@@ -136,7 +136,38 @@ namespace gs {
         void handle_control_requests(int iter, std::stop_token stop_token = {});
 
         // Prune gaussians using masks
-        void prune_after_training(float threshold);
+        void prune_by_center_vote(float center_keep_threshold, int min_visibility_count = 3);
+        
+        
+        /**
+        * @brief Prune by mask leakage (success-rate semantics) with optional mask dilation.
+        *
+        * For each visible Gaussian whose 2D center is inside the (dilated) mask and whose
+        * projected footprint is non-trivial, sample P points on its projected ellipse.
+        * We count a per-view "leak" if the fraction of sampled points that fall outside the
+        * (dilated) mask exceeds per_view_leak_frac. A Gaussian is KEPT only if:
+        *     (views_without_leak / candidate_views) >= leak_keep_threshold.
+        *
+        * - Visibility: views where the Gaussian is not visible do NOT contribute to ratios.
+        * - Mask dilation: if dilate_px > 0, the mask is dilated by that many pixels (tolerance).
+        *
+        * @param leak_keep_threshold   Required success rate of "no-leak" to KEEP a Gaussian. [0..1]
+        * @param min_pixel_radius      Minimum pixel radius to consider a footprint (filters micro-splats).
+        * @param min_center_mask       Minimum mask value at the center to consider "center inside".
+        * @param sample_points         4 (NESW) or 8 (NESW+diagonals).
+        * @param dilate_px             Mask dilation in pixels (tolerance at boundary). 0 = no dilation.
+        * @param per_view_leak_frac    Per-view leak threshold in [0..1]. Count a view as "leak" only if
+        *                              the fraction of sampled contour points outside the (dilated) mask
+        *                              exceeds this value. 0.0 means "any point outside" counts as leak.
+        */
+        void prune_by_mask_leakage(float leak_keep_threshold,
+                                         float min_pixel_radius = 1.5f,
+                                         float min_center_mask = 0.5f,
+                                         int sample_points = 8,
+                                         int dilate_px = 25,
+                                         float per_view_leak_frac = 0.0f);
+
+        void prune_after_training(float center_keep_threshold, float leak_keep_threshold);
         
         void save_ply(const std::filesystem::path& save_path, int iter_num, bool join_threads = true);
 
