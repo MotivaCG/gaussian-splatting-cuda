@@ -260,6 +260,419 @@ namespace gs {
             return std::unexpected(std::format("Error computing photometric loss: {}", e.what()));
         }
     }
+    
+
+    
+
+    // Gently boost opacity for Gaussians that are inside the mask in at least
+    // 'min_visible_views' visible views.
+    // Policy: alpha_new = clamp( 2 * alpha_old, alpha_old, alpha_min ).
+    //
+    // Notes:
+    // - Counts ONLY views where the Gaussian is visible (positive projected radii).
+    // - Uses explicit index arrays (no boolean mask indexing) to avoid broadcasting traps.
+    // - Flattens raw opacity to 1D to ensure shape consistency.
+    // - Never decreases opacity; caps at 'alpha_min' (< 1.0 to keep finite logits).
+    void Trainer::maybe_alpha_boost(const float alpha_min, const int min_visible_views) {
+        return;
+        const float min_support_ratio = 0.0f; // >= 0.0 => at least one inside vote across visible views
+        const float boost_value = 3.0f;
+
+        const float alpha_threshold = 0.0f; //ignore splats behind this level
+
+        SplatData& model = strategy_->get_model();
+        const int64_t N = model.get_means().size(0);
+        if (N <= 0)
+            return;
+
+        // Accumulators: visible-only votes
+        auto pos = torch::zeros({N}, torch::kInt32).to(torch::kCUDA);
+        auto tot = torch::zeros({N}, torch::kInt32).to(torch::kCUDA);
+
+        // Data loader (sequential, batch=1)
+        auto loader = torch::data::make_data_loader(
+            *train_dataset_,
+            torch::data::samplers::SequentialSampler(train_dataset_->size().value()),
+            torch::data::DataLoaderOptions().batch_size(1).workers(4));
+
+        // Model tensors
+        auto means3D = model.get_means();      // [N,3] CUDA
+        auto scales = model.get_scaling();     // [N,3] CUDA
+        auto rotations = model.get_rotation(); // [N,4] CUDA
+        auto opacities = model.get_opacity();  // [N] or [N,1] (unused here)
+        if (opacities.defined() && opacities.dim() == 2 && opacities.size(-1) == 1)
+            opacities = opacities.squeeze(-1);
+
+        // Projection constants
+        const float eps2d = 0.3f, near_p = 0.01f, far_p = 10000.0f, radius_clip = 0.0f, scaling_mod = 1.0f;
+
+        // Tally visible-only inside votes
+        for (auto& batch : *loader) {
+            auto cam_data = batch[0].data;
+            Camera* cam = cam_data.camera;
+            torch::Tensor float_weight_map = cam_data.attentionMask;
+            if (!cam || !float_weight_map.defined())
+                continue;
+
+            // CPU bool mask [H,W]
+            auto m3 = (float_weight_map > 0.5f);
+            auto mask = (m3.dim() == 3 && m3.size(0) == 1) ? m3.squeeze(0) : m3;
+            if (mask.dim() != 2)
+                continue;
+            mask = mask.contiguous();
+
+            const int H = (int)mask.size(0);
+            const int W = (int)mask.size(1);
+
+            // Camera tensors (CUDA)
+            auto view = cam->world_view_transform().to(torch::kCUDA);
+            auto K = cam->K().to(torch::kCUDA);
+            const int Wimg = (int)cam->image_width();
+            const int Himg = (int)cam->image_height();
+
+            // Projection-only (fast)
+            auto settings = torch::tensor({(float)Wimg, (float)Himg, eps2d, near_p, far_p, radius_clip, scaling_mod},
+                                          torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+            auto proj = ProjectionFunction::apply(means3D, rotations, scales, opacities, view, K, settings);
+
+            torch::Tensor radii2 = proj[0];  // [1,N,2] or [N,2]
+            torch::Tensor means2d = proj[1]; // [1,N,2] or [N,2]
+            if (!radii2.defined() || !means2d.defined())
+                continue;
+            if (radii2.dim() == 3 && radii2.size(0) == 1)
+                radii2 = radii2.squeeze(0);
+            if (means2d.dim() == 3 && means2d.size(0) == 1)
+                means2d = means2d.squeeze(0);
+
+            // Visible-only splats (positive projected radii)
+            auto visible = (radii2 > 0.0f).all(-1); // [N] bool CUDA
+            if (!visible.any().item<bool>())
+                continue;
+            auto vidx = visible.nonzero().squeeze(-1); // [M] long CUDA
+
+            // Pixel coords (on CPU) for mask sampling
+            auto xy_cuda = means2d.index({vidx}); // [M,2] CUDA
+            auto xy = xy_cuda.detach().to(torch::kCPU);
+            auto x = torch::round(xy.select(1, 0)).to(torch::kLong).clamp(0, W - 1);
+            auto y = torch::round(xy.select(1, 1)).to(torch::kLong).clamp(0, H - 1);
+            auto lin = y * W + x; // [M] CPU long
+
+            // Inside votes
+            auto inside_cpu = mask.flatten().index({lin});                   // [M] bool CPU
+            auto inside_i32 = inside_cpu.to(torch::kInt32).to(torch::kCUDA); // [M] int32 CUDA
+
+            pos.index_add_(0, vidx, inside_i32);
+            tot.index_add_(0, vidx, torch::ones_like(inside_i32, torch::kInt32));
+        }
+
+        // Decide eligibility (visible-only ratios) 
+        
+        // Read/prepare opacity logits as a flat 1D tensor
+        torch::NoGradGuard no_grad;
+        auto raw = model.opacity_raw(); // logits; can be [N] or [N,1] depending on impl
+        if (raw.dim() == 2 && raw.size(-1) == 1)
+            raw = raw.squeeze(-1);
+        if (raw.dim() != 1)
+            raw = raw.view({-1}); // flatten to [N]
+        auto cur_alpha = torch::sigmoid(raw);
+
+        auto tot_f = tot.to(torch::kFloat32).clamp_min(1.0f);
+        auto ratio = pos.to(torch::kFloat32) / tot_f;                                   // [N] float
+        auto eligible_mask = (tot >= min_visible_views) & (ratio >= min_support_ratio) & (cur_alpha > alpha_threshold); // [N] bool
+
+
+        const float eps = 1e-6f;
+        const float cap = std::min(alpha_min, 1.0f - eps);
+
+        // Further restrict to those below the cap (avoid needless writes)
+        auto below_cap = (cur_alpha < cap);          // [N] bool
+        auto final_mask = eligible_mask & below_cap; // [N] bool
+
+        auto idx = final_mask.nonzero().squeeze(-1); // [K] long
+        if (idx.numel() == 0) {
+            std::cout << "[Trainer] Alpha boost: no eligible splats.\n";
+            return;
+        }
+
+        // Compute target alpha = clamp(2*a, a, cap) on the selected indices
+        auto a = cur_alpha.index({idx}); // [K]
+        auto doubled = a * boost_value;
+        auto target = torch::min(doubled, torch::tensor(cap, a.options()));
+        target = torch::max(target, a).clamp(eps, cap); // never decrease; keep finite logits
+
+        // Write back logits (use max to be extra safe numerically)
+        auto new_logit = torch::logit(target); // [K]
+        auto old_logit = raw.index({idx});
+        auto write = torch::max(old_logit, new_logit); // monotonicity guard
+        raw.index_put_({idx}, write);
+
+        std::cout << "[Trainer] Alpha boost (x" << boost_value << " capped at " << alpha_min
+                  << "): updated splats\n";
+    }
+
+    void Trainer::contextual_alpha_boost_once(float target_alpha, int min_views) {
+        namespace F = torch::nn::functional;
+        torch::NoGradGuard no_grad;
+
+        // ---------------- Tunables (safe defaults) ----------------
+        const int core_erode_px = 3;             // core erosion to stay away from boundary
+        const int edge_band_px = 2;              // width of inner edge ring (mask \ erode(mask,edge_band_px))
+        const float support_thr = 0.60f;         // fraction of visible views with center in core
+        const int sample_points = 8;             // ellipse sampling (NESW + diagonals)
+        const float per_view_leak_frac = 0.125f; // view leaks if >12.5% sampled points outside (1 of 8)
+        const float no_leak_thr = 0.90f;         // fraction of center-in views that must be no-leak
+        const float edge_max_ratio = 0.20f;      // max fraction of views near boundary
+        const float depth_zscore_max = 1.5f;     // mean|zscore| across views (if depth available)
+        const float eps = 1e-6f;
+        const float cap_alpha = std::min(target_alpha, 1.0f - 1e-6f); // keep logits finite
+        const float boost_soft_cap = 0.95f;                           // safety cap after confidence scaling
+        const float rmax_px = 6.0f;                                   // reject very large projected footprints
+        const float rmin_px = 1.0f;                                   // reject needle-like footprints
+        const float kappa_max = 3.0f;                                 // reject highly elongated footprints (rmax/rmin)
+
+        // Ellipse sampling directions
+        std::vector<std::array<float, 2>> dirs = {{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}};
+        if (sample_points >= 8) {
+            const float s = 0.70710678f; // 1/sqrt(2)
+            dirs.push_back({s, s});
+            dirs.push_back({-s, s});
+            dirs.push_back({s, -s});
+            dirs.push_back({-s, -s});
+        }
+        const int P = (int)dirs.size();
+
+        // ---------------- Model state ----------------
+        SplatData& model = strategy_->get_model();
+        const int64_t N = model.get_means().size(0);
+        if (N <= 0)
+            return;
+
+        auto means3D = model.get_means();      // [N,3] CUDA
+        auto scales = model.get_scaling();     // [N,3] CUDA
+        auto rotations = model.get_rotation(); // [N,4] CUDA
+        auto opacities = model.get_opacity();  // [N] or [N,1] CUDA (unused in projection)
+        if (opacities.defined() && opacities.dim() == 2 && opacities.size(-1) == 1)
+            opacities = opacities.squeeze(-1);
+
+        // Accumulators (CUDA)
+        auto views_vis = torch::zeros({N}, torch::kInt32).cuda();       // visible views
+        auto center_in_pos = torch::zeros({N}, torch::kInt32).cuda();   // center in core
+        auto center_in_tot = torch::zeros({N}, torch::kInt32).cuda();   // == visible views considered
+        auto noleak_pos = torch::zeros({N}, torch::kInt32).cuda();      // no-leak among center-in
+        auto noleak_tot = torch::zeros({N}, torch::kInt32).cuda();      // center-in views
+        auto edge_hits = torch::zeros({N}, torch::kInt32).cuda();       // center near boundary
+        auto depth_abs_sum = torch::zeros({N}, torch::kFloat32).cuda(); // sum|zscore|
+        auto depth_cnt = torch::zeros({N}, torch::kInt32).cuda();       // views with depth info
+        auto bad_fp_flag = torch::zeros({N}, torch::kInt32).cuda();     // large/needle/anisotropic seen
+
+        // Projection constants (must match your rasterizer)
+        const float eps2d = 0.3f, near_p = 0.01f, far_p = 10000.0f, radius_clip = 0.0f, scaling_mod = 1.0f;
+
+        // ---------------- Dataset sweep ----------------
+        auto loader = torch::data::make_data_loader(
+            *train_dataset_,
+            torch::data::samplers::SequentialSampler(train_dataset_->size().value()),
+            torch::data::DataLoaderOptions().batch_size(1).workers(4));
+
+        int v = 0;
+        for (auto& batch : *loader) {
+            std::printf("\r[Contextual Alpha Boost] View %d/%zu", ++v, train_dataset_->size().value());
+            std::fflush(stdout);
+
+            auto cd = batch[0].data;
+            Camera* cam = cd.camera;
+            torch::Tensor wmap = cd.attentionMask; // CPU [1,H,W] or [H,W]
+            if (!cam || !wmap.defined())
+                continue;
+
+            // --- Mask (CPU) -> core & edge ring ---
+            auto m = (wmap > 0.5f).to(torch::kFloat32);                      // [1,H,W] or [H,W]
+            auto mask = (m.dim() == 3 && m.size(0) == 1) ? m.squeeze(0) : m; // [H,W] float on CPU
+            if (mask.dim() != 2)
+                continue;
+
+            const int H = (int)mask.size(0), W = (int)mask.size(1);
+
+            auto erode_fn = [&](const torch::Tensor& bin01, int r) -> torch::Tensor {
+                if (r <= 0)
+                    return bin01.clamp(0, 1);
+                const int k = 2 * r + 1;
+                auto inv = 1.0f - bin01;
+                auto inv_dil = F::max_pool2d(inv.unsqueeze(0).unsqueeze(0),
+                                             F::MaxPool2dFuncOptions(k).stride(1).padding(r))
+                                   .squeeze(0)
+                                   .squeeze(0);
+                return (1.0f - inv_dil).clamp(0, 1);
+            };
+            auto core = erode_fn(mask, core_erode_px);       // [H,W] float {0,1}
+            auto edge_core = erode_fn(mask, edge_band_px);   // [H,W]
+            auto edge_ring = (mask - edge_core).clamp(0, 1); // inside ring near boundary
+
+            // Also keep a CUDA version for fast sampling along ellipse
+            auto mask01_cuda = mask.to(torch::kCUDA); // [H,W] float {0,1} CUDA
+            auto core01_cpu = (core > 0.5f);          // CPU bool
+            auto ring01_cpu = (edge_ring > 0.5f);     // CPU bool
+
+            // --- Optional render depth (for coherence); safe handling of shapes/devices ---
+            torch::Tensor depth_cpu;
+            {
+                RenderOutput out = fast_rasterize(*cam, model, background_);
+                // depth can be undefined or of shape [1,H,W] or [H,W]
+                if (out.depth.defined()) {
+                    auto d = out.depth;
+                    if (d.dim() == 3 && d.size(0) == 1)
+                        d = d.squeeze(0);
+                    depth_cpu = d.contiguous().to(torch::kCPU); // sample on CPU
+                }
+            }
+
+            // --- Projection-only (CUDA) ---
+            auto view = cam->world_view_transform().to(torch::kCUDA); // [1,4,4]
+            auto K = cam->K().to(torch::kCUDA);                       // [1,3,3] or [3,3]
+            auto settings = torch::tensor({(float)W, (float)H, eps2d, near_p, far_p, radius_clip, scaling_mod},
+                                          torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+            auto proj = ProjectionFunction::apply(means3D, rotations, scales, opacities, view, K, settings);
+
+            auto radii = proj[0];   // [1,N,2] or [N,2]
+            auto means2d = proj[1]; // [1,N,2] or [N,2]
+            if (!radii.defined() || !means2d.defined())
+                continue;
+            if (radii.dim() == 3 && radii.size(0) == 1)
+                radii = radii.squeeze(0);
+            if (means2d.dim() == 3 && means2d.size(0) == 1)
+                means2d = means2d.squeeze(0);
+
+            auto visible = (radii > 0.0f).all(-1); // [N] bool CUDA
+            if (!visible.any().item<bool>())
+                continue;
+            auto vidx = visible.nonzero().squeeze(-1); // [M] long CUDA
+
+            // Footprint guards (CUDA)
+            auto rx = radii.index({vidx, 0}).abs();
+            auto ry = radii.index({vidx, 1}).abs();
+            auto rmax = torch::max(rx, ry);
+            auto rmin = torch::min(rx, ry);
+            auto kappa = rmax / (rmin + 1e-6f);
+            auto bad_fp = (rmax > rmax_px) | (rmin < rmin_px) | (kappa > kappa_max); // [M] bool CUDA
+
+            // Center pixels for CPU mask sampling
+            auto xy_cuda = means2d.index({vidx});           // [M,2] CUDA
+            auto xy_cpu = xy_cuda.detach().to(torch::kCPU); // CPU
+            auto cx = torch::round(xy_cpu.select(1, 0)).to(torch::kLong).clamp(0, W - 1);
+            auto cy = torch::round(xy_cpu.select(1, 1)).to(torch::kLong).clamp(0, H - 1);
+            auto lin_cpu = cy * W + cx; // [M] long CPU
+
+            // Center in core? Near edge?
+            auto center_in_core = core01_cpu.flatten().index({lin_cpu}); // [M] bool CPU
+            auto near_edge = ring01_cpu.flatten().index({lin_cpu});      // [M] bool CPU
+
+            // Push to CUDA for accumulation
+            auto center_i32 = center_in_core.to(torch::kInt32).to(torch::kCUDA); // [M]
+            auto edge_i32 = near_edge.to(torch::kInt32).to(torch::kCUDA);        // [M]
+            views_vis.index_add_(0, vidx, torch::ones_like(center_i32));
+            center_in_pos.index_add_(0, vidx, center_i32);
+            center_in_tot.index_add_(0, vidx, torch::ones_like(center_i32));
+            edge_hits.index_add_(0, vidx, edge_i32);
+            bad_fp_flag.index_add_(0, vidx, bad_fp.to(torch::kInt32));
+
+            // ---- Per-view leak test only for center-in pixels ----
+            if (center_in_core.any().item<bool>()) {
+                auto kidx = center_in_core.to(torch::kCUDA).nonzero().squeeze(-1); // [K] indices inside core among vidx
+                if (kidx.numel() > 0) {
+                    auto rxk = rx.index({kidx});
+                    auto ryk = ry.index({kidx});
+                    // center coords also on CUDA for fast linear sampling
+                    auto cx_cuda = cx.to(torch::kCUDA).index({kidx});
+                    auto cy_cuda = cy.to(torch::kCUDA).index({kidx});
+
+                    // Sample ellipse contour on CUDA
+                    auto sx = torch::empty({kidx.size(0), P}, torch::kLong).to(torch::kCUDA);
+                    auto sy = torch::empty_like(sx);
+                    for (int p = 0; p < P; ++p) {
+                        auto dx = torch::round(rxk * dirs[p][0]).to(torch::kLong);
+                        auto dy = torch::round(ryk * dirs[p][1]).to(torch::kLong);
+                        sx.index_put_({torch::indexing::Slice(), p}, (cx_cuda + dx).clamp(0, W - 1));
+                        sy.index_put_({torch::indexing::Slice(), p}, (cy_cuda + dy).clamp(0, H - 1));
+                    }
+                    auto lin_cuda = (sy * W + sx).reshape({-1});                                 // [K*P]
+                    auto mvals = mask01_cuda.view({-1}).index({lin_cuda}).view({-1, P});         // [K,P] in {0,1}
+                    auto outside_ratio = (1.0f - mvals).mean(1);                                 // [K] float
+                    auto no_leak_here = (outside_ratio <= per_view_leak_frac).to(torch::kInt32); // [K]
+
+                    auto ids = vidx.index({kidx}); // original Gaussian ids
+                    noleak_pos.index_add_(0, ids, no_leak_here);
+                    noleak_tot.index_add_(0, ids, torch::ones_like(no_leak_here));
+                }
+            }
+
+            // ---- Depth coherence (optional) ----
+            if (depth_cpu.defined()) {
+                // Sample only visible positions
+                auto dvals = depth_cpu.flatten().index({lin_cpu}); // [M] CPU float
+                // z-score within this view (only visible set)
+                auto mean = dvals.mean();
+                auto stdv = dvals.std().clamp_min(1e-6);
+                auto zabs = (dvals - mean).abs() / stdv; // [M] CPU
+                auto z_cuda = zabs.to(torch::kCUDA);
+                depth_abs_sum.index_add_(0, vidx, z_cuda);
+                depth_cnt.index_add_(0, vidx, torch::ones_like(center_i32));
+            }
+        }
+        std::printf("\n");
+
+        // ---------------- Final decision ----------------
+        auto vis_ok = (views_vis >= min_views);
+        auto support = center_in_pos.to(torch::kFloat32) / center_in_tot.to(torch::kFloat32).clamp_min(1.0f);
+        auto noleak_r = noleak_pos.to(torch::kFloat32) / noleak_tot.to(torch::kFloat32).clamp_min(1.0f);
+        auto edge_r = edge_hits.to(torch::kFloat32) / views_vis.to(torch::kFloat32).clamp_min(1.0f);
+        auto bad_fp = (bad_fp_flag > 0);
+
+        // Depth
+        auto depth_mean_abs = depth_abs_sum / depth_cnt.to(torch::kFloat32).clamp_min(1.0f);
+        auto depth_ok = torch::ones_like(depth_mean_abs, depth_mean_abs.options().dtype(torch::kBool));
+        if (depth_cnt.sum().item<int>() > 0) {
+            depth_ok = (depth_mean_abs <= depth_zscore_max);
+        }
+
+        auto cand = vis_ok & (support >= support_thr) & (noleak_r >= no_leak_thr) & (edge_r <= edge_max_ratio) & (~bad_fp) & depth_ok; // [N] bool CUDA
+
+        // ---------------- Apply boost (monotonic, capped) ----------------
+        auto raw = model.opacity_raw(); // logits
+        if (raw.dim() == 2 && raw.size(-1) == 1)
+            raw = raw.squeeze(-1);
+        if (raw.dim() != 1)
+            raw = raw.view({-1}); // [N]
+        raw = raw.contiguous();
+
+        auto cur_a = torch::sigmoid(raw); // [N]
+        auto need = cand & (cur_a < cap_alpha);
+        auto idx = need.nonzero().squeeze(-1); // [K]
+        if (idx.numel() == 0) {
+            std::cout << "[Contextual Alpha Boost] No eligible candidates.\n";
+            return;
+        }
+
+        // Confidence: combine support & no-leak and de-emphasize boundary
+        auto conf = (0.5f * support + 0.5f * noleak_r) * (1.0f - edge_r);
+        conf = conf.clamp(0.0f, 1.0f);
+        auto conf_k = conf.index({idx}); // [K]
+
+        auto a = cur_a.index({idx});                                            // [K]
+        auto targ = a + (cap_alpha - a) * conf_k;                               // interpolate towards cap by confidence
+        targ = torch::min(targ, torch::tensor(boost_soft_cap, targ.options())); // extra cap
+        targ = torch::max(targ, a).clamp(eps, cap_alpha);                       // never decrease
+
+        auto new_logit = torch::logit(targ);
+        auto old_logit = raw.index({idx});
+        raw.index_put_({idx}, torch::max(old_logit, new_logit));
+
+        std::cout << "[Contextual Alpha Boost] Boosted " << idx.size(0)
+                  << " splats (min_views=" << min_views
+                  << ", support>=" << (int)(support_thr * 100)
+                  << "%, no-leak>=" << (int)(no_leak_thr * 100)
+                  << "%, edge<=" << (int)(edge_max_ratio * 100)
+                  << "%, cap=" << target_alpha << ")\n";
+    }
 
     std::expected<torch::Tensor, std::string> Trainer::compute_scale_reg_loss(
         const SplatData& splatData,
@@ -476,6 +889,11 @@ namespace gs {
             
             const int total_iters = params_.optimization.iterations;
             const int warmup_end_iter = total_iters * 0.1f;
+
+            const int alpha_boost_iter = warmup_end_iter + 0.0;
+           if (weights.defined() && iter == alpha_boost_iter)
+                maybe_alpha_boost(0.90f /*alpha_min*/, 3 /*min_visible_views */);
+                //contextual_alpha_boost_once();
 
             if (!weights.defined() || iter < warmup_end_iter) {
                 loss_result = compute_photometric_loss(r_output,
@@ -1235,7 +1653,7 @@ namespace gs {
 
     void Trainer::prune_after_training(float vote_ratio_threshold, float leak_keep_threshold) {
         // 1) First, center-vote pruning (your original logic)
-        //prune_by_center_vote(vote_ratio_threshold);
+        prune_by_center_vote(vote_ratio_threshold);
 
         // 2) Re-fetch model and then leakage pruning on remaining splats
         prune_by_mask_leakage(leak_keep_threshold);
