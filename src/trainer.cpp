@@ -273,10 +273,8 @@ namespace gs {
     // - Uses explicit index arrays (no boolean mask indexing) to avoid broadcasting traps.
     // - Flattens raw opacity to 1D to ensure shape consistency.
     // - Never decreases opacity; caps at 'alpha_min' (< 1.0 to keep finite logits).
-    void Trainer::maybe_alpha_boost(const float alpha_min, const int min_visible_views) {
-        return;
+    void Trainer::maybe_alpha_boost(const float boost_value, const float alpha_min, const int min_visible_views) {
         const float min_support_ratio = 0.0f; // >= 0.0 => at least one inside vote across visible views
-        const float boost_value = 3.0f;
 
         const float alpha_threshold = 0.0f; //ignore splats behind this level
 
@@ -890,10 +888,11 @@ namespace gs {
             const int total_iters = params_.optimization.iterations;
             const int warmup_end_iter = total_iters * 0.1f;
 
-            const int alpha_boost_iter = warmup_end_iter + 0.0;
-           if (weights.defined() && iter == alpha_boost_iter)
-                maybe_alpha_boost(0.90f /*alpha_min*/, 3 /*min_visible_views */);
-                //contextual_alpha_boost_once();
+            const int alpha_boost_iter = total_iters * 0.3f;
+            if (weights.defined() && iter == alpha_boost_iter) {
+                // maybe_alpha_boost(2.5f /*boost_value*/, 0.90f /*alpha_min*/, 3 /*min_visible_views */);
+                // contextual_alpha_boost_once();
+            }
 
             if (!weights.defined() || iter < warmup_end_iter) {
                 loss_result = compute_photometric_loss(r_output,
@@ -1149,7 +1148,7 @@ namespace gs {
 
             training_complete:
                 if (params_.optimization.use_attention_mask)
-                    prune_after_training(0.8, 0.80);
+                    prune_after_training(0.8, 0.90);
             
             // Final save if not already saved by stop request
             if (!stop_requested_.load() && !stop_token.stop_requested()) {
@@ -1653,7 +1652,7 @@ namespace gs {
 
     void Trainer::prune_after_training(float vote_ratio_threshold, float leak_keep_threshold) {
         // 1) First, center-vote pruning (your original logic)
-        prune_by_center_vote(vote_ratio_threshold);
+        //prune_by_center_vote(vote_ratio_threshold);
 
         // 2) Re-fetch model and then leakage pruning on remaining splats
         prune_by_mask_leakage(leak_keep_threshold);

@@ -118,7 +118,7 @@ namespace gs {
             const SplatData& splatData,
             const param::OptimizationParameters& opt_params);
 
-        void maybe_alpha_boost(const float alpha_min, const int min_visible_views);
+        void maybe_alpha_boost(const float boost_value, const float alpha_min, const int min_visible_views);
         void contextual_alpha_boost_once(float target_alpha = 0.85f, int min_views = 3);
 
         std::expected<torch::Tensor, std::string> compute_scale_reg_loss(
