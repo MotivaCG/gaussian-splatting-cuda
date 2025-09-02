@@ -380,29 +380,22 @@ namespace gs::training {
 
             // Projection-only (fast)
 
-            gs::ProjectionSettings st;
-            st.width = image_w;
-            st.height = image_h;
-            st.eps2d = eps2d;
-            st.near_plane = near_plane;
-            st.far_plane = far_plane;
-            st.radius_clip = radius_clip;
-            st.scaling_modifier = scaling_mod;
+            std::optional<torch::Tensor> radial, tangential, thin_prism;
+            if (cam->radial_distortion().defined() && cam->radial_distortion().numel() > 0) 
+                radial = cam->radial_distortion();
+            if (cam->tangential_distortion().defined() && cam->tangential_distortion().numel() > 0) 
+                tangential = cam->tangential_distortion();
+            auto [radii, means2d] = ProjectFast(
+                means3D, rotations, scales, opacities, viewmat, K,
+                image_w, image_h, eps2d, near_plane, far_plane,
+                radius_clip, scaling_mod, cam->camera_model_type(),
+                radial, tangential, thin_prism);
 
-            auto proj_out = gs::ProjectionFunction::apply(
-                means3D, rotations, scales, opacities, viewmat, K, st);
-
-            torch::Tensor radii2 = proj_out[0]; // [1,N,2] or [N,2]
-            torch::Tensor means2d = proj_out[1]; // [1,N,2] or [N,2]
-            if (!radii2.defined() || !means2d.defined())
+            if (!radii.defined() || !means2d.defined())
                 continue;
-            if (radii2.dim() == 3 && radii2.size(0) == 1)
-                radii2 = radii2.squeeze(0);
-            if (means2d.dim() == 3 && means2d.size(0) == 1)
-                means2d = means2d.squeeze(0);
 
             // Visible-only splats (positive projected radii)
-            auto visible = (radii2 > 0.0f).all(-1); // [N] bool CUDA
+            auto visible = (radii > 0.0f).all(-1); // [N] bool CUDA
             if (!visible.any().item<bool>())
                 continue;
             auto vidx = visible.nonzero().squeeze(-1); // [M] long CUDA
@@ -1330,29 +1323,22 @@ namespace gs::training {
             const int image_h = (int)cam->image_height();
 
             // Projection-only
-            gs::ProjectionSettings st;
-            st.width = image_w;
-            st.height = image_h;
-            st.eps2d = eps2d;
-            st.near_plane = near_plane;
-            st.far_plane = far_plane;
-            st.radius_clip = radius_clip;
-            st.scaling_modifier = scaling_mod;
+            std::optional<torch::Tensor> radial, tangential, thin_prism;
+            if (cam->radial_distortion().defined() && cam->radial_distortion().numel() > 0) 
+                radial = cam->radial_distortion();
+            if (cam->tangential_distortion().defined() && cam->tangential_distortion().numel() > 0) 
+                tangential = cam->tangential_distortion();
+            auto [radii, means2d] = ProjectFast(
+                means3D, rotations, scales, opacities, viewmat, K,
+                image_w, image_h, eps2d, near_plane, far_plane,
+                radius_clip, scaling_mod, cam->camera_model_type(),
+                radial, tangential, thin_prism);
 
-            auto proj_out = gs::ProjectionFunction::apply(
-                means3D, rotations, scales, opacities, viewmat, K, st);
-
-            torch::Tensor radii2 = proj_out[0];  // [1,N,2] or [N,2]
-            torch::Tensor means2d = proj_out[1]; // [1,N,2] or [N,2]
-            if (!radii2.defined() || !means2d.defined())
+            if (!radii.defined() || !means2d.defined())
                 continue;
-            if (radii2.dim() == 3 && radii2.size(0) == 1)
-                radii2 = radii2.squeeze(0);
-            if (means2d.dim() == 3 && means2d.size(0) == 1)
-                means2d = means2d.squeeze(0);
 
             // Visibility: positive projected radius
-            torch::Tensor visible = (radii2.dim() == 2 && radii2.size(1) >= 1) ? (radii2 > 0.0f).all(-1) : (radii2 > 0.0f);
+            torch::Tensor visible = (radii.dim() == 2 && radii.size(1) >= 1) ? (radii > 0.0f).all(-1) : (radii > 0.0f);
             if (!visible.any().item<bool>())
                 continue;
             auto idx = visible.nonzero().squeeze(); // [M], CUDA
@@ -1477,25 +1463,20 @@ namespace gs::training {
             const int image_h = static_cast<int>(cam->image_height());
 
             // Projection-only: get means2d & radii
-            gs::ProjectionSettings st;
-            st.width = image_w;
-            st.height = image_h;
-            st.eps2d = eps2d;
-            st.near_plane = near_plane;
-            st.far_plane = far_plane;
-            st.radius_clip = radius_clip;
-            st.scaling_modifier = scaling_mod;
 
-            auto proj_out = gs::ProjectionFunction::apply(
-                means3D, rotations, scales, opacities, viewmat, K, st);
-            torch::Tensor radii = proj_out[0];   // [1,N,2] or [N,2]
-            torch::Tensor means2d = proj_out[1]; // [1,N,2] or [N,2]
+            std::optional<torch::Tensor> radial, tangential, thin_prism;
+            if (cam->radial_distortion().defined() && cam->radial_distortion().numel() > 0) 
+                radial = cam->radial_distortion();
+            if (cam->tangential_distortion().defined() && cam->tangential_distortion().numel() > 0) 
+                tangential = cam->tangential_distortion();
+            auto [radii, means2d] = ProjectFast(
+                means3D, rotations, scales, opacities, viewmat, K,
+                image_w, image_h, eps2d, near_plane, far_plane,
+                radius_clip, scaling_mod, cam->camera_model_type(),
+                radial, tangential, thin_prism);
+
             if (!radii.defined() || !means2d.defined())
                 continue;
-            if (radii.dim() == 3 && radii.size(0) == 1)
-                radii = radii.squeeze(0);
-            if (means2d.dim() == 3 && means2d.size(0) == 1)
-                means2d = means2d.squeeze(0);
 
             // Visibility: positive projected radius -> only visible splats count.
             auto visible = (radii > 0.0f).all(-1); // [N]
