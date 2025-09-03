@@ -23,6 +23,7 @@ namespace gs {
             float rotation_lr = 0.001f;
             float lambda_dssim = 0.2f;
             float min_opacity = 0.005f;
+            float darkness_boost = 0.0f;
             size_t refine_every = 100;
             size_t start_refine = 500;
             size_t stop_refine = 25'000;

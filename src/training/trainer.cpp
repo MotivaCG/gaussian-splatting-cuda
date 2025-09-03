@@ -118,7 +118,26 @@ namespace gs::training {
                         " vs. ground truth ", gt.sizes());
 
             // Base loss: L1 + SSIM
-            auto l1_loss = torch::l1_loss(rendered, gt);
+            torch::Tensor l1_loss;
+            // Weight amplify loss in dark regions
+            if (opt_params.darkness_boost <= 0) {
+                l1_loss = torch::l1_loss(rendered, gt);
+            } else {
+                // Compute lightness (perceptual brightness)
+                torch::Tensor darkness_weight;
+                {
+                    torch::NoGradGuard no_grad; // Si gt_lightness no necesita gradientes
+                    torch::Tensor gt_darkness;
+                    constexpr float kR = 0.299f, kG = 0.587f, kB = 0.114f;
+                    gt_darkness = (1.0f - kR * gt.select(-1, 0) + kG * gt.select(-1, 1) + kB * gt.select(-1, 2));
+                    darkness_weight = 1.0f + opt_params.darkness_boost * gt_darkness;
+                    darkness_weight = darkness_weight.unsqueeze(-1);
+                    const float eps = 1e-4f;
+                    darkness_weight /= torch::clamp(darkness_weight.mean(), eps, 10.0f);
+                }
+
+                l1_loss = (torch::l1_loss(rendered, gt, torch::Reduction::None) * darkness_weight).mean();
+            }
             auto ssim_loss = 1.f - fused_ssim(rendered, gt, "valid", /*train=*/true);
             torch::Tensor loss = (1.f - opt_params.lambda_dssim) * l1_loss +
                                  opt_params.lambda_dssim * ssim_loss;
