@@ -99,6 +99,36 @@ namespace gs::training {
         }
     }
 
+    static inline torch::Tensor make_darkness_weight(const torch::Tensor& gt, float boost) {
+        torch::NoGradGuard no_grad;
+
+        // gt: [B,H,W,3] (NHWC) o [B,3,H,W] (NCHW)
+        constexpr float kR = 0.299f, kG = 0.587f, kB = 0.114f;
+        const bool nhwc = (gt.size(-1) == 3);
+
+        torch::Tensor r, g, b; // [B,H,W] en ambos casos
+        if (nhwc) {
+            r = gt.select(-1, 0);
+            g = gt.select(-1, 1);
+            b = gt.select(-1, 2);
+        } else {
+            r = gt.select(1, 0);
+            g = gt.select(1, 1);
+            b = gt.select(1, 2);
+        }
+
+        // brightness in [0,1], darkness = 1 - brightness
+        auto darkness = (1.0f - (kR * r + kG * g + kB * b));
+
+        // w = 1 + boost * darkness, normalized by its mean (keeps global scale stable)
+        auto w = 1.0f + boost * darkness;
+        const float eps = 1e-4f;
+        w = w / torch::clamp(w.mean(), eps, 10.0f);
+
+        // Expand for broadcasting across the channel dimension
+        return nhwc ? w.unsqueeze(-1) : w.unsqueeze(1);
+    }
+
     std::expected<torch::Tensor, std::string> Trainer::compute_photometric_loss(
         const RenderOutput& render_output,
         const torch::Tensor& gt_image,
@@ -123,19 +153,8 @@ namespace gs::training {
             if (opt_params.darkness_boost <= 0) {
                 l1_loss = torch::l1_loss(rendered, gt);
             } else {
-                // Compute lightness (perceptual brightness)
-                torch::Tensor darkness_weight;
-                {
-                    torch::NoGradGuard no_grad; // Si gt_lightness no necesita gradientes
-                    torch::Tensor gt_darkness;
-                    constexpr float kR = 0.299f, kG = 0.587f, kB = 0.114f;
-                    gt_darkness = (1.0f - kR * gt.select(-1, 0) + kG * gt.select(-1, 1) + kB * gt.select(-1, 2));
-                    darkness_weight = 1.0f + opt_params.darkness_boost * gt_darkness;
-                    darkness_weight = darkness_weight.unsqueeze(-1);
-                    const float eps = 1e-4f;
-                    darkness_weight /= torch::clamp(darkness_weight.mean(), eps, 10.0f);
-                }
-
+                torch::NoGradGuard no_grad;
+                auto darkness_weight = make_darkness_weight(gt, opt_params.darkness_boost);
                 l1_loss = (torch::l1_loss(rendered, gt, torch::Reduction::None) * darkness_weight).mean();
             }
             auto ssim_loss = 1.f - fused_ssim(rendered, gt, "valid", /*train=*/true);
@@ -275,10 +294,23 @@ namespace gs::training {
 
             torch::Tensor W = weights;
 
-            // Pixel-wise L1 map and weighted L1 loss
-            auto l1_map = torch::abs(rendered - gt).mean(/*dim=*/1); // Resultado: [B, H, W]
-            auto wSum = W.sum().clamp_min(1e-6f);
-            auto l1_loss = (l1_map * W).sum() / wSum;
+            // Pixel-wise L1 map and weighted L1 loss (+ darkness_boost)
+            auto l1_map = torch::abs(rendered - gt); // [B,C,H,W] or [B,H,W,C]
+
+            if (opt_params.darkness_boost > 0.0f) {
+                torch::NoGradGuard no_grad;
+                auto darkness_weight = make_darkness_weight(gt, opt_params.darkness_boost);
+                l1_map = l1_map * darkness_weight;
+            }
+
+            const bool nhwc = (rendered.size(-1) == 3);
+            l1_map = nhwc ? l1_map.mean(-1) : l1_map.mean(1);
+            torch::Tensor W2 = W;
+            if (W2.dim() == 3 && W2.size(0) == 1) {
+                W2 = W2.squeeze(0);
+            }
+            auto wSum = W2.sum().clamp_min(1e-6f);
+            auto l1_loss = (l1_map * W2).sum() / wSum;
 
             // 2) pixel-wise SSIM map and weighted SSIM loss
             
@@ -311,9 +343,8 @@ namespace gs::training {
 
             // 3) combined loss
             auto loss = (1.0f - opt_params.lambda_dssim) * l1_loss + opt_params.lambda_dssim * ssim_loss;
-            
-        
-            if (outOfMaskAlphaPenalty > 0) {
+                    
+            if (outOfMaskAlphaPenalty > 0.0f && opt_params.darkness_boost <= 0.0f) {
                 if (!render_output.image.defined() || render_output.image.numel() == 0) {
                     printf("Image failed!\n");
                 } else if (!render_output.alpha.defined() || render_output.alpha.numel() == 0) {
@@ -1703,7 +1734,7 @@ namespace gs::training {
         prune_by_center_vote(vote_ratio_threshold);
 
         // 2) Re-fetch model and then leakage pruning on remaining splats
-        //prune_by_mask_leakage(leak_keep_threshold);
+        prune_by_mask_leakage(leak_keep_threshold);
     }
 
 
