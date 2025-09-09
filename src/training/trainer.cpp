@@ -403,10 +403,10 @@ namespace gs::training {
         auto tot = torch::zeros({N}, torch::kInt32).to(torch::kCUDA);
 
         // Data loader (sequential, batch=1)
-        auto loader = torch::data::make_data_loader(
-            *train_dataset_,
-            torch::data::samplers::SequentialSampler(train_dataset_->size().value()),
-            torch::data::DataLoaderOptions().batch_size(1).workers(4));
+        const size_t dataset_size = train_dataset_size_;
+        const int workers = std::max(1, params_.optimization.num_workers);
+        auto loader = create_efficient_infinite_dataloader(train_dataset_, workers);
+        auto it = loader->begin();
 
         // Model tensors
         auto means3D = model.get_means();      // [N,3] CUDA
@@ -420,10 +420,10 @@ namespace gs::training {
         const float eps2d = 0.3f, near_plane = 0.01f, far_plane = 10000.0f, radius_clip = 0.0f, scaling_mod = 1.0f;
 
         // Tally visible-only inside votes
-        for (auto& batch : *loader) {
-            auto cam_data = batch[0].data;
-            Camera* cam = cam_data.camera;
-            torch::Tensor float_weight_map = cam_data.attentionMask;
+        for (size_t i = 0; i < dataset_size; ++i, ++it) {
+            auto sample = *it; // CameraDataset::Sample
+            Camera* cam = sample.camera;
+            torch::Tensor float_weight_map = sample.attentionMask;
             if (!cam || !float_weight_map.defined())
                 continue;
 
@@ -1356,10 +1356,14 @@ namespace gs::training {
 
 
                 std::expected<Trainer::StepResult, std::string> step_result;
-                if (!params_.optimization.use_attention_mask || !camera_with_image.attentionMask.defined()) {
+
+                if (params_.optimization.use_attention_mask && !sample.attentionMask.defined())
+                    printf("Try to use invalid mask!\n");
+                if (!params_.optimization.use_attention_mask || !sample.attentionMask.defined()) {
                     step_result = train_step(iter, cam, gt_image, torch::Tensor(), render_mode, false, stop_token);
-                } else {
-                    torch::Tensor attention_image = std::move(camera_with_image.attentionMask);
+                }
+                else {
+                    torch::Tensor attention_image = std::move(sample.attentionMask);
                     bool out_of_mask_penalty = true;
                     step_result = train_step(iter, cam, gt_image, attention_image, render_mode, out_of_mask_penalty, stop_token);
                 }
@@ -1605,107 +1609,185 @@ namespace gs::training {
                   << removed << " / " << N << " splats (thr=" << threshold
                   << ", min_vis=" << min_visibility_count << ")\n";
     }*/
-    
+
     void Trainer::prune_by_center_vote(float center_keep_threshold, int min_visibility_count) {
         torch::NoGradGuard no_grad;
 
-        // 0) Access model
+        // 0) Model tensors
         SplatData& model = strategy_->get_model();
         const int64_t N = model.get_means().size(0);
-        if (N == 0) {
-
-            std::cout << "[Trainer] Prune center-vote: has no means!" << std::endl;
+        if (N <= 0) {
+            std::cout << "[Prune center] No gaussians to prune.\n";
             return;
         }
 
-        // 1) Vote buffers (CUDA int32)
-        torch::Tensor pos = torch::zeros({N}, torch::kInt32).cuda(); // inside votes
-        torch::Tensor tot = torch::zeros({N}, torch::kInt32).cuda(); // visibility count
-
-        // 2) Rebuild the same DataLoader (batch=1, sequential)
-        auto pruning_dataloader = torch::data::make_data_loader(
-            *train_dataset_,
-            torch::data::samplers::SequentialSampler(train_dataset_->size().value()),
-            torch::data::DataLoaderOptions().batch_size(1).workers(4));
-
-        // 3) Prepare model tensors (CUDA)
-        auto means3D = model.get_means();      // [N,3]
-        auto scales = model.get_scaling();     // [N,3]
-        auto rotations = model.get_rotation(); // [N,4]
-        auto opacities = model.get_opacity();  // [N] or [N,1]
+        auto means3D = model.get_means();
+        auto scales = model.get_scaling();
+        auto rotations = model.get_rotation();
+        auto opacities = model.get_opacity();
         if (opacities.defined() && opacities.dim() == 2 && opacities.size(-1) == 1)
             opacities = opacities.squeeze(-1);
 
-        // Projection constants
-        const float eps2d = 0.3f, near_plane = 0.01f, far_plane = 10000.0f, radius_clip = 0.0f, scaling_mod = 1.0f;
+        // 1) Vote buffers (CUDA int32)
+        auto pos = torch::zeros({N}, torch::kInt32).to(torch::kCUDA); // inside votes
+        auto tot = torch::zeros({N}, torch::kInt32).to(torch::kCUDA); // visible counts
+
+        // 2) Iterate once over the dataset with the efficient loader
+        const size_t dataset_size = train_dataset_size_;
+        if (dataset_size == 0) {
+            std::cout << "[Prune center] Empty dataset.\n";
+            return;
+        }
+        const int workers = std::max(1, params_.optimization.num_workers);
+        auto loader = create_efficient_infinite_dataloader(train_dataset_, workers);
+        auto it = loader->begin();
+
+        // 3) Projection constants
+        const float eps2d = 0.3f;
+        const float near_plane = 0.01f;
+        const float far_plane = 10000.0f;
+        const float radius_clip = 0.0f;
+        const float scaling_mod = 1.0f;
 
         int idx_img = 1;
-        for (auto& batch : *pruning_dataloader) {
-            // Progress heartbeat
-            std::printf("\r[Prune Center] image %d", idx_img++);
+        size_t skipped_missing = 0, skipped_shape = 0, skipped_size = 0, skipped_proj = 0;
+
+        for (size_t i = 0; i < dataset_size; ++i, ++it) {
+            std::printf("\r[Prune Center] image %d/%zu", idx_img++, dataset_size);
             std::fflush(stdout);
 
-            auto camera_with_data = batch[0].data;
-            Camera* cam = camera_with_data.camera;
-            torch::Tensor float_weight_map = camera_with_data.attentionMask;
-            if (!cam || !float_weight_map.defined())
+            const auto sample = *it; // CameraDataset::Sample {camera, image, attentionMask}
+            Camera* cam = sample.camera;
+            auto mask_f = sample.attentionMask;
+
+            if (!cam) {
+                std::cout << "\n[Prune center] Warning: null camera; skipping view.\n";
                 continue;
+            }
+            if (!mask_f.defined() || mask_f.numel() == 0) {
+                if (skipped_missing < 3)
+                    std::cout << "\n[Prune center] Warning: undefined/empty attentionMask; skipping view.\n";
+                ++skipped_missing;
+                continue;
+            }
 
-            // CPU mask [H,W] bool
-            auto bool_mask_3d = (float_weight_map > 0.5f);
-            auto bool_mask = (bool_mask_3d.dim() == 3 && bool_mask_3d.size(0) == 1) ? bool_mask_3d.squeeze(0) : bool_mask_3d;
-            TORCH_CHECK(bool_mask.dim() == 2, "Attention mask must be [H,W] or [1,H,W]");
-            bool_mask = bool_mask.contiguous();
-            const int H = (int)bool_mask.size(0);
-            const int W = (int)bool_mask.size(1);
+            // CPU binary mask [H,W]
+            auto m3 = (mask_f > 0.5f);
+            auto m2 = (m3.dim() == 3 && m3.size(0) == 1) ? m3.squeeze(0) : m3;
+            if (m2.dim() != 2) {
+                if (skipped_shape < 3)
+                    std::cout << "\n[Prune center] Warning: mask wrong shape; skipping view.\n";
+                ++skipped_shape;
+                continue;
+            }
+            auto mask = m2.to(torch::kCPU).contiguous();
 
-            // Camera tensors
-            auto viewmat = cam->world_view_transform().to(torch::kCUDA); // [1,4,4]
-            auto K = cam->K().to(torch::kCUDA);                          // [1,3,3] or [3,3]
+            const int W = (int)cam->image_width();
+            const int H = (int)cam->image_height();
+            if (mask.size(1) != W || mask.size(0) != H) {
+                if (skipped_size < 3) {
+                    std::cout << "\n[Prune center] Warning: mask size ("
+                              << (long long)mask.size(1) << "x" << (long long)mask.size(0)
+                              << ") != camera size (" << W << "x" << H << "); skipping view.\n";
+                }
+                ++skipped_size;
+                continue;
+            }
 
-            const int image_w = (int)cam->image_width();
-            const int image_h = (int)cam->image_height();
+            // Camera tensors (CUDA) with batch dim [1,...] if needed
+            auto view = cam->world_view_transform().to(torch::kCUDA);
+            auto K = cam->K().to(torch::kCUDA);
+            if (view.dim() == 2)
+                view = view.unsqueeze(0);
+            if (K.dim() == 2)
+                K = K.unsqueeze(0);
 
-            // Projection-only
+            // Distortion (optional)
             std::optional<torch::Tensor> radial, tangential, thin_prism;
-            if (cam->radial_distortion().defined() && cam->radial_distortion().numel() > 0) 
+            if (cam->radial_distortion().defined() && cam->radial_distortion().numel() > 0)
                 radial = cam->radial_distortion();
-            if (cam->tangential_distortion().defined() && cam->tangential_distortion().numel() > 0) 
+            if (cam->tangential_distortion().defined() && cam->tangential_distortion().numel() > 0)
                 tangential = cam->tangential_distortion();
-            auto [radii, means2d] = ProjectFast(
-                means3D, rotations, scales, opacities, viewmat, K,
-                image_w, image_h, eps2d, near_plane, far_plane,
-                radius_clip, scaling_mod, cam->camera_model_type(),
-                radial, tangential, thin_prism);
 
-            if (!radii.defined() || !means2d.defined())
+            // Fast projection: returns std::pair<Tensor,Tensor>
+            auto proj_pair = ProjectFast(
+                means3D, rotations, scales, opacities,
+                view, K,
+                W, H,
+                eps2d, near_plane, far_plane,
+                radius_clip, scaling_mod,
+                cam->camera_model_type(),
+                radial, tangential, /*thin_prism*/ std::nullopt);
+            auto radii = proj_pair.first;
+            auto means2d = proj_pair.second;
+
+            if (!radii.defined() || !means2d.defined()) {
+                if (skipped_proj < 3)
+                    std::cout << "\n[Prune center] Warning: projection returned undefined tensors; skipping view.\n";
+                ++skipped_proj;
                 continue;
+            }
 
-            // Visibility: positive projected radius
-            torch::Tensor visible = (radii.dim() == 2 && radii.size(1) >= 1) ? (radii > 0.0f).all(-1) : (radii > 0.0f);
+            if (radii.dim() == 3 && radii.size(0) == 1)
+                radii = radii.squeeze(0);
+            if (means2d.dim() == 3 && means2d.size(0) == 1)
+                means2d = means2d.squeeze(0);
+
+            // Visible splats: positive projected radii
+            torch::Tensor visible;
+            if (radii.dim() == 2 && radii.size(1) >= 1)
+                visible = (radii > 0.0f).all(-1);
+            else if (radii.dim() == 1)
+                visible = (radii > 0.0f);
+            else {
+                if (skipped_proj < 3)
+                    std::cout << "\n[Prune center] Warning: invalid radii shape; skipping view.\n";
+                ++skipped_proj;
+                continue;
+            }
+
             if (!visible.any().item<bool>())
                 continue;
-            auto idx = visible.nonzero().squeeze(); // [M], CUDA
+            auto vidx = visible.nonzero().squeeze(-1); // [M], CUDA
 
-            // Gather 2D & vote on CPU mask
-            auto xy_cuda = means2d.index({idx}); // [M,2], CUDA
+            // 2D centers -> CPU ints in [0..W-1],[0..H-1]
+            auto xy_cuda = means2d.index({vidx}); // [M,2], CUDA
             auto xy = xy_cuda.detach().to(torch::kCPU);
             auto x = torch::round(xy.select(1, 0)).to(torch::kLong).clamp(0, W - 1);
             auto y = torch::round(xy.select(1, 1)).to(torch::kLong).clamp(0, H - 1);
-            auto lin = y * W + x; // [M]
+            auto lin = y * W + x;
 
-            auto white_cpu = bool_mask.flatten().index({lin});                  // CPU bool
-            auto white_i32_cuda = white_cpu.to(torch::kInt32).to(torch::kCUDA); // CUDA int32
+            // Vote on CPU mask, accumulate on CUDA
+            auto inside_cpu = mask.flatten().index({lin}); // bool CPU
+            auto inside_i32_cuda = inside_cpu.to(torch::kInt32).to(torch::kCUDA);
+            auto ones_i32_cuda = torch::ones_like(inside_i32_cuda, torch::kInt32);
 
-            pos.index_add_(0, idx, white_i32_cuda);
-            tot.index_add_(0, idx, torch::ones_like(white_i32_cuda, torch::kInt32));
+            pos.index_add_(0, vidx, inside_i32_cuda);
+            tot.index_add_(0, vidx, ones_i32_cuda);
         }
         std::printf("\n");
 
-        // 4) Final keep & prune
-        auto tot_safe = tot.to(torch::kFloat32).clamp_min(1.0f);
-        auto ratio = pos.to(torch::kFloat32) / tot_safe;
-        auto keep_mask = (tot >= min_visibility_count) & (ratio >= center_keep_threshold);
+        // Graceful exits
+        if (tot.sum().item<long long>() == 0) {
+            std::cout << "[Prune center] No visibility accumulated (invalid/missing masks?); aborting prune.\n";
+            return;
+        }
+        auto meets_vis = (tot >= min_visibility_count);
+        if (!meets_vis.any().item<bool>()) {
+            std::cout << "[Prune center] No splats reached min_vis=" << min_visibility_count << "; aborting prune.\n";
+            return;
+        }
+
+        // Final keep & prune
+        auto tot_f = tot.to(torch::kFloat32).clamp_min(1.0f);
+        auto ratio = pos.to(torch::kFloat32) / tot_f;
+        auto keep_mask = meets_vis & (ratio >= center_keep_threshold);
+
+        const int64_t keep_cnt = keep_mask.sum().item<long long>();
+        if (keep_cnt == 0) {
+            std::cout << "[Prune center] keep_mask would be empty (thr=" << center_keep_threshold << "); skipping prune.\n";
+            return;
+        }
 
         const int removed = (keep_mask == 0).sum().item<int>();
         model.filterByMask(keep_mask);
@@ -1718,10 +1800,9 @@ namespace gs::training {
     // Prune Gaussians whose projected footprint "leaks" outside the mask too often.
     // Success-rate semantics: keep only if (views_without_leak / candidate_views) >= leak_keep_threshold.
     // - Only views where the Gaussian is visible are considered.
-    // - Optional mask dilation (dilate_px) provides pixel tolerance at the boundary.
-    // - per_view_leak_frac is the fraction of sampled contour points that must be outside
-    //   in a given view to count that view as a "leak". E.g., 0.25 means at least 25% of
-    //   sampled points outside the (dilated) mask to mark the view as leak.
+    // - Optional dilation 'dilate_px' (pixels) provides tolerance near the boundary.
+    // - 'per_view_leak_frac' is the fraction of sampled contour points outside the (dilated) mask
+    //    required to count that view as a "leak" (e.g., 0.25 -> at least 25% outside to mark as leak).
     void Trainer::prune_by_mask_leakage(float leak_keep_threshold,
                                         float min_pixel_radius,
                                         float min_center_mask,
@@ -1730,39 +1811,43 @@ namespace gs::training {
                                         float per_view_leak_frac) {
         torch::NoGradGuard no_grad;
 
-        // 0) Access model
+        // 0) Model tensors
         SplatData& model = strategy_->get_model();
         const int64_t N = model.get_means().size(0);
-        if (N == 0)
+        if (N <= 0) {
+            std::cout << "[Prune leak] No gaussians to prune.\n";
             return;
+        }
 
-        // 1) Leak vote buffers (CUDA int32)
-        torch::Tensor leak_votes = torch::zeros({N}, torch::kInt32).to(torch::kCUDA); // count of leak-views
-        torch::Tensor vis_counts = torch::zeros({N}, torch::kInt32).to(torch::kCUDA); // candidate views counted
-
-        // 2) DataLoader (sequential, batch=1)
-        auto pruning_dataloader = torch::data::make_data_loader(
-            *train_dataset_,
-            torch::data::samplers::SequentialSampler(train_dataset_->size().value()),
-            torch::data::DataLoaderOptions().batch_size(1).workers(4));
-
-        // 3) Model tensors (CUDA)
-        auto means3D = model.get_means();      // [N,3]
-        auto scales = model.get_scaling();     // [N,3]
-        auto rotations = model.get_rotation(); // [N,4]
-        auto opacities = model.get_opacity();  // [N] or [N,1]
+        auto means3D = model.get_means();
+        auto scales = model.get_scaling();
+        auto rotations = model.get_rotation();
+        auto opacities = model.get_opacity();
         if (opacities.defined() && opacities.dim() == 2 && opacities.size(-1) == 1)
             opacities = opacities.squeeze(-1);
 
-        // Projection constants (keep in sync with rasterizer)
+        // 1) Leak vote buffers (CUDA int32)
+        auto leak_votes = torch::zeros({N}, torch::kInt32).to(torch::kCUDA); // # leak-views
+        auto vis_counts = torch::zeros({N}, torch::kInt32).to(torch::kCUDA); // # candidate views
+
+        // 2) Iterate once over the dataset with the efficient loader
+        const size_t dataset_size = train_dataset_size_;
+        if (dataset_size == 0) {
+            std::cout << "[Prune leak] Empty dataset.\n";
+            return;
+        }
+        const int workers = std::max(1, params_.optimization.num_workers);
+        auto loader = create_efficient_infinite_dataloader(train_dataset_, workers);
+        auto it = loader->begin();
+
+        // 3) Projection constants
         const float eps2d = 0.3f;
         const float near_plane = 0.01f;
         const float far_plane = 10000.0f;
         const float radius_clip = 0.0f;
         const float scaling_mod = 1.0f;
 
-        // Directions on the ellipse: NESW (+ diagonals if requested).
-        // Note: we only support 4 or 8 samples in this fast path; sample_points>=8 -> 8 else 4.
+        // 4/8-direction sampling around ellipse (axis-aligned approx)
         std::vector<std::array<float, 2>> dirs = {{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}};
         if (sample_points >= 8) {
             const float s = 0.70710678f;
@@ -1773,23 +1858,48 @@ namespace gs::training {
         }
 
         int idx_img = 1;
-        for (auto& batch : *pruning_dataloader) {
-            std::printf("\r[Prune Leakage] image %d", idx_img++);
+        size_t skipped_missing = 0, skipped_shape = 0, skipped_size = 0, skipped_proj = 0;
+
+        for (size_t i = 0; i < dataset_size; ++i, ++it) {
+            std::printf("\r[Prune Leakage] image %d/%zu", idx_img++, dataset_size);
             std::fflush(stdout);
 
-            auto camera_with_data = batch[0].data;
-            Camera* cam = camera_with_data.camera;
-            torch::Tensor float_weight_map = camera_with_data.attentionMask;
-            if (!cam || !float_weight_map.defined())
-                continue;
+            const auto sample = *it; // CameraDataset::Sample
+            Camera* cam = sample.camera;
+            auto mask_f = sample.attentionMask;
 
-            // Mask {0,1} on CUDA, shape [H,W]
-            auto mask01_3d = (float_weight_map > 0.5f).to(torch::kFloat32); // [1,H,W] or [H,W]
+            if (!cam) {
+                std::cout << "\n[Prune leak] Warning: null camera; skipping view.\n";
+                continue;
+            }
+            if (!mask_f.defined() || mask_f.numel() == 0) {
+                if (skipped_missing < 3)
+                    std::cout << "\n[Prune leak] Warning: undefined/empty attentionMask; skipping view.\n";
+                ++skipped_missing;
+                continue;
+            }
+
+            // CUDA mask [H,W] in {0,1}
+            auto mask01_3d = (mask_f > 0.5f).to(torch::kFloat32);
             auto mask01 = (mask01_3d.dim() == 3 && mask01_3d.size(0) == 1) ? mask01_3d.squeeze(0) : mask01_3d;
-            TORCH_CHECK(mask01.dim() == 2, "Attention mask must be [H,W] or [1,H,W]");
+            if (mask01.dim() != 2) {
+                if (skipped_shape < 3)
+                    std::cout << "\n[Prune leak] Warning: mask wrong shape; skipping view.\n";
+                ++skipped_shape;
+                continue;
+            }
             mask01 = mask01.contiguous().to(torch::kCUDA);
 
-            // Optional dilation (pixel tolerance at boundary): k = 2*dilate_px+1, stride=1, same padding.
+            const int W = (int)cam->image_width();
+            const int H = (int)cam->image_height();
+            if (mask01.size(1) != W || mask01.size(0) != H) {
+                if (skipped_size < 3)
+                    std::cout << "\n[Prune leak] Warning: mask size != camera size; skipping view.\n";
+                ++skipped_size;
+                continue;
+            }
+
+            // Optional dilation (pixel tolerance at boundary)
             if (dilate_px > 0) {
                 const int k = 2 * dilate_px + 1;
                 auto m4 = mask01.unsqueeze(0).unsqueeze(0); // [1,1,H,W]
@@ -1797,33 +1907,47 @@ namespace gs::training {
                 mask01 = torch::nn::functional::max_pool2d(m4, opts).squeeze(0).squeeze(0); // [H,W]
             }
 
-            const int H = static_cast<int>(mask01.size(0));
-            const int W = static_cast<int>(mask01.size(1));
+            // Camera tensors (CUDA) with batch dim [1,...] if needed
+            auto view = cam->world_view_transform().to(torch::kCUDA);
+            auto K = cam->K().to(torch::kCUDA);
+            if (view.dim() == 2)
+                view = view.unsqueeze(0);
+            if (K.dim() == 2)
+                K = K.unsqueeze(0);
 
-            // Camera tensors (CUDA)
-            auto viewmat = cam->world_view_transform().to(torch::kCUDA); // [1,4,4]
-            auto K = cam->K().to(torch::kCUDA);                          // [1,3,3] or [3,3]
-            const int image_w = static_cast<int>(cam->image_width());
-            const int image_h = static_cast<int>(cam->image_height());
-
-            // Projection-only: get means2d & radii
-
+            // Distortion (optional)
             std::optional<torch::Tensor> radial, tangential, thin_prism;
-            if (cam->radial_distortion().defined() && cam->radial_distortion().numel() > 0) 
+            if (cam->radial_distortion().defined() && cam->radial_distortion().numel() > 0)
                 radial = cam->radial_distortion();
-            if (cam->tangential_distortion().defined() && cam->tangential_distortion().numel() > 0) 
+            if (cam->tangential_distortion().defined() && cam->tangential_distortion().numel() > 0)
                 tangential = cam->tangential_distortion();
-            auto [radii, means2d] = ProjectFast(
-                means3D, rotations, scales, opacities, viewmat, K,
-                image_w, image_h, eps2d, near_plane, far_plane,
-                radius_clip, scaling_mod, cam->camera_model_type(),
-                radial, tangential, thin_prism);
 
-            if (!radii.defined() || !means2d.defined())
+            // Fast projection: returns std::pair<Tensor,Tensor>
+            auto proj_pair = ProjectFast(
+                means3D, rotations, scales, opacities,
+                view, K,
+                W, H,
+                eps2d, near_plane, far_plane,
+                radius_clip, scaling_mod,
+                cam->camera_model_type(),
+                radial, tangential, /*thin_prism*/ std::nullopt);
+            auto radii = proj_pair.first;
+            auto means2d = proj_pair.second;
+
+            if (!radii.defined() || !means2d.defined()) {
+                if (skipped_proj < 3)
+                    std::cout << "\n[Prune leak] Warning: projection returned undefined tensors; skipping view.\n";
+                ++skipped_proj;
                 continue;
+            }
 
-            // Visibility: positive projected radius -> only visible splats count.
-            auto visible = (radii > 0.0f).all(-1); // [N]
+            if (radii.dim() == 3 && radii.size(0) == 1)
+                radii = radii.squeeze(0);
+            if (means2d.dim() == 3 && means2d.size(0) == 1)
+                means2d = means2d.squeeze(0);
+
+            // Visible splats: positive projected radii
+            auto visible = (radii > 0.0f).all(-1);
             if (!visible.any().item<bool>())
                 continue;
             auto vidx = visible.nonzero().squeeze(-1); // [M]
@@ -1837,13 +1961,10 @@ namespace gs::training {
             auto cx = torch::round(xy.select(1, 0)).to(torch::kLong).clamp(0, W - 1);
             auto cy = torch::round(xy.select(1, 1)).to(torch::kLong).clamp(0, H - 1);
 
-            // Center must be inside the (dilated) mask
-            auto center_mask = mask01.index({cy, cx});       // [M] in {0,1}
+            // Eligibility for leakage test
+            auto center_mask = mask01.index({cy, cx});       // [M] float {0,1}
             auto center_in = center_mask >= min_center_mask; // bool
-
-            // Footprint must be large enough (filters micro-splats)
             auto large_fp = (torch::max(rx, ry) >= min_pixel_radius);
-
             auto keep = center_in & large_fp;
             if (!keep.any().item<bool>())
                 continue;
@@ -1854,8 +1975,8 @@ namespace gs::training {
             auto cxk = cx.index({kidx});
             auto cyk = cy.index({kidx});
 
-            // Sample points around the ellipse (axis-aligned approx; fast and robust).
-            const int P = static_cast<int>(dirs.size());
+            // Sample P points around ellipse per kept splat
+            const int P = (int)dirs.size();
             auto sx = torch::empty({kidx.size(0), P}, torch::TensorOptions().dtype(torch::kLong).device(torch::kCUDA));
             auto sy = torch::empty_like(sx);
             for (int p = 0; p < P; ++p) {
@@ -1865,31 +1986,37 @@ namespace gs::training {
                 sy.index_put_({torch::indexing::Slice(), p}, (cyk + dy).clamp(0, H - 1));
             }
 
-            // Gather mask values at sampled points and compute per-splat outside fraction.
+            // Per-splat outside ratio in this view
             auto lin = (sy * W + sx).reshape({-1});                    // [K*P]
-            auto mvals = mask01.view({-1}).index({lin}).view({-1, P}); // [K,P] in {0,1}
+            auto mvals = mask01.view({-1}).index({lin}).view({-1, P}); // [K,P]
             auto outside_ratio = (1.0f - mvals).mean(1);               // [K] in [0,1]
 
-            // Per-view leak decision:
-            // Count a view as "leak" only if the fraction of sampled contour points
-            // outside the (dilated) mask exceeds per_view_leak_frac.
+            // Count a "leak view" if outside_ratio > per_view_leak_frac
             auto leak_here = (outside_ratio > per_view_leak_frac).to(torch::kInt32); // [K]
-            auto ids = vidx.index({kidx});                                           // [K] original Gaussian ids
+            auto ids = vidx.index({kidx});                                           // [K] original IDs
 
             vis_counts.index_add_(0, ids, torch::ones_like(leak_here));
             leak_votes.index_add_(0, ids, leak_here);
         }
         std::printf("\n");
 
-        // 4) Final decision (success-rate semantics)
-        auto vis_ok = vis_counts >= 1;
-        if (!vis_ok.any().item<bool>())
+        // Graceful exits
+        if (vis_counts.sum().item<long long>() == 0) {
+            std::cout << "[Prune leak] No candidate visibility accumulated (invalid/missing masks?); aborting prune.\n";
             return;
+        }
 
-        auto leak_fail = leak_votes.to(torch::kFloat32) / vis_counts.to(torch::kFloat32).clamp_min(1.0f); // failures in [0,1]
-        auto leak_ok = 1.0f - leak_fail;                                                                  // successes in [0,1]
-        auto is_prune = vis_ok & (leak_ok < leak_keep_threshold);
+        auto vis_ok = (vis_counts >= 1);
+        auto fail_r = leak_votes.to(torch::kFloat32) / vis_counts.to(torch::kFloat32).clamp_min(1.0f);
+        auto ok_r = 1.0f - fail_r;
+        auto is_prune = vis_ok & (ok_r < leak_keep_threshold);
         auto keep_mask = (~is_prune).to(torch::kBool);
+
+        const int64_t keep_cnt = keep_mask.sum().item<long long>();
+        if (keep_cnt == 0) {
+            std::cout << "[Prune leak] keep_mask would be empty (keep_thr=" << leak_keep_threshold << "); skipping prune.\n";
+            return;
+        }
 
         const int removed = is_prune.sum().item<int>();
         model.filterByMask(keep_mask);
@@ -1903,8 +2030,6 @@ namespace gs::training {
                   << ")\n";
     }
 
-
-
     void Trainer::prune_after_training(float vote_ratio_threshold, float leak_keep_threshold) {
         // 1) First, center-vote pruning (your original logic)
         prune_by_center_vote(vote_ratio_threshold);
@@ -1912,9 +2037,6 @@ namespace gs::training {
         // 2) Re-fetch model and then leakage pruning on remaining splats
         prune_by_mask_leakage(leak_keep_threshold);
     }
-
-
-
 
     void Trainer::save_ply(const std::filesystem::path& save_path, int iter_num, bool join_threads) {
         // Save PLY format - join_threads controls sync vs async
