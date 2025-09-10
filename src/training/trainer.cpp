@@ -1561,7 +1561,7 @@ namespace gs::training {
                 eps2d, near_plane, far_plane,
                 radius_clip, scaling_mod,
                 cam->camera_model_type(),
-                radial, tangential, /*thin_prism*/ std::nullopt);
+                radial, tangential, std::nullopt);
             auto radii = proj_pair.first;
             auto means2d = proj_pair.second;
 
