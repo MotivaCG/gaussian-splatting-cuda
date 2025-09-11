@@ -373,44 +373,48 @@ namespace gs::training {
             return std::unexpected(std::format("Error computing photometric loss: {}", e.what()));
         }
     }
-    
-
-    
 
     // Gently boost opacity for Gaussians that are inside the mask in at least
     // 'min_visible_views' visible views.
-    // Policy: alpha_new = clamp( 2 * alpha_old, alpha_old, alpha_min ).
+    // Policy: alpha_new = clamp(boost_value * alpha_old, alpha_old, alpha_min).
     //
     // Notes:
     // - Counts ONLY views where the Gaussian is visible (positive projected radii).
     // - Uses explicit index arrays (no boolean mask indexing) to avoid broadcasting traps.
     // - Flattens raw opacity to 1D to ensure shape consistency.
     // - Never decreases opacity; caps at 'alpha_min' (< 1.0 to keep finite logits).
-    void Trainer::maybe_alpha_boost(const float boost_value, const float alpha_min, const int min_visible_views) {
+    void Trainer::maybe_alpha_boost(const float boost_value,
+                                    const float alpha_min,
+                                    const int min_visible_views) {
+        torch::NoGradGuard no_grad;
+
         const float min_support_ratio = 0.0f; // >= 0.0 => at least one inside vote across visible views
+        const float alpha_threshold = 0.0f;   // ignore splats behind this level
 
-        const float alpha_threshold = 0.0f; //ignore splats behind this level
-
+        // Model & sizes
         SplatData& model = strategy_->get_model();
         const int64_t N = model.get_means().size(0);
         if (N <= 0)
             return;
 
-        // Accumulators: visible-only votes
+        // Accumulators: visible-only votes (CUDA int32)
         auto pos = torch::zeros({N}, torch::kInt32).to(torch::kCUDA);
         auto tot = torch::zeros({N}, torch::kInt32).to(torch::kCUDA);
 
-        // Data loader (sequential, batch=1)
+        // Data loader (sequential, batch=1) – iterate the dataloader itself
         const size_t dataset_size = train_dataset_size_;
+        if (dataset_size == 0)
+            return;
+
         const int workers = std::max(1, params_.optimization.num_workers);
-        auto loader = create_efficient_infinite_dataloader(train_dataset_, workers);
-        auto it = loader->begin();
+        auto train_dataloader = create_infinite_dataloader_from_dataset(train_dataset_, workers);
+        auto loader = train_dataloader->begin();
 
         // Model tensors
         auto means3D = model.get_means();      // [N,3] CUDA
         auto scales = model.get_scaling();     // [N,3] CUDA
         auto rotations = model.get_rotation(); // [N,4] CUDA
-        auto opacities = model.get_opacity();  // [N] or [N,1] (unused here)
+        auto opacities = model.get_opacity();  // [N] or [N,1] (unused by projection if not needed)
         if (opacities.defined() && opacities.dim() == 2 && opacities.size(-1) == 1)
             opacities = opacities.squeeze(-1);
 
@@ -418,50 +422,97 @@ namespace gs::training {
         const float eps2d = 0.3f, near_plane = 0.01f, far_plane = 10000.0f, radius_clip = 0.0f, scaling_mod = 1.0f;
 
         // Tally visible-only inside votes
-        for (size_t i = 0; i < dataset_size; ++i, ++it) {
-            auto sample = *it; // CameraDataset::Sample
+        int idx_img = 1;
+        size_t skipped_missing = 0, skipped_shape = 0, skipped_size = 0, skipped_proj = 0;
+
+        for (size_t i = 0; i < dataset_size; ++i, ++loader) {
+            // Consume batch like in the training loop
+            auto& batch = *loader;
+            const auto sample = batch[0].data; // {camera, image, attentionMask}
             Camera* cam = sample.camera;
-            torch::Tensor float_weight_map = sample.attentionMask;
-            if (!cam || !float_weight_map.defined())
+            auto mask_f = sample.attentionMask;
+
+            if (!cam || !mask_f.defined() || mask_f.numel() == 0) {
+                if (!cam) {
+                    std::cout << "\n[Alpha boost] Warning: null camera; skipping view.\n";
+                } else if (skipped_missing < 3) {
+                    std::cout << "\n[Alpha boost] Warning: undefined/empty attentionMask; skipping view.\n";
+                }
+                ++skipped_missing;
                 continue;
+            }
 
             // CPU bool mask [H,W]
-            auto m3 = (float_weight_map > 0.5f);
-            auto mask = (m3.dim() == 3 && m3.size(0) == 1) ? m3.squeeze(0) : m3;
-            if (mask.dim() != 2)
+            auto m3 = (mask_f > 0.5f);
+            auto m2 = (m3.dim() == 3 && m3.size(0) == 1) ? m3.squeeze(0) : m3;
+            if (m2.dim() != 2) {
+                if (skipped_shape < 3)
+                    std::cout << "\n[Alpha boost] Warning: mask wrong shape; skipping view.\n";
+                ++skipped_shape;
                 continue;
-            mask = mask.contiguous();
+            }
+            auto mask = m2.to(torch::kCPU).contiguous();
 
-            const int H = (int)mask.size(0);
-            const int W = (int)mask.size(1);
+            const int W = (int)cam->image_width();
+            const int H = (int)cam->image_height();
+            if (mask.size(1) != W || mask.size(0) != H) {
+                if (skipped_size < 3)
+                    std::cout << "\n[Alpha boost] Warning: mask size != camera size; skipping view.\n";
+                ++skipped_size;
+                continue;
+            }
 
-            // Camera tensors (CUDA)
+            // Camera tensors (CUDA) with batch dim if needed
             auto viewmat = cam->world_view_transform().to(torch::kCUDA);
             auto K = cam->K().to(torch::kCUDA);
-            const int image_w = (int)cam->image_width();
-            const int image_h = (int)cam->image_height();
+            if (viewmat.dim() == 2)
+                viewmat = viewmat.unsqueeze(0);
+            if (K.dim() == 2)
+                K = K.unsqueeze(0);
+
+            // Distortion (optional)
+            std::optional<torch::Tensor> radial, tangential;
+            if (cam->radial_distortion().defined() && cam->radial_distortion().numel() > 0)
+                radial = cam->radial_distortion();
+            if (cam->tangential_distortion().defined() && cam->tangential_distortion().numel() > 0)
+                tangential = cam->tangential_distortion();
 
             // Projection-only (fast)
+            auto [radii_raw, means2d_raw] = ProjectFast(
+                means3D, rotations, scales, opacities,
+                viewmat, K,
+                W, H,
+                eps2d, near_plane, far_plane,
+                radius_clip, scaling_mod,
+                cam->camera_model_type(),
+                radial, tangential, /*thin_prism*/ std::nullopt);
 
-            std::optional<torch::Tensor> radial, tangential, thin_prism;
-            if (cam->radial_distortion().defined() && cam->radial_distortion().numel() > 0) 
-                radial = cam->radial_distortion();
-            if (cam->tangential_distortion().defined() && cam->tangential_distortion().numel() > 0) 
-                tangential = cam->tangential_distortion();
-            auto [radii, means2d] = ProjectFast(
-                means3D, rotations, scales, opacities, viewmat, K,
-                image_w, image_h, eps2d, near_plane, far_plane,
-                radius_clip, scaling_mod, cam->camera_model_type(),
-                radial, tangential, thin_prism);
-
-            if (!radii.defined() || !means2d.defined())
+            if (!radii_raw.defined() || !means2d_raw.defined()) {
+                if (skipped_proj < 3)
+                    std::cout << "\n[Alpha boost] Warning: projection returned undefined tensors; skipping view.\n";
+                ++skipped_proj;
                 continue;
+            }
 
-            // Visible-only splats (positive projected radii)
-            auto visible = (radii > 0.0f).all(-1); // [N] bool CUDA
+            auto radii = (radii_raw.dim() == 3 && radii_raw.size(0) == 1) ? radii_raw.squeeze(0) : radii_raw;
+            auto means2d = (means2d_raw.dim() == 3 && means2d_raw.size(0) == 1) ? means2d_raw.squeeze(0) : means2d_raw;
+
+            // Visible-only splats (positive projected radii) – handle 1D/2D radii
+            torch::Tensor visible;
+            if (radii.dim() == 2 && radii.size(1) >= 1)
+                visible = (radii > 0.0f).all(-1); // [N]
+            else if (radii.dim() == 1)
+                visible = (radii > 0.0f); // [N]
+            else {
+                if (skipped_proj < 3)
+                    std::cout << "\n[Alpha boost] Warning: invalid radii shape; skipping view.\n";
+                ++skipped_proj;
+                continue;
+            }
             if (!visible.any().item<bool>())
                 continue;
-            auto vidx = visible.nonzero().squeeze(-1); // [M] long CUDA
+
+            auto vidx = visible.nonzero().squeeze(-1); // [M], CUDA
 
             // Pixel coords (on CPU) for mask sampling
             auto xy_cuda = means2d.index({vidx}); // [M,2] CUDA
@@ -470,7 +521,7 @@ namespace gs::training {
             auto y = torch::round(xy.select(1, 1)).to(torch::kLong).clamp(0, H - 1);
             auto lin = y * W + x; // [M] CPU long
 
-            // Inside votes
+            // Inside votes (CPU read, accumulate on CUDA)
             auto inside_cpu = mask.flatten().index({lin});                   // [M] bool CPU
             auto inside_i32 = inside_cpu.to(torch::kInt32).to(torch::kCUDA); // [M] int32 CUDA
 
@@ -478,36 +529,36 @@ namespace gs::training {
             tot.index_add_(0, vidx, torch::ones_like(inside_i32, torch::kInt32));
         }
 
-        // Decide eligibility (visible-only ratios) 
-        
         // Read/prepare opacity logits as a flat 1D tensor
-        torch::NoGradGuard no_grad;
         auto raw = model.opacity_raw(); // logits; can be [N] or [N,1] depending on impl
         if (raw.dim() == 2 && raw.size(-1) == 1)
             raw = raw.squeeze(-1);
         if (raw.dim() != 1)
-            raw = raw.view({-1}); // flatten to [N]
-        auto cur_alpha = torch::sigmoid(raw);
+            raw = raw.view({-1});             // [N]
+        auto cur_alpha = torch::sigmoid(raw); // [N], same device as raw
 
+        // Eligibility based on visible-only support
         auto tot_f = tot.to(torch::kFloat32).clamp_min(1.0f);
-        auto ratio = pos.to(torch::kFloat32) / tot_f;                                   // [N] float
-        auto eligible_mask = (tot >= min_visible_views) & (ratio >= min_support_ratio) & (cur_alpha > alpha_threshold); // [N] bool
-
+        auto ratio = pos.to(torch::kFloat32) / tot_f; // [N] float (CUDA)
+        auto eligible_mask =
+            (tot >= min_visible_views) &
+            (ratio >= min_support_ratio) &
+            (cur_alpha > alpha_threshold);
 
         const float eps = 1e-6f;
         const float cap = std::min(alpha_min, 1.0f - eps);
 
         // Further restrict to those below the cap (avoid needless writes)
-        auto below_cap = (cur_alpha < cap);          // [N] bool
-        auto final_mask = eligible_mask & below_cap; // [N] bool
+        auto below_cap = (cur_alpha < cap);
+        auto final_mask = eligible_mask & below_cap;
 
-        auto idx = final_mask.nonzero().squeeze(-1); // [K] long
+        auto idx = final_mask.nonzero().squeeze(-1); // [K] (CUDA)
         if (idx.numel() == 0) {
             std::cout << "[Trainer] Alpha boost: no eligible splats.\n";
             return;
         }
 
-        // Compute target alpha = clamp(2*a, a, cap) on the selected indices
+        // Compute target alpha = clamp(boost_value * a, a, cap) on the selected indices
         auto a = cur_alpha.index({idx}); // [K]
         auto doubled = a * boost_value;
         auto target = torch::min(doubled, torch::tensor(cap, a.options()));
@@ -519,9 +570,11 @@ namespace gs::training {
         auto write = torch::max(old_logit, new_logit); // monotonicity guard
         raw.index_put_({idx}, write);
 
-        std::cout << "[Trainer] Alpha boost (x" << boost_value << " capped at " << alpha_min
-                  << "): updated splats\n";
+        std::cout << "[Trainer] Alpha boost (x" << boost_value
+                  << ", cap=" << alpha_min
+                  << "): updated " << idx.numel() << " splats.\n";
     }
+
 
     std::expected<torch::Tensor, std::string> Trainer::compute_scale_reg_loss(
         const SplatData& splatData,
@@ -1640,6 +1693,9 @@ namespace gs::training {
                   << ", min_vis=" << min_visibility_count << ")\n";
     }*/
 
+    // -----------------------------------------------------------------------------
+    // Keep splats that land often inside the center-mask (vote-based).
+    // -----------------------------------------------------------------------------
     void Trainer::prune_by_center_vote(float center_keep_threshold, int min_visibility_count) {
         torch::NoGradGuard no_grad;
 
@@ -1669,10 +1725,9 @@ namespace gs::training {
             return;
         }
 
-        
         const int workers = std::max(1, params_.optimization.num_workers);
         auto train_dataloader = create_infinite_dataloader_from_dataset(train_dataset_, workers);
-        auto loader = train_dataloader->begin();
+        auto loader = train_dataloader->begin(); // iterate the dataloader itself
 
         // 3) Projection constants
         const float eps2d = 0.3f;
@@ -1684,10 +1739,11 @@ namespace gs::training {
         int idx_img = 1;
         size_t skipped_missing = 0, skipped_shape = 0, skipped_size = 0, skipped_proj = 0;
 
-        
         for (size_t i = 0; i < dataset_size; ++i, ++loader) {
             std::printf("\r[Prune Center] image %d/%zu", idx_img++, dataset_size);
             std::fflush(stdout);
+
+            // Consume a batch like in the training loop
             auto& batch = *loader;
             const auto camera_with_image = batch[0].data; // {camera, image, attentionMask}
             Camera* cam = camera_with_image.camera;
@@ -1735,15 +1791,15 @@ namespace gs::training {
             if (K.dim() == 2)
                 K = K.unsqueeze(0);
 
-            // Distortion (optional)
-            std::optional<torch::Tensor> radial, tangential, thin_prism;
+            // Distortion (optional) – ProjectFast handles device/shape
+            std::optional<torch::Tensor> radial, tangential;
             if (cam->radial_distortion().defined() && cam->radial_distortion().numel() > 0)
                 radial = cam->radial_distortion();
             if (cam->tangential_distortion().defined() && cam->tangential_distortion().numel() > 0)
                 tangential = cam->tangential_distortion();
 
-            // Fast projection: returns std::pair<Tensor,Tensor>
-            auto proj_pair = ProjectFast(
+            // Fast projection
+            auto [radii, means2d] = ProjectFast(
                 means3D, rotations, scales, opacities,
                 view, K,
                 W, H,
@@ -1751,8 +1807,6 @@ namespace gs::training {
                 radius_clip, scaling_mod,
                 cam->camera_model_type(),
                 radial, tangential, /*thin_prism*/ std::nullopt);
-            auto radii = proj_pair.first;
-            auto means2d = proj_pair.second;
 
             if (!radii.defined() || !means2d.defined()) {
                 if (skipped_proj < 3)
@@ -1778,9 +1832,9 @@ namespace gs::training {
                 ++skipped_proj;
                 continue;
             }
-
             if (!visible.any().item<bool>())
                 continue;
+
             auto vidx = visible.nonzero().squeeze(-1); // [M], CUDA
 
             // 2D centers -> CPU ints in [0..W-1],[0..H-1]
@@ -1788,7 +1842,7 @@ namespace gs::training {
             auto xy = xy_cuda.detach().to(torch::kCPU);
             auto x = torch::round(xy.select(1, 0)).to(torch::kLong).clamp(0, W - 1);
             auto y = torch::round(xy.select(1, 1)).to(torch::kLong).clamp(0, H - 1);
-            auto lin = y * W + x;
+            auto lin = y * W + x; // [M] long CPU
 
             // Vote on CPU mask, accumulate on CUDA
             auto inside_cpu = mask.flatten().index({lin}); // bool CPU
@@ -1830,12 +1884,11 @@ namespace gs::training {
                   << ", min_vis=" << min_visibility_count << ")\n";
     }
 
-    // Prune Gaussians whose projected footprint "leaks" outside the mask too often.
-    // Success-rate semantics: keep only if (views_without_leak / candidate_views) >= leak_keep_threshold.
-    // - Only views where the Gaussian is visible are considered.
-    // - Optional dilation 'dilate_px' (pixels) provides tolerance near the boundary.
-    // - 'per_view_leak_frac' is the fraction of sampled contour points outside the (dilated) mask
-    //    required to count that view as a "leak" (e.g., 0.25 -> at least 25% outside to mark as leak).
+
+    // -----------------------------------------------------------------------------
+    // Prune splats whose projected footprint leaks outside the mask too often.
+    // Success-rate semantics: keep only if (views_without_leak / candidate_views) >= keep_threshold.
+    // -----------------------------------------------------------------------------
     void Trainer::prune_by_mask_leakage(float leak_keep_threshold,
                                         float min_pixel_radius,
                                         float min_center_mask,
@@ -1863,15 +1916,16 @@ namespace gs::training {
         auto leak_votes = torch::zeros({N}, torch::kInt32).to(torch::kCUDA); // # leak-views
         auto vis_counts = torch::zeros({N}, torch::kInt32).to(torch::kCUDA); // # candidate views
 
-        // 2) Iterate once over the dataset with the efficient loader
+        // 2) Iterate once over the dataset (same pattern as training loop)
         const size_t dataset_size = train_dataset_size_;
         if (dataset_size == 0) {
             std::cout << "[Prune leak] Empty dataset.\n";
             return;
         }
+
         const int workers = std::max(1, params_.optimization.num_workers);
-        auto loader = create_efficient_infinite_dataloader(train_dataset_, workers);
-        auto it = loader->begin();
+        auto train_dataloader = create_infinite_dataloader_from_dataset(train_dataset_, workers);
+        auto loader = train_dataloader->begin();
 
         // 3) Projection constants
         const float eps2d = 0.3f;
@@ -1893,11 +1947,13 @@ namespace gs::training {
         int idx_img = 1;
         size_t skipped_missing = 0, skipped_shape = 0, skipped_size = 0, skipped_proj = 0;
 
-        for (size_t i = 0; i < dataset_size; ++i, ++it) {
+        for (size_t i = 0; i < dataset_size; ++i, ++loader) {
             std::printf("\r[Prune Leakage] image %d/%zu", idx_img++, dataset_size);
             std::fflush(stdout);
 
-            const auto sample = *it; // CameraDataset::Sample
+            // Consume a batch like in the training loop
+            auto& batch = *loader;
+            const auto sample = batch[0].data; // CameraDataset::Sample {camera, image, attentionMask}
             Camera* cam = sample.camera;
             auto mask_f = sample.attentionMask;
 
@@ -1948,15 +2004,15 @@ namespace gs::training {
             if (K.dim() == 2)
                 K = K.unsqueeze(0);
 
-            // Distortion (optional)
-            std::optional<torch::Tensor> radial, tangential, thin_prism;
+            // Distortion (optional) – ProjectFast handles device/shape
+            std::optional<torch::Tensor> radial, tangential;
             if (cam->radial_distortion().defined() && cam->radial_distortion().numel() > 0)
                 radial = cam->radial_distortion();
             if (cam->tangential_distortion().defined() && cam->tangential_distortion().numel() > 0)
                 tangential = cam->tangential_distortion();
 
-            // Fast projection: returns std::pair<Tensor,Tensor>
-            auto proj_pair = ProjectFast(
+            // Fast projection
+            auto [radii, means2d] = ProjectFast(
                 means3D, rotations, scales, opacities,
                 view, K,
                 W, H,
@@ -1964,8 +2020,6 @@ namespace gs::training {
                 radius_clip, scaling_mod,
                 cam->camera_model_type(),
                 radial, tangential, /*thin_prism*/ std::nullopt);
-            auto radii = proj_pair.first;
-            auto means2d = proj_pair.second;
 
             if (!radii.defined() || !means2d.defined()) {
                 if (skipped_proj < 3)
@@ -1979,16 +2033,30 @@ namespace gs::training {
             if (means2d.dim() == 3 && means2d.size(0) == 1)
                 means2d = means2d.squeeze(0);
 
-            // Visible splats: positive projected radii
-            auto visible = (radii > 0.0f).all(-1);
+            // Visible splats: positive projected radii (handle 1D/2D radii)
+            torch::Tensor visible;
+            if (radii.dim() == 2 && radii.size(1) >= 1)
+                visible = (radii > 0.0f).all(-1);
+            else if (radii.dim() == 1)
+                visible = (radii > 0.0f);
+            else {
+                if (skipped_proj < 3)
+                    std::cout << "\n[Prune leak] Warning: invalid radii shape; skipping view.\n";
+                ++skipped_proj;
+                continue;
+            }
             if (!visible.any().item<bool>())
                 continue;
-            auto vidx = visible.nonzero().squeeze(-1); // [M]
+
+            auto vidx = visible.nonzero().squeeze(-1); // [M], CUDA
 
             // Centers & radii for visible splats
-            auto xy = means2d.index({vidx});        // [M,2]
-            auto rx = radii.index({vidx, 0}).abs(); // [M]
-            auto ry = radii.index({vidx, 1}).abs(); // [M]
+            auto xy = means2d.index({vidx}); // [M,2], CUDA
+            auto rx = (radii.dim() == 2 ? radii.index({vidx, 0}).abs()
+                                        : radii.index({vidx}).abs()); // [M]
+            // If radii is 1D, use the same for x/y to keep a conservative ellipse
+            auto ry = (radii.dim() == 2 ? radii.index({vidx, 1}).abs()
+                                        : rx.clone());
 
             // Pixel centers
             auto cx = torch::round(xy.select(1, 0)).to(torch::kLong).clamp(0, W - 1);
@@ -2008,9 +2076,9 @@ namespace gs::training {
             auto cxk = cx.index({kidx});
             auto cyk = cy.index({kidx});
 
-            // Sample P points around ellipse per kept splat
+            // Sample P points around an axis-aligned ellipse per kept splat
             const int P = (int)dirs.size();
-            auto sx = torch::empty({kidx.size(0), P}, torch::TensorOptions().dtype(torch::kLong).device(torch::kCUDA));
+            auto sx = torch::empty({kidx.size(0), P}, torch::dtype(torch::kLong).device(torch::kCUDA));
             auto sy = torch::empty_like(sx);
             for (int p = 0; p < P; ++p) {
                 auto dx = torch::round(rxk * dirs[p][0]).to(torch::kLong);
@@ -2062,6 +2130,7 @@ namespace gs::training {
                   << ", per_view_leak_frac=" << per_view_leak_frac
                   << ")\n";
     }
+
 
     void Trainer::prune_after_training(float vote_ratio_threshold, float leak_keep_threshold) {
         // 1) First, center-vote pruning (your original logic)
