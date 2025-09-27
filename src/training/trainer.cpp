@@ -978,6 +978,39 @@ namespace gs::training {
         return bg;
     }
 
+    // Returns a 3-float CUDA tensor where each channel is either min or max.
+    // Guarantees at least one channel at max and one at min.
+    // Deterministic per 'step' using a tiny LCG-based hash.
+    torch::Tensor binary_extreme_background_for_step(int step, float eps = 1e-4f) {
+        // Define extremes with tiny epsilon to avoid exact 0/1 logits issues
+        const float vmin = eps;
+        const float vmax = 1.0f - eps;
+
+        // Simple deterministic PRNG from 'step'
+        auto next = [](uint32_t& s) {
+            s = s * 1664525u + 1013904223u; // LCG
+            return s;
+        };
+        uint32_t s = static_cast<uint32_t>(step) ^ 0x9E3779B9u;
+
+        // Pick distinct indices for max and min
+        int i_max = static_cast<int>(next(s) % 3u);
+        int i_min = (i_max + 1 + static_cast<int>(next(s) % 2u)) % 3; // different from i_max
+
+        // Third channel: choose independently min/max
+        int i_third = 3 - i_max - i_min; // remaining index
+        bool third_is_max = (next(s) & 1u) != 0;
+
+        float rgb[3] = {vmin, vmin, vmin};
+        rgb[i_max] = vmax;
+        rgb[i_min] = vmin;
+        rgb[i_third] = third_is_max ? vmax : vmin;
+
+        auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+        return torch::tensor({rgb[0], rgb[1], rgb[2]}, opts);
+    }
+
+
     // Helper to ensure buf matches base (defined, dtype, device, shape)
     static inline void ensure_like(torch::Tensor& buf, const torch::Tensor& base) {
         bool is_undefined = !buf.defined();
@@ -1009,16 +1042,15 @@ namespace gs::training {
         }
 
         // Generate per-iteration sine background
-        auto sine_bg = sine_background_for_step(iter);
+        //auto sine_bg = sine_background_for_step(iter);
+        auto sine_bg = binary_extreme_background_for_step(iter);
+
 
         // Ensure reusable buffer exists
         ensure_like(bg_mix_buffer_, background_);
 
-        bg_mix_buffer_.copy_(background_); // d2d copy of 3 floats
-        bg_mix_buffer_.mul_(1.0f - w_mix);
-        bg_mix_buffer_.add_(sine_bg, w_mix);
-
-        return bg_mix_buffer_; // const ref to mixed background
+        torch::lerp_out(bg_mix_buffer_, /*start=*/background_, /*end=*/sine_bg, /*weight=*/w_mix);
+        return bg_mix_buffer_;
     }
 
     std::expected<Trainer::StepResult, std::string> Trainer::train_step(
