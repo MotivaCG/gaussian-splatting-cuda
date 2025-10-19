@@ -935,12 +935,16 @@ namespace gs::training {
         } else if (phase < limit_mid) {
             const float t = (phase - limit_hi) / (limit_mid - limit_hi);
             return weight_hi + (weight_mid - weight_hi) * t; // decay to mid value
-        } else {
+        } else if (phase < limit_lo) {
             const float t = (phase - limit_mid) / (limit_lo - limit_mid);
-            return weight_mid + (weight_lo - weight_mid) * t; // decay to final value
+            return weight_mid + (weight_lo - weight_mid) * t; // decay to final value        
+        } else {
+            // Phase 4: [0.75, 1.0] → weight = 0.0 (clamp to final value)
+            return weight_lo;
         }
     }
 
+#ifdef USE_SINGLE_COLOR_BACKGROUND
     torch::Tensor sine_background_for_step(
         int step, int periodR = 37, int periodG = 41, int periodB = 43, bool grayscale_only = false, float jitter_amp = 0.03f) {
         const float eps = 1e-4f;
@@ -979,6 +983,7 @@ namespace gs::training {
         }
         return bg;
     }
+#endif // USE_SINGLE_COLOR_BACKGROUND
 
     // Returns a 3-float CUDA tensor where each channel is either min or max.
     // Guarantees at least one channel at max and one at min.
@@ -1013,6 +1018,71 @@ namespace gs::training {
     }
 
 
+#ifdef USE_FULL_NOISE_BACKGROUND
+    /**
+     * @brief Generates a full HxWx3 noise background buffer that changes per iteration.
+     *
+     * @param step Current training iteration
+     * @param height Image height
+     * @param width Image width
+     * @param temporal_seed Seed modifier for temporal variation (default: changes with step)
+     * @param spatial_frequency Controls noise frequency (higher = more varied)
+     * @return torch::Tensor Full RGB noise buffer [3, H, W]
+     */
+    torch::Tensor full_noise_for_step(
+        int step,
+        int height,
+        int width,
+        int temporal_seed = -1,
+        float spatial_frequency = 1.0f) {
+
+        auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+
+        // Use step as seed if not provided
+        if (temporal_seed < 0) {
+            temporal_seed = step;
+        }
+
+        // Set random seed for reproducibility and temporal variation
+        torch::manual_seed(temporal_seed);
+
+        // Generate full noise buffer [H, W, 3]
+        auto noise = torch::rand({height, width, 3}, opts);
+
+        // Optional: Apply spatial smoothing for less harsh noise
+        if (spatial_frequency < 1.0f) {
+            // Simple box blur for smoothing
+            int kernel_size = static_cast<int>(5.0f * (1.0f - spatial_frequency)) | 1; // Make odd
+            if (kernel_size > 1) {
+                auto kernel = torch::ones({kernel_size, kernel_size}, opts) / (kernel_size * kernel_size);
+                // Apply per channel
+                for (int c = 0; c < 3; ++c) {
+                    auto channel = noise.index({torch::indexing::Slice(),
+                                                torch::indexing::Slice(),
+                                                c});
+                    channel = torch::conv2d(
+                                  channel.unsqueeze(0).unsqueeze(0),
+                                  kernel.unsqueeze(0).unsqueeze(0),
+                                  /*bias=*/torch::nullopt,
+                                  /*stride=*/1,
+                                  /*padding=*/kernel_size / 2)
+                                  .squeeze(0)
+                                  .squeeze(0);
+                    noise.index_put_({torch::indexing::Slice(),
+                                      torch::indexing::Slice(),
+                                      c},
+                                     channel);
+                }
+            }
+        }
+
+        // Clamp to valid range
+        noise = noise.clamp(0.0f, 1.0f);
+
+        // Convert to [3, H, W] format for consistency with rendering
+        return noise.permute({2, 0, 1}).contiguous();
+    }
+#endif // USE_FULL_NOISE_BACKGROUND
     // Helper to ensure buf matches base (defined, dtype, device, shape)
     static inline void ensure_like(torch::Tensor& buf, const torch::Tensor& base) {
         bool is_undefined = !buf.defined();
@@ -1029,30 +1099,84 @@ namespace gs::training {
             buf = torch::empty_like(base);
     }
 
-    torch::Tensor& Trainer::background_for_step(int iter) {
+    
+    static inline void ensure_shape(torch::Tensor& buf, const torch::TensorOptions& opts,
+                                    const std::vector<int64_t>& shape) {
+        bool need = !buf.defined() ||
+                    buf.dtype() != opts.dtype() ||
+                    buf.device() != opts.device() ||
+                    buf.sizes().vec() != shape;
+
+        if (need) {
+            buf = torch::empty(shape, opts);
+        }
+    }
+    torch::Tensor& Trainer::background_for_step(int iter, int width, int height) {
         torch::NoGradGuard no_grad;
         const auto& opt = params_.optimization;
 
-        // Fast path: modulation disabled: return base background_
+        // Fast path: modulation disabled
         if (!opt.bg_modulation) {
             return background_;
         }
 
-        const float w_mix = inv_weight_piecewise(iter, opt.iterations);
+        
+        #ifdef USE_SINGLE_COLOR_BACKGROUND
+            const float w_mix = inv_weight_piecewise(iter, opt.iterations);
+        #else // USE_FULL_NOISE_BACKGROUND
+            //const float w_mix = 1.0f;
+            const float w_mix = inv_weight_piecewise(iter, opt.iterations);
+        #endif
+
         if (w_mix <= 0.0f) {
             return background_;
         }
 
-        // Generate per-iteration sine background
-        //auto sine_bg = sine_background_for_step(iter);
-        auto sine_bg = binary_extreme_background_for_step(iter);
+        #ifdef USE_SINGLE_COLOR_BACKGROUND
+            // generates a single color [3] background per iteration
+            // auto single_bg = sine_background_for_step(iter);
+            auto single_bg = binary_extreme_background_for_step(iter);
 
+            // Ensure buffer exists and matches background_ shape [3]
+            ensure_shape(bg_mix_buffer_, background_.options(), {3});
+            if (w_mix >= 1.0f) {
+                // Pure sine background, no mixing needed
+                bg_mix_buffer_ = single_bg;
+                return bg_mix_buffer_;
+            }
 
-        // Ensure reusable buffer exists
-        ensure_like(bg_mix_buffer_, background_);
+            bg_mix_buffer_.copy_(background_);
+            bg_mix_buffer_.mul_(1.0f - w_mix);
+            bg_mix_buffer_.add_(single_bg, w_mix);
 
-        torch::lerp_out(bg_mix_buffer_, /*start=*/background_, /*end=*/sine_bg, /*weight=*/w_mix);
-        return bg_mix_buffer_;
+            return bg_mix_buffer_;
+        #else // USE_FULL_NOISE_BACKGROUND
+
+            // Full noise background - generates complete image [3, H, W]
+            auto noise_bg = full_noise_for_step(iter, height, width);
+
+            // Ensure buffer has correct shape [3, H, W]
+            ensure_shape(noise_buffer_, background_.options(), {3, height, width});
+            if (w_mix >= 1.0f) {
+                // Pure noise background, no mixing needed
+                noise_buffer_ = noise_bg;
+                return noise_buffer_;
+            }
+
+            // Mix: base * (1-w) + noise * w
+            // If background_ is [3], expand it for proper broadcasting
+            if (background_.numel() == 3) {
+                // Efficient: use broadcasting during the add operation
+                noise_buffer_.copy_(noise_bg).mul_(w_mix);
+                // Add expanded base: background_[c] * (1-w) for each pixel
+                noise_buffer_.add_(background_.view({3, 1, 1}), 1.0f - w_mix);
+            } else {
+                // background_ is already [3, H, W]
+                noise_buffer_.copy_(noise_bg).mul_(w_mix);
+                noise_buffer_.add_(background_, 1.0f - w_mix);
+            }
+            return noise_buffer_;
+        #endif
     }
 
     std::expected<Trainer::StepResult, std::string> Trainer::train_step(
@@ -1129,7 +1253,7 @@ namespace gs::training {
             auto adjusted_cam_pos = poseopt_module_->forward(cam->world_view_transform(), torch::tensor({cam->uid()}));
             auto adjusted_cam = Camera(*cam, adjusted_cam_pos);
 
-            torch::Tensor& bg = background_for_step(iter);
+            torch::Tensor& bg = background_for_step(iter, adjusted_cam.image_width(), adjusted_cam.image_height());
 
             RenderOutput r_output;
             // Use the render mode from parameters
@@ -2178,10 +2302,11 @@ namespace gs::training {
         strategy_->get_model().save_ply(save_path, iter_num, join_threads);
 
         // Save SOG format if requested - ALWAYS synchronous
+        std::filesystem::path sog_path;
         if (params_.optimization.save_sog) {
-            strategy_->get_model().save_sog(save_path, iter_num,
-                                            params_.optimization.sog_iterations,
-                                            true); // Always synchronous
+            sog_path = strategy_->get_model().save_sog(save_path, iter_num,
+                                                       params_.optimization.sog_iterations,
+                                                       true); // Always synchronous
         }
 
         // Update project with PLY info
@@ -2189,6 +2314,10 @@ namespace gs::training {
             const std::string ply_name = "splat_" + std::to_string(iter_num);
             const std::filesystem::path ply_path = save_path / (ply_name + ".ply");
             lf_project_->addPly(gs::management::PlyData(false, ply_path, iter_num, ply_name));
+            if (params_.optimization.save_sog) {
+                std::string ply_name_sog = sog_path.stem().string();
+                lf_project_->addPly(gs::management::PlyData(false, sog_path, iter_num, ply_name_sog));
+            }
         }
 
         LOG_DEBUG("PLY save initiated: {} (sync={}), SOG always sync", save_path.string(), join_threads);
