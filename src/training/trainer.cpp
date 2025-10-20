@@ -149,20 +149,45 @@ namespace gs::training {
             TORCH_CHECK(rendered.sizes() == gt.sizes(),
                         "ERROR: size mismatch – rendered ", rendered.sizes(),
                         " vs. ground truth ", gt.sizes());
-
-            // Base loss: L1 + SSIM
-            torch::Tensor l1_loss;
-            // Weight amplify loss in dark regions
-            if (opt_params.darkness_boost <= 0) {
-                l1_loss = torch::l1_loss(rendered, gt);
-            } else {
+            
+            // Compute per-pixel L1 map and apply optional darkness/inv_freq weighting
+            const bool nhwc = (rendered.size(-1) == 3);
+            auto l1_map = torch::abs(rendered - gt); // [B,*,*,3]
+            if (opt_params.darkness_boost > 0.0f) {
                 torch::NoGradGuard no_grad;
                 auto darkness_weight = make_darkness_weight(gt, opt_params.darkness_boost);
-                l1_loss = (torch::l1_loss(rendered, gt, torch::Reduction::None) * darkness_weight).mean();
-            } 
-            auto ssim_loss = 1.f - fused_ssim(rendered, gt, "valid", /*train=*/true);
-            torch::Tensor loss = (1.f - opt_params.lambda_dssim) * l1_loss +
-                                 opt_params.lambda_dssim * ssim_loss;
+                l1_map = l1_map * darkness_weight; // channel-wise weight
+            }
+            l1_map = nhwc ? l1_map.mean(-1) : l1_map.mean(1); // [B,H,W]
+            if (inv_freq.defined() && inv_freq.numel() != 0) {
+                l1_map = l1_map * inv_freq; // [B,H,W] or [H,W] broadcast
+            }
+            auto l1_loss = l1_map.mean();
+
+            // SSIM as map to allow weighting like L1
+            namespace I = torch::indexing;
+            auto ssim_map = fused_ssim_map(rendered, gt, "valid", true); // [B,Hv,Wv]
+            auto ssim_loss_map = 1.0f - ssim_map; // [B,Hv,Wv]
+
+            // Center crop weights to SSIM map size
+            const int orig_h = l1_map.size(-2);
+            const int orig_w = l1_map.size(-1);
+            const int target_h = ssim_map.size(-2);
+            const int target_w = ssim_map.size(-1);
+            const int crop_h_start = (orig_h - target_h) / 2;
+            const int crop_w_start = (orig_w - target_w) / 2;
+
+            // Optional inv_freq weighting on SSIM
+            if (inv_freq.defined() && inv_freq.numel() != 0) {
+                auto inv_freq_cropped = inv_freq.index({I::Slice(crop_h_start, crop_h_start + target_h),
+                                                        I::Slice(crop_w_start, crop_w_start + target_w)});
+                ssim_loss_map = ssim_loss_map * inv_freq_cropped;
+            }
+
+            auto ssim_loss = ssim_loss_map.mean();
+
+            torch::Tensor loss = (1.0f - opt_params.lambda_dssim) * l1_loss
+                                +  opt_params.lambda_dssim * ssim_loss;
             return loss;
         } catch (const std::exception& e) {
             return std::unexpected(std::format("Error computing photometric loss: {}", e.what()));

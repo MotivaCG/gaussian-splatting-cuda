@@ -63,13 +63,12 @@ namespace gs::img {
      *  - Optional invert, gamma 2.2, Gaussian blur with sigma=0.025*min(H,W)
      *  - Two normalizations to [0,1] (pre- and post-blur), then gamma 2.2
      * Input accepted: [3,H,W], [1,3,H,W], or [H,W,3] (float32 in [0,1] or uint8).
-     * Output: [H,W] float32 in [0,1] (or uint8 if normalizeTo8Bit=true), on same device. */
+     * Output: [H,W] float32 in [0,1] on same device. */
     inline torch::Tensor compute_frequency_map_combined(
         torch::Tensor input,
         bool useSobel,
         bool useLaplacian,
-        bool invertOutput,
-        bool normalizeTo8Bit) {
+        bool invertOutput) {
         torch::NoGradGuard ng;
         TORCH_CHECK(input.defined() && input.numel() > 0, "input is empty");
         TORCH_CHECK(useSobel || useLaplacian,
@@ -189,10 +188,6 @@ namespace gs::img {
         // To [H,W]
         auto out = accum.squeeze(0).squeeze(0);
 
-        // Optional uint8
-        if (normalizeTo8Bit) {
-            out = (out.clamp(0.0f, 1.0f) * 255.0f).round().to(torch::kUInt8);
-        }
         return out;
     }
 
@@ -201,10 +196,9 @@ namespace gs::img {
         const torch::Tensor& chwImage,
         bool useSobel,
         bool useLaplacian,
-        bool invertOutput,
-        bool normalizeTo8Bit) {
+        bool invertOutput) {
         // cam->load_and_get_image returns [3,H,W] float32 in [0,1] on CUDA
-        return compute_frequency_map_combined(chwImage, useSobel, useLaplacian, invertOutput, normalizeTo8Bit);
+        return compute_frequency_map_combined(chwImage, useSobel, useLaplacian, invertOutput);
     }
 
 } // namespace gs::img

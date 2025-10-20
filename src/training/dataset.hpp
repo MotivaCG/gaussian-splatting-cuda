@@ -81,8 +81,7 @@ namespace gs::training {
                                         image,
                                         /*useSobel=*/true,
                                         /*useLaplacian=*/true,
-                                        /*invertOutput=*/true,
-                                        /*normalizeTo8Bit=*/false)
+                                        /*invertOutput=*/true)
                                         .to(image.device(), /*non_blocking=*/true)
                                         .contiguous();
                 #ifdef save_test_imgs
@@ -110,6 +109,13 @@ namespace gs::training {
                 }
                 #endif
                 inv_frequency_map = 1.0f + (inv_frequency_map * _datasetConfig.low_frequency_boost); // shift values
+
+                const float eps = 1e-2f;
+                auto mean_all = inv_frequency_map.mean().clamp_min(eps);
+                inv_frequency_map = inv_frequency_map / mean_all;
+                inv_frequency_map = inv_frequency_map.clamp(0.25f, 4.0f);
+                inv_frequency_map = inv_frequency_map.detach();
+
                 return {{cam.get(), std::move(image), std::move(attention_weights), std::move(inv_frequency_map)}, torch::empty({})};
             } else {
                 // Undefined tensor
