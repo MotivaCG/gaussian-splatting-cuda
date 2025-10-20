@@ -125,7 +125,9 @@ namespace gs::training {
         // w = 1 + boost * darkness, normalized by its mean (keeps global scale stable)
         auto w = 1.0f + boost * darkness;
         const float eps = 1e-4f;
-        w = w / torch::clamp(w.mean(), eps, 10.0f);
+        float m = w.mean().item<float>();
+        m = std::clamp(m, eps, 10.0f);
+        w.div_(m); // in-place
 
         // Expand for broadcasting across the channel dimension
         return nhwc ? w.unsqueeze(-1) : w.unsqueeze(1);
@@ -154,13 +156,13 @@ namespace gs::training {
             const bool nhwc = (rendered.size(-1) == 3);
             auto l1_map = torch::abs(rendered - gt); // [B,*,*,3]
             if (opt_params.darkness_boost > 0.0f) {
-                torch::NoGradGuard no_grad;
-                auto darkness_weight = make_darkness_weight(gt, opt_params.darkness_boost);
-                l1_map = l1_map * darkness_weight; // channel-wise weight
+                //torch::NoGradGuard no_grad;
+                const auto darkness_weight = make_darkness_weight(gt, opt_params.darkness_boost);
+                l1_map.mul_(darkness_weight);
             }
             l1_map = nhwc ? l1_map.mean(-1) : l1_map.mean(1); // [B,H,W]
             if (inv_freq.defined() && inv_freq.numel() != 0) {
-                l1_map = l1_map * inv_freq; // [B,H,W] or [H,W] broadcast
+                l1_map.mul_(inv_freq); // [B,H,W] or [H,W] broadcast
             }
             auto l1_loss = l1_map.mean();
 
@@ -327,9 +329,9 @@ namespace gs::training {
             auto l1_map = torch::abs(rendered - gt); // [B,C,H,W] or [B,H,W,C]
 
             if (opt_params.darkness_boost > 0.0f) {
-                torch::NoGradGuard no_grad;
-                auto darkness_weight = make_darkness_weight(gt, opt_params.darkness_boost);
-                l1_map = l1_map * darkness_weight;
+                //torch::NoGradGuard no_grad;
+                const auto darkness_weight = make_darkness_weight(gt, opt_params.darkness_boost);
+                l1_map.mul_(darkness_weight);
             }
 
             const bool nhwc = (rendered.size(-1) == 3);
@@ -337,7 +339,7 @@ namespace gs::training {
 
             // Apply frequency weight to the reduced L1 map
             if (inv_freq.defined() && inv_freq.numel() != 0) {
-                l1_map = l1_map * inv_freq;
+                l1_map.mul_(inv_freq);
             }
 
             torch::Tensor W2 = W;
