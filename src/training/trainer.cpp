@@ -134,6 +134,7 @@ namespace gs::training {
     std::expected<torch::Tensor, std::string> Trainer::compute_photometric_loss(
         const RenderOutput& render_output,
         const torch::Tensor& gt_image,
+        const torch::Tensor& inv_freq,
         const SplatData& splatData,
         const param::OptimizationParameters& opt_params) {
         try {
@@ -158,7 +159,7 @@ namespace gs::training {
                 torch::NoGradGuard no_grad;
                 auto darkness_weight = make_darkness_weight(gt, opt_params.darkness_boost);
                 l1_loss = (torch::l1_loss(rendered, gt, torch::Reduction::None) * darkness_weight).mean();
-            }
+            } 
             auto ssim_loss = 1.f - fused_ssim(rendered, gt, "valid", /*train=*/true);
             torch::Tensor loss = (1.f - opt_params.lambda_dssim) * l1_loss +
                                  opt_params.lambda_dssim * ssim_loss;
@@ -270,13 +271,14 @@ namespace gs::training {
     std::expected<torch::Tensor, std::string> Trainer::compute_photometric_loss(const RenderOutput& render_output,
                                                     const torch::Tensor& gt_image,
                                                     const torch::Tensor& weights,
+                                                    const torch::Tensor& inv_freq,
                                                     const float outOfMaskAlphaPenalty,
                                                     const SplatData& splatData,
                                                     const param::OptimizationParameters& opt_params) {
 
         if (!weights.defined() || weights.numel() == 0) {
             // fallback to the previous mode
-            return compute_photometric_loss(render_output, gt_image, splatData, opt_params);
+            return compute_photometric_loss(render_output, gt_image, inv_freq, splatData, opt_params);
         }
 
         try {
@@ -307,6 +309,12 @@ namespace gs::training {
 
             const bool nhwc = (rendered.size(-1) == 3);
             l1_map = nhwc ? l1_map.mean(-1) : l1_map.mean(1);
+
+            // Apply frequency weight to the reduced L1 map
+            if (inv_freq.defined() && inv_freq.numel() != 0) {
+                l1_map = l1_map * inv_freq;
+            }
+
             torch::Tensor W2 = W;
             if (W2.dim() == 3 && W2.size(0) == 1) {
                 W2 = W2.squeeze(0);
@@ -336,8 +344,15 @@ namespace gs::training {
             torch::Tensor W_cropped = W.index({I::Slice(),
                                                 I::Slice(crop_h_start, crop_h_start + target_h),
                                                 I::Slice(crop_w_start, crop_w_start + target_w)});
+
             // Compute the weighted SSIM loss.
             auto ssim_loss_map = 1.0f - ssim_map;
+
+            if (inv_freq.defined() && inv_freq.numel() != 0) {
+                auto inv_freq_cropped = inv_freq.index({I::Slice(crop_h_start, crop_h_start + target_h),
+                                                        I::Slice(crop_w_start, crop_w_start + target_w)});
+                ssim_loss_map = ssim_loss_map * inv_freq_cropped;
+            }
 
             // Normalize by the sum of the cropped weights for correct loss scaling.
             auto W_cropped_sum = W_cropped.sum().clamp_min(1e-6f);
@@ -751,10 +766,12 @@ namespace gs::training {
             if (train_dataset_) {
                 train_dataset_->set_resize_factor(params.dataset.resize_factor);
                 train_dataset_->set_max_width(params.dataset.max_width);
+                train_dataset_->set_low_frequency_boost(params.dataset.low_frequency_boost);
             }
             if (val_dataset_) {
                 val_dataset_->set_resize_factor(params.dataset.resize_factor);
                 val_dataset_->set_max_width(params.dataset.max_width);
+                val_dataset_->set_low_frequency_boost(params.dataset.low_frequency_boost);
             }
 
             train_dataset_size_ = train_dataset_->size().value();
@@ -983,7 +1000,6 @@ namespace gs::training {
         }
         return bg;
     }
-#endif // USE_SINGLE_COLOR_BACKGROUND
 
     // Returns a 3-float CUDA tensor where each channel is either min or max.
     // Guarantees at least one channel at max and one at min.
@@ -1016,9 +1032,12 @@ namespace gs::training {
         auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
         return torch::tensor({rgb[0], rgb[1], rgb[2]}, opts);
     }
-
+#endif // USE_SINGLE_COLOR_BACKGROUND
 
 #ifdef USE_FULL_NOISE_BACKGROUND
+
+    //#define dumpfile
+
     /**
      * @brief Generates a full HxWx3 noise background buffer that changes per iteration.
      *
@@ -1080,7 +1099,96 @@ namespace gs::training {
         noise = noise.clamp(0.0f, 1.0f);
 
         // Convert to [3, H, W] format for consistency with rendering
-        return noise.permute({2, 0, 1}).contiguous();
+        auto out = noise.permute({2, 0, 1}).contiguous();
+
+        #ifdef dumpfile
+                try {
+                    std::filesystem::path out_dir("d:/frequency");
+                    std::error_code ec;
+                    std::filesystem::create_directories(out_dir, ec); // ignore errors silently
+
+                    // Compose per-camera filenames
+                    const std::string iname = std::to_string(step) + ".png"; // input RGB
+                    const std::filesystem::path out_path_img = out_dir / iname;
+
+                    // English: cam->load_and_get_image returns CHW [3,H,W] float in [0,1]. Do NOT unsqueeze.
+                    torch::Tensor img_chw = out.detach().clamp(0.0f, 1.0f); // [3,H,W]
+                    save_image(out_path_img, img_chw);
+                } catch (const std::exception& e) {
+                    // Do not break training if I/O fails
+                    fprintf(stderr, "Warning: failed to save frequency PNG: %s\n", e.what());
+                }
+        #endif
+        return out;
+    }
+
+    /**
+     * @brief Per-pixel extreme binary background (RGB/CMY), deterministic from 'step' only.
+     *        No global RNG used, no tiles. Returns [3,H,W] float32 on CUDA.
+     *        Each pixel is one of: R, G, B, Y (R+G), M (R+B), C (G+B),
+     *        scaled to (eps, 1-eps) to avoid exact 0/1.
+     */
+    inline torch::Tensor extreme_binary_noise_background_for_step(
+        int step,
+        int H,
+        int W,
+        float eps = 1e-4f) {
+        TORCH_CHECK(H > 0 && W > 0, "H/W must be positive");
+
+        auto dev_f = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+        auto dev_l = torch::TensorOptions().dtype(torch::kLong).device(torch::kCUDA);
+
+        const float vmin = eps;
+        const float vmax = 1.0f - eps;
+
+        // Build row/col grids as float on CUDA
+        auto r = torch::arange(H, dev_f).view({H, 1}).expand({H, W}); // [H,W] float
+        auto c = torch::arange(W, dev_f).view({1, W}).expand({H, W}); // [H,W] float
+        const float st = static_cast<float>(step);
+
+        // Shader-style hash: frac(sin(dot([r,c,step], K)) * M)
+        // Use well-known constants to decorrelate axes.
+        auto s = r * 12.9898f + c * 78.233f + st * 37.719f; // [H,W]
+        auto t = torch::sin(s) * 43758.5453f;               // [H,W]
+        auto frac = t - torch::floor(t);                    // [0,1)
+
+        // Bucket to 0..5 (guard against rare 1.0 due to numeric)
+        auto idx6 = torch::clamp((frac * 6.0f).to(torch::kLong), 0, 5); // [H,W]
+
+        // LUT for extreme colors in {0,1}: R,G,B,Y(=R+G),M(=R+B),C(=G+B)
+        auto lut = torch::tensor({
+                                     {1.f, 0.f, 0.f}, // R
+                                     {0.f, 1.f, 0.f}, // G
+                                     {0.f, 0.f, 1.f}, // B
+                                     {1.f, 1.f, 0.f}, // Y
+                                     {1.f, 0.f, 1.f}, // M
+                                     {0.f, 1.f, 1.f}  // C
+                                 },
+                                 dev_f); // [6,3]
+
+        // Gather → [H,W,3], scale to (vmin,vmax), permute to [3,H,W]
+        auto cols = lut.index_select(0, idx6.reshape({-1})).reshape({H, W, 3});
+        auto out = (cols * (vmax - vmin) + vmin).permute({2, 0, 1}).contiguous();
+
+        #ifdef dumpfile
+         try {
+            std::filesystem::path out_dir("d:/frequency");
+            std::error_code ec;
+            std::filesystem::create_directories(out_dir, ec); // ignore errors silently
+
+            // Compose per-camera filenames
+            const std::string iname = std::to_string(step) + ".png"; // input RGB
+            const std::filesystem::path out_path_img = out_dir / iname;
+
+            // English: cam->load_and_get_image returns CHW [3,H,W] float in [0,1]. Do NOT unsqueeze.
+            torch::Tensor img_chw = out.detach().clamp(0.0f, 1.0f); // [3,H,W]
+            save_image(out_path_img, img_chw);
+        } catch (const std::exception& e) {
+            // Do not break training if I/O fails
+            fprintf(stderr, "Warning: failed to save frequency PNG: %s\n", e.what());
+        }
+        #endif
+        return out;
     }
 #endif // USE_FULL_NOISE_BACKGROUND
     // Helper to ensure buf matches base (defined, dtype, device, shape)
@@ -1124,8 +1232,8 @@ namespace gs::training {
         #ifdef USE_SINGLE_COLOR_BACKGROUND
             const float w_mix = inv_weight_piecewise(iter, opt.iterations);
         #else // USE_FULL_NOISE_BACKGROUND
-            //const float w_mix = 1.0f;
-            const float w_mix = inv_weight_piecewise(iter, opt.iterations);
+            const float w_mix = 1.0f;
+            //const float w_mix = inv_weight_piecewise(iter, opt.iterations);
         #endif
 
         if (w_mix <= 0.0f) {
@@ -1153,7 +1261,8 @@ namespace gs::training {
         #else // USE_FULL_NOISE_BACKGROUND
 
             // Full noise background - generates complete image [3, H, W]
-            auto noise_bg = full_noise_for_step(iter, height, width);
+            //auto noise_bg = full_noise_for_step(iter, height, width);
+            auto noise_bg = extreme_binary_noise_background_for_step(iter, height, width);
 
             // Ensure buffer has correct shape [3, H, W]
             ensure_shape(noise_buffer_, background_.options(), {3, height, width});
@@ -1184,6 +1293,7 @@ namespace gs::training {
         Camera* cam,
         torch::Tensor gt_image,
         torch::Tensor weights,
+        torch::Tensor inv_frequency,
         RenderMode render_mode,
         bool out_of_mask_penalty,
         std::stop_token stop_token) {
@@ -1284,6 +1394,7 @@ namespace gs::training {
             if (!weights.defined() || iter < warmup_end_iter) {
                 loss_result = compute_photometric_loss(r_output,
                                                         gt_image,
+                                                        inv_frequency,
                                                         strategy_->get_model(),
                                                         params_.optimization);
             } 
@@ -1308,6 +1419,7 @@ namespace gs::training {
                 loss_result = compute_photometric_loss( r_output,
                                                         gt_image,
                                                         weights,
+                                                        inv_frequency,
                                                         current_penalty_w,
                                                         strategy_->get_model(),
                                                         params_.optimization);
@@ -1562,15 +1674,19 @@ namespace gs::training {
                 auto camera_with_image = batch[0].data;
                 Camera* cam = camera_with_image.camera;
                 torch::Tensor gt_image = std::move(camera_with_image.image).to(torch::kCUDA, /*non_blocking=*/true);
+                torch::Tensor inv_frequency_image;
+                if (camera_with_image.invFrequencyMap.defined()) {
+                    inv_frequency_image = std::move(camera_with_image.invFrequencyMap).to(torch::kCUDA, /*non_blocking=*/true);
+                }
 
 
                 std::expected<Trainer::StepResult, std::string> step_result;
                 if (!params_.optimization.use_attention_mask || !camera_with_image.attentionMask.defined()) {
-                    step_result = train_step(iter, cam, gt_image, torch::Tensor(), render_mode, false, stop_token);
+                    step_result = train_step(iter, cam, gt_image, torch::Tensor(), inv_frequency_image, render_mode, false, stop_token);
                 } else {
                     torch::Tensor attention_image = std::move(camera_with_image.attentionMask).to(torch::kCUDA, /*non_blocking=*/true);
                     bool out_of_mask_penalty = true;
-                    step_result = train_step(iter, cam, gt_image, attention_image, render_mode, out_of_mask_penalty, stop_token);
+                    step_result = train_step(iter, cam, gt_image, attention_image, inv_frequency_image, render_mode, out_of_mask_penalty, stop_token);
                 }
 
                 

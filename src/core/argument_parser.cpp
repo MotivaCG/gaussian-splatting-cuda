@@ -121,6 +121,7 @@ namespace {
             ::args::ValueFlag<int> sh_degree(parser, "sh_degree", "Max SH degree [1-3]", {"sh-degree"});
             ::args::ValueFlag<float> min_opacity(parser, "min_opacity", "Minimum opacity threshold", {"min-opacity"});
             ::args::ValueFlag<float> darkness_boost(parser, "darkness_boost", "Weight amplify loss in dark regions", {"darkness-boost"});
+            ::args::ValueFlag<float> low_frequency_boost(parser, "low_frequency_boost", "Higher priority for low frequency areas", {"low-frequency-boost"});
             ::args::ValueFlag<std::string> render_mode(parser, "render_mode", "Render mode: RGB, D, ED, RGB_D, RGB_ED", {"render-mode"});
             ::args::ValueFlag<std::string> pose_opt(parser, "pose_opt", "Enable pose optimization type: none, direct, mlp", {"pose-opt"});
             ::args::ValueFlag<std::string> strategy(parser, "strategy", "Optimization strategy: mcmc, default", {"strategy"});
@@ -339,6 +340,7 @@ namespace {
                                         sh_degree_val = sh_degree ? std::optional<int>(::args::get(sh_degree)) : std::optional<int>(),
                                         min_opacity_val = min_opacity ? std::optional<float>(::args::get(min_opacity)) : std::optional<float>(),
                                         darkness_boost_val = darkness_boost ? std::optional<float>(::args::get(darkness_boost)) : std::optional<float>(),
+                                        low_frequency_boost_val = low_frequency_boost ? std::optional<float>(::args::get(low_frequency_boost)) : std::optional<float>(),                                        
                                         render_mode_val = render_mode ? std::optional<std::string>(::args::get(render_mode)) : std::optional<std::string>(),
                                         init_num_pts_val = init_num_pts ? std::optional<int>(::args::get(init_num_pts)) : std::optional<int>(),
                                         init_extent_val = init_extent ? std::optional<float>(::args::get(init_extent)) : std::optional<float>(),
@@ -365,6 +367,7 @@ namespace {
                                         save_sog_flag = bool(save_sog),
                                         enable_sparsity_flag = bool(enable_sparsity)]() {
                 auto& opt = params.optimization;
+ 
                 auto& ds = params.dataset;
 
                 // Simple lambdas to apply if flag/value exists
@@ -386,12 +389,13 @@ namespace {
                 setVal(max_cap_val, opt.max_cap);
                 setVal(project_name_val, ds.project_path);
                 setVal(images_folder_val, ds.images);
+                setVal(low_frequency_boost_val, ds.low_frequency_boost);
                 setVal(test_every_val, ds.test_every);
                 setVal(steps_scaler_val, opt.steps_scaler);
                 setVal(sh_degree_interval_val, opt.sh_degree_interval);
                 setVal(sh_degree_val, opt.sh_degree);
                 setVal(min_opacity_val, opt.min_opacity);
-                setVal(darkness_boost_val, opt.darkness_boost);
+                setVal(darkness_boost_val, opt.darkness_boost);  
                 setVal(render_mode_val, opt.render_mode);
                 setVal(init_num_pts_val, opt.init_num_pts);
                 setVal(init_extent_val, opt.init_extent);

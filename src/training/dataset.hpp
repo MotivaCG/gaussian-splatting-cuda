@@ -6,7 +6,9 @@
 
 #include "core/camera.hpp"
 #include "core/parameters.hpp"
+#include "core/image_io.hpp"
 #include "loader/loader.hpp"
+#include "frequency_map.hpp"
 #include <expected>
 #include <format>
 #include <memory>
@@ -19,6 +21,7 @@ namespace gs::training {
         Camera* camera;
         torch::Tensor image;
         torch::Tensor attentionMask;
+        torch::Tensor invFrequencyMap;
     };
 
     using CameraExample = torch::data::Example<CameraWithImage, torch::Tensor>;
@@ -48,7 +51,6 @@ namespace gs::training {
                     _indices.push_back(i);
                 }
             }
-
             std::cout << "Dataset created with " << _indices.size()
                       << " images (split: " << static_cast<int>(_split) << ")" << std::endl;
         }
@@ -72,7 +74,48 @@ namespace gs::training {
 
             torch::Tensor image = cam->load_and_get_image(_datasetConfig.resize_factor, _datasetConfig.max_width);
             torch::Tensor attention_weights = cam->load_and_get_attention_weights(_datasetConfig.resize_factor, _datasetConfig.max_width);
-            return {{cam.get(), std::move(image), std::move(attention_weights)}, torch::empty({})};
+
+            torch::Tensor inv_frequency_map;
+            if (_datasetConfig.low_frequency_boost > 1.0f) {
+                inv_frequency_map = gs::img::compute_frequency_map_combined(
+                                        image,
+                                        /*useSobel=*/true,
+                                        /*useLaplacian=*/true,
+                                        /*invertOutput=*/true,
+                                        /*normalizeTo8Bit=*/false)
+                                        .to(image.device(), /*non_blocking=*/true)
+                                        .contiguous();
+                #ifdef save_test_imgs
+                try {
+                    std::filesystem::path out_dir("d:/frequency");
+                    std::error_code ec;
+                    std::filesystem::create_directories(out_dir, ec); // ignore errors silently
+
+                    // Compose per-camera filenames
+                    const std::string iname = std::to_string(camera_idx) + "_i.png"; // input RGB
+                    const std::string fname = std::to_string(camera_idx) + "_f.png"; // frequency (1ch)
+                    const std::filesystem::path out_path_freq = out_dir / fname;
+                    const std::filesystem::path out_path_img = out_dir / iname;
+
+                    // English: save_image accepts CHW or HWC with C<=4. For 1 channel, pass [1,H,W].
+                    torch::Tensor visf_chw = inv_frequency_map.detach().clamp(0.0f, 1.0f).unsqueeze(0); // [1,H,W]
+                    save_image(out_path_freq, visf_chw);
+
+                    // English: cam->load_and_get_image returns CHW [3,H,W] float in [0,1]. Do NOT unsqueeze.
+                    torch::Tensor img_chw = image.detach().clamp(0.0f, 1.0f); // [3,H,W]
+                    save_image(out_path_img, img_chw);
+                } catch (const std::exception& e) {
+                    // Do not break training if I/O fails
+                    fprintf(stderr, "Warning: failed to save frequency PNG: %s\n", e.what());
+                }
+                #endif
+                inv_frequency_map = 1.0f + (inv_frequency_map * _datasetConfig.low_frequency_boost); // shift values
+                return {{cam.get(), std::move(image), std::move(attention_weights), std::move(inv_frequency_map)}, torch::empty({})};
+            } else {
+                // Undefined tensor
+                return {{cam.get(), std::move(image), std::move(attention_weights), torch::Tensor()}, torch::empty({})};
+            }
+
         }
 
         torch::optional<size_t> size() const override {
@@ -106,6 +149,7 @@ namespace gs::training {
         }
         void set_resize_factor(int resize_factor) { _datasetConfig.resize_factor = resize_factor; }
         void set_max_width(int max_width) { _datasetConfig.max_width = max_width; }
+        void set_low_frequency_boost(float low_frequency_boost) { _datasetConfig.low_frequency_boost = low_frequency_boost; }
 
     private:
         std::vector<std::shared_ptr<Camera>> _cameras;

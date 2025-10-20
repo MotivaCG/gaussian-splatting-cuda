@@ -152,6 +152,7 @@ namespace gs::loader {
             dataset_config.images = options.images_folder;
             dataset_config.resize_factor = options.resize_factor;
             dataset_config.max_width = options.max_width;
+            dataset_config.low_frequency_boost = options.low_frequency_boost;
 
             // Create dataset with ALL images
             auto dataset = std::make_shared<gs::training::CameraDataset>(

@@ -97,6 +97,7 @@ namespace gs {
             std::filesystem::path project_path = ""; // if path is relative it will be saved to output_path/project_name.ls
             std::string images = "images";
             std::string attention_masks = "masks";
+            float low_frequency_boost = 0.0f;
             int resize_factor = -1;
             int test_every = 8;
             std::vector<std::string> timelapse_images = {};

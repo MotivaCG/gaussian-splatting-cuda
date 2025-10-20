@@ -43,6 +43,7 @@ namespace gs::loader {
         std::string images_folder = "images";
         bool validate_only = false;
         ProgressCallback progress = nullptr;
+        float low_frequency_boost = 0.0f;
     };
 
     struct LoadedScene {

@@ -26,8 +26,8 @@
 #include <torch/torch.h>
 
 // Uncomment ONE of these to select background mode:
-#define USE_SINGLE_COLOR_BACKGROUND
-//#define USE_FULL_NOISE_BACKGROUND
+//#define USE_SINGLE_COLOR_BACKGROUND
+#define USE_FULL_NOISE_BACKGROUND
 
 // Default to sine if nothing is defined
 #if !defined(USE_SINGLE_COLOR_BACKGROUND) && !defined(USE_FULL_NOISE_BACKGROUND)
@@ -133,6 +133,7 @@ namespace gs::training {
             Camera* cam,
             torch::Tensor gt_image,
             torch::Tensor weights,
+            torch::Tensor inv_frequency,
             RenderMode render_mode,
             bool out_of_mask_penalty,
             std::stop_token stop_token = {});
@@ -141,6 +142,7 @@ namespace gs::training {
         std::expected<torch::Tensor, std::string> compute_photometric_loss(
             const RenderOutput& render_output,
             const torch::Tensor& gt_image,
+            const torch::Tensor& inv_freq,
             const SplatData& splatData,
             const param::OptimizationParameters& opt_params);
             
@@ -148,6 +150,7 @@ namespace gs::training {
             const RenderOutput& render_output,
             const torch::Tensor& gt_image,
             const torch::Tensor& weights,
+            const torch::Tensor& inv_freq,
             const float outOfMaskAlphaPenalty,
             const SplatData& splatData,
             const param::OptimizationParameters& opt_params);
