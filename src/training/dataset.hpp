@@ -76,7 +76,7 @@ namespace gs::training {
             torch::Tensor attention_weights = cam->load_and_get_attention_weights(_datasetConfig.resize_factor, _datasetConfig.max_width);
 
             torch::Tensor inv_frequency_map;
-            if (_datasetConfig.low_frequency_boost > 1.0f) {
+            if (_datasetConfig.low_frequency_boost > 0.0f) {
                 inv_frequency_map = gs::img::compute_frequency_map_combined(
                                         image,
                                         /*useSobel=*/true,

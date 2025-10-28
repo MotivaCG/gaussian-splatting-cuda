@@ -154,9 +154,27 @@ namespace gs::training {
             
             // Compute per-pixel L1 map and apply optional darkness/inv_freq weighting
             const bool nhwc = (rendered.size(-1) == 3);
-            auto l1_map = torch::abs(rendered - gt); // [B,*,*,3]
+
+            auto l1_map = torch::abs(rendered - gt);
+            //auto l1_map = torch::abs(rendered - gt); // [B,*,*,3]
+            //const double eps = 1e-3;
+            //auto r = torch::clamp_min(rendered, eps);
+            //auto g = torch::clamp_min(gt, eps);
+            //auto l1_map = torch::abs(torch::log(r) - torch::log(g)); //mancha
+            //auto l1_map = torch::abs(r-g)/torch::max(r,g); //mancha y union
+
+            /* auto denominator = torch::clamp_min(torch::max(rendered, gt), 0.25f);
+            auto l1_map = torch::abs(rendered - gt) / denominator;*/
+
+            /* const float eps = 1e-6f;
+            const float gamma = 0.4545f;
+            auto l1_map = torch::abs(rendered - gt);
+            l1_map = torch::clamp(l1_map, eps, 1.0f);
+            l1_map = torch::pow(l1_map, gamma);*/
+
+
             if (opt_params.darkness_boost > 0.0f) {
-                //torch::NoGradGuard no_grad;
+                torch::NoGradGuard no_grad;
                 const auto darkness_weight = make_darkness_weight(gt, opt_params.darkness_boost);
                 l1_map.mul_(darkness_weight);
             }
@@ -329,7 +347,7 @@ namespace gs::training {
             auto l1_map = torch::abs(rendered - gt); // [B,C,H,W] or [B,H,W,C]
 
             if (opt_params.darkness_boost > 0.0f) {
-                //torch::NoGradGuard no_grad;
+                torch::NoGradGuard no_grad;
                 const auto darkness_weight = make_darkness_weight(gt, opt_params.darkness_boost);
                 l1_map.mul_(darkness_weight);
             }
@@ -1246,6 +1264,7 @@ namespace gs::training {
             buf = torch::empty(shape, opts);
         }
     }
+
     torch::Tensor& Trainer::background_for_step(int iter, int width, int height) {
         torch::NoGradGuard no_grad;
         const auto& opt = params_.optimization;
@@ -1264,6 +1283,10 @@ namespace gs::training {
         #endif
 
         if (w_mix <= 0.0f) {
+            if (bg_mix_buffer_.defined())
+                bg_mix_buffer_ = torch::Tensor();
+            if (noise_buffer_.defined())
+                noise_buffer_ = torch::Tensor();
             return background_;
         }
 
@@ -1284,18 +1307,22 @@ namespace gs::training {
             bg_mix_buffer_.mul_(1.0f - w_mix);
             bg_mix_buffer_.add_(single_bg, w_mix);
 
+            single_bg = torch::Tensor();
+
             return bg_mix_buffer_;
         #else // USE_FULL_NOISE_BACKGROUND
 
             // Full noise background - generates complete image [3, H, W]
-            //auto noise_bg = full_noise_for_step(iter, height, width);
-            auto noise_bg = extreme_binary_noise_background_for_step(iter, height, width);
+            auto noise_bg = full_noise_for_step(iter, height, width);
+            //auto noise_bg = extreme_binary_noise_background_for_step(iter, height, width);
 
             // Ensure buffer has correct shape [3, H, W]
             ensure_shape(noise_buffer_, background_.options(), {3, height, width});
             if (w_mix >= 1.0f) {
-                // Pure noise background, no mixing needed
-                noise_buffer_ = noise_bg;
+                noise_buffer_.copy_(noise_bg);
+                noise_bg = torch::Tensor();
+                if (bg_mix_buffer_.defined())
+                    bg_mix_buffer_ = torch::Tensor();
                 return noise_buffer_;
             }
 
@@ -1311,6 +1338,8 @@ namespace gs::training {
                 noise_buffer_.copy_(noise_bg).mul_(w_mix);
                 noise_buffer_.add_(background_, 1.0f - w_mix);
             }
+
+            noise_bg = torch::Tensor();
             return noise_buffer_;
         #endif
     }
@@ -1399,6 +1428,15 @@ namespace gs::training {
             } else {
                 r_output = rasterize(adjusted_cam, strategy_->get_model(), bg, 1.0f, false, false, render_mode,
                                      nullptr);
+            }
+
+            // Free buffers from time to time
+            if (params_.optimization.bg_modulation && iter % 50 == 0) {
+                torch::NoGradGuard no_grad;
+                if (bg_mix_buffer_.defined())
+                    bg_mix_buffer_ = torch::Tensor();
+                if (noise_buffer_.defined())
+                    noise_buffer_ = torch::Tensor();
             }
 
             // Apply bilateral grid if enabled
@@ -1742,6 +1780,11 @@ namespace gs::training {
                         LOG_WARN("Failed to launch callback: {}", cudaGetErrorString(err));
                         callback_busy_ = false;
                     }
+                }
+
+                if (iter % 500 == 0) {
+                    torch::cuda::synchronize();
+                    c10::cuda::CUDACachingAllocator::emptyCache();
                 }
 
                 ++iter;
