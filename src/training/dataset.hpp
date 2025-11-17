@@ -9,6 +9,7 @@
 #include "core/image_io.hpp"
 #include "loader/loader.hpp"
 #include "frequency_map.hpp"
+#include "loader/filesystem_utils.hpp"
 #include <expected>
 #include <format>
 #include <memory>
@@ -36,19 +37,29 @@ namespace gs::training {
 
         CameraDataset(std::vector<std::shared_ptr<Camera>> cameras,
                       const gs::param::DatasetConfig& params,
-                      Split split = Split::ALL)
+                      Split split = Split::ALL,
+                      std::optional<std::vector<std::string>> included_images = std::nullopt)
             : _cameras(std::move(cameras)),
               _datasetConfig(params),
               _split(split) {
             // Create indices based on split
             _indices.clear();
-            for (size_t i = 0; i < _cameras.size(); ++i) {
-                const bool is_test = (i % params.test_every) == 0;
+            if (included_images.has_value()) {
+                for (size_t i = 0; i < _cameras.size(); ++i) {
+                    if (std::find(included_images->begin(), included_images->end(), loader::strip_extension(_cameras[i]->image_name())) !=
+                        included_images->end()) {
+                        _indices.push_back(i);
+                    }
+                }
+            } else {
+                for (size_t i = 0; i < _cameras.size(); ++i) {
+                    const bool is_test = (i % params.test_every) == 0;
 
-                if (_split == Split::ALL ||
-                    (_split == Split::TRAIN && !is_test) ||
-                    (_split == Split::VAL && is_test)) {
-                    _indices.push_back(i);
+                    if (_split == Split::ALL ||
+                        (_split == Split::TRAIN && !is_test) ||
+                        (_split == Split::VAL && is_test)) {
+                        _indices.push_back(i);
+                        }
                 }
             }
             std::cout << "Dataset created with " << _indices.size()

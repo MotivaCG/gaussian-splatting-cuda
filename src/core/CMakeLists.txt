@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 # Core module - fundamental data structures and utilities
+# Note: lfs_tensor library is now in src/core_new/tensor
 set(CORE_SOURCES
         application.cpp
         argument_parser.cpp
@@ -55,6 +56,7 @@ endif()
 
 target_link_libraries(gs_core
     PUBLIC
+        lfs_tensor      # LFS Tensor library (includes lfs_tensor_kernels)
         ${TORCH_LIBRARIES}
         TBB::tbb
         nlohmann_json::nlohmann_json
@@ -64,6 +66,7 @@ target_link_libraries(gs_core
         spdlog::spdlog
         ${WEBP_LIB}     # WebP for SOG compression
         ${ARCHIVE_LIB}  # LibArchive for SOG bundle support
+        gs_loader       # For CacheLoader used in camera.cpp
     PRIVATE
         taywee::args    # Only used in argument_parser.cpp
 )
@@ -134,6 +137,11 @@ endfunction()
 
 configure_build_type(gs_core)
 
-message(STATUS "Core module configured with ${CMAKE_BUILD_TYPE} build type")
-message(STATUS "  WebP library: ${WEBP_LIB}")
-message(STATUS "  Archive library: ${ARCHIVE_LIB}")
+message(STATUS "╔════════════════════════════════════════════════════════════════╗")
+message(STATUS "║  gs_core - Core Application Library                           ║")
+message(STATUS "╚════════════════════════════════════════════════════════════════╝")
+message(STATUS "  • Core library: C++23 (gs_core)")
+message(STATUS "  • Tensor library: lfs_tensor (from src/core_new/tensor)")
+message(STATUS "  • Build type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "  • WebP library: ${WEBP_LIB}")
+message(STATUS "  • Archive library: ${ARCHIVE_LIB}")

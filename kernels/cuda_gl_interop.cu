@@ -75,6 +75,47 @@ namespace gs {
         }
     }
 
+    // Kernel for writing interleaved position+color data to VBO
+    // positions: [N, 3], colors: [N, 3] -> output: [N, 6] interleaved
+    __global__ void writeInterleavedPosColor(
+        const float* __restrict__ positions,
+        const float* __restrict__ colors,
+        float* __restrict__ output,
+        int num_points) {
+
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+        if (idx < num_points) {
+            int out_idx = idx * 6;
+            int in_idx = idx * 3;
+
+            // Write position (3 floats)
+            output[out_idx + 0] = positions[in_idx + 0];
+            output[out_idx + 1] = positions[in_idx + 1];
+            output[out_idx + 2] = positions[in_idx + 2];
+
+            // Write color (3 floats)
+            output[out_idx + 3] = colors[in_idx + 0];
+            output[out_idx + 4] = colors[in_idx + 1];
+            output[out_idx + 5] = colors[in_idx + 2];
+        }
+    }
+
+    // Host function to launch the kernel
+    void launchWriteInterleavedPosColor(
+        const float* positions,
+        const float* colors,
+        float* output,
+        int num_points,
+        cudaStream_t stream = 0) {
+
+        const int threads = 256;
+        const int blocks = (num_points + threads - 1) / threads;
+
+        writeInterleavedPosColor<<<blocks, threads, 0, stream>>>(
+            positions, colors, output, num_points);
+    }
+
 } // namespace gs
 
 #endif // CUDA_GL_INTEROP_ENABLED

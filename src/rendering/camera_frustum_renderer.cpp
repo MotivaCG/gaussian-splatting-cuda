@@ -182,7 +182,8 @@ namespace gs::rendering {
                                                  const glm::vec3& train_color,
                                                  const glm::vec3& eval_color,
                                                  bool for_picking,
-                                                 const glm::vec3& view_position) {
+                                                 const glm::vec3& view_position,
+                                                 const glm::mat4& world_transform) {
 
         // Track if we need to regenerate
         bool needs_regeneration = false;
@@ -247,12 +248,16 @@ namespace gs::rendering {
             // Camera-to-world transform
             glm::mat4 c2w = glm::inverse(w2c);
 
-            // Extract camera position
-            glm::vec3 cam_pos = glm::vec3(c2w[3]);
+            // Apply world transform to camera position
+            // This keeps cameras in sync when the gaussian splat is transformed
+            glm::mat4 transformed_c2w = world_transform * c2w;
+
+            // Extract camera position (after world transform)
+            glm::vec3 cam_pos = glm::vec3(transformed_c2w[3]);
             camera_positions_.push_back(cam_pos);
 
             // Apply coordinate system conversion and scale
-            glm::mat4 model = c2w * GL_TO_COLMAP * glm::scale(glm::mat4(1.0f), glm::vec3(scale));
+            glm::mat4 model = transformed_c2w * GL_TO_COLMAP * glm::scale(glm::mat4(1.0f), glm::vec3(scale));
 
             // Determine color based on camera type
             bool is_test = cam->image_name().find("test") != std::string::npos;
@@ -332,7 +337,8 @@ namespace gs::rendering {
         const glm::mat4& projection,
         float scale,
         const glm::vec3& train_color,
-        const glm::vec3& eval_color) {
+        const glm::vec3& eval_color,
+        const glm::mat4& world_transform) {
 
         if (!initialized_ || cameras.empty()) {
             return {};
@@ -344,7 +350,7 @@ namespace gs::rendering {
         glm::vec3 view_position = glm::vec3(glm::inverse(view)[3]);
 
         // Prepare instance data for rendering (not picking)
-        prepareInstances(cameras, scale, train_color, eval_color, false, view_position);
+        prepareInstances(cameras, scale, train_color, eval_color, false, view_position, world_transform);
 
         if (cached_instances_.empty()) {
             return {};
@@ -507,7 +513,8 @@ namespace gs::rendering {
                                                   const glm::vec2& viewport_size,
                                                   const glm::mat4& view,
                                                   const glm::mat4& projection,
-                                                  float scale) {
+                                                  float scale,
+                                                  const glm::mat4& world_transform) {
         if (!initialized_ || cameras.empty()) {
             return -1;
         }
@@ -521,7 +528,7 @@ namespace gs::rendering {
             glm::vec3 view_position = glm::vec3(glm::inverse(view)[3]);
 
             // Use the same colors as last render to avoid visual changes
-            prepareInstances(cameras, scale, last_train_color_, last_eval_color_, false, view_position);
+            prepareInstances(cameras, scale, last_train_color_, last_eval_color_, false, view_position, world_transform);
 
             if (cached_instances_.empty()) {
                 LOG_ERROR("Failed to prepare instances for picking");

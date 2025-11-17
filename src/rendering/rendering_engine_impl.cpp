@@ -160,6 +160,7 @@ namespace gs::rendering {
             .point_cloud_mode = request.point_cloud_mode,
             .voxel_size = request.voxel_size,
             .gut = request.gut,
+            .equirectangular = request.equirectangular,
             .sh_degree = request.sh_degree};
 
         // Convert crop box if present
@@ -344,7 +345,8 @@ namespace gs::rendering {
         const ViewportData& viewport,
         float scale,
         const glm::vec3& train_color,
-        const glm::vec3& eval_color) {
+        const glm::vec3& eval_color,
+        const glm::mat4& world_transform) {
 
         if (!camera_frustum_renderer_.isInitialized()) {
             return {}; // Silent fail if not initialized
@@ -353,7 +355,7 @@ namespace gs::rendering {
         auto view = createViewMatrix(viewport);
         auto proj = createProjectionMatrix(viewport);
 
-        return camera_frustum_renderer_.render(cameras, view, proj, scale, train_color, eval_color);
+        return camera_frustum_renderer_.render(cameras, view, proj, scale, train_color, eval_color, world_transform);
     }
 
     Result<void> RenderingEngineImpl::renderCameraFrustumsWithHighlight(
@@ -362,7 +364,8 @@ namespace gs::rendering {
         float scale,
         const glm::vec3& train_color,
         const glm::vec3& eval_color,
-        int highlight_index) {
+        int highlight_index,
+        const glm::mat4& world_transform) {
 
         if (!camera_frustum_renderer_.isInitialized()) {
             return {}; // Silent fail if not initialized
@@ -374,7 +377,7 @@ namespace gs::rendering {
         auto view = createViewMatrix(viewport);
         auto proj = createProjectionMatrix(viewport);
 
-        return camera_frustum_renderer_.render(cameras, view, proj, scale, train_color, eval_color);
+        return camera_frustum_renderer_.render(cameras, view, proj, scale, train_color, eval_color, world_transform);
     }
 
     Result<int> RenderingEngineImpl::pickCameraFrustum(
@@ -383,7 +386,8 @@ namespace gs::rendering {
         const glm::vec2& viewport_pos,
         const glm::vec2& viewport_size,
         const ViewportData& viewport,
-        float scale) {
+        float scale,
+        const glm::mat4& world_transform) {
 
         if (!camera_frustum_renderer_.isInitialized()) {
             return -1;
@@ -393,7 +397,7 @@ namespace gs::rendering {
         auto proj = createProjectionMatrix(viewport);
 
         return camera_frustum_renderer_.pickCamera(
-            cameras, mouse_pos, viewport_pos, viewport_size, view, proj, scale);
+            cameras, mouse_pos, viewport_pos, viewport_size, view, proj, scale, world_transform);
     }
 
     std::shared_ptr<GizmoInteraction> RenderingEngineImpl::getGizmoInteraction() {

@@ -278,9 +278,3 @@ TEST_F(EuclideanTransformTest, EulerAnglesRoundtrip) {
             << "Retrieved angles: (" << retrieved_angles.x << ", " << retrieved_angles.y << ", " << retrieved_angles.z << ")";
     }
 }
-
-// Main function for running tests
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

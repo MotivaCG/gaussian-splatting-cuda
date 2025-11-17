@@ -1,7 +1,7 @@
 #pragma once
+#include "Projection.h"
 #include <optional>
 #include <torch/torch.h>
-#include "rasterization/rasterizer_autograd.hpp"
 
 namespace gs {
     namespace training {
@@ -23,11 +23,16 @@ namespace gs {
             std::optional<torch::Tensor> tangential = std::nullopt, // [...,C,2]
             std::optional<torch::Tensor> thin_prism = std::nullopt  // [...,C,4]
         ) {
+            // Ensure batch dimensions
             if (viewmat.dim() == 2)
                 viewmat = viewmat.unsqueeze(0);
             if (K.dim() == 2)
                 K = K.unsqueeze(0);
 
+            const int C = static_cast<int>(viewmat.size(0));
+            const int N = static_cast<int>(means3D.size(0));
+
+            // Pad distortion coefficients to expected sizes
             auto pad_last = [](torch::Tensor t, int want) {
                 if (!t.defined())
                     return t;
@@ -42,6 +47,7 @@ namespace gs {
                 }
                 return t;
             };
+
             if (radial)
                 radial = pad_last(*radial, 4);
             if (tangential)
@@ -49,26 +55,50 @@ namespace gs {
             if (thin_prism)
                 thin_prism = pad_last(*thin_prism, 4);
 
-            GUTProjectionSettings st{
-                image_w, image_h, eps2d,
-                near_plane, far_plane,
-                radius_clip, scaling_modifier,
-                camera_model};
+            // Apply scaling modifier
+            auto scaled_scales = scales * scaling_modifier;
 
-            auto out = fully_fused_projection_with_ut(
-                means3D, quats, scales, opacities,
-                viewmat, K,
-                radial, tangential, thin_prism,
-                st,
-                UnscentedTransformParameters{} // default UT
+            // Create output tensors
+            auto options = torch::TensorOptions().dtype(means3D.dtype()).device(means3D.device());
+            torch::Tensor radii = torch::empty({C, N, 2}, options);
+            torch::Tensor means2d = torch::empty({C, N, 2}, options);
+            torch::Tensor depths = torch::empty({C, N}, options);
+            torch::Tensor conics = torch::empty({C, N, 3}, options);
+
+            // Call the projection kernel
+            gsplat::launch_projection_ut_3dgs_fused_kernel(
+                means3D.contiguous(),
+                quats.contiguous(),
+                scaled_scales.contiguous(),
+                opacities.defined() ? std::optional(opacities.contiguous()) : std::nullopt,
+                viewmat.contiguous(),
+                std::nullopt, // viewmats1 (rolling shutter)
+                K.contiguous(),
+                static_cast<uint32_t>(image_w),
+                static_cast<uint32_t>(image_h),
+                eps2d,
+                near_plane,
+                far_plane,
+                radius_clip,
+                camera_model,
+                UnscentedTransformParameters{}, // default UT params
+                ShutterType::GLOBAL,
+                radial,
+                tangential,
+                thin_prism,
+                radii,
+                means2d,
+                depths,
+                conics,
+                std::nullopt // compensations
             );
 
-            torch::Tensor radii = out[0];
-            torch::Tensor means2d = out[1];
+            // Squeeze if only one camera
             if (radii.dim() == 3 && radii.size(0) == 1)
                 radii = radii.squeeze(0);
             if (means2d.dim() == 3 && means2d.size(0) == 1)
                 means2d = means2d.squeeze(0);
+
             return {radii.contiguous(), means2d.contiguous()};
         }
 

@@ -66,23 +66,50 @@ namespace gs::rendering {
         try {
             // Perform rendering with fast_rasterize
 
+            const SplatData* render_model_ptr = &model;
             SplatData cropped_model;
+
             if (request.crop_box) {
+                // Cropping creates a copy - safe to modify
                 cropped_model = model.crop_by_cropbox(*request.crop_box);
+                cropped_model.set_active_sh_degree(request.sh_degree);
+                render_model_ptr = &cropped_model;
+            } else if (request.sh_degree != model.get_active_sh_degree()) {
+                // NO CROP but sh_degree differs - we must temporarily modify and restore
+                int original_sh_degree = model.get_active_sh_degree();
+                const_cast<SplatData&>(model).set_active_sh_degree(request.sh_degree);
+
+                // Render with modified sh_degree
+                RenderResult result;
+                if (request.gut || request.equirectangular) {
+                    auto render_result = gs::training::rasterize(
+                        cam, model, background_, request.scaling_modifier, false, request.antialiasing,
+                        static_cast<training::RenderMode>(request.render_mode), nullptr);
+                    result.image = render_result.image;
+                    result.depth = render_result.depth;
+                } else {
+                    result.image = rasterize(cam, const_cast<SplatData&>(model), background_);
+                    result.depth = torch::empty({0}, torch::kFloat32);
+                }
+
+                // IMMEDIATELY restore original sh_degree
+                const_cast<SplatData&>(model).set_active_sh_degree(original_sh_degree);
+
+                result.valid = true;
+                LOG_TRACE("Rasterization completed successfully (sh_degree temporarily changed)");
+                return result;
             }
 
-            SplatData& mutable_model = request.crop_box ? const_cast<SplatData&>(cropped_model) : const_cast<SplatData&>(model);
-
-            mutable_model.set_active_sh_degree(request.sh_degree);
+            const SplatData& render_model = *render_model_ptr;
 
             RenderResult result;
-            if (request.gut) {
+            if (request.gut || request.equirectangular) {
                 auto render_result = gs::training::rasterize(
-                    cam, mutable_model, background_, request.scaling_modifier, false, request.antialiasing, static_cast<training::RenderMode>(request.render_mode), nullptr);
+                    cam, const_cast<SplatData&>(render_model), background_, request.scaling_modifier, false, request.antialiasing, static_cast<training::RenderMode>(request.render_mode), nullptr);
                 result.image = render_result.image;
                 result.depth = render_result.depth;
             } else {
-                result.image = rasterize(cam, mutable_model, background_);
+                result.image = rasterize(cam, const_cast<SplatData&>(render_model), background_);
                 result.depth = torch::empty({0}, torch::kFloat32); // No depth support in fast_rasterize; set empty
             }
             result.valid = true;
@@ -325,7 +352,7 @@ namespace gs::rendering {
                 request.viewport_size.y / 2.0f,
                 torch::empty({0}, torch::kFloat32),
                 torch::empty({0}, torch::kFloat32),
-                gsplat::CameraModelType::PINHOLE,
+                request.equirectangular ? gsplat::CameraModelType::EQUIRECTANGULAR : gsplat::CameraModelType::PINHOLE,
                 "render_camera",
                 "none",
                 "none",
