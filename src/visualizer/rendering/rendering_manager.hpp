@@ -32,7 +32,7 @@ namespace gs::visualizer {
         float fov = 60.0f;
         float scaling_modifier = 1.0f;
         bool antialiasing = false;
-        int sh_degree = 0;
+        int sh_degree = 3;
 
         // Crop box
         bool show_crop_box = false;
@@ -82,6 +82,7 @@ namespace gs::visualizer {
         size_t split_view_offset = 0;
 
         bool gut = false;
+        bool equirectangular = false;
     };
 
     struct SplitViewInfo {

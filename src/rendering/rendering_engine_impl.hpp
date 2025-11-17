@@ -107,7 +107,8 @@ namespace gs::rendering {
             const ViewportData& viewport,
             float scale,
             const glm::vec3& train_color,
-            const glm::vec3& eval_color) override;
+            const glm::vec3& eval_color,
+            const glm::mat4& world_transform) override;
 
         Result<void> renderCameraFrustumsWithHighlight(
             const std::vector<std::shared_ptr<const Camera>>& cameras,
@@ -115,7 +116,8 @@ namespace gs::rendering {
             float scale,
             const glm::vec3& train_color,
             const glm::vec3& eval_color,
-            int highlight_index) override;
+            int highlight_index,
+            const glm::mat4& world_transform) override;
 
         Result<int> pickCameraFrustum(
             const std::vector<std::shared_ptr<const Camera>>& cameras,
@@ -123,7 +125,8 @@ namespace gs::rendering {
             const glm::vec2& viewport_pos,
             const glm::vec2& viewport_size,
             const ViewportData& viewport,
-            float scale) override;
+            float scale,
+            const glm::mat4& world_transform) override;
 
         std::shared_ptr<GizmoInteraction> getGizmoInteraction() override;
 

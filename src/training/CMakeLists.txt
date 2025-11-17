@@ -37,6 +37,7 @@ set(TRAINING_KERNEL_SOURCES
         kernels/bilateral_grid_backward.cu
         kernels/bilateral_grid_tv.cu
         kernels/ssim.cu
+        kernels/regularization.cu
 )
 
 # Create training kernels library
@@ -57,7 +58,7 @@ target_include_directories(gs_training_kernels
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_BINARY_DIR}/include
         ${CMAKE_SOURCE_DIR}/gsplat
-        ${CMAKE_SOURCE_DIR}/fastgs
+        ${CMAKE_CURRENT_SOURCE_DIR}/fastgs
         ${CUDAToolkit_INCLUDE_DIRS}
 )
 
@@ -72,8 +73,13 @@ target_link_libraries(gs_training_kernels
 )
 
 target_compile_options(gs_training_kernels PRIVATE
-        $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:-O0 -g -G -lineinfo>
-        $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-O3 -use_fast_math --ptxas-options=-v>
+        # CUDA device code + MSVC host compiler flags (Windows only)
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Debug>>:-O0 -g -G -lineinfo -Xcompiler=/Od -Xcompiler=/Z7>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release>>:-O3 -use_fast_math --ptxas-options=-v -Xcompiler=/O2 -Xcompiler=/DNDEBUG>
+
+        # CUDA device code for non-Windows
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<NOT:$<CXX_COMPILER_ID:MSVC>>,$<CONFIG:Debug>>:-O0 -g -G -lineinfo>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<NOT:$<CXX_COMPILER_ID:MSVC>>,$<CONFIG:Release>>:-O3 -use_fast_math --ptxas-options=-v>
 )
 
 # Create training host library
@@ -86,7 +92,7 @@ target_include_directories(gs_training
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_BINARY_DIR}/include
         ${CMAKE_SOURCE_DIR}/gsplat
-        ${CMAKE_SOURCE_DIR}/fastgs
+        ${CMAKE_CURRENT_SOURCE_DIR}/fastgs
         ${CUDAToolkit_INCLUDE_DIRS}
         ${OPENGL_INCLUDE_DIRS}
 )

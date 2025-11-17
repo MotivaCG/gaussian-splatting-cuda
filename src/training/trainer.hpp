@@ -47,7 +47,8 @@ namespace gs::training {
     public:
         // Constructor that takes ownership of strategy and shares datasets
         Trainer(std::shared_ptr<CameraDataset> dataset,
-                std::unique_ptr<IStrategy> strategy);
+                std::unique_ptr<IStrategy> strategy,
+                std::optional<std::tuple<std::vector<std::string>, std::vector<std::string>>> provided_splits);
 
         // Delete copy operations
         Trainer(const Trainer&) = delete;
@@ -152,12 +153,12 @@ namespace gs::training {
             const SplatData& splatData,
             const param::OptimizationParameters& opt_params);
 
-        std::expected<torch::Tensor, std::string> compute_scale_reg_loss(
-            const SplatData& splatData,
+        std::expected<float, std::string> compute_scale_reg_loss(
+            SplatData& splatData,
             const param::OptimizationParameters& opt_params);
 
-        std::expected<torch::Tensor, std::string> compute_opacity_reg_loss(
-            const SplatData& splatData,
+        std::expected<float, std::string> compute_opacity_reg_loss(
+            SplatData& splatData,
             const param::OptimizationParameters& opt_params);
 
         std::expected<torch::Tensor, std::string> compute_bilateral_grid_tv_loss(
@@ -196,6 +197,7 @@ namespace gs::training {
         std::shared_ptr<CameraDataset> val_dataset_;
         std::unique_ptr<IStrategy> strategy_;
         param::TrainingParameters params_;
+        std::optional<std::tuple<std::vector<std::string>, std::vector<std::string>>> provided_splits_;
 
         torch::Tensor background_{};
         torch::Tensor bg_mix_buffer_;

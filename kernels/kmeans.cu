@@ -7,6 +7,7 @@
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
 #include <thrust/gather.h>
+#include <thrust/scatter.h>
 #include <thrust/sort.h>
 
 namespace gs {
@@ -269,25 +270,41 @@ namespace gs {
 
                 cudaDeviceSynchronize();
 
-                // Update centroids
-                for (int c = 0; c < k; ++c) {
-                    auto mask = labels == c;
-                    if (mask.any().item<bool>()) {
-                        auto cluster_points = data_2d.masked_select(mask.unsqueeze(1)).reshape({-1, 1});
-                        centroids[c] = cluster_points.mean(0);
-                    }
-                }
+                // OPTIMIZATION: Update centroids using parallel GPU kernel instead of slow CPU loop
+                // This eliminates k GPU->CPU syncs and processes all clusters in parallel
+                auto counts = torch::zeros({k}, torch::kInt32).to(data.device());
+                dim3 block(1, 1);  // 1D data, only need 1 thread per cluster
+                dim3 grid(k, 1);
+
+                update_centroids_kernel<<<grid, block>>>(
+                    data_2d.data_ptr<float>(),
+                    labels.data_ptr<int>(),
+                    centroids.data_ptr<float>(),
+                    counts.data_ptr<int>(),
+                    n, k, 1);  // n_dims = 1 for 1D data
+
+                cudaDeviceSynchronize();
             }
 
             // Final sort of centroids and remap labels
             auto [final_sorted, final_idx] = centroids.squeeze(1).sort(0);
             centroids = final_sorted.unsqueeze(1);
 
-            // Create inverse mapping for labels
+            // Create inverse mapping for labels using thrust::scatter (GPU-parallel, no CPU syncs)
             auto inv_map = torch::zeros({k}, torch::kInt32).to(data.device());
-            for (int i = 0; i < k; ++i) {
-                inv_map[final_idx[i].item<int>()] = i;
-            }
+            auto final_idx_int = final_idx.to(torch::kInt32);
+
+            // Generate sequence [0, 1, 2, ..., k-1] for scatter values
+            auto seq = torch::arange(k, torch::kInt32).to(data.device());
+
+            // Scatter: inv_map[final_idx_int[i]] = seq[i] for all i
+            // This builds the inverse permutation in parallel on GPU
+            thrust::scatter(
+                thrust::device,
+                seq.data_ptr<int>(),
+                seq.data_ptr<int>() + k,
+                final_idx_int.data_ptr<int>(),
+                inv_map.data_ptr<int>());
 
             // Remap labels
             auto remapped_labels = torch::zeros_like(labels);

@@ -287,6 +287,10 @@ namespace gs::visualizer {
                 settings_.background_color = *event.background_color;
                 LOG_TRACE("Background color changed");
             }
+            if (event.equirectangular) {
+                settings_.equirectangular = *event.equirectangular;
+                LOG_TRACE("Equirectangular rendering: {}", settings_.equirectangular ? "enabled" : "disabled");
+            }
             markDirty();
         });
 
@@ -538,6 +542,7 @@ namespace gs::visualizer {
             .point_cloud_mode = settings_.point_cloud_mode,
             .voxel_size = settings_.voxel_size,
             .gut = settings_.gut,
+            .equirectangular = settings_.equirectangular,
             .sh_degree = settings_.sh_degree};
 
         // Add crop box if enabled
@@ -1016,16 +1021,20 @@ namespace gs::visualizer {
                     }
                 }
 
-                // Render frustums
+                // Render frustums with world transform
                 LOG_TRACE("Rendering {} camera frustums with scale {}, highlighted index: {} (ID: {})",
                           cameras.size(), settings_.camera_frustum_scale, highlight_index, hovered_camera_id_);
+
+                // Apply world transform to camera frustums so they move with the gaussian splat
+                glm::mat4 world_transform = settings_.world_transform.toMat4();
 
                 auto frustum_result = engine_->renderCameraFrustumsWithHighlight(
                     cameras, viewport,
                     settings_.camera_frustum_scale,
                     settings_.train_camera_color,
                     settings_.eval_camera_color,
-                    highlight_index);
+                    highlight_index,
+                    world_transform);
 
                 if (!frustum_result) {
                     LOG_ERROR("Failed to render camera frustums: {}", frustum_result.error());
@@ -1041,7 +1050,8 @@ namespace gs::visualizer {
                         glm::vec2(context.viewport_region->x, context.viewport_region->y),
                         glm::vec2(context.viewport_region->width, context.viewport_region->height),
                         viewport,
-                        settings_.camera_frustum_scale);
+                        settings_.camera_frustum_scale,
+                        world_transform);
 
                     if (pick_result) {
                         int cam_id = *pick_result;
