@@ -1,9 +1,9 @@
 #pragma once
+#include "Cameras.h"    // Define UnscentedTransformParameters, ShutterType
+#include "Common.h"     // Define CameraModelType
+#include "Projection.h" // Define launch_projection_ut_3dgs_fused_kernel
 #include <optional>
 #include <torch/torch.h>
-#include "Common.h"       // Define CameraModelType
-#include "Cameras.h"      // Define UnscentedTransformParameters, ShutterType
-#include "Projection.h"   // Define launch_projection_ut_3dgs_fused_kernel
 
 namespace gs {
     namespace training {
@@ -49,7 +49,7 @@ namespace gs {
                 }
                 return t;
             };
-            
+
             if (radial)
                 radial = pad_last(*radial, 4);
             if (tangential)
@@ -63,8 +63,8 @@ namespace gs {
             // Create output tensors
             auto float_options = torch::TensorOptions().dtype(means3D.dtype()).device(means3D.device());
             auto int_options = torch::TensorOptions().dtype(torch::kInt32).device(means3D.device());
-            
-            torch::Tensor radii = torch::empty({C, N, 2}, int_options);      // radii debe ser int32
+
+            torch::Tensor radii = torch::empty({C, N, 2}, int_options);
             torch::Tensor means2d = torch::empty({C, N, 2}, float_options);
             torch::Tensor depths = torch::empty({C, N}, float_options);
             torch::Tensor conics = torch::empty({C, N, 3}, float_options);
@@ -76,7 +76,7 @@ namespace gs {
                 scaled_scales.contiguous(),
                 opacities.defined() ? std::optional(opacities.contiguous()) : std::nullopt,
                 viewmat.contiguous(),
-                std::nullopt,  // viewmats1 (rolling shutter)
+                std::nullopt, // viewmats1 (rolling shutter)
                 K.contiguous(),
                 static_cast<uint32_t>(image_w),
                 static_cast<uint32_t>(image_h),
@@ -85,7 +85,7 @@ namespace gs {
                 far_plane,
                 radius_clip,
                 camera_model,
-                UnscentedTransformParameters{},  // default UT params
+                UnscentedTransformParameters{}, // default UT params
                 ShutterType::GLOBAL,
                 radial,
                 tangential,
@@ -94,15 +94,15 @@ namespace gs {
                 means2d,
                 depths,
                 conics,
-                std::nullopt  // compensations
+                std::nullopt // compensations
             );
-            
+
             // Squeeze if only one camera
             if (radii.dim() == 3 && radii.size(0) == 1)
                 radii = radii.squeeze(0);
             if (means2d.dim() == 3 && means2d.size(0) == 1)
                 means2d = means2d.squeeze(0);
-                
+
             return {radii.contiguous(), means2d.contiguous()};
         }
 
