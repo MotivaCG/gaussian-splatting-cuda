@@ -8,6 +8,112 @@
 #include "io/cache_image_loader.hpp"
 #include <cuda_runtime.h>
 
+namespace {
+    using lfs::core::Tensor;
+    using lfs::core::TensorShape;
+
+    /**
+     * @brief Shift a 2D tensor up by one pixel (zero-padded).
+     * output[y, x] = input[y + 1, x] for y in [0, H-2], output[H-1, x] = 0
+     */
+    Tensor shift_up_2d(const Tensor& t) {
+        if (!t.is_valid() || t.ndim() != 2)
+            return {};
+        const size_t H = t.shape()[0];
+        const size_t W = t.shape()[1];
+        if (H == 0 || W == 0)
+            return {};
+        if (H == 1)
+            return Tensor::full(t.shape(), 0.0f, t.device());
+
+        const Tensor body = t.slice(0, 1, H);
+        const Tensor pad = Tensor::full(TensorShape({1, W}), 0.0f, t.device());
+        return Tensor::cat({body, pad}, 0);
+    }
+
+    /**
+     * @brief Shift a 2D tensor down by one pixel (zero-padded).
+     * output[0, x] = 0, output[y, x] = input[y - 1, x] for y in [1, H-1]
+     */
+    Tensor shift_down_2d(const Tensor& t) {
+        if (!t.is_valid() || t.ndim() != 2)
+            return {};
+        const size_t H = t.shape()[0];
+        const size_t W = t.shape()[1];
+        if (H == 0 || W == 0)
+            return {};
+        if (H == 1)
+            return Tensor::full(t.shape(), 0.0f, t.device());
+
+        const Tensor pad = Tensor::full(TensorShape({1, W}), 0.0f, t.device());
+        const Tensor body = t.slice(0, 0, H - 1);
+        return Tensor::cat({pad, body}, 0);
+    }
+
+    /**
+     * @brief Shift a 2D tensor left by one pixel (zero-padded).
+     * output[y, x] = input[y, x + 1] for x in [0, W-2], output[y, W-1] = 0
+     */
+    Tensor shift_left_2d(const Tensor& t) {
+        if (!t.is_valid() || t.ndim() != 2)
+            return {};
+        const size_t H = t.shape()[0];
+        const size_t W = t.shape()[1];
+        if (H == 0 || W == 0)
+            return {};
+        if (W == 1)
+            return Tensor::full(t.shape(), 0.0f, t.device());
+
+        const Tensor body = t.slice(1, 1, W);
+        const Tensor pad = Tensor::full(TensorShape({H, 1}), 0.0f, t.device());
+        return Tensor::cat({body, pad}, 1);
+    }
+
+    /**
+     * @brief Shift a 2D tensor right by one pixel (zero-padded).
+     * output[y, 0] = 0, output[y, x] = input[y, x - 1] for x in [1, W-1]
+     */
+    Tensor shift_right_2d(const Tensor& t) {
+        if (!t.is_valid() || t.ndim() != 2)
+            return {};
+        const size_t H = t.shape()[0];
+        const size_t W = t.shape()[1];
+        if (H == 0 || W == 0)
+            return {};
+        if (W == 1)
+            return Tensor::full(t.shape(), 0.0f, t.device());
+
+        const Tensor pad = Tensor::full(TensorShape({H, 1}), 0.0f, t.device());
+        const Tensor body = t.slice(1, 0, W - 1);
+        return Tensor::cat({pad, body}, 1);
+    }
+
+    /**
+     * @brief Binary erosion (cross-shaped structuring element) for 2D masks.
+     *
+     * Expects mask values in {0, 1} (float). The result remains in {0, 1}.
+     * We use a cross kernel because it is cheaper than a full 3x3 and works well
+     * to carve a conservative "core" region away from uncertain borders.
+     */
+    Tensor erode_cross_binary_2d(const Tensor& mask_bin_2d, int radius_px) {
+        if (!mask_bin_2d.is_valid() || mask_bin_2d.ndim() != 2)
+            return {};
+        if (radius_px <= 0)
+            return mask_bin_2d;
+
+        Tensor cur = mask_bin_2d;
+        for (int i = 0; i < radius_px; ++i) {
+            const Tensor up = shift_up_2d(cur); // ← PROBLEMA AQUÍ
+            const Tensor down = shift_down_2d(cur);
+            const Tensor left = shift_left_2d(cur);
+            const Tensor right = shift_right_2d(cur);
+
+            cur = cur * up * down * left * right;
+        }
+        return cur;
+    }
+} // namespace
+
 namespace lfs::core {
     static Tensor world_to_view(const Tensor& R, const Tensor& t) {
         // Create 4x4 identity matrix
@@ -400,5 +506,70 @@ namespace lfs::core {
         LOG_DEBUG("Loaded mask for {}: [{},{}]", _image_name, mask.shape()[0], mask.shape()[1]);
 
         return _cached_mask;
+    }
+
+    Tensor Camera::load_and_get_mask_fg_core(
+        int resize_factor, int max_width,
+        bool invert_mask, float mask_threshold,
+        int erode_radius_px) {
+        // Load (and cache) the processed mask on CUDA.
+        const lfs::core::Tensor mask = load_and_get_mask(resize_factor, max_width, invert_mask, mask_threshold);
+        if (!mask.is_valid() || mask.numel() == 0) {
+            return lfs::core::Tensor();
+        }
+
+        // Note: load_and_get_mask() returns [H,W] (already grayscale and optionally inverted).
+        // We strictly binarize here because load_and_get_mask() thresholds only push highs to 1,
+        // leaving lows potentially as grayscale. Matting assumes true binary.
+        const bool cache_key_match =
+            (_cached_cores_resize_factor == resize_factor) &&
+            (_cached_cores_max_width == max_width) &&
+            (_cached_cores_invert == invert_mask) &&
+            (_cached_cores_threshold == mask_threshold);
+
+        if (_mask_cores_loaded &&
+            cache_key_match &&
+            _cached_mask_fg_core.is_valid() &&
+            _cached_mask_bg_core.is_valid() &&
+            _cached_mask_core_radius_px == erode_radius_px &&
+            _cached_mask_fg_core.shape() == mask.shape()) {
+            return _cached_mask_fg_core;
+        }
+
+        // Build strict binary mask {0,1}.
+        const float thr = (mask_threshold > 0.0f && mask_threshold < 1.0f) ? mask_threshold : 0.5f;
+        const lfs::core::Tensor ones = lfs::core::Tensor::full(mask.shape(), 1.0f, mask.device());
+        const lfs::core::Tensor zeros = lfs::core::Tensor::full(mask.shape(), 0.0f, mask.device());
+        const lfs::core::Tensor mask_bin = ones.where(mask.ge(thr), zeros).contiguous();
+
+        // Compute conservative cores (eroded FG and eroded BG).
+        _cached_mask_fg_core = erode_cross_binary_2d(mask_bin, erode_radius_px).contiguous();
+
+        // BG core uses (1 - mask_bin) eroded.
+        _cached_mask_bg_core = erode_cross_binary_2d(ones - mask_bin, erode_radius_px).contiguous();
+
+        // Update cache state.
+        _cached_mask_core_radius_px = erode_radius_px;
+        _mask_cores_loaded = true;
+
+        _cached_cores_resize_factor = resize_factor;
+        _cached_cores_max_width = max_width;
+        _cached_cores_invert = invert_mask;
+        _cached_cores_threshold = mask_threshold;
+
+        return _cached_mask_fg_core;
+    }
+
+    Tensor Camera::load_and_get_mask_bg_core(
+        int resize_factor, int max_width,
+        bool invert_mask, float mask_threshold,
+        int erode_radius_px) {
+        // Compute both cores together to keep cache coherent.
+        (void)load_and_get_mask_fg_core(resize_factor, max_width, invert_mask, mask_threshold, erode_radius_px);
+
+        if (!_cached_mask_bg_core.is_valid()) {
+            return lfs::core::Tensor();
+        }
+        return _cached_mask_bg_core;
     }
 } // namespace lfs::core

@@ -132,13 +132,15 @@ namespace {
 
             // Mask-related arguments
             ::args::MapFlag<std::string, lfs::core::param::MaskMode> mask_mode(parser, "mask_mode",
-                                                                               "Mask mode: none, segment, ignore, alpha_consistent (default: none)",
+                                                                               "Mask mode: none, segment, ignore, alpha_consistent, matting (default: none)",
                                                                                {"mask-mode"},
                                                                                std::unordered_map<std::string, lfs::core::param::MaskMode>{
                                                                                    {"none", lfs::core::param::MaskMode::None},
                                                                                    {"segment", lfs::core::param::MaskMode::Segment},
                                                                                    {"ignore", lfs::core::param::MaskMode::Ignore},
-                                                                                   {"alpha_consistent", lfs::core::param::MaskMode::AlphaConsistent}});
+                                                                                   {"alpha_consistent", lfs::core::param::MaskMode::AlphaConsistent},
+                                                                                   {"hardmatting", lfs::core::param::MaskMode::HardMatting},
+                                                                                   {"softmatting", lfs::core::param::MaskMode::SoftMatting}});
             ::args::Flag invert_masks(parser, "invert_masks", "Invert mask values (swap object/background)", {"invert-masks"});
 
             ::args::MapFlag<std::string, int> resize_factor(parser, "resize_factor",

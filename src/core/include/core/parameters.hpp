@@ -18,7 +18,9 @@ namespace lfs::core {
             None,           // No masking applied
             Segment,        // Soft penalty to enforce alpha→0 in masked areas
             Ignore,         // Completely ignore masked regions in loss
-            AlphaConsistent // Enforce exact alpha values from mask
+            AlphaConsistent, // Enforce exact alpha values from mask
+            HardMatting,
+            SoftMatting
         };
 
         struct OptimizationParameters {

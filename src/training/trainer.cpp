@@ -147,7 +147,9 @@ namespace lfs::training {
         const lfs::core::Tensor& gt_image,
         const lfs::core::Tensor& mask,
         const lfs::core::Tensor& alpha,
-        const lfs::core::param::OptimizationParameters& opt_params) {
+        const lfs::core::param::OptimizationParameters& opt_params,
+        const lfs::core::Tensor* fg_core_2d,
+        const lfs::core::Tensor* bg_core_2d) {
 
         using namespace lfs::core;
         constexpr float EPSILON = 1e-8f;
@@ -224,6 +226,155 @@ namespace lfs::training {
                 loss = loss + alpha_loss;
                 grad_alpha = (alpha_2d - mask_2d).sign() * (ALPHA_CONSISTENCY_WEIGHT / static_cast<float>(alpha_2d.numel()));
             }
+        } else if (mode == param::MaskMode::HardMatting || mode == param::MaskMode::SoftMatting) {
+
+            // -----------------------------------------------------------------
+            // Matting (Binary, Error-Tolerant, Hole-Closing)
+            // Supports both HardMatting (no cores) and SoftMatting (with cores)
+            // -----------------------------------------------------------------
+
+            // Fixed defaults (not user-configurable): conservative, hole-closing.
+            constexpr float kBgPhotometricRatio = 0.05f;
+            constexpr float kBgAlphaPenaltyWeight = 0.10f;
+            constexpr float kBgAlphaPenaltyPower = 2.0f;
+            constexpr float kFgMinAlpha = 0.90f;
+            constexpr float kFgAlphaFloorWeight = 0.12f;
+
+            // -----------------------------------------------------------------
+            // Validate cores for SoftMatting mode
+            // -----------------------------------------------------------------
+            const bool use_cores = (mode == param::MaskMode::SoftMatting);
+
+            if (use_cores) {
+                if (!fg_core_2d || !bg_core_2d || !fg_core_2d->is_valid() || !bg_core_2d->is_valid()) {
+                    return std::unexpected(
+                        "MaskMode::SoftMatting requires fg_core_2d and bg_core_2d (eroded cores). "
+                        "Compute/cache them in Camera and pass pointers here.");
+                }
+            }
+
+            // -----------------------------------------------------------------
+            // Build BG mask (same shape as mask_2d) and expand to [C,H,W]
+            // -----------------------------------------------------------------
+            static thread_local lfs::core::Tensor one_2d;
+            if (one_2d.is_empty() || one_2d.device() != mask_2d.device() || one_2d.shape() != mask_2d.shape()) {
+                one_2d = lfs::core::Tensor::full(mask_2d.shape(), 1.0f, mask_2d.device());
+            }
+
+            const lfs::core::Tensor bg_mask_2d = one_2d - mask_2d;
+
+            const lfs::core::Tensor bg_mask_expanded =
+                bg_mask_2d.unsqueeze(0).expand({static_cast<int>(rendered.shape()[0]),
+                                                static_cast<int>(mask_2d.shape()[0]),
+                                                static_cast<int>(mask_2d.shape()[1])});
+
+            // -----------------------------------------------------------------
+            // Normalization factors as floats (avoid Tensor / Tensor(scalar))
+            // -----------------------------------------------------------------
+            const float sum_fg_f_raw = mask_sum.item<float>(); // Matting-only sync
+            const float sum_fg_f = (sum_fg_f_raw > EPSILON) ? sum_fg_f_raw : EPSILON;
+
+            const float total_f = static_cast<float>(rendered.numel());
+            const float sum_fg_noeps = (sum_fg_f > EPSILON) ? (sum_fg_f - EPSILON) : 0.0f;
+            const float sum_bg_f = std::max(total_f - sum_fg_noeps, EPSILON);
+
+            // -----------------------------------------------------------------
+            // L1: FG + ratio * BG
+            // -----------------------------------------------------------------
+            const lfs::core::Tensor diff = rendered - gt_image;
+            const lfs::core::Tensor l1_diff = diff.abs();
+            const lfs::core::Tensor sign_diff = diff.sign();
+
+            const lfs::core::Tensor l1_fg = (l1_diff * mask_expanded).sum() / sum_fg_f;
+            const lfs::core::Tensor l1_grad_fg = (sign_diff * mask_expanded) / sum_fg_f;
+
+            const lfs::core::Tensor l1_bg = (l1_diff * bg_mask_expanded).sum() / sum_bg_f;
+            const lfs::core::Tensor l1_grad_bg = (sign_diff * bg_mask_expanded) / sum_bg_f;
+
+            lfs::core::Tensor l1_total = l1_fg + l1_bg * kBgPhotometricRatio;
+            lfs::core::Tensor l1_grad = l1_grad_fg + l1_grad_bg * kBgPhotometricRatio;
+
+            // -----------------------------------------------------------------
+            // Optional DSSIM mixed with masked weighting (FG + weak BG)
+            // -----------------------------------------------------------------
+            if (opt_params.lambda_dssim > 0.0f) {
+                static thread_local lfs::core::Tensor one_scalar;
+                if (one_scalar.is_empty() || one_scalar.device() != rendered.device()) {
+                    one_scalar = lfs::core::Tensor::full({}, 1.0f, rendered.device());
+                }
+
+                const auto rendered_4d = rendered.unsqueeze(0);
+                const auto gt_4d = gt_image.unsqueeze(0);
+
+                auto ssim_result = lfs::training::kernels::ssim_forward_map(rendered_4d, gt_4d, false);
+                const lfs::core::Tensor ssim_map_3d = ssim_result.ssim_map.squeeze(0);
+
+                const lfs::core::Tensor ssim_fg = (ssim_map_3d * mask_expanded).sum() / sum_fg_f;
+                const lfs::core::Tensor ssim_loss_fg = one_scalar - ssim_fg;
+
+                const lfs::core::Tensor ssim_bg = (ssim_map_3d * bg_mask_expanded).sum() / sum_bg_f;
+                const lfs::core::Tensor ssim_loss_bg = one_scalar - ssim_bg;
+
+                const lfs::core::Tensor ssim_loss_total = ssim_loss_fg + ssim_loss_bg * kBgPhotometricRatio;
+
+                const float l1_weight = 1.0f - opt_params.lambda_dssim;
+                const float ssim_weight = opt_params.lambda_dssim;
+
+                loss = l1_total * l1_weight + ssim_loss_total * ssim_weight;
+
+                const lfs::core::Tensor mask_4d = mask_expanded.unsqueeze(0);
+                const lfs::core::Tensor bg_4d = bg_mask_expanded.unsqueeze(0);
+
+                const lfs::core::Tensor dL_dmap =
+                    (mask_4d / sum_fg_f + (bg_4d / sum_bg_f) * kBgPhotometricRatio) * (-1.0f);
+
+                const lfs::core::Tensor ssim_grad =
+                    lfs::training::kernels::ssim_backward_with_grad_map(ssim_result.ctx, dL_dmap).squeeze(0);
+
+                grad = l1_grad * l1_weight + ssim_grad * ssim_weight;
+            } else {
+                loss = l1_total;
+                grad = l1_grad;
+            }
+
+            // -----------------------------------------------------------------
+            // Alpha regularization:
+            //  HardMatting: Direct inside/outside mask regularization
+            //  SoftMatting: Core-only regularization (more conservative)
+            // -----------------------------------------------------------------
+            if (alpha.is_valid()) {
+                const lfs::core::Tensor alpha_2d = (alpha.ndim() == 3) ? alpha.squeeze(0) : alpha;
+                const float inv_pixels = 1.0f / static_cast<float>(alpha_2d.numel());
+
+                grad_alpha = lfs::core::Tensor::zeros_like(alpha_2d);
+
+                // Select regularization masks based on mode
+                const lfs::core::Tensor& bg_reg_mask = use_cores ? *bg_core_2d : bg_mask_2d;
+                const lfs::core::Tensor& fg_reg_mask = use_cores ? *fg_core_2d : mask_2d;
+
+                // (a) BG cleanup: alpha -> 0 on background region
+                {
+                    const lfs::core::Tensor bg_weights = bg_reg_mask.pow(kBgAlphaPenaltyPower);
+                    const lfs::core::Tensor bg_penalty = (alpha_2d * bg_weights).mean() * kBgAlphaPenaltyWeight;
+                    loss = loss + bg_penalty;
+
+                    grad_alpha = grad_alpha + bg_weights * (kBgAlphaPenaltyWeight * inv_pixels);
+                }
+
+                // (b) FG alpha floor: enforce alpha >= kFgMinAlpha on foreground region
+                {
+                    const lfs::core::Tensor delta = alpha_2d - kFgMinAlpha;
+                    const lfs::core::Tensor gap = (delta * -1.0f).relu();
+
+                    const lfs::core::Tensor floor_penalty = (gap * fg_reg_mask).mean() * kFgAlphaFloorWeight;
+                    loss = loss + floor_penalty;
+
+                    const lfs::core::Tensor active = delta.lt(0.0f).to(lfs::core::DataType::Float32);
+                    grad_alpha = grad_alpha + (active * fg_reg_mask) * (-kFgAlphaFloorWeight * inv_pixels);
+                }
+            }
+
+            return MaskLossResult{.loss = loss, .grad_image = grad, .grad_alpha = grad_alpha};
         } else {
             auto fallback = compute_photometric_loss_with_gradient(rendered, gt_image, opt_params);
             if (!fallback) {
@@ -487,7 +638,7 @@ namespace lfs::training {
             LOG_INFO("Visualization: {}", params.optimization.headless ? "disabled" : "enabled");
             LOG_INFO("Strategy: {}", params.optimization.strategy);
             if (params.optimization.mask_mode != lfs::core::param::MaskMode::None) {
-                static constexpr const char* MASK_MODE_NAMES[] = {"none", "segment", "ignore", "alpha_consistent"};
+                static constexpr const char* MASK_MODE_NAMES[] = {"none", "segment", "ignore", "alpha_consistent", "hardmatting", "softmatting"};
                 LOG_INFO("Mask mode: {}", MASK_MODE_NAMES[static_cast<int>(params.optimization.mask_mode)]);
             }
             if (current_iteration_ > 0) {
@@ -840,7 +991,7 @@ namespace lfs::training {
                 const bool use_mask = params_.optimization.mask_mode != lfs::core::param::MaskMode::None && cam->has_mask();
                 if (use_mask) {
                     // Load mask (cached after first load)
-                    auto mask = cam->load_and_get_mask(
+                    const lfs::core::Tensor mask = cam->load_and_get_mask(
                         params_.dataset.resize_factor,
                         params_.dataset.max_width,
                         params_.optimization.invert_masks,
@@ -849,12 +1000,67 @@ namespace lfs::training {
                     // Extract mask tile if tiling
                     lfs::core::Tensor mask_tile = mask;
                     if (num_tiles > 1 && mask.ndim() == 2) {
-                        auto tile_h = mask.slice(0, tile_y_offset, tile_y_offset + tile_height);
+                        const lfs::core::Tensor tile_h = mask.slice(0, tile_y_offset, tile_y_offset + tile_height);
                         mask_tile = tile_h.slice(1, tile_x_offset, tile_x_offset + tile_width);
                     }
+ 
+                    // Matting uses precomputed eroded "core" masks to avoid fighting uncertain boundaries.
+                    // These cores are computed lazily and cached per Camera, so this is NOT a per-iteration cost.
+                    lfs::core::Tensor fg_core;
+                    lfs::core::Tensor bg_core;
+                    bool use_matting_cores = false;
+
+                    if (params_.optimization.mask_mode == lfs::core::param::MaskMode::SoftMatting) {
+                        constexpr int kMattingCoreErodeRadiusPx = 2;
+
+                        fg_core = cam->load_and_get_mask_fg_core(
+                            params_.dataset.resize_factor,
+                            params_.dataset.max_width,
+                            params_.optimization.invert_masks,
+                            params_.optimization.mask_threshold,
+                            kMattingCoreErodeRadiusPx);
+
+                        bg_core = cam->load_and_get_mask_bg_core(
+                            params_.dataset.resize_factor,
+                            params_.dataset.max_width,
+                            params_.optimization.invert_masks,
+                            params_.optimization.mask_threshold,
+                            kMattingCoreErodeRadiusPx);
+
+                        if (!fg_core.is_valid() || !bg_core.is_valid()) {
+                            nvtxRangePop();
+                            nvtxRangePop();
+                            return std::unexpected("MaskMode::Matting: failed to load fg/bg core masks.");
+                        }
+                        use_matting_cores = true;
+                    }
+                    
+                    // Extract core tiles if Matting is enabled (must match mask_tile spatially)
+                    lfs::core::Tensor fg_core_tile;
+                    lfs::core::Tensor bg_core_tile;
+                    const lfs::core::Tensor* fg_core_ptr = nullptr;
+                    const lfs::core::Tensor* bg_core_ptr = nullptr;
+
+                    if (use_matting_cores) {
+                        fg_core_tile = fg_core;
+                        bg_core_tile = bg_core;
+
+                        if (num_tiles > 1 && fg_core.ndim() == 2) {
+                            const lfs::core::Tensor tile_h_fg = fg_core.slice(0, tile_y_offset, tile_y_offset + tile_height);
+                            fg_core_tile = tile_h_fg.slice(1, tile_x_offset, tile_x_offset + tile_width);
+
+                            const lfs::core::Tensor tile_h_bg = bg_core.slice(0, tile_y_offset, tile_y_offset + tile_height);
+                            bg_core_tile = tile_h_bg.slice(1, tile_x_offset, tile_x_offset + tile_width);
+                        }
+
+                        fg_core_ptr = &fg_core_tile;
+                        bg_core_ptr = &bg_core_tile;
+                    }
+
 
                     auto result = compute_photometric_loss_with_mask(
-                        corrected_image, gt_tile, mask_tile, output.alpha, params_.optimization);
+                        corrected_image, gt_tile, mask_tile, output.alpha, params_.optimization,
+                        fg_core_ptr, bg_core_ptr);
                     if (!result) {
                         nvtxRangePop();
                         nvtxRangePop();

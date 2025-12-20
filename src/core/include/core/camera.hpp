@@ -50,6 +50,16 @@ namespace lfs::core {
         Tensor load_and_get_mask(int resize_factor = -1, int max_width = 3840,
                                  bool invert_mask = false, float mask_threshold = 0.5f);
 
+        // Load the attention mask and return a conservative foreground
+        Tensor load_and_get_mask_fg_core(int resize_factor = -1, int max_width = 3840,
+                                         bool invert_mask = false, float mask_threshold = 0.5f,
+                                         int erode_radius_px = 2);
+
+        // Load the attention mask and return a conservative background
+        Tensor load_and_get_mask_bg_core(int resize_factor = -1, int max_width = 3840,
+                                         bool invert_mask = false, float mask_threshold = 0.5f,
+                                         int erode_radius_px = 2);
+
         // Load image from disk just to populate _image_width/_image_height
         void load_image_size(int resize_factor = -1, int max_width = 3840);
 
@@ -134,6 +144,18 @@ namespace lfs::core {
         // Mask caching (processed mask stored on GPU)
         Tensor _cached_mask;
         bool _mask_loaded = false;
+
+        // Just for matting
+        Tensor _cached_mask_fg_core;
+        Tensor _cached_mask_bg_core;
+        bool _mask_cores_loaded = false;
+        int _cached_mask_core_radius_px = -1;
+
+        // Cache key to avoid mismatch if mask loading params change
+        int _cached_cores_resize_factor = -999;
+        int _cached_cores_max_width = -999;
+        bool _cached_cores_invert = false;
+        float _cached_cores_threshold = -1.0f;
 
         // CUDA stream for async operations
         cudaStream_t _stream = nullptr;

@@ -127,7 +127,7 @@ namespace lfs::core {
                     {"prune_ratio", defaults.prune_ratio, "Final pruning ratio for sparsity"},
                     {"bg_modulation", defaults.bg_modulation, "Enable sinusoidal background modulation"},
                     {"gut", defaults.gut, "Enable GUT mode"},
-                    {"mask_mode", std::string("none"), "Mask mode: none, segment, ignore, alpha_consistent"},
+                    {"mask_mode", std::string("none"), "Mask mode: none, segment, ignore, alpha_consistent, matting"},
                     {"invert_masks", defaults.invert_masks, "Invert mask values"},
                     {"mask_opacity_penalty_weight", defaults.mask_opacity_penalty_weight, "Opacity penalty weight for segment mode"},
                     {"mask_opacity_penalty_power", defaults.mask_opacity_penalty_power, "Penalty falloff power"},
@@ -262,7 +262,7 @@ namespace lfs::core {
             opt_json["bg_modulation"] = bg_modulation;
 
             // Mask parameters
-            static constexpr const char* MASK_MODE_NAMES[] = {"none", "segment", "ignore", "alpha_consistent"};
+            static constexpr const char* MASK_MODE_NAMES[] = {"none", "segment", "ignore", "alpha_consistent", "hardmatting", "softmatting"};
             opt_json["mask_mode"] = MASK_MODE_NAMES[static_cast<int>(mask_mode)];
             opt_json["invert_masks"] = invert_masks;
             opt_json["mask_opacity_penalty_weight"] = mask_opacity_penalty_weight;
@@ -427,6 +427,10 @@ namespace lfs::core {
                     params.mask_mode = MaskMode::Ignore;
                 } else if (mode == "alpha_consistent") {
                     params.mask_mode = MaskMode::AlphaConsistent;
+                } else if (mode == "hardmatting") {
+                    params.mask_mode = MaskMode::HardMatting;
+                } else if (mode == "softmatting") {
+                    params.mask_mode = MaskMode::SoftMatting;
                 }
             }
             if (json.contains("invert_masks")) {
