@@ -32,6 +32,160 @@
 
 namespace lfs::training {
 
+    
+struct PhotometricEval {
+        lfs::core::Tensor loss;     // scalar
+        lfs::core::Tensor grad_img; // [C,H,W]
+    };
+
+    // -----------------------------------------------------------------------------
+    // Build a per-pixel weight factor in [~1 .. ~1+boost] emphasizing darker areas.
+    // The output is a multiplicative factor (mean-normalized to ~1.0) to keep the
+    // overall loss scale stable when enabled.
+    //
+    // IMPORTANT: This is intended to be applied to L1 only (not DSSIM) by design.
+    // -----------------------------------------------------------------------------
+    static lfs::core::Tensor build_darkness_factor_2d(
+        const lfs::core::Tensor& gt_image_chw,
+        float boost) {
+        using namespace lfs::core;
+
+        if (boost <= 0.0f) {
+            return {}; // invalid / empty => disabled
+        }
+
+        // We expect gt_image as [C,H,W] in linear-ish space.
+        if (gt_image_chw.ndim() != 3 || gt_image_chw.shape()[0] < 3) {
+            return {}; // cannot compute luminance robustly
+        }
+
+        // Compute luminance from RGB.
+        // NOTE: TensorRowProxy supports implicit conversion to Tensor.
+        const Tensor r = gt_image_chw[0];
+        const Tensor g = gt_image_chw[1];
+        const Tensor b = gt_image_chw[2];
+
+        Tensor lum = r * 0.299f + g * 0.587f + b * 0.114f;
+
+        // darkness = clamp(1 - lum, 0, 1) without using (float - Tensor).
+        Tensor darkness = lum.clone();
+        darkness.mul_(-1.0f);
+        darkness.add_(1.0f);
+        darkness.clamp_(0.0f, 1.0f);
+
+        // factor = 1 + boost * darkness
+        Tensor factor = darkness;
+        factor.mul_(boost);
+        factor.add_(1.0f);
+
+        // Mean-normalize so the average factor is ~1.0 (keeps training scale stable).
+        // Yes, this is a sync point (item<float>()), but it's only done when boost > 0.
+        const float mean_f = factor.mean().item<float>();
+        const float inv_mean = (mean_f > 1e-8f) ? (1.0f / mean_f) : 1.0f;
+        factor.mul_(inv_mean);
+
+        return factor; // [H,W]
+    }
+
+    // -----------------------------------------------------------------------------
+    // Generic weighted photometric loss with manual gradient:
+    //   - L1 is always supported
+    //   - DSSIM (SSIM-map) is optionally mixed via lambda_dssim
+    //
+    // The weights are explicit per-pixel coefficients (not necessarily summing to 1).
+    // This supports:
+    //   - unmasked: uniform weights = 1/N
+    //   - segment/ignore: mask / sum(mask)
+    //   - matting FG+BG: mask/sum_fg + ratio*bg/sum_bg
+    //
+    // For DSSIM, the loss is:
+    //   ssim_loss = ssim_base - sum(ssim_map * ssim_weight)
+    // where ssim_base is typically 1.0, but for FG+ratio*BG it should be (1 + ratio).
+    //
+    // IMPORTANT IMPLEMENTATION NOTE:
+    //  Avoid Tensor / Tensor(scalar) and float / Tensor(scalar). Always use float
+    //  denominators and Tensor * float (or Tensor / float) to prevent exhausting
+    //  broadcast shape-array pools.
+    // -----------------------------------------------------------------------------
+    static std::expected<PhotometricEval, std::string> eval_photometric_weighted(
+        const lfs::core::Tensor& rendered_chw,
+        const lfs::core::Tensor& gt_image_chw,
+        float lambda_dssim,
+        const lfs::core::Tensor& l1_weight_chw,   // may be invalid/empty => uniform
+        const lfs::core::Tensor& ssim_weight_chw, // may be invalid/empty => uniform
+        float ssim_base) {
+        using namespace lfs::core;
+
+        // L1
+        const Tensor diff = rendered_chw - gt_image_chw;
+        const Tensor abs_diff = diff.abs();
+        const Tensor sign_diff = diff.sign();
+
+        Tensor l1_loss;
+        Tensor l1_grad;
+
+        if (l1_weight_chw.is_valid()) {
+            // Weighted sum (weights may sum to != 1 by design).
+            l1_loss = (abs_diff * l1_weight_chw).sum();
+            l1_grad = sign_diff * l1_weight_chw;
+        } else {
+            // Uniform mean.
+            const float inv_n = 1.0f / static_cast<float>(rendered_chw.numel());
+            l1_loss = abs_diff.sum() * inv_n;
+            l1_grad = sign_diff * inv_n;
+        }
+
+        Tensor loss = l1_loss;
+        Tensor grad = l1_grad;
+
+        // DSSIM mix
+        if (lambda_dssim > 0.0f) {
+            static thread_local Tensor one_scalar;
+            if (one_scalar.is_empty() || one_scalar.device() != rendered_chw.device()) {
+                one_scalar = Tensor::full({}, 1.0f, rendered_chw.device());
+            }
+
+            const auto rendered_4d = rendered_chw.unsqueeze(0);
+            const auto gt_4d = gt_image_chw.unsqueeze(0);
+
+            auto ssim_result = lfs::training::kernels::ssim_forward_map(rendered_4d, gt_4d, false);
+            const Tensor ssim_map_3d = ssim_result.ssim_map.squeeze(0); // [C,H,W]
+
+            Tensor ssim_score;
+            Tensor dL_dmap_4d;
+
+            if (ssim_weight_chw.is_valid()) {
+                // score = sum(ssim_map * weight)
+                ssim_score = (ssim_map_3d * ssim_weight_chw).sum();
+                dL_dmap_4d = (ssim_weight_chw.unsqueeze(0)) * (-1.0f); // [1,C,H,W]
+            } else {
+                // uniform score = mean(ssim_map)
+                const float inv_n = 1.0f / static_cast<float>(ssim_map_3d.numel());
+                ssim_score = ssim_map_3d.sum() * inv_n;
+
+                // Full tensor, no broadcast division.
+                dL_dmap_4d = Tensor::full(ssim_result.ssim_map.shape(), -inv_n, rendered_chw.device());
+            }
+
+            // ssim_loss = base - score
+            const Tensor ssim_loss = one_scalar * ssim_base - ssim_score;
+
+            const float l1_w = 1.0f - lambda_dssim;
+            const float ssim_w = lambda_dssim;
+
+            loss = l1_loss * l1_w + ssim_loss * ssim_w;
+
+            const Tensor ssim_grad = lfs::training::kernels::ssim_backward_with_grad_map(
+                                         ssim_result.ctx, dL_dmap_4d)
+                                         .squeeze(0);
+
+            grad = l1_grad * l1_w + ssim_grad * ssim_w;
+        }
+
+        return PhotometricEval{.loss = loss, .grad_img = grad};
+    }
+
+
     // Tile configuration for memory-efficient training
     enum class TileMode {
         One = 1, // 1 tile  - 1x1 - Render full image (no tiling)
@@ -105,18 +259,42 @@ namespace lfs::training {
     }
 
     // Compute photometric loss AND gradient manually
-    std::expected<std::pair<lfs::core::Tensor, lfs::core::Tensor>, std::string> Trainer::compute_photometric_loss_with_gradient(
+    std::expected<std::pair<lfs::core::Tensor, lfs::core::Tensor>, std::string>
+    Trainer::compute_photometric_loss_with_gradient(
         const lfs::core::Tensor& rendered,
         const lfs::core::Tensor& gt_image,
         const lfs::core::param::OptimizationParameters& opt_params) {
-        lfs::training::losses::PhotometricLoss photometric_loss;
-        lfs::training::losses::PhotometricLoss::Params params{.lambda_dssim = opt_params.lambda_dssim};
-        auto result = photometric_loss.forward(rendered, gt_image, params);
-        if (!result) {
-            return std::unexpected(result.error());
+        using namespace lfs::core;
+
+        // Optional darkness boost (L1 only).
+        Tensor l1_w;   // [C,H,W] coefficients
+        Tensor ssim_w; // keep uniform => invalid
+
+        if (opt_params.darkness_boost > 0.0f) {
+            const Tensor factor_2d = build_darkness_factor_2d(gt_image, opt_params.darkness_boost);
+            if (factor_2d.is_valid()) {
+                // Uniform coefficients (1/N) multiplied by the factor.
+                const float inv_n = 1.0f / static_cast<float>(rendered.numel());
+                const Tensor factor_3d = factor_2d.unsqueeze(0).expand({static_cast<int>(rendered.shape()[0]),
+                                                                        static_cast<int>(rendered.shape()[1]),
+                                                                        static_cast<int>(rendered.shape()[2])});
+
+                l1_w = factor_3d * inv_n;
+            }
         }
-        auto [loss_tensor, ctx] = *result;
-        return std::make_pair(loss_tensor, ctx.grad_image);
+
+        auto eval = eval_photometric_weighted(
+            rendered, gt_image,
+            opt_params.lambda_dssim,
+            l1_w,   // if invalid => uniform
+            ssim_w, // keep uniform DSSIM
+            1.0f);
+
+        if (!eval) {
+            return std::unexpected(eval.error());
+        }
+
+        return std::make_pair(eval->loss, eval->grad_img);
     }
 
     std::expected<void, std::string> Trainer::validate_masks() {
@@ -142,7 +320,8 @@ namespace lfs::training {
         return {};
     }
 
-    std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric_loss_with_mask(
+    std::expected<Trainer::MaskLossResult, std::string>
+    Trainer::compute_photometric_loss_with_mask(
         const lfs::core::Tensor& rendered,
         const lfs::core::Tensor& gt_image,
         const lfs::core::Tensor& mask,
@@ -150,101 +329,144 @@ namespace lfs::training {
         const lfs::core::param::OptimizationParameters& opt_params,
         const lfs::core::Tensor* fg_core_2d,
         const lfs::core::Tensor* bg_core_2d) {
-
         using namespace lfs::core;
+
         constexpr float EPSILON = 1e-8f;
         constexpr float ALPHA_CONSISTENCY_WEIGHT = 10.0f;
 
         const auto mode = opt_params.mask_mode;
-        const Tensor mask_2d = mask.ndim() == 3 ? mask.squeeze(0) : mask;
+
+        const Tensor mask_2d = (mask.ndim() == 3) ? mask.squeeze(0) : mask;
+
         const Tensor mask_expanded = mask_2d.unsqueeze(0).expand({static_cast<int>(rendered.shape()[0]),
                                                                   static_cast<int>(mask_2d.shape()[0]),
                                                                   static_cast<int>(mask_2d.shape()[1])});
-        const Tensor mask_sum = mask_expanded.sum() + EPSILON;
+
+        // We'll often need a reusable 2D "ones" tensor to build bg masks.
+        static thread_local Tensor one_2d;
+        if (one_2d.is_empty() || one_2d.device() != mask_2d.device() || one_2d.shape() != mask_2d.shape()) {
+            one_2d = Tensor::full(mask_2d.shape(), 1.0f, mask_2d.device());
+        }
+
+        // Optional darkness boost factor (2D) for L1 only (applied by multiplying L1 weights).
+        Tensor darkness_factor_2d;
+        if (opt_params.darkness_boost > 0.0f) {
+            darkness_factor_2d = build_darkness_factor_2d(gt_image, opt_params.darkness_boost);
+        }
 
         Tensor loss, grad, grad_alpha;
 
+        // -------------------------------------------------------------------------
+        // Segment / Ignore: masked photometric (FG only)
+        // -------------------------------------------------------------------------
         if (mode == param::MaskMode::Segment || mode == param::MaskMode::Ignore) {
-            // Masked L1 loss
-            const Tensor l1_diff = (rendered - gt_image).abs();
-            const Tensor masked_l1 = (l1_diff * mask_expanded).sum() / mask_sum;
-            const Tensor sign_diff = (rendered - gt_image).sign();
-            Tensor l1_grad = sign_diff * mask_expanded / mask_sum;
 
-            if (opt_params.lambda_dssim > 0.0f) {
-                // Masked SSIM (same padding to preserve dimensions)
-                const auto rendered_4d = rendered.unsqueeze(0);
-                const auto gt_4d = gt_image.unsqueeze(0);
-                auto ssim_result = lfs::training::kernels::ssim_forward_map(rendered_4d, gt_4d, false);
+            // Compute mask_sum as float to avoid Tensor/Tensor(scalar) divisions.
+            const float mask_sum_f_raw = (mask_expanded.sum() + EPSILON).item<float>();
+            const float mask_sum_f = (mask_sum_f_raw > EPSILON) ? mask_sum_f_raw : EPSILON;
+            const float inv_mask_sum = 1.0f / mask_sum_f;
 
-                const Tensor ssim_map_3d = ssim_result.ssim_map.squeeze(0);
-                const Tensor masked_ssim = (ssim_map_3d * mask_expanded).sum() / mask_sum;
-                const Tensor ssim_loss = Tensor::full({}, 1.0f, rendered.device()) - masked_ssim;
+            // Base coefficients: mask / sum(mask)
+            Tensor base_w = mask_expanded * inv_mask_sum; // [C,H,W]
 
-                const float l1_weight = 1.0f - opt_params.lambda_dssim;
-                const float ssim_weight = opt_params.lambda_dssim;
-                loss = masked_l1 * l1_weight + ssim_loss * ssim_weight;
+            // L1 gets optional darkness factor, DSSIM stays unmodified.
+            Tensor l1_w = base_w;
+            Tensor ssim_w = base_w;
 
-                // SSIM backward with per-pixel gradient: d(loss)/d(ssim_map[i]) = -mask[i] / mask_sum
-                const Tensor mask_4d = mask_expanded.unsqueeze(0);
-                const Tensor dL_dmap = mask_4d * (-1.0f) / mask_sum;
-                const Tensor ssim_grad = lfs::training::kernels::ssim_backward_with_grad_map(ssim_result.ctx, dL_dmap).squeeze(0);
-                grad = l1_grad * l1_weight + ssim_grad * ssim_weight;
-            } else {
-                loss = masked_l1;
-                grad = l1_grad;
+            if (darkness_factor_2d.is_valid()) {
+                const Tensor darkness_factor_3d = darkness_factor_2d.unsqueeze(0).expand({static_cast<int>(rendered.shape()[0]),
+                                                                                          static_cast<int>(mask_2d.shape()[0]),
+                                                                                          static_cast<int>(mask_2d.shape()[1])});
+                l1_w = l1_w * darkness_factor_3d;
             }
 
-            // Segment: opacity penalty for background
+            auto eval = eval_photometric_weighted(
+                rendered, gt_image,
+                opt_params.lambda_dssim,
+                l1_w,
+                ssim_w,
+                1.0f);
+
+            if (!eval) {
+                return std::unexpected(eval.error());
+            }
+
+            loss = eval->loss;
+            grad = eval->grad_img;
+
+            // Segment: opacity penalty for background (configurable power/weight).
             if (mode == param::MaskMode::Segment && alpha.is_valid()) {
-                const Tensor alpha_2d = alpha.ndim() == 3 ? alpha.squeeze(0) : alpha;
-                const Tensor bg_mask = Tensor::full(mask_2d.shape(), 1.0f, mask_2d.device()) - mask_2d;
-                const Tensor penalty_weights = bg_mask.pow(opt_params.mask_opacity_penalty_power);
+                const Tensor alpha_2d = (alpha.ndim() == 3) ? alpha.squeeze(0) : alpha;
+
+                const Tensor bg_mask_2d = one_2d - mask_2d;
+                const Tensor penalty_weights = bg_mask_2d.pow(opt_params.mask_opacity_penalty_power);
+
                 const Tensor penalty = (alpha_2d * penalty_weights).mean() * opt_params.mask_opacity_penalty_weight;
+                loss = loss + penalty;
 
                 const float inv_pixels = opt_params.mask_opacity_penalty_weight / static_cast<float>(alpha_2d.numel());
                 grad_alpha = penalty_weights * inv_pixels;
-                loss = loss + penalty;
             }
 
-        } else if (mode == param::MaskMode::AlphaConsistent) {
-            // Standard photometric loss
-            lfs::training::losses::PhotometricLoss photo_loss_fn;
-            const lfs::training::losses::PhotometricLoss::Params params{.lambda_dssim = opt_params.lambda_dssim};
-            auto result = photo_loss_fn.forward(rendered, gt_image, params);
-            if (!result) {
-                return std::unexpected(result.error());
-            }
-            auto [photo_loss, ctx] = *result;
-            loss = photo_loss;
-            grad = ctx.grad_image;
+            return MaskLossResult{.loss = loss, .grad_image = grad, .grad_alpha = grad_alpha};
+        }
 
-            // Alpha should match mask
+        // -------------------------------------------------------------------------
+        // AlphaConsistent: full photometric + alpha->mask
+        // -------------------------------------------------------------------------
+        if (mode == param::MaskMode::AlphaConsistent) {
+
+            // Full-image photometric (uniform). Apply darkness boost to L1 only if enabled.
+            Tensor l1_w;   // optional
+            Tensor ssim_w; // keep uniform
+
+            if (darkness_factor_2d.is_valid()) {
+                const float inv_n = 1.0f / static_cast<float>(rendered.numel());
+                const Tensor darkness_factor_3d = darkness_factor_2d.unsqueeze(0).expand({static_cast<int>(rendered.shape()[0]),
+                                                                                          static_cast<int>(mask_2d.shape()[0]),
+                                                                                          static_cast<int>(mask_2d.shape()[1])});
+                l1_w = darkness_factor_3d * inv_n;
+            }
+
+            auto eval = eval_photometric_weighted(
+                rendered, gt_image,
+                opt_params.lambda_dssim,
+                l1_w,   // if invalid => uniform
+                ssim_w, // uniform DSSIM
+                1.0f);
+
+            if (!eval) {
+                return std::unexpected(eval.error());
+            }
+
+            loss = eval->loss;
+            grad = eval->grad_img;
+
             if (alpha.is_valid()) {
-                const Tensor alpha_2d = alpha.ndim() == 3 ? alpha.squeeze(0) : alpha;
+                const Tensor alpha_2d = (alpha.ndim() == 3) ? alpha.squeeze(0) : alpha;
+
                 const Tensor alpha_loss = (alpha_2d - mask_2d).abs().mean() * ALPHA_CONSISTENCY_WEIGHT;
                 loss = loss + alpha_loss;
-                grad_alpha = (alpha_2d - mask_2d).sign() * (ALPHA_CONSISTENCY_WEIGHT / static_cast<float>(alpha_2d.numel()));
-            }
-        } else if (mode == param::MaskMode::HardMatting || mode == param::MaskMode::SoftMatting) {
 
-            // -----------------------------------------------------------------
-            // Matting (Binary, Error-Tolerant, Hole-Closing)
-            // Supports both HardMatting (no cores) and SoftMatting (with cores)
-            // -----------------------------------------------------------------
+                grad_alpha = (alpha_2d - mask_2d).sign() *
+                             (ALPHA_CONSISTENCY_WEIGHT / static_cast<float>(alpha_2d.numel()));
+            }
+
+            return MaskLossResult{.loss = loss, .grad_image = grad, .grad_alpha = grad_alpha};
+        }
+
+        // -------------------------------------------------------------------------
+        // HardMatting / SoftMatting: FG strong + weak BG vote, plus alpha regularization
+        // -------------------------------------------------------------------------
+        if (mode == param::MaskMode::HardMatting || mode == param::MaskMode::SoftMatting) {
 
             // Fixed defaults (not user-configurable): conservative, hole-closing.
             constexpr float kBgPhotometricRatio = 0.05f;
             constexpr float kBgAlphaPenaltyWeight = 0.10f;
-            constexpr float kBgAlphaPenaltyPower = 2.0f;
             constexpr float kFgMinAlpha = 0.90f;
             constexpr float kFgAlphaFloorWeight = 0.12f;
 
-            // -----------------------------------------------------------------
-            // Validate cores for SoftMatting mode
-            // -----------------------------------------------------------------
             const bool use_cores = (mode == param::MaskMode::SoftMatting);
-
             if (use_cores) {
                 if (!fg_core_2d || !bg_core_2d || !fg_core_2d->is_valid() || !bg_core_2d->is_valid()) {
                     return std::unexpected(
@@ -253,138 +475,101 @@ namespace lfs::training {
                 }
             }
 
-            // -----------------------------------------------------------------
-            // Build BG mask (same shape as mask_2d) and expand to [C,H,W]
-            // -----------------------------------------------------------------
-            static thread_local lfs::core::Tensor one_2d;
-            if (one_2d.is_empty() || one_2d.device() != mask_2d.device() || one_2d.shape() != mask_2d.shape()) {
-                one_2d = lfs::core::Tensor::full(mask_2d.shape(), 1.0f, mask_2d.device());
-            }
+            // BG mask in [H,W] and expanded to [C,H,W]
+            const Tensor bg_mask_2d = one_2d - mask_2d;
+            const Tensor bg_mask_expanded = bg_mask_2d.unsqueeze(0).expand({static_cast<int>(rendered.shape()[0]),
+                                                                            static_cast<int>(mask_2d.shape()[0]),
+                                                                            static_cast<int>(mask_2d.shape()[1])});
 
-            const lfs::core::Tensor bg_mask_2d = one_2d - mask_2d;
-
-            const lfs::core::Tensor bg_mask_expanded =
-                bg_mask_2d.unsqueeze(0).expand({static_cast<int>(rendered.shape()[0]),
-                                                static_cast<int>(mask_2d.shape()[0]),
-                                                static_cast<int>(mask_2d.shape()[1])});
-
-            // -----------------------------------------------------------------
-            // Normalization factors as floats (avoid Tensor / Tensor(scalar))
-            // -----------------------------------------------------------------
-            const float sum_fg_f_raw = mask_sum.item<float>(); // Matting-only sync
+            // Compute FG/BG counts as floats (avoid broadcast scalar divisions).
+            const float sum_fg_f_raw = (mask_expanded.sum() + EPSILON).item<float>();
             const float sum_fg_f = (sum_fg_f_raw > EPSILON) ? sum_fg_f_raw : EPSILON;
 
             const float total_f = static_cast<float>(rendered.numel());
             const float sum_fg_noeps = (sum_fg_f > EPSILON) ? (sum_fg_f - EPSILON) : 0.0f;
             const float sum_bg_f = std::max(total_f - sum_fg_noeps, EPSILON);
 
-            // -----------------------------------------------------------------
-            // L1: FG + ratio * BG
-            // -----------------------------------------------------------------
-            const lfs::core::Tensor diff = rendered - gt_image;
-            const lfs::core::Tensor l1_diff = diff.abs();
-            const lfs::core::Tensor sign_diff = diff.sign();
+            const float inv_sum_fg = 1.0f / sum_fg_f;
+            const float inv_sum_bg = 1.0f / sum_bg_f;
 
-            const lfs::core::Tensor l1_fg = (l1_diff * mask_expanded).sum() / sum_fg_f;
-            const lfs::core::Tensor l1_grad_fg = (sign_diff * mask_expanded) / sum_fg_f;
+            // Combined weight map:
+            //   w = mask/sum_fg + ratio * bg/sum_bg
+            // DSSIM base must be (1 + ratio) to match: (1-mean_fg) + ratio*(1-mean_bg)
+            Tensor base_w = mask_expanded * inv_sum_fg + bg_mask_expanded * (kBgPhotometricRatio * inv_sum_bg);
+            const float ssim_base = 1.0f + kBgPhotometricRatio;
 
-            const lfs::core::Tensor l1_bg = (l1_diff * bg_mask_expanded).sum() / sum_bg_f;
-            const lfs::core::Tensor l1_grad_bg = (sign_diff * bg_mask_expanded) / sum_bg_f;
+            Tensor l1_w = base_w;
+            Tensor ssim_w = base_w;
 
-            lfs::core::Tensor l1_total = l1_fg + l1_bg * kBgPhotometricRatio;
-            lfs::core::Tensor l1_grad = l1_grad_fg + l1_grad_bg * kBgPhotometricRatio;
-
-            // -----------------------------------------------------------------
-            // Optional DSSIM mixed with masked weighting (FG + weak BG)
-            // -----------------------------------------------------------------
-            if (opt_params.lambda_dssim > 0.0f) {
-                static thread_local lfs::core::Tensor one_scalar;
-                if (one_scalar.is_empty() || one_scalar.device() != rendered.device()) {
-                    one_scalar = lfs::core::Tensor::full({}, 1.0f, rendered.device());
-                }
-
-                const auto rendered_4d = rendered.unsqueeze(0);
-                const auto gt_4d = gt_image.unsqueeze(0);
-
-                auto ssim_result = lfs::training::kernels::ssim_forward_map(rendered_4d, gt_4d, false);
-                const lfs::core::Tensor ssim_map_3d = ssim_result.ssim_map.squeeze(0);
-
-                const lfs::core::Tensor ssim_fg = (ssim_map_3d * mask_expanded).sum() / sum_fg_f;
-                const lfs::core::Tensor ssim_loss_fg = one_scalar - ssim_fg;
-
-                const lfs::core::Tensor ssim_bg = (ssim_map_3d * bg_mask_expanded).sum() / sum_bg_f;
-                const lfs::core::Tensor ssim_loss_bg = one_scalar - ssim_bg;
-
-                const lfs::core::Tensor ssim_loss_total = ssim_loss_fg + ssim_loss_bg * kBgPhotometricRatio;
-
-                const float l1_weight = 1.0f - opt_params.lambda_dssim;
-                const float ssim_weight = opt_params.lambda_dssim;
-
-                loss = l1_total * l1_weight + ssim_loss_total * ssim_weight;
-
-                const lfs::core::Tensor mask_4d = mask_expanded.unsqueeze(0);
-                const lfs::core::Tensor bg_4d = bg_mask_expanded.unsqueeze(0);
-
-                const lfs::core::Tensor dL_dmap =
-                    (mask_4d / sum_fg_f + (bg_4d / sum_bg_f) * kBgPhotometricRatio) * (-1.0f);
-
-                const lfs::core::Tensor ssim_grad =
-                    lfs::training::kernels::ssim_backward_with_grad_map(ssim_result.ctx, dL_dmap).squeeze(0);
-
-                grad = l1_grad * l1_weight + ssim_grad * ssim_weight;
-            } else {
-                loss = l1_total;
-                grad = l1_grad;
+            // Optional darkness boost: apply to L1 only.
+            if (darkness_factor_2d.is_valid()) {
+                const Tensor darkness_factor_3d = darkness_factor_2d.unsqueeze(0).expand({static_cast<int>(rendered.shape()[0]),
+                                                                                          static_cast<int>(mask_2d.shape()[0]),
+                                                                                          static_cast<int>(mask_2d.shape()[1])});
+                l1_w = l1_w * darkness_factor_3d;
             }
 
-            // -----------------------------------------------------------------
+            auto eval = eval_photometric_weighted(
+                rendered, gt_image,
+                opt_params.lambda_dssim,
+                l1_w,
+                ssim_w,
+                ssim_base);
+
+            if (!eval) {
+                return std::unexpected(eval.error());
+            }
+
+            loss = eval->loss;
+            grad = eval->grad_img;
+
             // Alpha regularization:
-            //  HardMatting: Direct inside/outside mask regularization
-            //  SoftMatting: Core-only regularization (more conservative)
-            // -----------------------------------------------------------------
+            //  HardMatting: inside/outside mask
+            //  SoftMatting: core-only (more conservative)
             if (alpha.is_valid()) {
-                const lfs::core::Tensor alpha_2d = (alpha.ndim() == 3) ? alpha.squeeze(0) : alpha;
+                const Tensor alpha_2d = (alpha.ndim() == 3) ? alpha.squeeze(0) : alpha;
                 const float inv_pixels = 1.0f / static_cast<float>(alpha_2d.numel());
 
-                grad_alpha = lfs::core::Tensor::zeros_like(alpha_2d);
+                grad_alpha = Tensor::zeros_like(alpha_2d);
 
-                // Select regularization masks based on mode
-                const lfs::core::Tensor& bg_reg_mask = use_cores ? *bg_core_2d : bg_mask_2d;
-                const lfs::core::Tensor& fg_reg_mask = use_cores ? *fg_core_2d : mask_2d;
+                const Tensor& bg_reg_mask = use_cores ? *bg_core_2d : bg_mask_2d; // [H,W]
+                const Tensor& fg_reg_mask = use_cores ? *fg_core_2d : mask_2d;    // [H,W]
 
-                // (a) BG cleanup: alpha -> 0 on background region
+                // (a) Background cleanup: alpha -> 0
+                // NOTE: bg_reg_mask is binary, so pow(2) is a no-op; keep it simple and fast.
                 {
-                    const lfs::core::Tensor bg_weights = bg_reg_mask.pow(kBgAlphaPenaltyPower);
-                    const lfs::core::Tensor bg_penalty = (alpha_2d * bg_weights).mean() * kBgAlphaPenaltyWeight;
+                    const Tensor bg_penalty = (alpha_2d * bg_reg_mask).mean() * kBgAlphaPenaltyWeight;
                     loss = loss + bg_penalty;
 
-                    grad_alpha = grad_alpha + bg_weights * (kBgAlphaPenaltyWeight * inv_pixels);
+                    grad_alpha = grad_alpha + bg_reg_mask * (kBgAlphaPenaltyWeight * inv_pixels);
                 }
 
-                // (b) FG alpha floor: enforce alpha >= kFgMinAlpha on foreground region
+                // (b) Foreground alpha floor: hinge penalty relu(kFgMinAlpha - alpha) on FG region
                 {
-                    const lfs::core::Tensor delta = alpha_2d - kFgMinAlpha;
-                    const lfs::core::Tensor gap = (delta * -1.0f).relu();
+                    const Tensor delta = alpha_2d - kFgMinAlpha; // delta < 0 => alpha < min
+                    const Tensor gap = (delta * -1.0f).relu();   // relu(min - alpha)
 
-                    const lfs::core::Tensor floor_penalty = (gap * fg_reg_mask).mean() * kFgAlphaFloorWeight;
+                    const Tensor floor_penalty = (gap * fg_reg_mask).mean() * kFgAlphaFloorWeight;
                     loss = loss + floor_penalty;
 
-                    const lfs::core::Tensor active = delta.lt(0.0f).to(lfs::core::DataType::Float32);
+                    const Tensor active = delta.lt(0.0f).to(DataType::Float32);
                     grad_alpha = grad_alpha + (active * fg_reg_mask) * (-kFgAlphaFloorWeight * inv_pixels);
                 }
             }
 
             return MaskLossResult{.loss = loss, .grad_image = grad, .grad_alpha = grad_alpha};
-        } else {
-            auto fallback = compute_photometric_loss_with_gradient(rendered, gt_image, opt_params);
-            if (!fallback) {
-                return std::unexpected(fallback.error());
-            }
-            return MaskLossResult{.loss = fallback->first, .grad_image = fallback->second, .grad_alpha = {}};
         }
 
-        return MaskLossResult{.loss = loss, .grad_image = grad, .grad_alpha = grad_alpha};
+        // -------------------------------------------------------------------------
+        // Fallback: full photometric (uniform)
+        // -------------------------------------------------------------------------
+        auto fallback = compute_photometric_loss_with_gradient(rendered, gt_image, opt_params);
+        if (!fallback) {
+            return std::unexpected(fallback.error());
+        }
+        return MaskLossResult{.loss = fallback->first, .grad_image = fallback->second, .grad_alpha = {}};
     }
+
 
     // Returns GPU tensor for loss - NO SYNC!
     std::expected<lfs::core::Tensor, std::string> Trainer::compute_scale_reg_loss(

@@ -87,6 +87,7 @@ namespace lfs::core {
                     {"rotation_lr", defaults.rotation_lr, "Learning rate for rotation updates"},
                     {"lambda_dssim", defaults.lambda_dssim, "DSSIM loss weight"},
                     {"min_opacity", defaults.min_opacity, "Minimum opacity threshold"},
+                    {"darkness_boost", defaults.darkness_boost, "Weight to amplify loss in dark regions"},
                     {"refine_every", defaults.refine_every, "Interval between densification steps"},
                     {"start_refine", defaults.start_refine, "Starting iteration for densification"},
                     {"stop_refine", defaults.stop_refine, "Ending iteration for densification"},
@@ -219,6 +220,7 @@ namespace lfs::core {
             opt_json["rotation_lr"] = rotation_lr;
             opt_json["lambda_dssim"] = lambda_dssim;
             opt_json["min_opacity"] = min_opacity;
+            opt_json["darkness_boost"] = darkness_boost;
             opt_json["refine_every"] = refine_every;
             opt_json["start_refine"] = start_refine;
             opt_json["stop_refine"] = stop_refine;
@@ -306,6 +308,9 @@ namespace lfs::core {
             }
             if (json.contains("max_cap")) {
                 params.max_cap = json["max_cap"];
+            }
+            if (json.contains("darkness_boost")) {
+                params.darkness_boost = json["darkness_boost"];
             }
 
             if (json.contains("strategy")) {
