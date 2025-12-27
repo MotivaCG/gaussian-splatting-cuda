@@ -263,6 +263,7 @@ namespace lfs::core {
             opt_json["init_rho"] = init_rho;
             opt_json["prune_ratio"] = prune_ratio;
             opt_json["bg_modulation"] = bg_modulation;
+            opt_json["high_confidence_count"] = high_confidence_count;
 
             // Mask parameters
             static constexpr const char* MASK_MODE_NAMES[] = {"none", "segment", "ignore", "alpha_consistent", "hardmatting", "softmatting"};
@@ -414,6 +415,9 @@ namespace lfs::core {
             }
             if (json.contains("bg_modulation")) {
                 params.bg_modulation = json["bg_modulation"];
+            }
+            if (json.contains("high_confidence_count")) {
+                params.high_confidence_count = json["high_confidence_count"];
             }
             if (json.contains("gut")) {
                 params.gut = json["gut"];

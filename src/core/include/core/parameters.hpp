@@ -15,9 +15,9 @@ namespace lfs::core {
     namespace param {
         // Mask mode for attention mask behavior during training
         enum class MaskMode {
-            None,           // No masking applied
-            Segment,        // Soft penalty to enforce alpha→0 in masked areas
-            Ignore,         // Completely ignore masked regions in loss
+            None,            // No masking applied
+            Segment,         // Soft penalty to enforce alpha→0 in masked areas
+            Ignore,          // Completely ignore masked regions in loss
             AlphaConsistent, // Enforce exact alpha values from mask
             HardMatting,
             SoftMatting
@@ -94,6 +94,7 @@ namespace lfs::core {
             int sparsify_steps = 15000;
             float init_rho = 0.0005f;
             float prune_ratio = 0.6f;
+            int high_confidence_count = -1;
 
             std::string config_file = "";
 
