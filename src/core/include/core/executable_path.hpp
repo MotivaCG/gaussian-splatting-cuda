@@ -77,6 +77,7 @@ namespace lfs::core {
     inline std::filesystem::path getIconsDir() { return getAssetsDir() / "icon"; }
     inline std::filesystem::path getFontsDir() { return getAssetsDir() / "fonts"; }
     inline std::filesystem::path getThemesDir() { return getAssetsDir() / "themes"; }
+    inline std::filesystem::path getLocalesDir() { return getResourceBaseDir() / "locales"; }
 
     // Library path lookup: production (bin/../lib) or build directory
     inline std::filesystem::path getLibDir() {
@@ -98,15 +99,20 @@ namespace lfs::core {
 
     // nvImageCodec extensions directory
     inline std::filesystem::path getExtensionsDir() {
-        const auto lib_dir = getLibDir();
+        const auto exe_dir = getExecutableDir();
+
+        // Distribution: exe in bin/, extensions in ../extensions/ (sibling directories)
+        if (const auto ext = exe_dir.parent_path() / "extensions"; std::filesystem::exists(ext)) {
+            return ext;
+        }
 
         // Standard location: lib/extensions/
+        const auto lib_dir = getLibDir();
         if (const auto ext = lib_dir / "extensions"; std::filesystem::exists(ext)) {
             return ext;
         }
 
-        // Fallback: extensions/ in exe directory
-        const auto exe_dir = getExecutableDir();
+        // Fallback: extensions/ in exe directory (development)
         if (const auto ext = exe_dir / "extensions"; std::filesystem::exists(ext)) {
             return ext;
         }

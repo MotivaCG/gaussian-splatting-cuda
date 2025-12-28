@@ -61,9 +61,10 @@ jobs:
       - name: Package
         run: |
           $date = Get-Date -Format "yyyy-MM-dd"
+          $sha = git rev-parse --short HEAD
           cmake --install build --prefix dist
-          Compress-Archive -Path dist\* -DestinationPath "LichtFeld-Studio-windows-nightly-$date.zip"
-          echo "PACKAGE_NAME=LichtFeld-Studio-windows-nightly-$date.zip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Compress-Archive -Path dist\* -DestinationPath "LichtFeld-Studio-windows-nightly-$date-$sha.zip"
+          echo "PACKAGE_NAME=LichtFeld-Studio-windows-nightly-$date-$sha.zip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -89,7 +90,7 @@ jobs:
           tag_name: nightly
           name: Nightly Build
           prerelease: true
-          files: LichtFeld-Studio-windows-nightly-*.zip
+          files: LichtFeld-Studio-windows-nightly-*-*.zip
           body: |
             Automated nightly build from `${{ github.sha }}`
 

@@ -28,7 +28,10 @@ namespace lfs::vis::gui {
         void setOnNewProject(std::function<void()> callback);
         void setOnImportDataset(std::function<void()> callback);
         void setOnImportPLY(std::function<void()> callback);
+        void setOnImportCheckpoint(std::function<void()> callback);
+        void setOnImportConfig(std::function<void()> callback);
         void setOnExport(std::function<void()> callback);
+        void setOnExportConfig(std::function<void()> callback);
         void setOnExit(std::function<void()> callback);
 
         // Permission check for New Project (returns true if clearing is allowed)
@@ -43,6 +46,9 @@ namespace lfs::vis::gui {
 
         bool isCapturingInput() const { return rebinding_action_.has_value(); }
         bool isInputSettingsOpen() const { return show_input_settings_; }
+        bool isAboutWindowOpen() const { return show_about_window_; }
+        bool isGettingStartedWindowOpen() const { return show_getting_started_; }
+        bool isDebugWindowOpen() const { return show_debug_window_; }
         void captureKey(int key, int mods);
         void captureMouseButton(int button, int mods);
         void cancelCapture();
@@ -70,7 +76,10 @@ namespace lfs::vis::gui {
         std::function<void()> on_new_project_;
         std::function<void()> on_import_dataset_;
         std::function<void()> on_import_ply_;
+        std::function<void()> on_import_checkpoint_;
+        std::function<void()> on_import_config_;
         std::function<void()> on_export_;
+        std::function<void()> on_export_config_;
         std::function<void()> on_exit_;
         std::function<bool()> can_clear_;
 

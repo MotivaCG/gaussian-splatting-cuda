@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "gui/ui_widgets.hpp"
+#include "gui/localization_manager.hpp"
+#include "gui/string_keys.hpp"
 #include "scene/scene_manager.hpp"
 #include "theme/theme.hpp"
 #include "training/training_manager.hpp"
@@ -19,7 +21,7 @@ namespace lfs::vis::gui::widgets {
 
         ImGui::SameLine();
         ImGui::PushID(label);
-        if (ImGui::Button("Reset")) {
+        if (ImGui::Button(LOC(lichtfeld::Strings::Common::RESET))) {
             *v = reset_value;
             changed = true;
         }
@@ -33,7 +35,7 @@ namespace lfs::vis::gui::widgets {
 
         ImGui::SameLine();
         ImGui::PushID(label);
-        if (ImGui::Button("Reset")) {
+        if (ImGui::Button(LOC(lichtfeld::Strings::Common::RESET))) {
             v[0] = v[1] = v[2] = reset_value;
             changed = true;
         }
@@ -87,14 +89,16 @@ namespace lfs::vis::gui::widgets {
     }
 
     void DrawModeStatus(const UIContext& ctx) {
+        using namespace lichtfeld::Strings;
+
         auto* scene_manager = ctx.viewer->getSceneManager();
         if (!scene_manager) {
-            ImGui::Text("Mode: Unknown");
+            ImGui::Text("%s %s", LOC(Status::MODE), LOC(Status::UNKNOWN));
             return;
         }
 
         const auto& t = theme();
-        const char* mode_str = "Unknown";
+        const char* mode_str = LOC(Status::UNKNOWN);
         ImVec4 mode_color = t.palette.text_dim;
 
         // Content determines base mode
@@ -102,12 +106,12 @@ namespace lfs::vis::gui::widgets {
 
         switch (content) {
         case SceneManager::ContentType::Empty:
-            mode_str = "Empty";
+            mode_str = LOC(Mode::EMPTY);
             mode_color = t.palette.text_dim;
             break;
 
         case SceneManager::ContentType::SplatFiles:
-            mode_str = "Edit Mode";
+            mode_str = LOC(Mode::EDIT_MODE);
             mode_color = t.palette.info;
             break;
 
@@ -115,51 +119,51 @@ namespace lfs::vis::gui::widgets {
             // For dataset, check training state from TrainerManager
             auto* trainer_manager = scene_manager->getTrainerManager();
             if (!trainer_manager || !trainer_manager->hasTrainer()) {
-                mode_str = "Dataset (No Trainer)";
+                mode_str = LOC(Status::DATASET_NO_TRAINER);
                 mode_color = t.palette.text_dim;
             } else {
                 // Use trainer state for specific mode
                 auto state = trainer_manager->getState();
                 switch (state) {
                 case TrainerManager::State::Ready:
-                    mode_str = "Dataset (Ready)";
+                    mode_str = LOC(Status::DATASET_READY);
                     mode_color = t.palette.success;
                     break;
                 case TrainerManager::State::Running:
-                    mode_str = "Training";
+                    mode_str = LOC(Status::TRAINING);
                     mode_color = t.palette.warning;
                     break;
                 case TrainerManager::State::Paused:
-                    mode_str = "Training (Paused)";
+                    mode_str = LOC(Status::TRAINING_PAUSED);
                     mode_color = lighten(t.palette.warning, -0.3f);
                     break;
                 case TrainerManager::State::Finished: {
                     const auto reason = trainer_manager->getStateMachine().getFinishReason();
                     switch (reason) {
                     case FinishReason::Completed:
-                        mode_str = "Training Complete";
+                        mode_str = LOC(Messages::TRAINING_COMPLETE);
                         mode_color = t.palette.success;
                         break;
                     case FinishReason::UserStopped:
-                        mode_str = "Training Stopped";
+                        mode_str = LOC(Messages::TRAINING_STOPPED);
                         mode_color = t.palette.text_dim;
                         break;
                     case FinishReason::Error:
-                        mode_str = "Training Error";
+                        mode_str = LOC(Messages::TRAINING_ERROR);
                         mode_color = t.palette.error;
                         break;
                     default:
-                        mode_str = "Training Finished";
+                        mode_str = LOC(Status::TRAINING_FINISHED);
                         mode_color = t.palette.text_dim;
                     }
                     break;
                 }
                 case TrainerManager::State::Stopping:
-                    mode_str = "Stopping...";
+                    mode_str = LOC(Status::STOPPING);
                     mode_color = darken(t.palette.error, 0.3f);
                     break;
                 default:
-                    mode_str = "Dataset";
+                    mode_str = LOC(Mode::DATASET);
                     mode_color = t.palette.text_dim;
                 }
             }
@@ -167,16 +171,16 @@ namespace lfs::vis::gui::widgets {
         }
         }
 
-        ImGui::TextColored(mode_color, "Mode: %s", mode_str);
+        ImGui::TextColored(mode_color, "%s %s", LOC(Status::MODE), mode_str);
 
         // Display scene info
         auto info = scene_manager->getSceneInfo();
         if (info.num_gaussians > 0) {
-            ImGui::Text("Gaussians: %zu", info.num_gaussians);
+            ImGui::Text("%s %zu", LOC(Status::GAUSSIANS), info.num_gaussians);
         }
 
         if (info.source_type == "PLY" && info.num_nodes > 0) {
-            ImGui::Text("PLY Models: %zu", info.num_nodes);
+            ImGui::Text(LOC(Status::PLY_MODELS_COUNT), info.num_nodes);
         }
 
         // Display training iteration if actively training
@@ -185,7 +189,7 @@ namespace lfs::vis::gui::widgets {
             if (trainer_manager && trainer_manager->isRunning()) {
                 int iteration = trainer_manager->getCurrentIteration();
                 if (iteration > 0) {
-                    ImGui::Text("Iteration: %d", iteration);
+                    ImGui::Text("%s %d", LOC(Status::ITERATION), iteration);
                 }
             }
         }
@@ -253,12 +257,21 @@ namespace lfs::vis::gui::widgets {
         constexpr float TINT_BASE = 0.7f;
         constexpr float TINT_ACCENT = 0.3f;
         constexpr float FALLBACK_PADDING = 8.0f;
-        constexpr ImVec4 TINT_NORMAL = {1.0f, 1.0f, 1.0f, 0.9f};
 
         const auto& t = theme();
-        const ImVec4 bg_normal = selected ? t.button_selected() : t.button_normal();
-        const ImVec4 bg_hovered = selected ? t.button_selected_hovered() : t.button_hovered();
-        const ImVec4 bg_active = selected ? darken(t.button_selected(), ACTIVE_DARKEN) : t.button_active();
+
+        // Calculate background brightness to detect light themes
+        const float bg_brightness = (t.palette.background.x + t.palette.background.y + t.palette.background.z) / 3.0f;
+
+        // Use darker tint for light themes, lighter tint for dark themes
+        const ImVec4 TINT_NORMAL = bg_brightness > 0.5f
+                                       ? ImVec4{0.2f, 0.2f, 0.2f, 0.9f}  // Dark tint for light themes
+                                       : ImVec4{1.0f, 1.0f, 1.0f, 0.9f}; // Light tint for dark themes
+
+        // Make button backgrounds transparent so they blend with toolbar, except when selected
+        const ImVec4 bg_normal = selected ? t.button_selected() : ImVec4{0, 0, 0, 0};
+        const ImVec4 bg_hovered = selected ? t.button_selected_hovered() : withAlpha(t.palette.surface_bright, 0.3f);
+        const ImVec4 bg_active = selected ? darken(t.button_selected(), ACTIVE_DARKEN) : withAlpha(t.palette.surface_bright, 0.5f);
         const ImVec4 tint = selected
                                 ? ImVec4{TINT_BASE + t.palette.primary.x * TINT_ACCENT,
                                          TINT_BASE + t.palette.primary.y * TINT_ACCENT,
@@ -315,6 +328,33 @@ namespace lfs::vis::gui::widgets {
 
         ImGui::PopStyleColor(3);
         return clicked;
+    }
+
+    void SetThemedTooltip(const char* fmt, ...) {
+        const auto& t = theme();
+
+        // Calculate background brightness to detect light themes
+        const float bg_brightness = (t.palette.background.x + t.palette.background.y + t.palette.background.z) / 3.0f;
+        const bool is_light_theme = bg_brightness > 0.5f;
+
+        // Push both background and text colors for tooltips
+        if (is_light_theme) {
+            ImGui::PushStyleColor(ImGuiCol_PopupBg, withAlpha(t.palette.surface, 0.95f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4{0.2f, 0.2f, 0.2f, 1.0f});
+        }
+
+        ImGui::BeginTooltip();
+
+        va_list args;
+        va_start(args, fmt);
+        ImGui::TextV(fmt, args);
+        va_end(args);
+
+        ImGui::EndTooltip();
+
+        if (is_light_theme) {
+            ImGui::PopStyleColor(2);
+        }
     }
 
 } // namespace lfs::vis::gui::widgets

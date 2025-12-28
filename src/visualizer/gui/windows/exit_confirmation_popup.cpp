@@ -3,23 +3,32 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "exit_confirmation_popup.hpp"
+#include "gui/localization_manager.hpp"
+#include "gui/string_keys.hpp"
 #include "gui/ui_widgets.hpp"
 #include "theme/theme.hpp"
 #include <imgui.h>
 
 namespace lfs::vis::gui {
 
+    using namespace lichtfeld::Strings;
+
     namespace {
+        // Fixed dimensions to prevent DPI-related resize feedback loop
+        constexpr float POPUP_WIDTH = 340.0f;
+        constexpr float POPUP_HEIGHT = 150.0f;
+
         constexpr float BUTTON_WIDTH = 100.0f;
         constexpr float BUTTON_SPACING = 12.0f;
         constexpr float POPUP_ALPHA = 0.98f;
         constexpr float BORDER_SIZE = 2.0f;
         constexpr ImVec2 WINDOW_PADDING{24.0f, 20.0f};
-        constexpr ImGuiWindowFlags POPUP_FLAGS = ImGuiWindowFlags_AlwaysAutoResize |
-                                                 ImGuiWindowFlags_NoCollapse |
+
+        constexpr ImGuiWindowFlags POPUP_FLAGS = ImGuiWindowFlags_NoCollapse |
                                                  ImGuiWindowFlags_NoMove |
-                                                 ImGuiWindowFlags_NoDocking;
-        constexpr const char* POPUP_TITLE = "Exit Application?";
+                                                 ImGuiWindowFlags_NoDocking |
+                                                 ImGuiWindowFlags_NoResize |
+                                                 ImGuiWindowFlags_NoScrollbar;
     } // namespace
 
     void ExitConfirmationPopup::show(Callback on_confirm, Callback on_cancel) {
@@ -29,8 +38,10 @@ namespace lfs::vis::gui {
     }
 
     void ExitConfirmationPopup::render() {
+        const char* popup_title = LOC(ExitPopup::TITLE);
+
         if (pending_open_) {
-            ImGui::OpenPopup(POPUP_TITLE);
+            ImGui::OpenPopup(popup_title);
             open_ = true;
             pending_open_ = false;
         }
@@ -46,6 +57,7 @@ namespace lfs::vis::gui {
         const ImVec4 title_bg_active = darken(t.palette.surface, 0.05f);
 
         ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, {0.5f, 0.5f});
+        ImGui::SetNextWindowSize({POPUP_WIDTH, POPUP_HEIGHT}, ImGuiCond_Always);
 
         ImGui::PushStyleColor(ImGuiCol_WindowBg, popup_bg);
         ImGui::PushStyleColor(ImGuiCol_TitleBg, title_bg);
@@ -56,17 +68,17 @@ namespace lfs::vis::gui {
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, WINDOW_PADDING);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, t.sizes.popup_rounding);
 
-        if (ImGui::BeginPopupModal(POPUP_TITLE, nullptr, POPUP_FLAGS)) {
-            ImGui::TextUnformatted("Are you sure you want to exit?");
+        if (ImGui::BeginPopupModal(popup_title, nullptr, POPUP_FLAGS)) {
+            ImGui::TextUnformatted(LOC(ExitPopup::MESSAGE));
             ImGui::Spacing();
-            ImGui::TextColored(t.palette.text_dim, "Any unsaved changes will be lost.");
+            ImGui::TextColored(t.palette.text_dim, "%s", LOC(ExitPopup::UNSAVED_WARNING));
             ImGui::Dummy({0.0f, 8.0f});
 
             // Center buttons
             const float total_width = BUTTON_WIDTH * 2.0f + BUTTON_SPACING;
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (ImGui::GetContentRegionAvail().x - total_width) * 0.5f);
 
-            if (widgets::ColoredButton("Cancel", widgets::ButtonStyle::Secondary, {BUTTON_WIDTH, 0}) ||
+            if (widgets::ColoredButton(LOC(Common::CANCEL), widgets::ButtonStyle::Secondary, {BUTTON_WIDTH, 0}) ||
                 ImGui::IsKeyPressed(ImGuiKey_Escape)) {
                 open_ = false;
                 if (on_cancel_)
@@ -76,7 +88,7 @@ namespace lfs::vis::gui {
 
             ImGui::SameLine(0.0f, BUTTON_SPACING);
 
-            if (widgets::ColoredButton("Exit", widgets::ButtonStyle::Error, {BUTTON_WIDTH, 0}) ||
+            if (widgets::ColoredButton(LOC(ExitPopup::EXIT), widgets::ButtonStyle::Error, {BUTTON_WIDTH, 0}) ||
                 ImGui::IsKeyPressed(ImGuiKey_Enter)) {
                 open_ = false;
                 if (on_confirm_)

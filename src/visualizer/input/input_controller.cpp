@@ -986,6 +986,9 @@ namespace lfs::vis {
     }
 
     void InputController::handleFileDrop(const std::vector<std::string>& paths) {
+        using namespace lfs::core::events;
+        ui::FileDropReceived{}.emit();
+
         std::vector<std::filesystem::path> splat_files;
         std::optional<std::filesystem::path> dataset_path;
 
@@ -997,10 +1000,13 @@ namespace lfs::vis {
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
             if (ext == ".resume") {
-                // Checkpoint files go through the training resume flow
                 cmd::LoadCheckpointForTraining{.path = filepath}.emit();
-                LOG_INFO("Loading checkpoint for training via drag-and-drop: {}", filepath.filename().string());
-                return; // Don't process other files when loading a checkpoint
+                LOG_INFO("Loading checkpoint via drag-and-drop: {}", filepath.filename().string());
+                return;
+            } else if (ext == ".json") {
+                cmd::LoadConfigFile{.path = filepath}.emit();
+                LOG_INFO("Loading config via drag-and-drop: {}", filepath.filename().string());
+                return;
             } else if (ext == ".ply" || ext == ".sog" || ext == ".spz") {
                 splat_files.push_back(filepath);
             } else if (!dataset_path && std::filesystem::is_directory(filepath)) {

@@ -55,6 +55,11 @@ namespace lfs::vis::gui {
             }
         });
 
+        state::ConfigLoadFailed::when([this](const auto& e) {
+            show(Type::FAILURE, "Invalid Config File",
+                 std::format("Could not load '{}':\n\n{}", e.path.filename().string(), e.error));
+        });
+
         state::TrainingCompleted::when([this](const auto& e) {
             if (e.success) {
                 const auto message = std::format(
@@ -67,8 +72,20 @@ namespace lfs::vis::gui {
                 show(Type::INFO, "Training Complete", message,
                      []() { cmd::SwitchToLatestCheckpoint{}.emit(); });
             } else {
-                show(Type::FAILURE, "Training Failed",
-                     e.error.value_or("Unknown error occurred during training."));
+                // Format error message for better clarity
+                std::string error_msg = e.error.value_or("Unknown error occurred during training.");
+
+                // Check if this is an OOM error and format it clearly
+                if (error_msg.find("OUT_OF_MEMORY") != std::string::npos) {
+                    error_msg = "Out of GPU memory!\n\n"
+                                "The scene is too large for available GPU memory.\n\n"
+                                "Suggestions:\n"
+                                "  - Reduce image resolution (--resize-factor)\n"
+                                "  - Enable tile mode (--tile-mode 2 or 4)\n"
+                                "  - Reduce max Gaussians (--max-cap)";
+                }
+
+                show(Type::FAILURE, "Training Failed", error_msg);
             }
         });
     }

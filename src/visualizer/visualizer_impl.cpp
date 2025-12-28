@@ -6,6 +6,7 @@
 #include "command/commands/crop_command.hpp"
 #include "command/commands/selection_command.hpp"
 #include "core/data_loading_service.hpp"
+#include "core/event_bus.hpp"
 #include "core/logger.hpp"
 #include "core/services.hpp"
 #include "scene/scene_manager.hpp"
@@ -73,7 +74,8 @@ namespace lfs::vis {
     }
 
     VisualizerImpl::~VisualizerImpl() {
-        // Clear services before destroying components
+        // Clear event handlers before destroying components to prevent use-after-free
+        lfs::core::event::bus().clear_all();
         services().clear();
 
         trainer_manager_.reset();
@@ -243,6 +245,10 @@ namespace lfs::vis {
         // File loading commands
         cmd::LoadFile::when([this](const auto& cmd) {
             handleLoadFileCommand(cmd);
+        });
+
+        cmd::LoadConfigFile::when([this](const auto& cmd) {
+            handleLoadConfigFile(cmd.path);
         });
 
         cmd::SwitchToLatestCheckpoint::when([this](const auto&) {
@@ -753,6 +759,15 @@ namespace lfs::vis {
 
     void VisualizerImpl::handleLoadFileCommand([[maybe_unused]] const lfs::core::events::cmd::LoadFile& cmd) {
         // File loading is handled by the data_loader_ service
+    }
+
+    void VisualizerImpl::handleLoadConfigFile(const std::filesystem::path& path) {
+        auto result = lfs::core::param::read_optim_params_from_json(path);
+        if (!result) {
+            state::ConfigLoadFailed{.path = path, .error = result.error()}.emit();
+            return;
+        }
+        parameter_manager_->importParams(*result);
     }
 
     void VisualizerImpl::handleTrainingCompleted([[maybe_unused]] const state::TrainingCompleted& event) {

@@ -120,10 +120,12 @@ namespace {
             ::args::ValueFlag<std::string> log_filter(parser, "pattern", "Filter log messages (glob: *foo*, regex: \\\\d+)", {"log-filter"});
 
             // Optional flag arguments
+            ::args::Flag enable_mip(parser, "enable_mip", "Enable mip filter (anti-aliasing)", {"enable-mip"});
             ::args::Flag use_bilateral_grid(parser, "bilateral_grid", "Enable bilateral grid filtering", {"bilateral-grid"});
             ::args::Flag enable_eval(parser, "eval", "Enable evaluation during training", {"eval"});
             ::args::Flag headless(parser, "headless", "Disable visualization during training", {"headless"});
             ::args::Flag no_splash(parser, "no_splash", "Skip splash screen on startup", {"no-splash"});
+            ::args::Flag no_interop(parser, "no_interop", "Disable CUDA-GL interop (use CPU fallback for display)", {"no-interop"});
             ::args::Flag enable_save_eval_images(parser, "save_eval_images", "Save eval images and depth maps", {"save-eval-images"});
             ::args::Flag save_depth(parser, "save_depth", "Save depth maps during training", {"save-depth"});
             ::args::Flag bg_modulation(parser, "bg_modulation", "Enable sinusoidal background modulation mixed with base background", {"bg-modulation"});
@@ -399,10 +401,12 @@ namespace {
                                         // Mask parameters
                                         mask_mode_val = mask_mode ? std::optional<lfs::core::param::MaskMode>(::args::get(mask_mode)) : std::optional<lfs::core::param::MaskMode>(),
                                         // Capture flag states
+                                        enable_mip_flag = bool(enable_mip),
                                         use_bilateral_grid_flag = bool(use_bilateral_grid),
                                         enable_eval_flag = bool(enable_eval),
                                         headless_flag = bool(headless),
                                         no_splash_flag = bool(no_splash),
+                                        no_interop_flag = bool(no_interop),
                                         enable_save_eval_images_flag = bool(enable_save_eval_images),
                                         bg_modulation_flag = bool(bg_modulation),
                                         random_flag = bool(random),
@@ -450,10 +454,12 @@ namespace {
                 setVal(init_rho_val, opt.init_rho);
                 setVal(prune_ratio_val, opt.prune_ratio);
 
+                setFlag(enable_mip_flag, opt.mip_filter);
                 setFlag(use_bilateral_grid_flag, opt.use_bilateral_grid);
                 setFlag(enable_eval_flag, opt.enable_eval);
                 setFlag(headless_flag, opt.headless);
                 setFlag(no_splash_flag, opt.no_splash);
+                setFlag(no_interop_flag, opt.no_interop);
                 setFlag(enable_save_eval_images_flag, opt.enable_save_eval_images);
                 setFlag(bg_modulation_flag, opt.bg_modulation);
                 setFlag(random_flag, opt.random);

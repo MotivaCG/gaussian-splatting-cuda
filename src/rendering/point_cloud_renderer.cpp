@@ -178,7 +178,7 @@ namespace lfs::rendering {
         LOG_TIMER_TRACE("PointCloudRenderer::renderInternal");
         GLStateGuard state_guard;
 
-        constexpr size_t MAX_POINT_COUNT = 10'000'000;
+        constexpr size_t MAX_POINT_COUNT = 50'000'000;
         const size_t num_points = positions.size(0);
         current_point_count_ = num_points;
 

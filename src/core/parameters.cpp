@@ -237,6 +237,7 @@ namespace lfs::core {
             opt_json["enable_eval"] = enable_eval;
             opt_json["enable_save_eval_images"] = enable_save_eval_images;
             opt_json["strategy"] = strategy;
+            opt_json["mip_filter"] = mip_filter;
             opt_json["use_bilateral_grid"] = use_bilateral_grid;
             opt_json["bilateral_grid_X"] = bilateral_grid_X;
             opt_json["bilateral_grid_Y"] = bilateral_grid_Y;
@@ -340,6 +341,9 @@ namespace lfs::core {
             }
             if (json.contains("enable_save_eval_images")) {
                 params.enable_save_eval_images = json["enable_save_eval_images"];
+            }
+            if (json.contains("mip_filter")) {
+                params.mip_filter = json["mip_filter"];
             }
             if (json.contains("use_bilateral_grid")) {
                 params.use_bilateral_grid = json["use_bilateral_grid"];
@@ -468,19 +472,16 @@ namespace lfs::core {
                 return std::unexpected(json_result.error());
             }
 
-            auto json = *json_result;
+            const auto& json = *json_result;
 
-            // Create default parameters for verification
+            // Extract optimization sub-object if present (supports both flat and nested formats)
+            const auto& opt_json = json.contains("optimization") ? json["optimization"] : json;
+
             OptimizationParameters defaults;
-
-            // Verify parameters before reading
-            verify_optimization_parameters(defaults, json);
+            verify_optimization_parameters(defaults, opt_json);
 
             try {
-                OptimizationParameters params = OptimizationParameters::from_json(json);
-
-                return params;
-
+                return OptimizationParameters::from_json(opt_json);
             } catch (const std::exception& e) {
                 return std::unexpected(std::format("Error parsing optimization parameters: {}", e.what()));
             }
@@ -514,8 +515,10 @@ namespace lfs::core {
                 ss << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S");
                 json["timestamp"] = ss.str();
 
-                // Save to file
-                std::filesystem::path filepath = output_path / "training_config.json";
+                // Use path directly if .json, otherwise append default filename
+                const std::filesystem::path filepath = (output_path.extension() == ".json")
+                                                           ? output_path
+                                                           : output_path / "training_config.json";
                 std::ofstream file(filepath);
                 if (!file.is_open()) {
                     return std::unexpected(std::format("Could not open file for writing: {}", filepath.string()));

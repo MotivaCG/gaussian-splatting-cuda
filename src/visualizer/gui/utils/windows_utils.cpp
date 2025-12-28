@@ -61,7 +61,7 @@ namespace lfs::vis::gui {
 
                             if (SUCCEEDED(hr)) {
                                 strDirectory = filePath;
-                                CoTaskMemFree(filePath);
+                                // Caller is responsible for calling CoTaskMemFree(strDirectory)
                             }
                             pItem->Release();
                         }
@@ -438,6 +438,23 @@ namespace lfs::vis::gui {
         const std::string fallback = "kdialog --getopenfilename . 'Point Cloud (*.ply *.sog *.spz)' 2>/dev/null";
 
         const std::string result = runDialogCommand(primary, fallback);
+        return result.empty() ? std::filesystem::path{} : std::filesystem::path(result);
+#endif
+    }
+
+    std::filesystem::path OpenCheckpointFileDialog() {
+#ifdef _WIN32
+        PWSTR filePath = nullptr;
+        COMDLG_FILTERSPEC rgSpec[] = {{L"Checkpoint", L"*.resume"}};
+
+        if (SUCCEEDED(utils::selectFileNative(filePath, rgSpec, 1, false))) {
+            return std::filesystem::path(filePath);
+        }
+        return {};
+#else
+        const std::string result = runDialogCommand(
+            "zenity --file-selection --file-filter='Checkpoint|*.resume' --title='Open Checkpoint' 2>/dev/null",
+            "kdialog --getopenfilename . 'Checkpoint (*.resume)' 2>/dev/null");
         return result.empty() ? std::filesystem::path{} : std::filesystem::path(result);
 #endif
     }
