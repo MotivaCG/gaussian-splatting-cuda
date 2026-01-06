@@ -127,6 +127,7 @@ namespace lfs::core {
                     {"init_rho", defaults.init_rho, "Initial ADMM penalty parameter"},
                     {"prune_ratio", defaults.prune_ratio, "Final pruning ratio for sparsity"},
                     {"bg_modulation", defaults.bg_modulation, "Enable sinusoidal background modulation"},
+                    {"high_confidence_count", defaults.high_confidence_count, "Number of points comming from actual SfM"},
                     {"gut", defaults.gut, "Enable GUT mode"},
                     {"mask_mode", std::string("none"), "Mask mode: none, segment, ignore, alpha_consistent, matting"},
                     {"invert_masks", defaults.invert_masks, "Invert mask values"},

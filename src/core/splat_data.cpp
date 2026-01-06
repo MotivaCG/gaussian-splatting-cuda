@@ -16,6 +16,53 @@
 
 namespace {
 
+    const float untrusted_scale_multiplier = 1.5f;
+    const float untrusted_opacity_multiplier = 0.35f;
+
+    /**
+     * @brief Modifies scale and opacity for low-confidence points.
+     * * This function unifies the logic for handling "untrusted" points (those beyond
+     * high_confidence_count). It applies a logarithmic scale offset and adjusts
+     * the opacity logit.
+     */
+    void apply_low_confidence_modifiers(lfs::core::Tensor& scaling_cpu,
+                                        lfs::core::Tensor& opacity_cpu,
+                                        size_t num_points,
+                                        int high_conf_count,
+                                        float init_opacity) {
+        // Basic validation
+        if (high_conf_count < 0 || high_conf_count >= static_cast<int>(num_points)) {
+            return;
+        }
+
+        // Use global constants defined above
+        const float log_scale_offset = std::log(untrusted_scale_multiplier);
+
+        const float untrusted_opacity = init_opacity * untrusted_opacity_multiplier;
+        // Clamp opacity to avoid log(0) or log(1) numerical instability
+        const float safe_opacity = std::max(1e-6f, std::min(0.9999f, untrusted_opacity));
+        const float untrusted_logit = std::log(safe_opacity / (1.0f - safe_opacity));
+
+        // Get accessors (tensors must be on CPU)
+        auto scaling_acc = scaling_cpu.accessor<float, 2>();
+        auto opacity_acc = opacity_cpu.accessor<float, 2>();
+
+        for (size_t i = static_cast<size_t>(high_conf_count); i < num_points; ++i) {
+            // 1. Modify Scale: Add logarithmic offset to all 3 axes
+            // Multiplies the real scale by untrusted_scale_multiplier
+            for (size_t j = 0; j < 3; ++j) {
+                scaling_acc(i, j) += log_scale_offset;
+            }
+            // 2. Modify Opacity: Set new logit
+            opacity_acc(i, 0) = untrusted_logit;
+        }
+
+        LOG_INFO("Applied modifiers to {} low-confidence points: scale_mult={}, opacity_mult={}",
+                 num_points - high_conf_count,
+                 untrusted_scale_multiplier,
+                 untrusted_opacity_multiplier);
+    }
+
     // Point cloud adaptor for nanoflann
     struct PointCloudAdaptor {
         const float* points;
@@ -630,21 +677,8 @@ namespace lfs::core {
                                   .mul(params.optimization.init_scaling)
                                   .log()
                                   .unsqueeze(-1)
-                                  .expand(std::span<const int>(scale_expand_shape));
-
-                  // Apply untrusted scale multiplier to low-confidence points
-                const int high_conf_count = params.optimization.high_confidence_count;
-                if (high_conf_count >= 0 && high_conf_count < static_cast<int>(num_points)) {
-                    const float log_scale_offset = 5.0f;
-                    auto scaling_acc = scaling_cpu.accessor<float, 2>();
-                    for (size_t i = static_cast<size_t>(high_conf_count); i < num_points; ++i) {
-                        for (size_t j = 0; j < 3; ++j) {
-                            scaling_acc(i, j) += log_scale_offset;
-                        }
-                    }
-                    LOG_INFO("Applied untrusted_scale_multiplier={} to {} low-confidence points",
-                             log_scale_offset, num_points - high_conf_count);
-                }
+                                  .expand(std::span<const int>(scale_expand_shape))
+                                  .contiguous();
 
                 LOG_DEBUG("  scaling_cpu computed: is_valid={}, ptr={}, device={}, shape={}, numel={}",
                           scaling_cpu.is_valid(), static_cast<const void*>(scaling_cpu.ptr<float>()),
@@ -667,19 +701,13 @@ namespace lfs::core {
                 auto init_val = params.optimization.init_opacity;
                 opacity_cpu = Tensor::full({num_points, 1}, init_val, Device::CPU).logit();
 
-                // Apply untrusted opacity multiplier to low-confidence points
-                if (high_conf_count >= 0 && high_conf_count < static_cast<int>(num_points)) {
-                    const float untrusted_opacity_multiplier = 0.5f;
-                    const float untrusted_opacity = params.optimization.init_opacity * untrusted_opacity_multiplier;
-                    const float untrusted_logit = std::log(untrusted_opacity / (1.0f - untrusted_opacity));
-                    auto opacity_acc = opacity_cpu.accessor<float, 2>();
-                    for (size_t i = static_cast<size_t>(high_conf_count); i < num_points; ++i) {
-                        opacity_acc(i, 0) = untrusted_logit;
-                    }
-                    LOG_INFO("Applied untrusted_opacity_multiplier={} (opacity {:.3f} -> {:.3f}) to {} low-confidence points",
-                             untrusted_opacity_multiplier, params.optimization.init_opacity,
-                             untrusted_opacity, num_points - high_conf_count);
-                }
+                // Apply untrusted multipliers to low-confidence points using the helper function
+                apply_low_confidence_modifiers(
+                    scaling_cpu,
+                    opacity_cpu,
+                    num_points,
+                    params.optimization.high_confidence_count,
+                    params.optimization.init_opacity);
 
                 LOG_DEBUG("  opacity_cpu computed: is_valid={}, ptr={}, shape={}, numel={}",
                           opacity_cpu.is_valid(), static_cast<const void*>(opacity_cpu.ptr<float>()),
@@ -863,34 +891,28 @@ namespace lfs::core {
 
                 auto opacity_temp = Tensor::full({num_points, 1}, params.optimization.init_opacity, Device::CUDA).logit();
 
-                // Apply untrusted multipliers to low-confidence points
-                const int high_conf_count = params.optimization.high_confidence_count;
-                if (high_conf_count >= 0 && high_conf_count < static_cast<int>(num_points)) {
-                    float untrusted_scale_multiplier = 5.0f;
-                    float untrusted_opacity_multiplier = 0.5f;
-                    const float scale_mult = untrusted_scale_multiplier;
-                    const float opacity_mult = untrusted_opacity_multiplier;
-                    const float log_scale_offset = std::log(scale_mult);
-                    const float untrusted_opacity = params.optimization.init_opacity * opacity_mult;
-                    const float untrusted_logit = std::log(untrusted_opacity / (1.0f - untrusted_opacity));
+                
+                // Apply untrusted multipliers to low-confidence points using the helper function
 
+                const int high_conf_count = params.optimization.high_confidence_count;
+                if (params.optimization.high_confidence_count >= 0 &&
+                    params.optimization.high_confidence_count < static_cast<int>(num_points)) {
+
+                    // Tensors are on CUDA, need to move to CPU for modification
                     auto scaling_cpu = scaling_temp.cpu();
                     auto opacity_cpu = opacity_temp.cpu();
-                    auto scaling_acc = scaling_cpu.accessor<float, 2>();
-                    auto opacity_acc = opacity_cpu.accessor<float, 2>();
 
-                    for (size_t i = static_cast<size_t>(high_conf_count); i < num_points; ++i) {
-                        for (size_t j = 0; j < 3; ++j) {
-                            scaling_acc(i, j) += log_scale_offset;
-                        }
-                        opacity_acc(i, 0) = untrusted_logit;
-                    }
+                    // Apply modifiers using the helper function
+                    apply_low_confidence_modifiers(
+                        scaling_cpu,
+                        opacity_cpu,
+                        num_points,
+                        params.optimization.high_confidence_count,
+                        params.optimization.init_opacity);
 
+                    // Move back to CUDA
                     scaling_temp = scaling_cpu.cuda();
                     opacity_temp = opacity_cpu.cuda();
-
-                    LOG_INFO("Applied untrusted multipliers (scale={}, opacity={}) to {} low-confidence points",
-                             scale_mult, opacity_mult, num_points - high_conf_count);
                 }
 
                 auto colors_device = colors.cuda();
