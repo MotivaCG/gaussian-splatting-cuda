@@ -130,6 +130,7 @@ namespace {
             ::args::Flag enable_save_eval_images(parser, "save_eval_images", "Save eval images and depth maps", {"save-eval-images"});
             ::args::Flag save_depth(parser, "save_depth", "Save depth maps during training", {"save-depth"});
             ::args::Flag bg_modulation(parser, "bg_modulation", "Enable sinusoidal background modulation mixed with base background", {"bg-modulation"});
+            ::args::Flag bg_noise(parser, "bg_noise", "Enable per-pixel noise background (overrides bg-modulation)", {"bg-noise"});
             ::args::Flag random(parser, "random", "Use random initialization instead of SfM", {"random"});
             ::args::Flag gut(parser, "gut", "Enable GUT mode", {"gut"});
             ::args::Flag enable_sparsity(parser, "enable_sparsity", "Enable sparsity optimization", {"enable-sparsity"});
@@ -411,6 +412,7 @@ namespace {
                                         no_interop_flag = bool(no_interop),
                                         enable_save_eval_images_flag = bool(enable_save_eval_images),
                                         bg_modulation_flag = bool(bg_modulation),
+                                        bg_noise_flag = bool(bg_noise),
                                         random_flag = bool(random),
                                         gut_flag = bool(gut),
                                         enable_sparsity_flag = bool(enable_sparsity),
@@ -465,6 +467,7 @@ namespace {
                 setFlag(no_interop_flag, opt.no_interop);
                 setFlag(enable_save_eval_images_flag, opt.enable_save_eval_images);
                 setFlag(bg_modulation_flag, opt.bg_modulation);
+                setFlag(bg_noise_flag, opt.bg_noise);
                 setFlag(random_flag, opt.random);
                 setFlag(gut_flag, opt.gut);
                 setFlag(enable_sparsity_flag, opt.enable_sparsity);

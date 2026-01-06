@@ -128,6 +128,7 @@ namespace lfs::core {
                     {"prune_ratio", defaults.prune_ratio, "Final pruning ratio for sparsity"},
                     {"bg_modulation", defaults.bg_modulation, "Enable sinusoidal background modulation"},
                     {"high_confidence_count", defaults.high_confidence_count, "Number of points comming from actual SfM"},
+                    {"bg_noise", defaults.bg_noise, "Enable per-pixel noise background (overrides bg-modulation)"},
                     {"gut", defaults.gut, "Enable GUT mode"},
                     {"mask_mode", std::string("none"), "Mask mode: none, segment, ignore, alpha_consistent, matting"},
                     {"invert_masks", defaults.invert_masks, "Invert mask values"},
@@ -266,6 +267,7 @@ namespace lfs::core {
             opt_json["prune_ratio"] = prune_ratio;
             opt_json["bg_modulation"] = bg_modulation;
             opt_json["high_confidence_count"] = high_confidence_count;
+            opt_json["bg_noise"] = bg_noise;
 
             // Mask parameters
             static constexpr const char* MASK_MODE_NAMES[] = {"none", "segment", "ignore", "alpha_consistent", "hardmatting", "softmatting"};
@@ -423,6 +425,9 @@ namespace lfs::core {
             }
             if (json.contains("high_confidence_count")) {
                 params.high_confidence_count = json["high_confidence_count"];
+            }
+            if (json.contains("bg_noise")) {
+                params.bg_noise = json["bg_noise"];
             }
             if (json.contains("gut")) {
                 params.gut = json["gut"];
