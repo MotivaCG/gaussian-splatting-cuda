@@ -83,7 +83,6 @@ namespace lfs::core {
                     {"init_opacity", defaults.init_opacity, "Initial opacity value for new Gaussians"},
                     {"init_scaling", defaults.init_scaling, "Initial scaling value for new Gaussians"},
                     {"sh_degree", defaults.sh_degree, "Spherical harmonics degree"},
-                    {"num_workers", defaults.num_workers, "Number of image loader threads"},
                     {"max_cap", defaults.max_cap, "Maximum number of Gaussians for MCMC strategy"},
                     {"strategy", defaults.strategy, "Optimization strategy: mcmc, default"},
                     {"enable_eval", defaults.enable_eval, "Enable evaluation during training"},
@@ -113,8 +112,8 @@ namespace lfs::core {
                     {"init_rho", defaults.init_rho, "Initial ADMM penalty parameter"},
                     {"prune_ratio", defaults.prune_ratio, "Final pruning ratio for sparsity"},
                     {"bg_modulation", defaults.bg_modulation, "Enable sinusoidal background modulation"},
-                    {"high_confidence_count", defaults.high_confidence_count, "Number of points comming from actual SfM"},
                     {"bg_noise", defaults.bg_noise, "Enable per-pixel noise background (overrides bg-modulation)"},
+                    {"high_confidence_count", defaults.high_confidence_count, "Number of points comming from actual SfM"},
                     {"gut", defaults.gut, "Enable GUT mode"},
                     {"mask_mode", std::string("none"), "Mask mode: none, segment, ignore, alpha_consistent, matting"},
                     {"invert_masks", defaults.invert_masks, "Invert mask values"},
@@ -251,8 +250,8 @@ namespace lfs::core {
             opt_json["init_rho"] = init_rho;
             opt_json["prune_ratio"] = prune_ratio;
             opt_json["bg_modulation"] = bg_modulation;
-            opt_json["high_confidence_count"] = high_confidence_count;
             opt_json["bg_noise"] = bg_noise;
+            opt_json["high_confidence_count"] = high_confidence_count;
 
             // Mask parameters
             static constexpr const char* MASK_MODE_NAMES[] = {"none", "segment", "ignore", "alpha_consistent", "hardmatting", "softmatting"};
@@ -422,11 +421,11 @@ namespace lfs::core {
             if (json.contains("bg_modulation")) {
                 params.bg_modulation = json["bg_modulation"];
             }
-            if (json.contains("high_confidence_count")) {
-                params.high_confidence_count = json["high_confidence_count"];
-            }
             if (json.contains("bg_noise")) {
                 params.bg_noise = json["bg_noise"];
+            }
+            if (json.contains("high_confidence_count")) {
+                params.high_confidence_count = json["high_confidence_count"];
             }
             if (json.contains("gut")) {
                 params.gut = json["gut"];

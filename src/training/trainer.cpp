@@ -226,6 +226,12 @@ namespace lfs::training {
             // Supports both HardMatting (no cores) and SoftMatting (with cores)
             // -----------------------------------------------------------------
 
+            //TODO create a fused kernel as the original ls does
+            const Tensor mask_expanded = mask_2d.unsqueeze(0).expand({static_cast<int>(rendered.shape()[0]),
+                                                                      static_cast<int>(mask_2d.shape()[0]),
+                                                                      static_cast<int>(mask_2d.shape()[1])});
+            const Tensor mask_sum = mask_expanded.sum() + EPSILON;
+
             // Fixed defaults (not user-configurable): conservative, hole-closing.
             constexpr float kBgPhotometricRatio = 0.05f;
             constexpr float kBgAlphaPenaltyWeight = 0.10f;
