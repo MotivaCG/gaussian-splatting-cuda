@@ -1162,8 +1162,8 @@ namespace indicators {
 
         COORD cursor;
 
-        cursor.X = csbiInfo.dwCursorPosition.X + x;
-        cursor.Y = csbiInfo.dwCursorPosition.Y + y;
+        cursor.X = static_cast<SHORT>(csbiInfo.dwCursorPosition.X + x);
+        cursor.Y = static_cast<SHORT>(csbiInfo.dwCursorPosition.Y + y);
         SetConsoleCursorPosition(hStdout, cursor);
     }
 
@@ -2295,7 +2295,7 @@ namespace indicators {
                 get_value<details::ProgressBarOption::fill>(),
                 get_value<details::ProgressBarOption::lead>(),
                 get_value<details::ProgressBarOption::remainder>()};
-            writer.write(double(progress_) / double(max_progress) * 100.0f);
+            writer.write(static_cast<float>(double(progress_) / double(max_progress) * 100.0f));
 
             os << get_value<details::ProgressBarOption::end>();
 
@@ -2310,7 +2310,7 @@ namespace indicators {
             const auto end_length = get_value<details::ProgressBarOption::end>().size();
             const auto terminal_width = terminal_size().second;
             // prefix + bar_width + postfix should be <= terminal_width
-            const int remaining = terminal_width - (prefix_length + start_length + bar_width + end_length + postfix_length);
+            const int remaining = static_cast<int>(terminal_width - (prefix_length + start_length + bar_width + end_length + postfix_length));
             if (prefix_length == -1 || postfix_length == -1) {
                 os << "\r";
             } else if (remaining > 0) {
@@ -2605,7 +2605,7 @@ namespace indicators {
             const auto end_length = get_value<details::ProgressBarOption::end>().size();
             const auto terminal_width = terminal_size().second;
             // prefix + bar_width + postfix should be <= terminal_width
-            const int remaining = terminal_width - (prefix_length + start_length + bar_width + end_length + postfix_length);
+            const int remaining = static_cast<int>(terminal_width - (prefix_length + start_length + bar_width + end_length + postfix_length));
             if (prefix_length == -1 || postfix_length == -1) {
                 os << "\r";
             } else if (remaining > 0) {
@@ -2850,7 +2850,7 @@ namespace indicators {
             const auto end_length = get_value<details::ProgressBarOption::end>().size();
             const auto terminal_width = terminal_size().second;
             // prefix + bar_width + postfix should be <= terminal_width
-            const int remaining = terminal_width - (prefix_length + start_length + bar_width + end_length + postfix_length);
+            const int remaining = static_cast<int>(terminal_width - (prefix_length + start_length + bar_width + end_length + postfix_length));
             if (prefix_length == -1 || postfix_length == -1) {
                 os << "\r";
             } else if (remaining > 0) {
