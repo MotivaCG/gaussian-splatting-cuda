@@ -4,7 +4,6 @@
 #include "core/logger.hpp"
 #include "core/pinned_memory_allocator.hpp"
 #include "core/tensor_trace.hpp"
-#include "internal/cuda_stream_context.hpp"
 #include "internal/memory_pool.hpp"
 #include "internal/tensor_broadcast.hpp"
 #include "internal/tensor_functors.hpp"
@@ -65,8 +64,6 @@ namespace lfs::core {
     Tensor Tensor::load(LoadOp op, const LoadArgs& args) {
         Tensor result;
 
-        cudaStream_t current_stream = getCurrentCUDAStream();
-
         switch (op) {
         case LoadOp::Empty: {
             result.shape_ = args.shape;
@@ -75,7 +72,6 @@ namespace lfs::core {
             result.is_contiguous_ = true;
             result.device_ = args.device;
             result.dtype_ = args.dtype;
-            result.stream_ = current_stream;
             result.id_ = next_id_++;
 
             size_t bytes = result.shape_.elements() * dtype_size(result.dtype_);
@@ -84,9 +80,9 @@ namespace lfs::core {
                 // Create a dummy allocation to hold a valid shared_ptr
                 // We allocate 1 byte even though we don't need it
                 if (result.device_ == Device::CUDA) {
-                    void* dummy = CudaMemoryPool::instance().allocate(1, current_stream);
-                    result.data_owner_ = std::shared_ptr<void>(dummy, [current_stream](void* p) {
-                        CudaMemoryPool::instance().deallocate(p, current_stream);
+                    void* dummy = CudaMemoryPool::instance().allocate(1, nullptr);
+                    result.data_owner_ = std::shared_ptr<void>(dummy, [](void* p) {
+                        CudaMemoryPool::instance().deallocate(p, nullptr);
                     });
                 } else {
                     void* dummy = nullptr;
@@ -109,13 +105,13 @@ namespace lfs::core {
             }
 
             if (result.device_ == Device::CUDA) {
-                void* ptr = CudaMemoryPool::instance().allocate(bytes, current_stream);
+                void* ptr = CudaMemoryPool::instance().allocate(bytes, nullptr);
                 if (!ptr) {
                     LOG_ERROR("Failed to allocate {} bytes from memory pool", bytes);
                     return Tensor();
                 }
-                result.data_owner_ = std::shared_ptr<void>(ptr, [current_stream](void* p) {
-                    CudaMemoryPool::instance().deallocate(p, current_stream);
+                result.data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
+                    CudaMemoryPool::instance().deallocate(p, nullptr);
                 });
                 result.data_ = result.data_owner_.get();
                 result.compute_alignment(); // Compute alignment flags once
@@ -168,10 +164,9 @@ namespace lfs::core {
                 return result;
 
             if (result.device_ == Device::CUDA) {
-                cudaStream_t stream = result.stream_;
                 if (result.dtype_ == DataType::Float32) {
                     if (value == 0.0f) {
-                        cudaMemsetAsync(result.data_, 0, result.bytes(), stream);
+                        cudaMemset(result.data_, 0, result.bytes());
                     } else {
                         tensor_ops::launch_load_op(
                             result.data_,
@@ -180,35 +175,37 @@ namespace lfs::core {
                             LoadOp::Const,
                             &value,
                             result.dtype_,
-                            stream);
+                            nullptr);
+                        // No sync - tensor operation
                     }
                 } else if (result.dtype_ == DataType::Float16) {
                     if (value == 0.0f) {
-                        cudaMemsetAsync(result.data_, 0, result.bytes(), stream);
+                        cudaMemset(result.data_, 0, result.bytes());
                     } else {
-                        tensor_ops::launch_fill(static_cast<__half*>(result.data_),
-                                                result.numel(), __float2half(value), stream);
+                        // Create Float16 values on CPU, then copy to GPU
+                        std::vector<__half> temp(result.numel(), __float2half(value));
+                        cudaMemcpy(result.data_, temp.data(), result.bytes(), cudaMemcpyHostToDevice);
                     }
                 } else if (result.dtype_ == DataType::Bool) {
-                    const unsigned char fill_val = (value != 0.0f) ? 1 : 0;
-                    cudaMemsetAsync(result.data_, fill_val, result.bytes(), stream);
+                    unsigned char fill_val = (value != 0.0f) ? 1 : 0;
+                    cudaMemset(result.data_, fill_val, result.bytes());
                 } else if (result.dtype_ == DataType::Int32) {
                     if (value == 0.0f) {
-                        cudaMemsetAsync(result.data_, 0, result.bytes(), stream);
+                        cudaMemset(result.data_, 0, result.bytes());
                     } else {
-                        tensor_ops::launch_fill(static_cast<int*>(result.data_),
-                                                result.numel(), static_cast<int>(value), stream);
+                        std::vector<int> temp(result.numel(), static_cast<int>(value));
+                        cudaMemcpy(result.data_, temp.data(), result.bytes(), cudaMemcpyHostToDevice);
                     }
                 } else if (result.dtype_ == DataType::Int64) {
                     if (value == 0.0f) {
-                        cudaMemsetAsync(result.data_, 0, result.bytes(), stream);
+                        cudaMemset(result.data_, 0, result.bytes());
                     } else {
-                        tensor_ops::launch_fill(static_cast<int64_t*>(result.data_),
-                                                result.numel(), static_cast<int64_t>(value), stream);
+                        std::vector<int64_t> temp(result.numel(), static_cast<int64_t>(value));
+                        cudaMemcpy(result.data_, temp.data(), result.bytes(), cudaMemcpyHostToDevice);
                     }
                 } else if (result.dtype_ == DataType::UInt8) {
                     const uint8_t fill_val = static_cast<uint8_t>(std::clamp(value, 0.0f, 255.0f));
-                    cudaMemsetAsync(result.data_, fill_val, result.bytes(), stream);
+                    cudaMemset(result.data_, fill_val, result.bytes());
                 }
             } else {
                 if (result.dtype_ == DataType::Float32) {
@@ -255,19 +252,18 @@ namespace lfs::core {
             result.is_contiguous_ = true;
             result.device_ = args.device;
             result.dtype_ = args.dtype;
-            result.stream_ = current_stream;
             result.id_ = next_id_++;
 
             size_t bytes = count * dtype_size(result.dtype_);
 
             if (result.device_ == Device::CUDA) {
-                void* ptr = CudaMemoryPool::instance().allocate(bytes, current_stream);
+                void* ptr = CudaMemoryPool::instance().allocate(bytes, nullptr);
                 if (!ptr) {
                     LOG_ERROR("Failed to allocate {} bytes from memory pool", bytes);
                     return Tensor();
                 }
-                result.data_owner_ = std::shared_ptr<void>(ptr, [current_stream](void* p) {
-                    CudaMemoryPool::instance().deallocate(p, current_stream);
+                result.data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
+                    CudaMemoryPool::instance().deallocate(p, nullptr);
                 });
                 result.data_ = result.data_owner_.get();
 
@@ -279,12 +275,17 @@ namespace lfs::core {
                     dtype_name(result.dtype_));
 
                 if (result.dtype_ == DataType::Float32) {
-                    tensor_ops::launch_arange(static_cast<float*>(result.data_),
-                                              count, start, step, current_stream);
+                    std::vector<float> data(count);
+                    for (size_t i = 0; i < count; ++i) {
+                        data[i] = start + i * step;
+                    }
+                    cudaMemcpy(result.data_, data.data(), bytes, cudaMemcpyHostToDevice);
                 } else if (result.dtype_ == DataType::Int32) {
-                    tensor_ops::launch_arange(static_cast<int*>(result.data_),
-                                              count, static_cast<int>(start),
-                                              static_cast<int>(step), current_stream);
+                    std::vector<int> data(count);
+                    for (size_t i = 0; i < count; ++i) {
+                        data[i] = static_cast<int>(start + i * step);
+                    }
+                    cudaMemcpy(result.data_, data.data(), bytes, cudaMemcpyHostToDevice);
                 }
             } else {
                 // Use pinned memory for CPU tensors
@@ -324,11 +325,13 @@ namespace lfs::core {
             if (result.device_ == Device::CUDA) {
                 if (result.dtype_ == DataType::Float32) {
                     tensor_ops::launch_uniform(result.ptr<float>(), result.numel(), low, high,
-                                               RandomGenerator::instance().get_next_cuda_seed(), result.stream_);
+                                               RandomGenerator::instance().get_next_cuda_seed(), 0);
+                    // No sync - tensor operation
                 } else if (result.dtype_ == DataType::Int32) {
                     tensor_ops::launch_randint(result.ptr<int>(), result.numel(),
                                                static_cast<int>(low), static_cast<int>(high),
-                                               RandomGenerator::instance().get_next_cuda_seed(), result.stream_);
+                                               RandomGenerator::instance().get_next_cuda_seed(), 0);
+                    // No sync - tensor operation
                 }
             } else {
                 auto& gen = *static_cast<std::mt19937_64*>(
@@ -389,35 +392,39 @@ namespace lfs::core {
                 return result;
 
             if (result.device_ == Device::CUDA) {
-                cudaStream_t stream = result.stream_;
                 if (result.dtype_ == DataType::Int32) {
                     tensor_ops::launch_randint(result.ptr<int>(), result.numel(), low, high,
-                                               RandomGenerator::instance().get_next_cuda_seed(), stream);
+                                               RandomGenerator::instance().get_next_cuda_seed(), 0);
+                    // No sync - tensor operation
                 } else if (result.dtype_ == DataType::Float32) {
                     int* temp_buffer = static_cast<int*>(
-                        CudaMemoryPool::instance().allocate(result.numel() * sizeof(int), stream));
+                        CudaMemoryPool::instance().allocate(result.numel() * sizeof(int), nullptr));
 
                     if (temp_buffer) {
                         tensor_ops::launch_randint(temp_buffer, result.numel(), low, high,
-                                                   RandomGenerator::instance().get_next_cuda_seed(), stream);
+                                                   RandomGenerator::instance().get_next_cuda_seed(), 0);
 
                         tensor_ops::launch_convert_type<int, float>(temp_buffer, result.ptr<float>(),
-                                                                    result.numel(), stream);
-                        CudaMemoryPool::instance().deallocate(temp_buffer, stream);
+                                                                    result.numel(), 0);
+                        // No sync - tensor operation
+
+                        CudaMemoryPool::instance().deallocate(temp_buffer, nullptr);
                     } else {
                         LOG_ERROR("Failed to allocate temp buffer from memory pool");
                     }
                 } else if (result.dtype_ == DataType::UInt8) {
                     int* temp_buffer = static_cast<int*>(
-                        CudaMemoryPool::instance().allocate(result.numel() * sizeof(int), stream));
+                        CudaMemoryPool::instance().allocate(result.numel() * sizeof(int), nullptr));
 
                     if (temp_buffer) {
                         tensor_ops::launch_randint(temp_buffer, result.numel(), low, high,
-                                                   RandomGenerator::instance().get_next_cuda_seed(), stream);
+                                                   RandomGenerator::instance().get_next_cuda_seed(), 0);
 
                         tensor_ops::launch_convert_type<int, uint8_t>(temp_buffer, result.ptr<uint8_t>(),
-                                                                      result.numel(), stream);
-                        CudaMemoryPool::instance().deallocate(temp_buffer, stream);
+                                                                      result.numel(), 0);
+                        // No sync - tensor operation
+
+                        CudaMemoryPool::instance().deallocate(temp_buffer, nullptr);
                     } else {
                         LOG_ERROR("Failed to allocate temp buffer from memory pool");
                     }
@@ -455,7 +462,8 @@ namespace lfs::core {
 
             if (result.device_ == Device::CUDA) {
                 tensor_ops::launch_bernoulli(result.ptr<float>(), result.numel(), p,
-                                             RandomGenerator::instance().get_next_cuda_seed(), result.stream_);
+                                             RandomGenerator::instance().get_next_cuda_seed(), 0);
+                // No sync - tensor operation
             } else {
                 auto& gen = *static_cast<std::mt19937_64*>(
                     RandomGenerator::instance().get_generator(Device::CPU));
@@ -487,7 +495,8 @@ namespace lfs::core {
             if (weights->device() == Device::CUDA) {
                 tensor_ops::launch_multinomial(weights->ptr<float>(), result.ptr<int64_t>(),
                                                n, num_samples, replacement,
-                                               RandomGenerator::instance().get_next_cuda_seed(), result.stream_);
+                                               RandomGenerator::instance().get_next_cuda_seed(), 0);
+                // No sync - tensor operation
             } else {
                 auto weights_data = weights->to_vector();
 
@@ -547,7 +556,8 @@ namespace lfs::core {
             size_t min_dim = std::min(m, n);
 
             if (result.device_ == Device::CUDA) {
-                tensor_ops::launch_eye(result.ptr<float>(), m, n, result.stream_);
+                tensor_ops::launch_eye(result.ptr<float>(), m, n, nullptr);
+                // No sync - tensor operation
             } else {
                 float* data = result.ptr<float>();
                 for (size_t i = 0; i < min_dim; ++i) {
@@ -629,10 +639,9 @@ namespace lfs::core {
 
                 std::vector<size_t> out_shape = args.keepdim ? std::vector<size_t>{1, N} : std::vector<size_t>{N};
                 auto result = Tensor::empty(TensorShape(out_shape), device_, dtype_);
-                result.set_stream(stream_); // Propagate stream
 
                 LOG_DEBUG("[COLUMN REDUCE] M={}, N={}, op={}", M, N, static_cast<int>(op));
-                tensor_ops::launch_column_reduce(ptr<float>(), result.ptr<float>(), M, N, op, stream_);
+                tensor_ops::launch_column_reduce(ptr<float>(), result.ptr<float>(), M, N, op, nullptr);
                 return result;
             }
         }
@@ -813,11 +822,12 @@ namespace lfs::core {
 
             if (input->device_ == Device::CUDA) {
                 if (out_dtype == DataType::Float32) {
-                    tensor_ops::launch_fill(static_cast<float*>(result.data_ptr()),
-                                            result.numel(), identity_value, result.stream_);
+                    std::vector<float> temp(result.numel(), identity_value);
+                    cudaMemcpy(result.data_ptr(), temp.data(),
+                               result.bytes(), cudaMemcpyHostToDevice);
                 } else if (out_dtype == DataType::Bool) {
-                    const unsigned char bool_val = (identity_value != 0.0f) ? 1 : 0;
-                    cudaMemsetAsync(result.data_ptr(), bool_val, result.bytes(), result.stream_);
+                    unsigned char bool_val = (identity_value != 0.0f) ? 1 : 0;
+                    cudaMemset(result.data_ptr(), bool_val, result.bytes());
                 }
             } else {
                 if (out_dtype == DataType::Float32) {
@@ -837,7 +847,8 @@ namespace lfs::core {
                 input->shape_.dims().data(), input->shape_.rank(),
                 axes.data(), axes.size(),
                 args.keepdim, op,
-                input->dtype_, result.stream_);
+                input->dtype_, nullptr);
+            // No sync - tensor operation
         } else {
             // CPU implementation
 
@@ -1282,6 +1293,7 @@ namespace lfs::core {
                 result.shape().rank(),
                 result.numel(),
                 0);
+            // No sync - tensor operation
         } else {
             // CPU implementation of where operation
             const unsigned char* cond = static_cast<const unsigned char*>(a_broadcast.data_ptr());
@@ -1690,6 +1702,7 @@ namespace lfs::core {
                     row_size,
                     element_size,
                     nullptr);
+                // No sync - tensor operation
             } else {
                 // CPU: Simple memcpy per row
                 size_t result_offset = 0;
@@ -1732,6 +1745,7 @@ namespace lfs::core {
                 resolved_dim,
                 element_size,
                 nullptr);
+            // No sync - tensor operation
         } else {
             // CPU fallback
             for (size_t outer = 0; outer < outer_size; ++outer) {
@@ -1890,21 +1904,20 @@ namespace lfs::core {
         auto result = empty(shape_, device_, dtype_);
 
         if (device_ == Device::CUDA) {
-            cudaStream_t stream = result.stream_;
             if (dtype_ == DataType::Float32) {
                 // Single-pass: read from source, write clamped to destination
                 const float* src = ptr<float>();
                 float* dst = result.ptr<float>();
 
                 // Use our optimized kernel
-                tensor_ops::launch_clamp_fused(src, dst, min_val, max_val, numel(), stream);
+                tensor_ops::launch_clamp_fused(src, dst, min_val, max_val, numel(), nullptr);
             } else if (dtype_ == DataType::Int32) {
                 // Fallback: copy then clamp for int
-                cudaMemcpyAsync(result.data_, data_ptr(), bytes(), cudaMemcpyDeviceToDevice, stream);
+                cudaMemcpy(result.data_, data_ptr(), bytes(), cudaMemcpyDeviceToDevice);
                 tensor_ops::launch_clamp_scalar_int(result.ptr<int>(),
                                                     static_cast<int>(min_val),
                                                     static_cast<int>(max_val),
-                                                    numel(), stream);
+                                                    numel(), nullptr);
             }
         } else {
             // CPU: simple loop

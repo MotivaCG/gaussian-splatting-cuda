@@ -4,12 +4,9 @@
 
 #pragma once
 
-#include <cuda_runtime.h>
-
 namespace fast_lfs::optimizer {
 
     // Pure CUDA interface - no torch dependencies
-    // stream: optional CUDA stream for parallel execution (nullptr = default stream)
     void adam_step_raw(
         float* param,
         float* exp_avg,
@@ -21,8 +18,7 @@ namespace fast_lfs::optimizer {
         const float beta2,
         const float eps,
         const float bias_correction1_rcp,
-        const float bias_correction2_sqrt_rcp,
-        cudaStream_t stream = nullptr);
+        const float bias_correction2_sqrt_rcp);
 
     // Batched zero operation for MCMC relocation (much faster than CPU loop)
     void zero_rows_at_indices(

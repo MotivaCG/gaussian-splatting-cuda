@@ -198,7 +198,6 @@ namespace lfs::training {
 
         lfs::core::Tensor background_{};
         lfs::core::Tensor bg_mix_buffer_;
-        float* bg_rgb_pinned_ = nullptr; // Pinned host buffer for async copy
         std::unique_ptr<TrainingProgress> progress_;
         size_t train_dataset_size_ = 0;
 
@@ -240,8 +239,5 @@ namespace lfs::training {
         std::function<void()> callback_;
         std::atomic<bool> callback_busy_{false};
         cudaStream_t callback_stream_ = nullptr;
-
-        // GPU-side synchronization event (reusable, avoids CPU blocking)
-        cudaEvent_t img_sync_event_ = nullptr;
     };
 } // namespace lfs::training

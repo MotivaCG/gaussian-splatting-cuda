@@ -306,9 +306,6 @@ namespace lfs::training {
 
         cudaStreamCreateWithFlags(&callback_stream_, cudaStreamNonBlocking);
 
-        // Create reusable event for GPU-side sync (avoids CPU blocking)
-        cudaEventCreateWithFlags(&img_sync_event_, cudaEventDisableTiming);
-
         LOG_DEBUG("Trainer constructed with {} cameras", base_dataset_->get_cameras().size());
     }
 
@@ -323,9 +320,6 @@ namespace lfs::training {
         }
 
         cudaStreamCreateWithFlags(&callback_stream_, cudaStreamNonBlocking);
-
-        // Create reusable event for GPU-side sync (avoids CPU blocking)
-        cudaEventCreateWithFlags(&img_sync_event_, cudaEventDisableTiming);
 
         // Datasets will be created in initialize() from Scene cameras
         if (!scene.getTrainCameras()) {
@@ -528,12 +522,6 @@ namespace lfs::training {
         }
         callback_busy_ = false;
 
-        // Destroy GPU sync event
-        if (img_sync_event_) {
-            cudaEventDestroy(img_sync_event_);
-            img_sync_event_ = nullptr;
-        }
-
         cudaDeviceSynchronize();
 
         strategy_.reset();
@@ -541,12 +529,6 @@ namespace lfs::training {
         sparsity_optimizer_.reset();
         evaluator_.reset();
         progress_.reset();
-
-        // Free pinned buffer
-        if (bg_rgb_pinned_ != nullptr) {
-            cudaFreeHost(bg_rgb_pinned_);
-            bg_rgb_pinned_ = nullptr;
-        }
         train_dataset_.reset();
         val_dataset_.reset();
 
@@ -649,24 +631,21 @@ namespace lfs::training {
             return background_;
         }
 
-        // Lazy allocate pinned + GPU buffer
-        if (bg_rgb_pinned_ == nullptr)
-            cudaHostAlloc(&bg_rgb_pinned_, 3 * sizeof(float), cudaHostAllocDefault);
-        if (bg_mix_buffer_.is_empty())
-            bg_mix_buffer_ = lfs::core::Tensor::empty({3}, lfs::core::Device::CUDA, lfs::core::DataType::Float32);
-
-        // Sine-based RGB with prime periods
+        // Sine-based RGB with prime periods for color diversity
         const float pr = TWO_PI * static_cast<float>(iter % BG_PERIOD_R) / BG_PERIOD_R;
         const float pg = TWO_PI * static_cast<float>(iter % BG_PERIOD_G) / BG_PERIOD_G;
         const float pb = TWO_PI * static_cast<float>(iter % BG_PERIOD_B) / BG_PERIOD_B;
 
-        bg_rgb_pinned_[0] = std::clamp(0.5f * (1.0f + std::sin(pr)) * w, CLAMP_EPS, 1.0f - CLAMP_EPS);
-        bg_rgb_pinned_[1] = std::clamp(0.5f * (1.0f + std::sin(pg + PHASE_OFFSET_G)) * w, CLAMP_EPS, 1.0f - CLAMP_EPS);
-        bg_rgb_pinned_[2] = std::clamp(0.5f * (1.0f + std::sin(pb + PHASE_OFFSET_B)) * w, CLAMP_EPS, 1.0f - CLAMP_EPS);
+        const float result[3] = {
+            std::clamp(0.5f * (1.0f + std::sin(pr)) * w, CLAMP_EPS, 1.0f - CLAMP_EPS),
+            std::clamp(0.5f * (1.0f + std::sin(pg + PHASE_OFFSET_G)) * w, CLAMP_EPS, 1.0f - CLAMP_EPS),
+            std::clamp(0.5f * (1.0f + std::sin(pb + PHASE_OFFSET_B)) * w, CLAMP_EPS, 1.0f - CLAMP_EPS)};
 
-        // Async copy from persistent pinned buffer
-        cudaMemcpyAsync(bg_mix_buffer_.ptr<float>(), bg_rgb_pinned_, 3 * sizeof(float),
-                        cudaMemcpyHostToDevice, bg_mix_buffer_.stream());
+        if (bg_mix_buffer_.is_empty()) {
+            bg_mix_buffer_ = lfs::core::Tensor::empty({3}, lfs::core::Device::CUDA, lfs::core::DataType::Float32);
+        }
+
+        cudaMemcpyAsync(bg_mix_buffer_.ptr<float>(), result, sizeof(result), cudaMemcpyHostToDevice, nullptr);
         return bg_mix_buffer_;
     }
 
@@ -1219,24 +1198,8 @@ namespace lfs::training {
                 lfs::core::Camera* cam = example.data.camera;
                 lfs::core::Tensor gt_image = std::move(example.data.image);
 
-                // GPU-side sync: make default stream wait for image loading stream
-                // This avoids CPU blocking - the GPU handles synchronization
-                if (cudaStream_t img_stream = gt_image.stream(); img_stream != nullptr) {
-                    cudaEventRecord(img_sync_event_, img_stream);
-                    cudaStreamWaitEvent(nullptr, img_sync_event_, 0); // default stream waits
-                }
-
                 // Store pipelined mask for use in train_step
                 pipelined_mask_ = example.mask.has_value() ? std::move(*example.mask) : lfs::core::Tensor();
-
-                // GPU-side sync for mask stream if different from image stream
-                if (pipelined_mask_.is_valid()) {
-                    if (cudaStream_t mask_stream = pipelined_mask_.stream();
-                        mask_stream != nullptr && mask_stream != gt_image.stream()) {
-                        cudaEventRecord(img_sync_event_, mask_stream);
-                        cudaStreamWaitEvent(nullptr, img_sync_event_, 0);
-                    }
-                }
 
                 auto step_result = train_step(iter, cam, gt_image, render_mode, stop_token);
                 if (!step_result) {
