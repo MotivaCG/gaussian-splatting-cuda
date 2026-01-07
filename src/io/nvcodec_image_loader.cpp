@@ -829,7 +829,7 @@ namespace lfs::io {
             decoder,
             code_streams.data(),
             nv_images.data(),
-            batch_size,
+            (int)batch_size,
             &decode_params,
             &decode_future);
 
@@ -994,7 +994,7 @@ namespace lfs::io {
             decoder,
             code_streams.data(),
             nv_images.data(),
-            batch_size,
+            (int)batch_size,
             &decode_params,
             &decode_future);
 
