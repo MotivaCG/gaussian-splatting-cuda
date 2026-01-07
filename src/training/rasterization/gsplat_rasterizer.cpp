@@ -9,21 +9,6 @@
 #include "training/kernels/grad_alpha.hpp"
 #include <spdlog/spdlog.h>
 
-// Debug macro for CUDA sync points - only active in debug builds
-// Disabled by default for performance (saves ~50% API overhead)
-#ifdef GSPLAT_DEBUG_SYNC_ENABLED
-#define GSPLAT_DEBUG_SYNC(msg)                                            \
-    do {                                                                  \
-        cudaDeviceSynchronize();                                          \
-        auto err = cudaGetLastError();                                    \
-        if (err != cudaSuccess) {                                         \
-            LOG_ERROR("CUDA error {}: {}", msg, cudaGetErrorString(err)); \
-        }                                                                 \
-    } while (0)
-#else
-#define GSPLAT_DEBUG_SYNC(msg) ((void)0)
-#endif
-
 namespace lfs::training {
 
     std::expected<std::pair<RenderOutput, GsplatRasterizeContext>, std::string> gsplat_rasterize_forward(
@@ -493,7 +478,12 @@ namespace lfs::training {
             bg_ptr = ctx.bg_color.ptr<float>();
         }
 
-        GSPLAT_DEBUG_SYNC("BEFORE gsplat backward");
+        // Debug: check for errors before gsplat backward
+        cudaDeviceSynchronize();
+        auto err_pre_gsplat = cudaGetLastError();
+        if (err_pre_gsplat != cudaSuccess) {
+            LOG_ERROR("CUDA error BEFORE gsplat backward: {}", cudaGetErrorString(err_pre_gsplat));
+        }
 
         // Call backward with raw pointers
         gsplat_lfs::rasterize_from_world_with_sh_bwd(
@@ -547,7 +537,12 @@ namespace lfs::training {
             nullptr // stream
         );
 
-        GSPLAT_DEBUG_SYNC("AFTER gsplat backward");
+        // Debug: check for errors after gsplat backward
+        cudaDeviceSynchronize();
+        auto err_post_gsplat = cudaGetLastError();
+        if (err_post_gsplat != cudaSuccess) {
+            LOG_ERROR("CUDA error AFTER gsplat backward: {}", cudaGetErrorString(err_post_gsplat));
+        }
 
         // ============ Chain rule for activation functions ============
         // gsplat backward returns gradients w.r.t. activated parameters
@@ -558,13 +553,21 @@ namespace lfs::training {
         // In-place: v_scales_ptr *= scales
         kernels::launch_exp_backward(v_scales_ptr, ctx.scales.ptr<float>(), N, nullptr);
 
-        GSPLAT_DEBUG_SYNC("AFTER exp_backward");
+        cudaDeviceSynchronize();
+        auto err_exp = cudaGetLastError();
+        if (err_exp != cudaSuccess) {
+            LOG_ERROR("CUDA error AFTER exp_backward: {}", cudaGetErrorString(err_exp));
+        }
 
         // Opacities: sigmoid(raw) -> v_opacities_raw = v_opacities * sigmoid * (1 - sigmoid)
         // In-place: v_opacities_ptr *= sigmoid * (1 - sigmoid)
         kernels::launch_sigmoid_backward(v_opacities_ptr, ctx.opacities.ptr<float>(), N, nullptr);
 
-        GSPLAT_DEBUG_SYNC("AFTER sigmoid_backward");
+        cudaDeviceSynchronize();
+        auto err_sigmoid = cudaGetLastError();
+        if (err_sigmoid != cudaSuccess) {
+            LOG_ERROR("CUDA error AFTER sigmoid_backward: {}", cudaGetErrorString(err_sigmoid));
+        }
 
         // Quaternions: normalize(raw) -> need Jacobian of normalization
         // v_raw = (v_activated - q_norm * dot(q_norm, v_activated)) / ||q_raw||
@@ -577,7 +580,11 @@ namespace lfs::training {
             N,
             nullptr);
 
-        GSPLAT_DEBUG_SYNC("AFTER quat_normalize_backward");
+        cudaDeviceSynchronize();
+        auto err_quat = cudaGetLastError();
+        if (err_quat != cudaSuccess) {
+            LOG_ERROR("CUDA error AFTER quat_normalize_backward: {}", cudaGetErrorString(err_quat));
+        }
 
         // ============ Accumulate gradients into optimizer using CUDA kernels ============
         // This avoids any tensor operations that might allocate from memory pool
@@ -622,7 +629,12 @@ namespace lfs::training {
             }
         }
 
-        GSPLAT_DEBUG_SYNC("BEFORE SH kernel");
+        // Debug: sync and check for errors before SH kernel
+        cudaDeviceSynchronize();
+        auto err_pre = cudaGetLastError();
+        if (err_pre != cudaSuccess) {
+            LOG_ERROR("CUDA error BEFORE SH kernel: {}", cudaGetErrorString(err_pre));
+        }
 
         kernels::launch_grad_accumulate_sh(
             optimizer.get_grad(ParamType::Sh0).ptr<float>(),
@@ -633,7 +645,13 @@ namespace lfs::training {
             K_dst, // K_dst: destination buffer width
             nullptr);
 
-        GSPLAT_DEBUG_SYNC("AFTER SH kernel");
+        // Debug: sync and check for errors after SH kernel
+        cudaDeviceSynchronize();
+        auto err_post = cudaGetLastError();
+        if (err_post != cudaSuccess) {
+            LOG_ERROR("CUDA error AFTER SH kernel: {} (N={}, K={}, K_dst={}, dst_shN={})",
+                      cudaGetErrorString(err_post), N, K, K_dst, (void*)dst_shN);
+        }
 
         // Update densification info if available (shape is [2, N])
         const bool update_densification_info =
@@ -649,7 +667,11 @@ namespace lfs::training {
                 N,
                 nullptr);
 
-            GSPLAT_DEBUG_SYNC("AFTER grad_norm_accumulate");
+            cudaDeviceSynchronize();
+            auto err_dens = cudaGetLastError();
+            if (err_dens != cudaSuccess) {
+                LOG_ERROR("CUDA error AFTER grad_norm_accumulate: {}", cudaGetErrorString(err_dens));
+            }
         }
 
         // Free internally allocated buffers from forward
@@ -660,12 +682,22 @@ namespace lfs::training {
             cudaFree(ctx.flatten_ids_ptr);
         }
 
-        GSPLAT_DEBUG_SYNC("AFTER cudaFree");
+        // Extra sync after cudaFree to catch any lingering errors
+        cudaDeviceSynchronize();
+        auto err_free = cudaGetLastError();
+        if (err_free != cudaSuccess) {
+            LOG_ERROR("CUDA error AFTER cudaFree: {}", cudaGetErrorString(err_free));
+        }
 
         // End arena frame to release memory from forward pass
         arena.end_frame(ctx.frame_id);
 
-        GSPLAT_DEBUG_SYNC("AFTER end_frame");
+        // Final final sync
+        cudaDeviceSynchronize();
+        auto err_arena = cudaGetLastError();
+        if (err_arena != cudaSuccess) {
+            LOG_ERROR("CUDA error AFTER end_frame: {}", cudaGetErrorString(err_arena));
+        }
     }
 
 } // namespace lfs::training

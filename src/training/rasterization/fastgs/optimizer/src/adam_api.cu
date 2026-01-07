@@ -22,8 +22,7 @@ namespace fast_lfs::optimizer {
         const float beta2,
         const float eps,
         const float bias_correction1_rcp,
-        const float bias_correction2_sqrt_rcp,
-        cudaStream_t stream) {
+        const float bias_correction2_sqrt_rcp) {
 
         // Validate pointers
         CHECK_CUDA_PTR(param, "param");
@@ -48,8 +47,7 @@ namespace fast_lfs::optimizer {
             beta2,
             eps,
             bias_correction1_rcp,
-            bias_correction2_sqrt_rcp,
-            stream);
+            bias_correction2_sqrt_rcp);
     }
 
     void zero_rows_at_indices(

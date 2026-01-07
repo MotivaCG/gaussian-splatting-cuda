@@ -299,7 +299,8 @@ namespace lfs::core::tensor_ops {
 
     void launch_max_scalar(const float* data, float* result, size_t n, cudaStream_t stream) {
         if (n == 0) {
-            launch_fill(result, 1, -FLT_MAX, stream); // Empty array sentinel
+            float v = -FLT_MAX;
+            cudaMemcpyAsync(result, &v, sizeof(float), cudaMemcpyHostToDevice, stream);
             return;
         }
 
@@ -319,7 +320,8 @@ namespace lfs::core::tensor_ops {
 
     void launch_min_scalar(const float* data, float* result, size_t n, cudaStream_t stream) {
         if (n == 0) {
-            launch_fill(result, 1, FLT_MAX, stream); // Empty array sentinel
+            float v = FLT_MAX;
+            cudaMemcpyAsync(result, &v, sizeof(float), cudaMemcpyHostToDevice, stream);
             return;
         }
 

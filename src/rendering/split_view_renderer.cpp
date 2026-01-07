@@ -129,7 +129,7 @@ namespace lfs::rendering {
             // Set texture
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, texture_id);
-            shader->set("texture0", 0);
+            (void)shader->set("texture0", 0);
         } else {
             // Simple OpenGL blit without shader
             glActiveTexture(GL_TEXTURE0);
@@ -141,7 +141,7 @@ namespace lfs::rendering {
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
         if (shader) {
-            shader->unbind();
+            (void)shader->unbind();
         }
 
         // Restore state
@@ -466,7 +466,7 @@ namespace lfs::rendering {
 
         LOG_TRACE("Drew composite quad");
 
-        split_shader_.unbind();
+        (void)split_shader_.unbind();
 
         // Restore state
         glDisable(GL_BLEND);

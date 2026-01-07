@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include <cuda_runtime.h>
-
 namespace fast_lfs::optimizer {
 
     void adam_step(
@@ -19,7 +17,6 @@ namespace fast_lfs::optimizer {
         const float beta2,
         const float eps,
         const float bias_correction1_rcp,
-        const float bias_correction2_sqrt_rcp,
-        cudaStream_t stream = nullptr);
+        const float bias_correction2_sqrt_rcp);
 
 }

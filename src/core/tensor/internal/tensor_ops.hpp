@@ -22,6 +22,7 @@ namespace lfs::core {
 // Only include in CUDA compilation units - C++ files will link to .cu implementations
 #ifdef __CUDACC__
 #include "tensor_generic_ops.cuh"
+#define CUDA_INFINITY FLT_MAX
 #else
 // Forward declaration for C++ files - implementation in tensor_ops.cu
 namespace lfs::core::tensor_ops {
@@ -37,6 +38,7 @@ namespace lfs::core::tensor_ops {
     void launch_scalar_op_generic(const T* data, T scalar, OutputT* result, size_t n,
                                   Op op, cudaStream_t stream = nullptr);
 } // namespace lfs::core::tensor_ops
+#define CUDA_INFINITY INFINITY
 #endif
 
 // ============= CPU Helpers (Generic, Header-Only) =============
@@ -106,12 +108,6 @@ namespace lfs::core::tensor_ops {
     void launch_load_op(void* output, const size_t* shape, size_t rank,
                         LoadOp op, const void* args,
                         DataType dtype, cudaStream_t stream);
-
-    // ============= Fill / Arange (GPU-native) =============
-    template <typename T>
-    void launch_fill(T* output, size_t n, T value, cudaStream_t stream);
-    template <typename T>
-    void launch_arange(T* output, size_t n, T start, T step, cudaStream_t stream);
 
     // Unified Type Conversion Template
     template <typename SrcT, typename DstT>

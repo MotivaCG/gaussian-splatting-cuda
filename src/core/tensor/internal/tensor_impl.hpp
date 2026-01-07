@@ -337,7 +337,6 @@ namespace lfs::core {
             }
 
             auto result = Tensor::empty(broadcast_shape, device_, out_dtype);
-            result.stream_ = stream_; // Propagate stream from input
 
             bool a_needs_broadcast = (shape_ != broadcast_shape);
             bool b_needs_broadcast = (other.shape() != broadcast_shape);
@@ -384,7 +383,6 @@ namespace lfs::core {
             validate_unary_op();
 
             auto result = Tensor::empty(shape_, device_, out_dtype);
-            result.stream_ = stream_; // Propagate stream from input
 
             if (device_ == Device::CUDA) {
                 // Handle different input tensor dtypes
@@ -393,23 +391,24 @@ namespace lfs::core {
                     if (out_dtype == DataType::Bool) {
                         tensor_ops::launch_scalar_op_generic(
                             ptr<int>(), scalar_int, result.ptr<unsigned char>(),
-                            numel(), op, stream_);
+                            numel(), op, nullptr);
                     } else if (out_dtype == DataType::Int32) {
                         tensor_ops::launch_scalar_op_generic(
                             ptr<int>(), scalar_int, result.ptr<int>(),
-                            numel(), op, stream_);
+                            numel(), op, nullptr);
                     }
                 } else { // Float32
                     if (out_dtype == DataType::Bool) {
                         tensor_ops::launch_scalar_op_generic(
                             ptr<float>(), scalar, result.ptr<unsigned char>(),
-                            numel(), op, stream_);
+                            numel(), op, nullptr);
                     } else {
                         tensor_ops::launch_scalar_op_generic(
                             ptr<float>(), scalar, result.ptr<float>(),
-                            numel(), op, stream_);
+                            numel(), op, nullptr);
                     }
                 }
+                // No sync needed - operations are async
             } else {
                 // CPU implementation
                 if (dtype_ == DataType::Int32) {
@@ -451,7 +450,8 @@ namespace lfs::core {
             if (device_ == Device::CUDA) {
                 tensor_ops::launch_scalar_op_generic(
                     ptr<float>(), scalar, ptr<float>(),
-                    numel(), op, stream_);
+                    numel(), op, nullptr);
+                // No sync - tensor operation
             } else {
                 // CPU implementation
                 float* dst = ptr<float>();
@@ -485,7 +485,8 @@ namespace lfs::core {
             if (device_ == Device::CUDA) {
                 tensor_ops::launch_binary_op_generic(
                     ptr<SrcT>(), other.ptr<SrcT>(), ptr<SrcT>(),
-                    numel(), op, stream_);
+                    numel(), op, nullptr);
+                // No sync - tensor operation
             } else {
                 // CPU implementation
                 apply_binary_cpu(ptr<SrcT>(), other.ptr<SrcT>(), ptr<SrcT>(),
@@ -1367,7 +1368,7 @@ namespace lfs::core {
         // Scalar reduce operations - use direct CUB path for CUDA Float32 contiguous tensors
         float sum_scalar() const {
             if (device_ == Device::CUDA && dtype_ == DataType::Float32 && is_contiguous_) {
-                return tensor_ops::direct_sum_scalar(ptr<float>(), numel(), stream_);
+                return tensor_ops::direct_sum_scalar(ptr<float>(), numel(), nullptr);
             }
             auto result = sum();
             if (dtype_ == DataType::Bool) {
@@ -1378,21 +1379,21 @@ namespace lfs::core {
 
         float mean_scalar() const {
             if (device_ == Device::CUDA && dtype_ == DataType::Float32 && is_contiguous_) {
-                return tensor_ops::direct_mean_scalar(ptr<float>(), numel(), stream_);
+                return tensor_ops::direct_mean_scalar(ptr<float>(), numel(), nullptr);
             }
             return mean().item();
         }
 
         float min_scalar() const {
             if (device_ == Device::CUDA && dtype_ == DataType::Float32 && is_contiguous_) {
-                return tensor_ops::direct_min_scalar(ptr<float>(), numel(), stream_);
+                return tensor_ops::direct_min_scalar(ptr<float>(), numel(), nullptr);
             }
             return min().item();
         }
 
         float max_scalar() const {
             if (device_ == Device::CUDA && dtype_ == DataType::Float32 && is_contiguous_) {
-                return tensor_ops::direct_max_scalar(ptr<float>(), numel(), stream_);
+                return tensor_ops::direct_max_scalar(ptr<float>(), numel(), nullptr);
             }
             return max().item();
         }

@@ -136,9 +136,8 @@ namespace lfs::io {
         struct PendingPair {
             std::optional<lfs::core::Tensor> image;
             std::optional<lfs::core::Tensor> mask;
-            cudaStream_t image_stream = nullptr; // Stream used to load image
-            cudaStream_t mask_stream = nullptr;  // Stream used to load mask (may differ)
-            bool mask_expected = false;          // True if a mask was requested for this sequence_id
+            cudaStream_t stream = nullptr;
+            bool mask_expected = false; // True if a mask was requested for this sequence_id
         };
 
         template <typename T>
