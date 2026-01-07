@@ -129,7 +129,10 @@ namespace lfs::rendering {
             // Set texture
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, texture_id);
-            (void)shader->set("texture0", 0);
+            if (auto result = shader->set("texture0", 0); !result) {
+                LOG_TRACE("Failed to set texture0: {}", result.error());
+            }
+
         } else {
             // Simple OpenGL blit without shader
             glActiveTexture(GL_TEXTURE0);
@@ -141,7 +144,9 @@ namespace lfs::rendering {
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
         if (shader) {
-            (void)shader->unbind();
+            if (auto result = split_shader_.unbind(); !result) {
+                LOG_TRACE("Failed to unbind shader: {}", result.error());
+            }
         }
 
         // Restore state
@@ -466,7 +471,9 @@ namespace lfs::rendering {
 
         LOG_TRACE("Drew composite quad");
 
-        (void)split_shader_.unbind();
+        if (auto result = split_shader_.unbind(); !result) {
+            LOG_TRACE("Failed to unbind shader: {}", result.error());
+        }
 
         // Restore state
         glDisable(GL_BLEND);
