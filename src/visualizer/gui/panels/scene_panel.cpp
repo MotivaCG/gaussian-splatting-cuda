@@ -6,6 +6,10 @@
 
 #include "core/image_io.hpp"
 #include "core/logger.hpp"
+#include "core/parameter_manager.hpp"
+#include "core/path_utils.hpp"
+#include "core/services.hpp"
+#include "gui/dpi_scale.hpp"
 #include "gui/localization_manager.hpp"
 #include "gui/panels/scene_panel.hpp"
 #include "gui/string_keys.hpp"
@@ -208,9 +212,10 @@ namespace lfs::vis::gui {
         const auto selected_names_vec = scene_manager->getSelectedNodeNames();
         std::unordered_set<std::string> selected_names(selected_names_vec.begin(), selected_names_vec.end());
         const auto& t = theme();
+        const float scale = getDpiScale();
 
         // Search filter
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 2.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f * scale, 2.0f * scale));
         ImGui::PushStyleColor(ImGuiCol_FrameBg, withAlpha(t.palette.surface, 0.5f));
         ImGui::SetNextItemWidth(-1);
         ImGui::InputTextWithHint("##filter", LOC(lichtfeld::Strings::Scene::FILTER), m_filterText, sizeof(m_filterText));
@@ -220,9 +225,9 @@ namespace lfs::vis::gui {
         ImGui::Spacing();
 
         // Compact outliner style
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f, 1.0f));
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f, 0.0f));
-        ImGui::PushStyleVar(ImGuiStyleVar_IndentSpacing, 14.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f * scale, 1.0f * scale));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f * scale, 0.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_IndentSpacing, 14.0f * scale);
         ImGui::PushStyleColor(ImGuiCol_Header, withAlpha(t.palette.primary, 0.3f));
         ImGui::PushStyleColor(ImGuiCol_HeaderHovered, withAlpha(t.palette.primary, 0.4f));
         ImGui::PushStyleColor(ImGuiCol_HeaderActive, withAlpha(t.palette.primary, 0.5f));
@@ -343,9 +348,10 @@ namespace lfs::vis::gui {
         const bool parent_is_dataset = parent_node && parent_node->type == NodeType::DATASET;
 
         const auto& t = theme();
+        const float scale = getDpiScale();
         ImDrawList* const draw_list = ImGui::GetWindowDrawList();
 
-        constexpr float ROW_PADDING = 2.0f;
+        const float ROW_PADDING = 2.0f * scale;
         constexpr ImU32 HIGHLIGHT_COLOR = IM_COL32(80, 120, 180, 180);
         constexpr ImU32 SELECTION_COLOR_BASE = IM_COL32(60, 100, 160, 200);
         constexpr ImU32 SELECTION_COLOR_FLASH = IM_COL32(140, 180, 240, 230);
@@ -387,8 +393,8 @@ namespace lfs::vis::gui {
         }
 
         // Scene graph icon layout constants
-        constexpr float ICON_SIZE = 16.0f;
-        constexpr float ICON_SPACING = 2.0f;
+        const float ICON_SIZE = 16.0f * scale;
+        const float ICON_SPACING = 2.0f * scale;
         const ImVec2 icon_sz{ICON_SIZE, ICON_SIZE};
 
         const bool can_drag = canReparent(node, nullptr, scene);
@@ -488,9 +494,13 @@ namespace lfs::vis::gui {
             }
 
             // [Mask] - indicator for cameras with masks
+            // Rotate 180° when masks are inverted
             if (has_mask && m_icons.mask) {
                 ImGui::SameLine(0.0f, ICON_SPACING);
-                ImGui::Image(static_cast<ImTextureID>(m_icons.mask), icon_sz, {0, 0}, {1, 1},
+                const bool inverted = services().paramsOrNull() && services().paramsOrNull()->getActiveParams().invert_masks;
+                const ImVec2 uv0 = inverted ? ImVec2(1, 1) : ImVec2(0, 0);
+                const ImVec2 uv1 = inverted ? ImVec2(0, 0) : ImVec2(1, 1);
+                ImGui::Image(static_cast<ImTextureID>(m_icons.mask), icon_sz, uv0, uv1,
                              ImVec4(0.9f, 0.5f, 0.6f, 0.8f), {0, 0, 0, 0});
             }
 
@@ -728,15 +738,16 @@ namespace lfs::vis::gui {
         if (depth <= 0)
             return;
 
-        constexpr float INDENT_WIDTH = 14.0f;
-        constexpr float LINE_OFFSET_X = 7.0f;
+        const float scale = getDpiScale();
+        const float INDENT_WIDTH = 14.0f * scale;
+        const float LINE_OFFSET_X = 7.0f * scale;
 
         const auto& t = theme();
         const ImU32 guide_color = toU32(withAlpha(t.palette.text_dim, 0.25f));
 
         ImDrawList* const dl = ImGui::GetWindowDrawList();
         const ImVec2 cursor = ImGui::GetCursorScreenPos();
-        const float row_height = ImGui::GetTextLineHeight() + 2.0f;
+        const float row_height = ImGui::GetTextLineHeight() + 2.0f * scale;
 
         for (int i = 0; i < depth; ++i) {
             const float x = cursor.x + i * INDENT_WIDTH + LINE_OFFSET_X;
@@ -844,7 +855,7 @@ namespace lfs::vis::gui {
 
             for (size_t i = 0; i < m_imagePaths.size(); ++i) {
                 const auto& imagePath = m_imagePaths[i];
-                const std::string filename = imagePath.filename().string();
+                const std::string filename = lfs::core::path_to_utf8(imagePath.filename());
                 const std::string unique_id = std::format("{}##{}", filename, i);
                 const bool is_selected = (m_selectedImageIndex == static_cast<int>(i));
 
@@ -923,9 +934,9 @@ namespace lfs::vis::gui {
 
     void ScenePanel::onImageSelected(const std::filesystem::path& imagePath) {
         ui::NodeSelected{
-            .path = imagePath.string(),
+            .path = lfs::core::path_to_utf8(imagePath),
             .type = "Images",
-            .metadata = {{"filename", imagePath.filename().string()}, {"path", imagePath.string()}}}
+            .metadata = {{"filename", lfs::core::path_to_utf8(imagePath.filename())}, {"path", lfs::core::path_to_utf8(imagePath)}}}
             .emit();
     }
 

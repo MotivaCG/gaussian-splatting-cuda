@@ -9,12 +9,31 @@
 #include "training/kernels/grad_alpha.hpp"
 #include <spdlog/spdlog.h>
 
+// Debug macro for CUDA sync points - only active in debug builds
+// Disabled by default for performance (saves ~50% API overhead)
+#ifdef GSPLAT_DEBUG_SYNC_ENABLED
+#define GSPLAT_DEBUG_SYNC(msg)                                            \
+    do {                                                                  \
+        cudaDeviceSynchronize();                                          \
+        auto err = cudaGetLastError();                                    \
+        if (err != cudaSuccess) {                                         \
+            LOG_ERROR("CUDA error {}: {}", msg, cudaGetErrorString(err)); \
+        }                                                                 \
+    } while (0)
+#else
+#define GSPLAT_DEBUG_SYNC(msg) ((void)0)
+#endif
+
 namespace lfs::training {
 
     std::expected<std::pair<RenderOutput, GsplatRasterizeContext>, std::string> gsplat_rasterize_forward(
         core::Camera& viewpoint_camera,
         core::SplatData& gaussian_model,
         core::Tensor& bg_color,
+        int tile_x_offset,
+        int tile_y_offset,
+        int tile_width,
+        int tile_height,
         float scaling_modifier,
         bool antialiased,
         GsplatRenderMode render_mode,
@@ -25,13 +44,27 @@ namespace lfs::training {
         uint64_t frame_id = arena.begin_frame();
         auto arena_allocator = arena.get_allocator(frame_id);
 
-        // Get camera parameters
-        const uint32_t image_height = static_cast<uint32_t>(viewpoint_camera.image_height());
-        const uint32_t image_width = static_cast<uint32_t>(viewpoint_camera.image_width());
+        // Full image dimensions
+        const uint32_t full_image_height = static_cast<uint32_t>(viewpoint_camera.image_height());
+        const uint32_t full_image_width = static_cast<uint32_t>(viewpoint_camera.image_width());
 
-        // Get raw pointers for camera matrices
+        // Render dimensions (0 = full image)
+        const uint32_t image_width = (tile_width > 0) ? static_cast<uint32_t>(tile_width) : full_image_width;
+        const uint32_t image_height = (tile_height > 0) ? static_cast<uint32_t>(tile_height) : full_image_height;
+
         const float* viewmat_ptr = viewpoint_camera.world_view_transform_ptr();
-        auto K_tensor = viewpoint_camera.K().contiguous();
+
+        // Adjust K matrix principal point (cx, cy) for tile offset
+        core::Tensor K_tensor;
+        if (tile_x_offset != 0 || tile_y_offset != 0) {
+            auto K_cpu = viewpoint_camera.K().cpu().contiguous();
+            auto K_acc = K_cpu.accessor<float, 3>();
+            K_acc(0, 0, 2) -= static_cast<float>(tile_x_offset);
+            K_acc(0, 1, 2) -= static_cast<float>(tile_y_offset);
+            K_tensor = K_cpu.to(core::Device::CUDA).contiguous();
+        } else {
+            K_tensor = viewpoint_camera.K().contiguous();
+        }
         const float* K_ptr = K_tensor.ptr<float>();
 
         // Get Gaussian parameters (activated) - ensure contiguous
@@ -125,8 +158,8 @@ namespace lfs::training {
                                : 0; // SH coefficients
         const uint32_t H = image_height;
         const uint32_t W = image_width;
-        const uint32_t tile_height = (H + tile_size - 1) / tile_size;
-        const uint32_t tile_width = (W + tile_size - 1) / tile_size;
+        const uint32_t num_tiles_y = (H + tile_size - 1) / tile_size;
+        const uint32_t num_tiles_x = (W + tile_size - 1) / tile_size;
 
         // Determine channels based on render mode
         uint32_t channels = 3;
@@ -149,7 +182,7 @@ namespace lfs::training {
         const size_t conics_size = align(C * N * 3 * sizeof(float));
         const size_t compensations_size = calc_compensations ? align(C * N * sizeof(float)) : 0;
         const size_t tiles_per_gauss_size = align(C * N * sizeof(int32_t));
-        const size_t tile_offsets_size = align(C * tile_height * tile_width * sizeof(int32_t));
+        const size_t tile_offsets_size = align(C * num_tiles_y * num_tiles_x * sizeof(int32_t));
         const size_t colors_size = align(C * N * channels * sizeof(float));
         const size_t render_colors_size = align(C * H * W * channels * sizeof(float));
         const size_t render_alphas_size = align(C * H * W * sizeof(float));
@@ -348,8 +381,8 @@ namespace lfs::training {
         ctx.image_width = image_width;
         ctx.image_height = image_height;
         ctx.tile_size = tile_size;
-        ctx.tile_width = tile_width;
-        ctx.tile_height = tile_height;
+        ctx.tile_width = num_tiles_x;
+        ctx.tile_height = num_tiles_y;
         ctx.eps2d = eps2d;
         ctx.near_plane = near_plane;
         ctx.far_plane = far_plane;
@@ -359,6 +392,10 @@ namespace lfs::training {
         ctx.render_mode = render_mode;
         ctx.camera_model = camera_model;
         ctx.frame_id = frame_id;
+        ctx.render_tile_x_offset = tile_x_offset;
+        ctx.render_tile_y_offset = tile_y_offset;
+        ctx.render_tile_width = tile_width;
+        ctx.render_tile_height = tile_height;
 
         return std::pair{render_output, ctx};
     }
@@ -456,12 +493,7 @@ namespace lfs::training {
             bg_ptr = ctx.bg_color.ptr<float>();
         }
 
-        // Debug: check for errors before gsplat backward
-        cudaDeviceSynchronize();
-        auto err_pre_gsplat = cudaGetLastError();
-        if (err_pre_gsplat != cudaSuccess) {
-            LOG_ERROR("CUDA error BEFORE gsplat backward: {}", cudaGetErrorString(err_pre_gsplat));
-        }
+        GSPLAT_DEBUG_SYNC("BEFORE gsplat backward");
 
         // Call backward with raw pointers
         gsplat_lfs::rasterize_from_world_with_sh_bwd(
@@ -515,12 +547,7 @@ namespace lfs::training {
             nullptr // stream
         );
 
-        // Debug: check for errors after gsplat backward
-        cudaDeviceSynchronize();
-        auto err_post_gsplat = cudaGetLastError();
-        if (err_post_gsplat != cudaSuccess) {
-            LOG_ERROR("CUDA error AFTER gsplat backward: {}", cudaGetErrorString(err_post_gsplat));
-        }
+        GSPLAT_DEBUG_SYNC("AFTER gsplat backward");
 
         // ============ Chain rule for activation functions ============
         // gsplat backward returns gradients w.r.t. activated parameters
@@ -531,21 +558,13 @@ namespace lfs::training {
         // In-place: v_scales_ptr *= scales
         kernels::launch_exp_backward(v_scales_ptr, ctx.scales.ptr<float>(), N, nullptr);
 
-        cudaDeviceSynchronize();
-        auto err_exp = cudaGetLastError();
-        if (err_exp != cudaSuccess) {
-            LOG_ERROR("CUDA error AFTER exp_backward: {}", cudaGetErrorString(err_exp));
-        }
+        GSPLAT_DEBUG_SYNC("AFTER exp_backward");
 
         // Opacities: sigmoid(raw) -> v_opacities_raw = v_opacities * sigmoid * (1 - sigmoid)
         // In-place: v_opacities_ptr *= sigmoid * (1 - sigmoid)
         kernels::launch_sigmoid_backward(v_opacities_ptr, ctx.opacities.ptr<float>(), N, nullptr);
 
-        cudaDeviceSynchronize();
-        auto err_sigmoid = cudaGetLastError();
-        if (err_sigmoid != cudaSuccess) {
-            LOG_ERROR("CUDA error AFTER sigmoid_backward: {}", cudaGetErrorString(err_sigmoid));
-        }
+        GSPLAT_DEBUG_SYNC("AFTER sigmoid_backward");
 
         // Quaternions: normalize(raw) -> need Jacobian of normalization
         // v_raw = (v_activated - q_norm * dot(q_norm, v_activated)) / ||q_raw||
@@ -558,11 +577,7 @@ namespace lfs::training {
             N,
             nullptr);
 
-        cudaDeviceSynchronize();
-        auto err_quat = cudaGetLastError();
-        if (err_quat != cudaSuccess) {
-            LOG_ERROR("CUDA error AFTER quat_normalize_backward: {}", cudaGetErrorString(err_quat));
-        }
+        GSPLAT_DEBUG_SYNC("AFTER quat_normalize_backward");
 
         // ============ Accumulate gradients into optimizer using CUDA kernels ============
         // This avoids any tensor operations that might allocate from memory pool
@@ -607,12 +622,7 @@ namespace lfs::training {
             }
         }
 
-        // Debug: sync and check for errors before SH kernel
-        cudaDeviceSynchronize();
-        auto err_pre = cudaGetLastError();
-        if (err_pre != cudaSuccess) {
-            LOG_ERROR("CUDA error BEFORE SH kernel: {}", cudaGetErrorString(err_pre));
-        }
+        GSPLAT_DEBUG_SYNC("BEFORE SH kernel");
 
         kernels::launch_grad_accumulate_sh(
             optimizer.get_grad(ParamType::Sh0).ptr<float>(),
@@ -623,13 +633,7 @@ namespace lfs::training {
             K_dst, // K_dst: destination buffer width
             nullptr);
 
-        // Debug: sync and check for errors after SH kernel
-        cudaDeviceSynchronize();
-        auto err_post = cudaGetLastError();
-        if (err_post != cudaSuccess) {
-            LOG_ERROR("CUDA error AFTER SH kernel: {} (N={}, K={}, K_dst={}, dst_shN={})",
-                      cudaGetErrorString(err_post), N, K, K_dst, (void*)dst_shN);
-        }
+        GSPLAT_DEBUG_SYNC("AFTER SH kernel");
 
         // Update densification info if available (shape is [2, N])
         const bool update_densification_info =
@@ -645,11 +649,7 @@ namespace lfs::training {
                 N,
                 nullptr);
 
-            cudaDeviceSynchronize();
-            auto err_dens = cudaGetLastError();
-            if (err_dens != cudaSuccess) {
-                LOG_ERROR("CUDA error AFTER grad_norm_accumulate: {}", cudaGetErrorString(err_dens));
-            }
+            GSPLAT_DEBUG_SYNC("AFTER grad_norm_accumulate");
         }
 
         // Free internally allocated buffers from forward
@@ -660,22 +660,12 @@ namespace lfs::training {
             cudaFree(ctx.flatten_ids_ptr);
         }
 
-        // Extra sync after cudaFree to catch any lingering errors
-        cudaDeviceSynchronize();
-        auto err_free = cudaGetLastError();
-        if (err_free != cudaSuccess) {
-            LOG_ERROR("CUDA error AFTER cudaFree: {}", cudaGetErrorString(err_free));
-        }
+        GSPLAT_DEBUG_SYNC("AFTER cudaFree");
 
         // End arena frame to release memory from forward pass
         arena.end_frame(ctx.frame_id);
 
-        // Final final sync
-        cudaDeviceSynchronize();
-        auto err_arena = cudaGetLastError();
-        if (err_arena != cudaSuccess) {
-            LOG_ERROR("CUDA error AFTER end_frame: {}", cudaGetErrorString(err_arena));
-        }
+        GSPLAT_DEBUG_SYNC("AFTER end_frame");
     }
 
 } // namespace lfs::training

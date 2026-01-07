@@ -5,7 +5,7 @@
     "file": "File",
     "file.new_project": "New Project",
     "file.import_dataset": "Import Dataset",
-    "file.import_ply": "Import Ply",
+    "file.import_ply": "Import PLY, SOG, SPZ",
     "file.import_checkpoint": "Import Checkpoint",
     "file.import_config": "Import Config",
     "file.export": "Export...",
@@ -43,10 +43,11 @@
     "title": "QUICK START GUIDE",
     "description": "Learn how to prepare datasets and get started with LichtFeld Studio:",
     "wiki_section": "WIKI & FAQ",
-    "video_latest": "Latest Tutorial",
+    "video_latest": "LichtFeld v0.3.0 Feature Overview",
     "video_reality_scan": "Reality Scan Dataset",
     "video_colmap": "COLMAP Tutorial",
     "video_lichtfeld": "LichtFeld Tutorial",
+    "video_masks": "Masks Tutorial",
     "loading": "Loading..."
   },
 
@@ -455,12 +456,23 @@
     "exit": "Exit"
   },
 
-  "save_dir_popup": {
-    "title": "Select Output Directory",
-    "configure_output": "Configure output location",
-    "dataset_label": "Dataset:",
-    "output_dir": "Output Directory:",
-    "help_text": "Training checkpoints, logs, and exported models will be saved to this directory."
+  "load_dataset_popup": {
+    "title": "Load Dataset",
+    "configure_paths": "Configure dataset paths",
+    "images_dir": "Images:  ",
+    "sparse_dir": "Sparse:  ",
+    "masks_dir": "Masks:   ",
+    "output_dir": "Output:  ",
+    "help_text": "Training checkpoints, logs, and exported models will be saved to the output directory."
+  },
+
+  "notification": {
+    "cannot_open": "Cannot Open",
+    "dropped_not_recognized": "The dropped",
+    "directory": "directory",
+    "file": "file",
+    "items": "items",
+    "and_more": "... and"
   },
 
   "export_dialog": {
@@ -490,6 +502,11 @@
     "loss": "Loss:",
     "gaussians_count": "%s Gaussians",
     "exporting": "Exporting %s...",
+    "importing": "Importing %s...",
+    "import_complete": "Import complete: %zu images, %zu points",
+    "import_failed": "Import failed: %s",
+    "import_complete_title": "Import Complete",
+    "import_failed_title": "Import Failed",
     "num_splats": "num Splats: %d",
     "status_label": "Status: %s"
   },
@@ -542,7 +559,6 @@
     "max_gaussians": "Max Gaussians:",
     "sh_degree": "SH Degree:",
     "tile_mode": "Tile Mode:",
-    "num_workers": "Num Workers:",
     "steps_scaler": "Steps Scaler:",
     "bilateral_grid": "Bilateral Grid:",
     "mask_mode": "Mask Mode:",
@@ -625,5 +641,18 @@
     "y": "Y:",
     "z": "Z:",
     "u": "U:"
+  },
+
+  "resume_checkpoint_popup": {
+    "title": "Resume Checkpoint",
+    "checkpoint": "CHECKPOINT",
+    "configure_paths": "Configure paths before loading",
+    "file": "File:",
+    "stored_path": "Stored Path:",
+    "not_found": "(not found)",
+    "dataset_path": "Dataset Path:",
+    "invalid": "(invalid)",
+    "output_path": "Output Path:",
+    "help_text": "The dataset path stored in the checkpoint may have changed. Update it if needed."
   }
 }

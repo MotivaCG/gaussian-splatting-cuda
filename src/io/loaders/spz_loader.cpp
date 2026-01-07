@@ -4,6 +4,7 @@
 
 #include "spz_loader.hpp"
 #include "core/logger.hpp"
+#include "core/path_utils.hpp"
 #include "core/splat_data.hpp"
 #include "formats/spz.hpp"
 #include "io/error.hpp"
@@ -36,11 +37,11 @@ namespace lfs::io {
 
         // Validation only mode
         if (options.validate_only) {
-            LOG_DEBUG("Validation only mode for SPZ: {}", path.string());
+            LOG_DEBUG("Validation only mode for SPZ: {}", lfs::core::path_to_utf8(path));
 
             // Check for gzip magic bytes
-            std::ifstream file(path, std::ios::binary);
-            if (!file) {
+            std::ifstream file;
+            if (!lfs::core::open_file_for_read(path, std::ios::binary, file)) {
                 return make_error(ErrorCode::READ_FAILURE,
                                   "Cannot open SPZ file", path);
             }
@@ -73,7 +74,7 @@ namespace lfs::io {
             options.progress(50.0f, "Decompressing SPZ data...");
         }
 
-        LOG_INFO("Loading SPZ file: {}", path.string());
+        LOG_INFO("Loading SPZ file: {}", lfs::core::path_to_utf8(path));
         auto splat_result = load_spz(path);
         if (!splat_result) {
             return make_error(ErrorCode::CORRUPTED_DATA,

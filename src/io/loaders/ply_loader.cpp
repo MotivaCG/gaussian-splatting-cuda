@@ -4,6 +4,7 @@
 
 #include "ply_loader.hpp"
 #include "core/logger.hpp"
+#include "core/path_utils.hpp"
 #include "core/splat_data.hpp"
 #include "formats/ply.hpp"
 #include "io/error.hpp"
@@ -45,10 +46,10 @@ namespace lfs::io {
 
         // Validation only mode
         if (options.validate_only) {
-            LOG_DEBUG("Validation only mode for PLY: {}", path.string());
+            LOG_DEBUG("Validation only mode for PLY: {}", lfs::core::path_to_utf8(path));
             // Basic validation - check if it's a PLY file
-            std::ifstream file(path, std::ios::binary);
-            if (!file) {
+            std::ifstream file;
+            if (!lfs::core::open_file_for_read(path, std::ios::binary, file)) {
                 return make_error(ErrorCode::PERMISSION_DENIED,
                                   "Cannot open file for reading", path);
             }
@@ -82,7 +83,7 @@ namespace lfs::io {
             options.progress(50.0f, "Parsing PLY data...");
         }
 
-        LOG_INFO("Loading PLY file: {}", path.string());
+        LOG_INFO("Loading PLY file: {}", lfs::core::path_to_utf8(path));
 
         auto splat_result = load_ply(path);
 

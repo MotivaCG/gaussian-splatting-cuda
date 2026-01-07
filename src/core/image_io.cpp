@@ -9,6 +9,7 @@
 #include <OpenImageIO/imageio.h>
 
 #include "core/logger.hpp"
+#include "core/path_utils.hpp"
 #include <algorithm>
 #include <condition_variable>
 #include <filesystem>
@@ -62,9 +63,10 @@ namespace lfs::core {
     std::tuple<int, int, int> get_image_info(std::filesystem::path p) {
         init_oiio();
 
-        auto in = OIIO::ImageInput::open(p.string());
+        const std::string path_utf8 = lfs::core::path_to_utf8(p);
+        auto in = OIIO::ImageInput::open(path_utf8);
         if (!in) {
-            throw std::runtime_error("OIIO open failed: " + p.string() + " : " + OIIO::geterror());
+            throw std::runtime_error("OIIO open failed: " + path_utf8 + " : " + OIIO::geterror());
         }
         const OIIO::ImageSpec& spec = in->spec();
         const int w = spec.width;
@@ -78,9 +80,10 @@ namespace lfs::core {
     load_image_with_alpha(std::filesystem::path p) {
         init_oiio();
 
-        std::unique_ptr<OIIO::ImageInput> in(OIIO::ImageInput::open(p.string()));
+        const std::string path_utf8 = lfs::core::path_to_utf8(p);
+        std::unique_ptr<OIIO::ImageInput> in(OIIO::ImageInput::open(path_utf8));
         if (!in)
-            throw std::runtime_error("Load failed: " + p.string() + " : " + OIIO::geterror());
+            throw std::runtime_error("Load failed: " + path_utf8 + " : " + OIIO::geterror());
 
         const OIIO::ImageSpec& spec = in->spec();
         int w = spec.width, h = spec.height, file_c = spec.nchannels;
@@ -105,7 +108,7 @@ namespace lfs::core {
                 std::string e = in->geterror();
                 std::free(out);
                 in->close();
-                throw std::runtime_error("Read failed: " + p.string() + (e.empty() ? "" : (" : " + e)));
+                throw std::runtime_error("Read failed: " + path_utf8 + (e.empty() ? "" : (" : " + e)));
             }
             return finish(out, w, h, 4);
         } else {
@@ -152,12 +155,13 @@ namespace lfs::core {
             init_oiio();
         }
 
+        const std::string path_utf8 = lfs::core::path_to_utf8(p);
         std::unique_ptr<OIIO::ImageInput> in;
         {
             LOG_TIMER("OIIO::ImageInput::open");
-            in = std::unique_ptr<OIIO::ImageInput>(OIIO::ImageInput::open(p.string()));
+            in = std::unique_ptr<OIIO::ImageInput>(OIIO::ImageInput::open(path_utf8));
             if (!in)
-                throw std::runtime_error("Load failed: " + p.string() + " : " + OIIO::geterror());
+                throw std::runtime_error("Load failed: " + path_utf8 + " : " + OIIO::geterror());
         }
 
         const OIIO::ImageSpec& spec = in->spec();
@@ -188,7 +192,7 @@ namespace lfs::core {
                         std::string e = in->geterror();
                         std::free(out);
                         in->close();
-                        throw std::runtime_error("Read failed: " + p.string() + (e.empty() ? "" : (" : " + e)));
+                        throw std::runtime_error("Read failed: " + path_utf8 + (e.empty() ? "" : (" : " + e)));
                     }
                 }
 
@@ -240,7 +244,7 @@ namespace lfs::core {
                         std::string e = in->geterror();
                         std::free(full);
                         in->close();
-                        throw std::runtime_error("Read failed: " + p.string() + (e.empty() ? "" : (" : " + e)));
+                        throw std::runtime_error("Read failed: " + path_utf8 + (e.empty() ? "" : (" : " + e)));
                     }
                 }
 
@@ -296,7 +300,7 @@ namespace lfs::core {
                 if (!in->read_image(0, 0, 0, in_c, OIIO::TypeDesc::UINT8, tmp.data())) {
                     auto e = in->geterror();
                     in->close();
-                    throw std::runtime_error("Read failed: " + p.string() + (e.empty() ? "" : (" : " + e)));
+                    throw std::runtime_error("Read failed: " + path_utf8 + (e.empty() ? "" : (" : " + e)));
                 }
             }
 
@@ -334,18 +338,34 @@ namespace lfs::core {
                 }
             }
 
-            if (res_div == 2 || res_div == 4 || res_div == 8) {
-                const int nw = std::max(1, w / res_div);
-                const int nh = std::max(1, h / res_div);
+            // Calculate target dimensions after res_div
+            int nw = (res_div == 2 || res_div == 4 || res_div == 8) ? std::max(1, w / res_div) : w;
+            int nh = (res_div == 2 || res_div == 4 || res_div == 8) ? std::max(1, h / res_div) : h;
+
+            // Apply max_width if needed
+            int scale_w = nw;
+            int scale_h = nh;
+            if (max_width > 0 && (nw > max_width || nh > max_width)) {
+                if (nw > nh) {
+                    scale_h = std::max(1, max_width * nh / nw);
+                    scale_w = std::max(1, max_width);
+                } else {
+                    scale_w = std::max(1, max_width * nw / nh);
+                    scale_h = std::max(1, max_width);
+                }
+            }
+
+            // Resize if dimensions changed
+            if (scale_w != w || scale_h != h) {
                 unsigned char* out = nullptr;
                 try {
-                    out = downscale_resample_direct(base, w, h, nw, nh, nthreads);
+                    out = downscale_resample_direct(base, w, h, scale_w, scale_h, nthreads);
                 } catch (...) {
                     std::free(base);
                     throw;
                 }
                 std::free(base);
-                return {out, nw, nh, 3};
+                return {out, scale_w, scale_h, 3};
             }
 
             return {base, w, h, 3};
@@ -369,15 +389,15 @@ namespace lfs::core {
         if (channels < 1 || channels > 4)
             throw std::runtime_error("save_image: channels must be in [1..4]");
 
-        LOG_INFO("Saving image: {} shape: [{}, {}, {}]", path.string(), height, width, channels);
+        const std::string path_utf8 = lfs::core::path_to_utf8(path);
+        LOG_INFO("Saving image: {} shape: [{}, {}, {}]", path_utf8, height, width, channels);
 
         auto img_uint8 = (image.clamp(0, 1) * 255.0f).to(lfs::core::DataType::UInt8).contiguous();
 
         // Prepare OIIO output
-        const std::string fname = path.string();
-        auto out = OIIO::ImageOutput::create(fname);
+        auto out = OIIO::ImageOutput::create(path_utf8);
         if (!out) {
-            throw std::runtime_error("ImageOutput::create failed for " + fname + " : " + OIIO::geterror());
+            throw std::runtime_error("ImageOutput::create failed for " + path_utf8 + " : " + OIIO::geterror());
         }
 
         OIIO::ImageSpec spec(width, height, channels, OIIO::TypeDesc::UINT8);
@@ -388,9 +408,9 @@ namespace lfs::core {
         if (ext == ".jpg" || ext == ".jpeg")
             spec.attribute("CompressionQuality", 95);
 
-        if (!out->open(fname, spec)) {
+        if (!out->open(path_utf8, spec)) {
             auto e = out->geterror();
-            throw std::runtime_error("open('" + fname + "') failed: " + (e.empty() ? OIIO::geterror() : e));
+            throw std::runtime_error("open('" + path_utf8 + "') failed: " + (e.empty() ? OIIO::geterror() : e));
         }
 
         if (!out->write_image(OIIO::TypeDesc::UINT8, img_uint8.ptr<uint8_t>())) {
@@ -412,24 +432,16 @@ namespace lfs::core {
             return;
         }
 
-        // Prepare all to HWC float on CPU
+        // Convert all images to HWC float on CPU
         std::vector<lfs::core::Tensor> xs;
         xs.reserve(images.size());
         for (size_t idx = 0; idx < images.size(); ++idx) {
-            auto img = images[idx];
-            LOG_INFO("save_image: Input image {} shape before conversion: [{}, {}, {}]",
-                     idx, img.shape()[0], img.shape()[1], img.shape()[2]);
-
-            img = img.clone().to(lfs::core::Device::CPU).to(lfs::core::DataType::Float32);
+            auto img = images[idx].clone().to(lfs::core::Device::CPU).to(lfs::core::DataType::Float32);
             if (img.ndim() == 4)
                 img = img.squeeze(0);
             if (img.ndim() == 3 && img.shape()[0] <= 4)
                 img = img.permute({1, 2, 0});
-            img = img.contiguous();
-
-            LOG_INFO("save_image: Image {} shape after conversion to HWC: [{}, {}, {}]",
-                     idx, img.shape()[0], img.shape()[1], img.shape()[2]);
-            xs.push_back(img);
+            xs.push_back(img.contiguous());
         }
 
         // Separator (white)
@@ -443,25 +455,12 @@ namespace lfs::core {
 
         // Concatenate
         lfs::core::Tensor combo = xs[0];
-        LOG_INFO("save_image: Starting combo shape: [{}, {}, {}]",
-                 combo.shape()[0], combo.shape()[1], combo.shape()[2]);
-
         for (size_t i = 1; i < xs.size(); ++i) {
-            LOG_INFO("save_image: Concatenating image {} (shape [{}, {}, {}]) along axis {}",
-                     i, xs[i].shape()[0], xs[i].shape()[1], xs[i].shape()[2], horizontal ? 1 : 0);
-
             combo = (separator_width > 0)
                         ? lfs::core::Tensor::cat({combo, sep, xs[i]}, horizontal ? 1 : 0)
                         : lfs::core::Tensor::cat({combo, xs[i]}, horizontal ? 1 : 0);
-
-            LOG_INFO("save_image: After concatenation, combo shape: [{}, {}, {}]",
-                     combo.shape()[0], combo.shape()[1], combo.shape()[2]);
         }
 
-        LOG_INFO("save_image: Final combo shape before saving: [{}, {}, {}]",
-                 combo.shape()[0], combo.shape()[1], combo.shape()[2]);
-
-        // Save
         lfs::core::save_image(path, combo);
     }
 
@@ -485,7 +484,8 @@ namespace lfs::core {
             return false;
         }
 
-        std::unique_ptr<OIIO::ImageOutput> out(OIIO::ImageOutput::create(p.string()));
+        const std::string path_utf8 = lfs::core::path_to_utf8(p);
+        std::unique_ptr<OIIO::ImageOutput> out(OIIO::ImageOutput::create(path_utf8));
         if (!out) {
             return false;
         }
@@ -506,7 +506,7 @@ namespace lfs::core {
             spec.attribute("Compression", "lzw");
         }
 
-        if (!out->open(p.string(), spec)) {
+        if (!out->open(path_utf8, spec)) {
             return false;
         }
 
@@ -660,7 +660,7 @@ namespace lfs::core::image_io {
                 lfs::core::save_image(t.path, t.image);
             }
         } catch (const std::exception& e) {
-            LOG_ERROR("[BatchImageSaver] Error saving {}: {}", t.path.string(), e.what());
+            LOG_ERROR("[BatchImageSaver] Error saving {}: {}", lfs::core::path_to_utf8(t.path), e.what());
         }
     }
 } // namespace lfs::core::image_io

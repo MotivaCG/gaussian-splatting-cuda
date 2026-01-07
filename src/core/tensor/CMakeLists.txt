@@ -33,6 +33,7 @@ set(LFS_TENSOR_SOURCES
     tensor_row_proxy.cpp       # TensorRowProxy implementations (moved from header)
     pinned_memory_allocator.cpp # Pinned memory allocator for fast CPU-GPU transfers (used by tensor)
     offset_allocator.cpp       # OffsetAllocator for O(1) GPU memory sub-allocation
+    cuda_stream_pool.cpp       # CUDA stream pool for parallel execution
 )
 
 # CUDA sources (limited to C++20)
@@ -44,6 +45,7 @@ set(LFS_TENSOR_CUDA_SOURCES
     tensor_masking_ops.cu   # CUDA kernels for masking/indexing
     tensor_random_ops.cu    # CUDA kernels for random ops
     tensor_strided_ops.cu   # CUDA kernels for strided tensor operations
+    tensor_dot_optimized.cu # Optimized dot product and scalar reduction kernels
 )
 
 # Create CUDA library for tensor operations (C++20)

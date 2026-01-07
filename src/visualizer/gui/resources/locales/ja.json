@@ -5,7 +5,7 @@
     "file": "ファイル",
     "file.new_project": "新規プロジェクト",
     "file.import_dataset": "データセットをインポート",
-    "file.import_ply": "PLYをインポート",
+    "file.import_ply": "PLY, SOG, SPZをインポート",
     "file.import_checkpoint": "チェックポイントをインポート",
     "file.import_config": "設定をインポート",
     "file.export": "エクスポート...",
@@ -43,10 +43,11 @@
     "title": "クイックスタートガイド",
     "description": "データセットの準備方法とLichtFeld Studioの使い方を学びましょう:",
     "wiki_section": "Wiki & よくある質問",
-    "video_latest": "最新チュートリアル",
+    "video_latest": "LichtFeld v0.3.0 機能概要",
     "video_reality_scan": "Reality Scanデータセット",
     "video_colmap": "COLMAPチュートリアル",
     "video_lichtfeld": "LichtFeldチュートリアル",
+    "video_masks": "マスクチュートリアル",
     "loading": "読み込み中..."
   },
 
@@ -455,12 +456,23 @@
     "exit": "終了"
   },
 
-  "save_dir_popup": {
-    "title": "出力ディレクトリを選択",
-    "configure_output": "出力場所を設定",
-    "dataset_label": "データセット:",
-    "output_dir": "出力ディレクトリ:",
-    "help_text": "トレーニングのチェックポイント、ログ、エクスポートされたモデルはこのディレクトリに保存されます。"
+  "load_dataset_popup": {
+    "title": "データセットを読み込む",
+    "configure_paths": "データセットのパスを設定",
+    "images_dir": "画像:   ",
+    "sparse_dir": "Sparse: ",
+    "masks_dir": "マスク: ",
+    "output_dir": "出力:   ",
+    "help_text": "チェックポイント、ログ、エクスポートされたモデルは出力ディレクトリに保存されます。"
+  },
+
+  "notification": {
+    "cannot_open": "開けません",
+    "dropped_not_recognized": "ドロップされた",
+    "directory": "フォルダ",
+    "file": "ファイル",
+    "items": "項目",
+    "and_more": "... 他"
   },
 
   "export_dialog": {
@@ -490,6 +502,11 @@
     "loss": "損失:",
     "gaussians_count": "%s ガウシアン",
     "exporting": "%s をエクスポート中...",
+    "importing": "%s をインポート中...",
+    "import_complete": "インポート完了: %zu 画像, %zu ポイント",
+    "import_failed": "インポート失敗: %s",
+    "import_complete_title": "インポート完了",
+    "import_failed_title": "インポート失敗",
     "num_splats": "スプラット数: %d",
     "status_label": "ステータス: %s"
   },
@@ -542,7 +559,6 @@
     "max_gaussians": "Max Gaussians:",
     "sh_degree": "SH Degree:",
     "tile_mode": "Tile Mode:",
-    "num_workers": "Num Workers:",
     "steps_scaler": "Steps Scaler:",
     "bilateral_grid": "Bilateral Grid:",
     "mask_mode": "Mask Mode:",
@@ -625,5 +641,18 @@
     "y": "Y:",
     "z": "Z:",
     "u": "U:"
+  },
+
+  "resume_checkpoint_popup": {
+    "title": "チェックポイントを再開",
+    "checkpoint": "チェックポイント",
+    "configure_paths": "読み込み前にパスを設定",
+    "file": "ファイル:",
+    "stored_path": "保存されたパス:",
+    "not_found": "(見つかりません)",
+    "dataset_path": "データセットパス:",
+    "invalid": "(無効)",
+    "output_path": "出力パス:",
+    "help_text": "チェックポイントに保存されたデータセットパスが変更されている可能性があります。必要に応じて更新してください。"
   }
 }

@@ -5,9 +5,11 @@
 #include "core/argument_parser.hpp"
 #include "core/logger.hpp"
 #include "core/parameters.hpp"
+#include "core/path_utils.hpp"
 #include <algorithm>
 #include <args.hxx>
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <expected>
 #include <filesystem>
@@ -28,12 +30,12 @@ namespace {
         Help
     };
 
-    const std::set<std::string> VALID_STRATEGIES = {"mcmc", "default"};
+    const std::set<std::string> VALID_STRATEGIES = {"mcmc", "adc"};
 
     void scale_steps_vector(std::vector<size_t>& steps, float scaler) {
         std::set<size_t> unique_steps;
         for (const auto& step : steps) {
-            size_t scaled = static_cast<size_t>(static_cast<float>(step) * scaler);
+            size_t scaled = static_cast<size_t>(std::lround(static_cast<float>(step) * scaler));
             if (scaled > 0) {
                 unique_steps.insert(scaled);
             }
@@ -93,7 +95,6 @@ namespace {
 
             // Optional value arguments
             ::args::ValueFlag<uint32_t> iterations(parser, "iterations", "Number of iterations", {'i', "iter"});
-            ::args::ValueFlag<int> num_workers(parser, "num_threads", "Number of workers", {"num-workers"});
             ::args::ValueFlag<int> max_cap(parser, "max_cap", "Max Gaussians for MCMC", {"max-cap"});
             ::args::ValueFlag<std::string> images_folder(parser, "images", "Images folder name", {"images"});
             ::args::ValueFlag<int> test_every(parser, "test_every", "Use every Nth image as test", {"test-every"});
@@ -101,7 +102,7 @@ namespace {
             ::args::ValueFlag<int> sh_degree_interval(parser, "sh_degree_interval", "SH degree interval", {"sh-degree-interval"});
             ::args::ValueFlag<int> sh_degree(parser, "sh_degree", "Max SH degree [0-3]", {"sh-degree"});
             ::args::ValueFlag<float> min_opacity(parser, "min_opacity", "Minimum opacity threshold", {"min-opacity"});
-            ::args::ValueFlag<std::string> strategy(parser, "strategy", "Optimization strategy: mcmc, default", {"strategy"});
+            ::args::ValueFlag<std::string> strategy(parser, "strategy", "Optimization strategy: mcmc, adc", {"strategy"});
             ::args::ValueFlag<int> init_num_pts(parser, "init_num_pts", "Number of random initialization points", {"init-num-pts"});
             ::args::ValueFlag<float> init_extent(parser, "init_extent", "Extent of random initialization", {"init-extent"});
             ::args::ValueFlagList<std::string> timelapse_images(parser, "timelapse_images", "Image filenames to render timelapse images for", {"timelapse-images"});
@@ -224,10 +225,10 @@ namespace {
             if (view_ply) {
                 const auto& view_path_str = ::args::get(view_ply);
                 if (!view_path_str.empty()) {
-                    const std::filesystem::path view_path{view_path_str};
+                    const std::filesystem::path view_path = lfs::core::utf8_to_path(view_path_str);
 
                     if (!std::filesystem::exists(view_path)) {
-                        return std::unexpected(std::format("Path does not exist: {}", view_path.string()));
+                        return std::unexpected(std::format("Path does not exist: {}", lfs::core::path_to_utf8(view_path)));
                     }
 
                     constexpr std::array<std::string_view, 4> SUPPORTED_EXTENSIONS = {".ply", ".sog", ".spz", ".resume"};
@@ -247,13 +248,13 @@ namespace {
 
                         if (params.view_paths.empty()) {
                             return std::unexpected(std::format(
-                                "No supported files (.ply, .sog, .spz, .resume) found in: {}", view_path.string()));
+                                "No supported files (.ply, .sog, .spz, .resume) found in: {}", lfs::core::path_to_utf8(view_path)));
                         }
                         LOG_DEBUG("Found {} view files in directory", params.view_paths.size());
                     } else {
                         if (!is_supported(view_path)) {
                             return std::unexpected(std::format(
-                                "Unsupported format. Expected: .ply, .sog, .spz, .resume. Got: {}", view_path.string()));
+                                "Unsupported format. Expected: .ply, .sog, .spz, .resume. Got: {}", lfs::core::path_to_utf8(view_path)));
                         }
                         params.view_paths.push_back(view_path);
                     }
@@ -267,21 +268,22 @@ namespace {
 
             // Check for resume mode
             if (resume_checkpoint) {
-                const auto ckpt_path = ::args::get(resume_checkpoint);
-                if (!ckpt_path.empty()) {
+                const auto ckpt_path_str = ::args::get(resume_checkpoint);
+                if (!ckpt_path_str.empty()) {
+                    const auto ckpt_path = lfs::core::utf8_to_path(ckpt_path_str);
                     if (!std::filesystem::exists(ckpt_path)) {
-                        return std::unexpected(std::format("Checkpoint file does not exist: {}", ckpt_path));
+                        return std::unexpected(std::format("Checkpoint file does not exist: {}", ckpt_path_str));
                     }
                     params.resume_checkpoint = ckpt_path;
                 }
             }
 
             if (init_path) {
-                const auto path = ::args::get(init_path);
-                params.init_path = path;
+                const auto path_str = ::args::get(init_path);
+                params.init_path = path_str;
 
-                if (!std::filesystem::exists(path)) {
-                    return std::unexpected(std::format("Initialization file does not exist: {}", path));
+                if (!std::filesystem::exists(lfs::core::utf8_to_path(path_str))) {
+                    return std::unexpected(std::format("Initialization file does not exist: {}", path_str));
                 }
             }
 
@@ -300,8 +302,8 @@ namespace {
             // Training/resume mode requires both data-path and output-path
             // Exception: resume mode can work without explicit paths (extracted from checkpoint)
             if (has_data_path && has_output_path) {
-                params.dataset.data_path = ::args::get(data_path);
-                params.dataset.output_path = ::args::get(output_path);
+                params.dataset.data_path = lfs::core::utf8_to_path(::args::get(data_path));
+                params.dataset.output_path = lfs::core::utf8_to_path(::args::get(output_path));
 
                 // Create output directory
                 std::error_code ec;
@@ -309,7 +311,7 @@ namespace {
                 if (ec) {
                     return std::unexpected(std::format(
                         "Failed to create output directory '{}': {}",
-                        params.dataset.output_path.string(), ec.message()));
+                        lfs::core::path_to_utf8(params.dataset.output_path), ec.message()));
                 }
             } else if (has_data_path != has_output_path && !has_resume) {
                 // Only require both if not in resume mode
@@ -319,10 +321,10 @@ namespace {
             } else if (has_resume) {
                 // Resume mode: paths are optional (will be read from checkpoint)
                 if (has_data_path) {
-                    params.dataset.data_path = ::args::get(data_path);
+                    params.dataset.data_path = lfs::core::utf8_to_path(::args::get(data_path));
                 }
                 if (has_output_path) {
-                    params.dataset.output_path = ::args::get(output_path);
+                    params.dataset.output_path = lfs::core::utf8_to_path(::args::get(output_path));
 
                     // Create output directory if provided
                     std::error_code ec;
@@ -330,7 +332,7 @@ namespace {
                     if (ec) {
                         return std::unexpected(std::format(
                             "Failed to create output directory '{}': {}",
-                            params.dataset.output_path.string(), ec.message()));
+                            lfs::core::path_to_utf8(params.dataset.output_path), ec.message()));
                     }
                 }
             }
@@ -339,7 +341,7 @@ namespace {
                 const auto strat = ::args::get(strategy);
                 if (VALID_STRATEGIES.find(strat) == VALID_STRATEGIES.end()) {
                     return std::unexpected(std::format(
-                        "ERROR: Invalid optimization strategy '{}'. Valid strategies are: mcmc, default",
+                        "ERROR: Invalid optimization strategy '{}'. Valid strategies are: mcmc, adc",
                         strat));
                 }
 
@@ -381,7 +383,6 @@ namespace {
                                         max_width_val = max_width ? std::optional<int>(::args::get(max_width)) : std::optional<int>(3840),          // default 3840
                                         use_cpu_cache_val = use_cpu_cache ? std::optional<bool>(::args::get(use_cpu_cache)) : std::optional<bool>(),
                                         use_fs_cache_val = use_fs_cache ? std::optional<bool>(::args::get(use_fs_cache)) : std::optional<bool>(),
-                                        num_workers_val = num_workers ? std::optional<int>(::args::get(num_workers)) : std::optional<int>(),
                                         max_cap_val = max_cap ? std::optional<int>(::args::get(max_cap)) : std::optional<int>(),
                                         config_file_val = config_file ? std::optional<std::string>(::args::get(config_file)) : std::optional<std::string>(),
                                         images_folder_val = images_folder ? std::optional<std::string>(::args::get(images_folder)) : std::optional<std::string>(),
@@ -438,7 +439,6 @@ namespace {
                 setVal(max_width_val, ds.max_width);
                 setVal(use_cpu_cache_val, ds.loading_params.use_cpu_memory);
                 setVal(use_fs_cache_val, ds.loading_params.use_fs_cache);
-                setVal(num_workers_val, opt.num_workers);
                 setVal(max_cap_val, opt.max_cap);
                 setVal(images_folder_val, ds.images);
                 setVal(test_every_val, ds.test_every);
@@ -495,12 +495,15 @@ namespace {
         if (scaler > 0) {
             LOG_INFO("Scaling training steps by factor: {}", scaler);
 
-            opt.iterations *= scaler;
-            opt.start_refine *= scaler;
-            opt.reset_every *= scaler;
-            opt.stop_refine *= scaler;
-            opt.refine_every *= scaler;
-            opt.sh_degree_interval *= scaler;
+            const auto scale = [scaler](const size_t v) {
+                return static_cast<size_t>(std::lround(static_cast<float>(v) * scaler));
+            };
+            opt.iterations = scale(opt.iterations);
+            opt.start_refine = scale(opt.start_refine);
+            opt.reset_every = scale(opt.reset_every);
+            opt.stop_refine = scale(opt.stop_refine);
+            opt.refine_every = scale(opt.refine_every);
+            opt.sh_degree_interval = scale(opt.sh_degree_interval);
 
             scale_steps_vector(opt.eval_steps, scaler);
             scale_steps_vector(opt.save_steps, scaler);
@@ -517,54 +520,41 @@ std::expected<std::unique_ptr<lfs::core::param::TrainingParameters>, std::string
 lfs::core::args::parse_args_and_params(int argc, const char* const argv[]) {
 
     auto params = std::make_unique<lfs::core::param::TrainingParameters>();
-
-    // Parse command line arguments
     auto parse_result = parse_arguments(convert_args(argc, argv), *params);
-
-    std::string strategy = params->optimization.strategy; // empty when config files is used and not passed as command line argument
-    std::string config_file = params->optimization.config_file;
-    std::filesystem::path config_file_to_read = config_file != ""
-                                                    ? std::filesystem::path(reinterpret_cast<const char8_t*>(config_file.c_str()))
-                                                    : lfs::core::param::get_parameter_file_path(params->optimization.strategy + "_optimization_params.json");
+    const std::string& strategy = params->optimization.strategy;
+    const std::string& config_file = params->optimization.config_file;
 
     if (!parse_result) {
         return std::unexpected(parse_result.error());
     }
 
-    auto [result, apply_overrides] = *parse_result;
-
-    // Handle help case
+    const auto [result, apply_overrides] = *parse_result;
     if (result == ParseResult::Help) {
         std::exit(0);
     }
 
-    auto opt_params_result = lfs::core::param::read_optim_params_from_json(config_file_to_read);
-    if (!opt_params_result) {
-        return std::unexpected(std::format("Failed to load optimization parameters: {}",
-                                           opt_params_result.error()));
-    }
-    params->optimization = *opt_params_result;
+    // Load from --config or use hardcoded defaults
+    if (!config_file.empty()) {
+        const auto opt_result = lfs::core::param::read_optim_params_from_json(lfs::core::utf8_to_path(config_file));
+        if (!opt_result) {
+            return std::unexpected(std::format("Config load failed: {}", opt_result.error()));
+        }
+        params->optimization = *opt_result;
 
-    std::filesystem::path config_file_loading = lfs::core::param::get_parameter_file_path("loading_params.json");
-    auto loading_result = lfs::core::param::read_loading_params_from_json(config_file_loading);
-    if (!loading_result) {
-        return std::unexpected(std::format("Failed to load loading parameters: {}",
-                                           loading_result.error()));
-    }
-    params->dataset.loading_params = *loading_result;
-
-    // if a config file was used and strategy was also passed as command line argument, ensure they match
-    if (config_file != "" && strategy != "" && strategy != params->optimization.strategy) {
-        LOG_ERROR("Conflict between strategy in config file and --strategy on command line");
-        return std::unexpected(std::format("Conflict between strategy in config file and --strategy on command line"));
+        if (!strategy.empty() && strategy != params->optimization.strategy) {
+            return std::unexpected("--strategy conflicts with config file");
+        }
+    } else {
+        params->optimization = (strategy == "adc")
+                                   ? lfs::core::param::OptimizationParameters::adc_defaults()
+                                   : lfs::core::param::OptimizationParameters::mcmc_defaults();
     }
 
-    // Apply command line overrides
+    params->dataset.loading_params = lfs::core::param::LoadingParams{};
+
     if (apply_overrides) {
         apply_overrides();
     }
-
-    // Apply step scaling
     apply_step_scaling(*params);
 
     return params;
@@ -650,11 +640,11 @@ lfs::core::args::parse_args(const int argc, const char* const argv[]) {
     }
 
     param::ConvertParameters params;
-    params.input_path = ::args::get(input);
+    params.input_path = lfs::core::utf8_to_path(::args::get(input));
     params.sh_degree = sh_degree ? ::args::get(sh_degree) : -1;
 
     if (!std::filesystem::exists(params.input_path)) {
-        return std::unexpected(std::format("Input not found: {}", params.input_path.string()));
+        return std::unexpected(std::format("Input not found: {}", lfs::core::path_to_utf8(params.input_path)));
     }
 
     if (params.sh_degree < -1 || params.sh_degree > 3) {
@@ -662,7 +652,7 @@ lfs::core::args::parse_args(const int argc, const char* const argv[]) {
     }
 
     if (output)
-        params.output_path = ::args::get(output);
+        params.output_path = lfs::core::utf8_to_path(::args::get(output));
     if (sog_iter)
         params.sog_iterations = ::args::get(sog_iter);
     params.overwrite = overwrite;

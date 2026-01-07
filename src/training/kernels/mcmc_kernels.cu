@@ -926,52 +926,53 @@ namespace lfs::training::mcmc {
 
         cudaStream_t cuda_stream = stream ? static_cast<cudaStream_t>(stream) : nullptr;
 
-        // Compute sum using custom reduction kernel (ZERO Thrust allocations!)
-        int threads = 256;
-        int blocks = (n_alive + threads - 1) / threads;
-        size_t shared_mem_size = threads * sizeof(float);
+        // Block-level reduction
+        constexpr int THREADS = 256;
+        const int blocks = (n_alive + THREADS - 1) / THREADS;
+        const size_t shared_mem_size = THREADS * sizeof(float);
 
-        // Allocate a small temp buffer for partial sums (only O(num_blocks) floats)
         float* d_partial_sums = nullptr;
         cudaMallocAsync(&d_partial_sums, blocks * sizeof(float), cuda_stream);
 
-        // Launch block-level reduction
-        reduce_opacities_kernel<<<blocks, threads, shared_mem_size, cuda_stream>>>(
+        reduce_opacities_kernel<<<blocks, THREADS, shared_mem_size, cuda_stream>>>(
             opacities, alive_indices, n_alive, d_partial_sums, N);
 
-        // Final reduction on CPU (small array)
-        std::vector<float> h_partial_sums(blocks);
-        cudaMemcpyAsync(h_partial_sums.data(), d_partial_sums, blocks * sizeof(float), cudaMemcpyDeviceToHost, cuda_stream);
-        cudaStreamSynchronize(cuda_stream); // Wait for copy to complete
+        // Final reduction with CUB
+        float* d_prob_sum = nullptr;
+        cudaMallocAsync(&d_prob_sum, sizeof(float), cuda_stream);
 
+        void* d_reduce_temp = nullptr;
+        size_t reduce_temp_bytes = 0;
+        cub::DeviceReduce::Sum(d_reduce_temp, reduce_temp_bytes, d_partial_sums, d_prob_sum, blocks, cuda_stream);
+        cudaMallocAsync(&d_reduce_temp, reduce_temp_bytes, cuda_stream);
+        cub::DeviceReduce::Sum(d_reduce_temp, reduce_temp_bytes, d_partial_sums, d_prob_sum, blocks, cuda_stream);
+        cudaFreeAsync(d_reduce_temp, cuda_stream);
+
+        // Copy result to host (required for branching)
         float prob_sum = 0.0f;
-        for (int i = 0; i < blocks; ++i) {
-            prob_sum += h_partial_sums[i];
-        }
+        cudaMemcpyAsync(&prob_sum, d_prob_sum, sizeof(float), cudaMemcpyDeviceToHost, cuda_stream);
+        cudaStreamSynchronize(cuda_stream);
 
-        // Free temp buffer
         cudaFreeAsync(d_partial_sums, cuda_stream);
+        cudaFreeAsync(d_prob_sum, cuda_stream);
 
         if (prob_sum <= 0.0f) {
-            // All zero probabilities - just sample uniformly
             cudaMemsetAsync(sampled_global_indices, 0, n_samples * sizeof(int64_t), cuda_stream);
             cudaMemsetAsync(sampled_opacities, 0, n_samples * sizeof(float), cuda_stream);
             cudaMemsetAsync(sampled_scales, 0, n_samples * 3 * sizeof(float), cuda_stream);
             return;
         }
 
-        // Pre-compute cumulative sum using Tensor lib for memory management
+        // Cumulative sum for sampling
         auto alive_probs = lfs::core::Tensor::empty({n_alive}, lfs::core::Device::CUDA, lfs::core::DataType::Float32);
         auto cumsum_buf = lfs::core::Tensor::empty({n_alive}, lfs::core::Device::CUDA, lfs::core::DataType::Float32);
 
-        // Gather alive opacities
         thrust::transform(thrust::cuda::par.on(cuda_stream),
                           thrust::counting_iterator<int>(0),
                           thrust::counting_iterator<int>(n_alive),
                           thrust::device_ptr<float>(alive_probs.ptr<float>()),
                           [=] __device__(int i) { return opacities[alive_indices[i]]; });
 
-        // Compute cumulative sum using CUB
         void* d_temp_storage = nullptr;
         size_t temp_storage_bytes = 0;
         cub::DeviceScan::InclusiveSum(d_temp_storage, temp_storage_bytes,
@@ -980,15 +981,14 @@ namespace lfs::training::mcmc {
         cub::DeviceScan::InclusiveSum(d_temp_storage, temp_storage_bytes,
                                       alive_probs.ptr<float>(), cumsum_buf.ptr<float>(), n_alive, cuda_stream);
 
-        // Launch fused kernel with pre-computed cumsum
-        dim3 sample_threads(256);
-        dim3 sample_grid((n_samples + sample_threads.x - 1) / sample_threads.x);
+        constexpr int SAMPLE_THREADS = 256;
+        const int sample_grid = (n_samples + SAMPLE_THREADS - 1) / SAMPLE_THREADS;
 
-        multinomial_sample_and_gather_kernel<<<sample_grid, sample_threads, 0, cuda_stream>>>(
+        multinomial_sample_and_gather_kernel<<<sample_grid, SAMPLE_THREADS, 0, cuda_stream>>>(
             opacities,
             scaling_raw,
             alive_indices,
-            cumsum_buf.ptr<float>(), // Pass pre-computed cumsum
+            cumsum_buf.ptr<float>(),
             n_alive,
             n_samples,
             prob_sum,
@@ -998,7 +998,6 @@ namespace lfs::training::mcmc {
             sampled_scales,
             N);
 
-        // Cleanup CUB temp storage
         cudaFreeAsync(d_temp_storage, cuda_stream);
     }
 
@@ -1099,44 +1098,46 @@ namespace lfs::training::mcmc {
 
         cudaStream_t cuda_stream = stream ? static_cast<cudaStream_t>(stream) : nullptr;
 
-        // Compute sum using custom reduction kernel (ZERO Thrust allocations!)
-        int threads = 256;
-        int blocks = (N + threads - 1) / threads;
-        size_t shared_mem_size = threads * sizeof(float);
+        // Block-level reduction
+        constexpr int THREADS = 256;
+        const int blocks = (N + THREADS - 1) / THREADS;
+        const size_t shared_mem_size = THREADS * sizeof(float);
 
-        // Allocate a small temp buffer for partial sums (only O(num_blocks) floats)
         float* d_partial_sums = nullptr;
         cudaMallocAsync(&d_partial_sums, blocks * sizeof(float), cuda_stream);
 
-        // Launch block-level reduction
-        reduce_all_opacities_kernel<<<blocks, threads, shared_mem_size, cuda_stream>>>(
+        reduce_all_opacities_kernel<<<blocks, THREADS, shared_mem_size, cuda_stream>>>(
             opacities, N, d_partial_sums);
 
-        // Final reduction on CPU (small array)
-        std::vector<float> h_partial_sums(blocks);
-        cudaMemcpyAsync(h_partial_sums.data(), d_partial_sums, blocks * sizeof(float), cudaMemcpyDeviceToHost, cuda_stream);
-        cudaStreamSynchronize(cuda_stream); // Wait for copy to complete
+        // Final reduction with CUB
+        float* d_prob_sum = nullptr;
+        cudaMallocAsync(&d_prob_sum, sizeof(float), cuda_stream);
 
+        void* d_reduce_temp = nullptr;
+        size_t reduce_temp_bytes = 0;
+        cub::DeviceReduce::Sum(d_reduce_temp, reduce_temp_bytes, d_partial_sums, d_prob_sum, blocks, cuda_stream);
+        cudaMallocAsync(&d_reduce_temp, reduce_temp_bytes, cuda_stream);
+        cub::DeviceReduce::Sum(d_reduce_temp, reduce_temp_bytes, d_partial_sums, d_prob_sum, blocks, cuda_stream);
+        cudaFreeAsync(d_reduce_temp, cuda_stream);
+
+        // Copy result to host (required for branching)
         float prob_sum = 0.0f;
-        for (int i = 0; i < blocks; ++i) {
-            prob_sum += h_partial_sums[i];
-        }
+        cudaMemcpyAsync(&prob_sum, d_prob_sum, sizeof(float), cudaMemcpyDeviceToHost, cuda_stream);
+        cudaStreamSynchronize(cuda_stream);
 
-        // Free temp buffer
         cudaFreeAsync(d_partial_sums, cuda_stream);
+        cudaFreeAsync(d_prob_sum, cuda_stream);
 
         if (prob_sum <= 0.0f) {
-            // All zero probabilities - return zeros
             cudaMemsetAsync(sampled_indices, 0, n_samples * sizeof(int64_t), cuda_stream);
             cudaMemsetAsync(sampled_opacities, 0, n_samples * sizeof(float), cuda_stream);
             cudaMemsetAsync(sampled_scales, 0, n_samples * 3 * sizeof(float), cuda_stream);
             return;
         }
 
-        // Pre-compute cumulative sum using Tensor lib for memory management
+        // Cumulative sum for sampling
         auto cumsum_buf = lfs::core::Tensor::empty({N}, lfs::core::Device::CUDA, lfs::core::DataType::Float32);
 
-        // Compute cumulative sum using CUB
         void* d_temp_storage = nullptr;
         size_t temp_storage_bytes = 0;
         cub::DeviceScan::InclusiveSum(d_temp_storage, temp_storage_bytes,
@@ -1145,14 +1146,13 @@ namespace lfs::training::mcmc {
         cub::DeviceScan::InclusiveSum(d_temp_storage, temp_storage_bytes,
                                       opacities, cumsum_buf.ptr<float>(), N, cuda_stream);
 
-        // Launch sampling kernel with pre-computed cumsum
-        dim3 sample_threads(256);
-        dim3 sample_grid((n_samples + sample_threads.x - 1) / sample_threads.x);
+        constexpr int SAMPLE_THREADS = 256;
+        const int sample_grid = (n_samples + SAMPLE_THREADS - 1) / SAMPLE_THREADS;
 
-        multinomial_sample_all_kernel<<<sample_grid, sample_threads, 0, cuda_stream>>>(
+        multinomial_sample_all_kernel<<<sample_grid, SAMPLE_THREADS, 0, cuda_stream>>>(
             opacities,
             scaling_raw,
-            cumsum_buf.ptr<float>(), // Pass pre-computed cumsum
+            cumsum_buf.ptr<float>(),
             N,
             n_samples,
             prob_sum,
@@ -1161,7 +1161,6 @@ namespace lfs::training::mcmc {
             sampled_opacities,
             sampled_scales);
 
-        // Cleanup CUB temp storage
         cudaFreeAsync(d_temp_storage, cuda_stream);
     }
 

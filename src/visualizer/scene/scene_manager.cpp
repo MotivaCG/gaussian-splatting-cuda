@@ -9,6 +9,7 @@
 #include "command/commands/mirror_command.hpp"
 #include "core/logger.hpp"
 #include "core/parameter_manager.hpp"
+#include "core/path_utils.hpp"
 #include "core/services.hpp"
 #include "core/splat_data_export.hpp"
 #include "core/splat_data_transform.hpp"
@@ -28,6 +29,11 @@
 #include <stdexcept>
 
 namespace lfs::vis {
+
+    namespace {
+        // Voxel size for point cloud rendering (in scene units)
+        constexpr float DEFAULT_VOXEL_SIZE = 0.03f;
+    } // namespace
 
     using namespace lfs::core::events;
 
@@ -172,7 +178,7 @@ namespace lfs::vis {
         LOG_TIMER("SceneManager::loadSplatFile");
 
         try {
-            LOG_INFO("Loading splat file: {}", path.string());
+            LOG_INFO("Loading splat file: {}", lfs::core::path_to_utf8(path));
 
             // Clear existing scene
             clear();
@@ -195,12 +201,12 @@ namespace lfs::vis {
 
             auto* splat_data = std::get_if<std::shared_ptr<lfs::core::SplatData>>(&load_result->data);
             if (!splat_data || !*splat_data) {
-                LOG_ERROR("Expected splat file but got different data type from: {}", path.string());
+                LOG_ERROR("Expected splat file but got different data type from: {}", lfs::core::path_to_utf8(path));
                 throw std::runtime_error("Expected splat file but got different data type");
             }
 
             // Add to scene
-            std::string name = path.stem().string();
+            std::string name = lfs::core::path_to_utf8(path.stem());
             size_t gaussian_count = (*splat_data)->size();
             LOG_DEBUG("Adding '{}' to scene with {} gaussians", name, gaussian_count);
 
@@ -280,7 +286,7 @@ namespace lfs::vis {
             LOG_INFO("Loaded '{}' with {} gaussians", name, gaussian_count);
 
         } catch (const std::exception& e) {
-            LOG_ERROR("Failed to load splat file: {} (path: {})", e.what(), path.string());
+            LOG_ERROR("Failed to load splat file: {} (path: {})", e.what(), lfs::core::path_to_utf8(path));
             throw;
         }
     }
@@ -292,7 +298,7 @@ namespace lfs::vis {
         try {
             if (content_type_ != ContentType::SplatFiles) {
                 loadSplatFile(path);
-                return path.stem().string();
+                return lfs::core::path_to_utf8(path.stem());
             }
 
             auto loader = lfs::io::Loader::create();
@@ -313,7 +319,7 @@ namespace lfs::vis {
             }
 
             // Generate unique name
-            const std::string base_name = name_hint.empty() ? path.stem().string() : name_hint;
+            const std::string base_name = name_hint.empty() ? lfs::core::path_to_utf8(path.stem()) : name_hint;
             std::string name = base_name;
             int counter = 1;
             while (scene_.getNode(name) != nullptr) {
@@ -371,7 +377,7 @@ namespace lfs::vis {
             return name;
 
         } catch (const std::exception& e) {
-            LOG_ERROR("Failed to add splat file: {} (path: {})", e.what(), path.string());
+            LOG_ERROR("Failed to add splat file: {} (path: {})", e.what(), lfs::core::path_to_utf8(path));
             throw;
         }
     }
@@ -1005,12 +1011,82 @@ namespace lfs::vis {
         }
     }
 
+    std::expected<void, std::string> SceneManager::applyLoadedDataset(
+        const std::filesystem::path& path,
+        const lfs::core::param::TrainingParameters& params,
+        lfs::io::LoadResult&& load_result) {
+        LOG_TIMER("SceneManager::applyLoadedDataset");
+
+        try {
+            if (services().trainerOrNull()) {
+                services().trainerOrNull()->clearTrainer();
+            }
+            clear();
+
+            auto dataset_params = params;
+            dataset_params.dataset.data_path = path;
+            cached_params_ = dataset_params;
+
+            auto apply_result = lfs::training::applyLoadResultToScene(dataset_params, scene_, std::move(load_result));
+            if (!apply_result) {
+                return std::unexpected(apply_result.error());
+            }
+
+            if (const auto* pc_node = scene_.getNode("PointCloud");
+                pc_node && pc_node->type == NodeType::POINTCLOUD) {
+                (void)scene_.getOrCreateCropBoxForSplat(pc_node->id);
+            }
+
+            auto trainer = std::make_unique<lfs::training::Trainer>(scene_);
+            trainer->setParams(dataset_params);
+
+            if (!services().trainerOrNull()) {
+                return std::unexpected("No trainer manager");
+            }
+            services().trainerOrNull()->setScene(&scene_);
+            services().trainerOrNull()->setTrainer(std::move(trainer));
+
+            {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                content_type_ = ContentType::Dataset;
+                dataset_path_ = path;
+            }
+
+            const auto* training_model = scene_.getTrainingModel();
+            const size_t num_gaussians = training_model ? training_model->size() : 0;
+            const auto* point_cloud = scene_.getVisiblePointCloud();
+            const size_t num_points = point_cloud ? point_cloud->size() : 0;
+
+            state::SceneLoaded{
+                .scene = nullptr,
+                .path = path,
+                .type = state::SceneLoaded::Type::Dataset,
+                .num_gaussians = num_gaussians}
+                .emit();
+
+            emitSceneChanged();
+
+            if ((num_gaussians > 0 || num_points > 0) && services().trainerOrNull() && services().trainerOrNull()->getTrainer()) {
+                ui::PointCloudModeChanged{.enabled = true, .voxel_size = DEFAULT_VOXEL_SIZE}.emit();
+            }
+
+            return {};
+
+        } catch (const std::exception& e) {
+            LOG_ERROR("applyLoadedDataset failed: {}", e.what());
+            return std::unexpected(e.what());
+        }
+    }
+
     void SceneManager::loadDataset(const std::filesystem::path& path,
                                    const lfs::core::param::TrainingParameters& params) {
         LOG_TIMER("SceneManager::loadDataset");
 
+        // Emit start event for progress tracking
+        state::DatasetLoadStarted{.path = path}.emit();
+
         try {
-            LOG_INFO("Loading dataset: {}", path.string());
+            LOG_INFO("Loading dataset: {}", lfs::core::path_to_utf8(path));
 
             // Setup training parameters
             auto dataset_params = params;
@@ -1081,10 +1157,12 @@ namespace lfs::vis {
             // Get info from scene
             const auto* training_model = scene_.getTrainingModel();
             const size_t num_gaussians = training_model ? training_model->size() : 0;
+            const auto* point_cloud = scene_.getVisiblePointCloud();
+            const size_t num_points = point_cloud ? point_cloud->size() : 0;
             const size_t num_cameras = scene_.getTrainCameras() ? scene_.getTrainCameras()->size() : 0;
 
-            LOG_INFO("Dataset loaded successfully - {} images, {} initial gaussians",
-                     num_cameras, num_gaussians);
+            LOG_INFO("Dataset loaded successfully - {} images, {} initial points/gaussians",
+                     num_cameras, num_gaussians > 0 ? num_gaussians : num_points);
 
             state::SceneLoaded{
                 .scene = nullptr,
@@ -1098,23 +1176,19 @@ namespace lfs::vis {
                 .success = true,
                 .error = std::nullopt,
                 .num_images = num_cameras,
-                .num_points = num_gaussians}
+                .num_points = num_gaussians > 0 ? num_gaussians : num_points}
                 .emit();
 
             emitSceneChanged();
 
             // Switch to point cloud rendering mode by default for datasets
-            // Re-enabled with debug logging to investigate dimension mismatch
-            if (num_gaussians > 0 && services().trainerOrNull() && services().trainerOrNull()->getTrainer()) {
-                ui::PointCloudModeChanged{
-                    .enabled = true,
-                    .voxel_size = 0.03f}
-                    .emit();
-                LOG_INFO("Switched to point cloud rendering mode for dataset ({} gaussians)", num_gaussians);
+            if ((num_gaussians > 0 || num_points > 0) && services().trainerOrNull() && services().trainerOrNull()->getTrainer()) {
+                ui::PointCloudModeChanged{.enabled = true, .voxel_size = DEFAULT_VOXEL_SIZE}.emit();
+                LOG_INFO("Switched to point cloud mode ({} points)", num_gaussians > 0 ? num_gaussians : num_points);
             }
 
         } catch (const std::exception& e) {
-            LOG_ERROR("Failed to load dataset: {} (path: {})", e.what(), path.string());
+            LOG_ERROR("Failed to load dataset: {} (path: {})", e.what(), lfs::core::path_to_utf8(path));
 
             // Emit failure event instead of throwing
             state::DatasetLoadCompleted{
@@ -1158,7 +1232,7 @@ namespace lfs::vis {
             }
             if (!std::filesystem::exists(checkpoint_params.dataset.data_path)) {
                 throw std::runtime_error("Dataset path does not exist: " +
-                                         checkpoint_params.dataset.data_path.string());
+                                         lfs::core::path_to_utf8(checkpoint_params.dataset.data_path));
             }
 
             // Validate dataset structure before clearing
@@ -1227,6 +1301,9 @@ namespace lfs::vis {
                 dataset_path_ = checkpoint_params.dataset.data_path;
             }
 
+            // when loading checkpoint with sparsity enabled, adjust total iterations
+            checkpoint_params.optimization.iterations = checkpoint_params.optimization.enable_sparsity ? checkpoint_params.optimization.iterations - checkpoint_params.optimization.sparsify_steps : checkpoint_params.optimization.iterations;
+
             // Update current params from checkpoint (session params remain unchanged)
             if (auto* param_mgr = services().paramsOrNull()) {
                 param_mgr->setCurrentParams(checkpoint_params.optimization);
@@ -1244,7 +1321,7 @@ namespace lfs::vis {
 
             emitSceneChanged();
 
-            ui::PointCloudModeChanged{.enabled = false, .voxel_size = 0.03f}.emit();
+            ui::PointCloudModeChanged{.enabled = false, .voxel_size = DEFAULT_VOXEL_SIZE}.emit();
             selectNode(MODEL_NAME);
             ui::FocusTrainingPanel{}.emit();
 

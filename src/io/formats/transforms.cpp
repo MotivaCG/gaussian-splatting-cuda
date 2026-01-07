@@ -5,6 +5,7 @@
 #include "transforms.hpp"
 #include "core/image_io.hpp"
 #include "core/logger.hpp"
+#include "core/path_utils.hpp"
 #include "core/tensor.hpp"
 #include "formats/colmap.hpp"
 #include "tinyply.hpp"
@@ -25,13 +26,11 @@ namespace lfs::io {
     using lfs::core::PointCloud;
     using lfs::core::Tensor;
 
-    // Constants for random point cloud generation
     constexpr int DEFAULT_NUM_INIT_GAUSSIAN = 10000;
     constexpr uint64_t DEFAULT_RANDOM_SEED = 8128;
+    constexpr float EQUIRECTANGULAR_DUMMY_FOCAL = 20.0f;
 
-    // Use std::numbers::pi instead of a custom PI constant.
-
-    // Helper function to convert Tensor to glm::mat4
+    // Helper: Tensor to glm::mat4
     glm::mat4 tensor_to_mat4(const Tensor& t) {
         glm::mat4 mat;
         const float* data = t.ptr<float>();
@@ -88,13 +87,17 @@ namespace lfs::io {
     }
 
     std::filesystem::path GetTransformImagePath(const std::filesystem::path& dir_path, const nlohmann::json& frame) {
-        auto image_path = dir_path / frame["file_path"];
-        auto images_image_path = dir_path / "images" / frame["file_path"];
-        auto image_path_png = std::filesystem::path(image_path.string() + ".png");
+        // Use utf8_to_path for proper Unicode handling since JSON is UTF-8 encoded
+        const auto file_path = lfs::core::utf8_to_path(frame["file_path"].get<std::string>());
+        auto image_path = dir_path / file_path;
+        auto images_image_path = dir_path / "images" / file_path;
+        // Use path concatenation for proper Unicode handling
+        auto image_path_png = image_path;
+        image_path_png += ".png";
         if (std::filesystem::exists(image_path_png)) {
             // blender data set has not extension, must assumes png
             image_path = image_path_png;
-            LOG_TRACE("Using PNG extension for image: {}", image_path.string());
+            LOG_TRACE("Using PNG extension for image: {}", lfs::core::path_to_utf8(image_path));
         }
         if (std::filesystem::exists(images_image_path) && std::filesystem::is_regular_file(images_image_path)) {
             image_path = images_image_path;
@@ -114,18 +117,21 @@ namespace lfs::io {
             } else if (std::filesystem::is_regular_file(transPath / "transforms.json")) {
                 transformsFile = transPath / "transforms.json";
             } else {
-                LOG_ERROR("Could not find transforms file in: {}", transPath.string());
-                throw std::runtime_error("could not find transforms_train.json nor transforms.json in " + transPath.string());
+                LOG_ERROR("Could not find transforms file in: {}", lfs::core::path_to_utf8(transPath));
+                throw std::runtime_error("could not find transforms_train.json nor transforms.json in " + lfs::core::path_to_utf8(transPath));
             }
         }
 
         if (!std::filesystem::is_regular_file(transformsFile)) {
-            LOG_ERROR("Not a valid file: {}", transformsFile.string());
-            throw std::runtime_error(transformsFile.string() + " is not a valid file");
+            LOG_ERROR("Not a valid file: {}", lfs::core::path_to_utf8(transformsFile));
+            throw std::runtime_error(lfs::core::path_to_utf8(transformsFile) + " is not a valid file");
         }
 
-        LOG_DEBUG("Reading transforms from: {}", transformsFile.string());
-        std::ifstream trans_file{transformsFile.string()};
+        LOG_DEBUG("Reading transforms from: {}", lfs::core::path_to_utf8(transformsFile));
+        std::ifstream trans_file;
+        if (!lfs::core::open_file_for_read(transformsFile, trans_file)) {
+            throw std::runtime_error("Failed to open: " + lfs::core::path_to_utf8(transformsFile));
+        }
 
         std::filesystem::path dir_path = transformsFile.parent_path();
 
@@ -159,6 +165,20 @@ namespace lfs::io {
 
         float fl_x = -1, fl_y = -1;
         auto camera_model = lfs::core::CameraModelType::PINHOLE;
+
+        // Parse explicit camera_model field (nerfstudio format)
+        if (transforms.contains("camera_model")) {
+            const std::string model_str = transforms["camera_model"];
+            if (model_str == "EQUIRECTANGULAR") {
+                camera_model = lfs::core::CameraModelType::EQUIRECTANGULAR;
+            } else if (model_str == "FISHEYE" || model_str == "OPENCV_FISHEYE") {
+                camera_model = lfs::core::CameraModelType::FISHEYE;
+            } else if (model_str != "PINHOLE") {
+                LOG_WARN("Unknown camera_model '{}', defaulting to PINHOLE", model_str);
+            }
+            LOG_DEBUG("Camera model: {}", model_str);
+        }
+
         if (transforms.contains("fl_x")) {
             fl_x = float(transforms["fl_x"]);
         } else if (transforms.contains("camera_angle_x")) {
@@ -170,21 +190,30 @@ namespace lfs::io {
         } else if (transforms.contains("camera_angle_y")) {
             fl_y = fov_rad_to_focal_length(h, float(transforms["camera_angle_y"]));
         } else {
-            // OmniBlender no intrinsics
-            if (!transforms.contains("fl_x") && !transforms.contains("camera_angle_x") &&
-                !transforms.contains("fl_y") && !transforms.contains("camera_angle_y")) {
-                LOG_WARN("No camera intrinsics found, assuming equirectangular");
-                fl_x = 20.0;
-                fl_y = 20.0;
-                camera_model = lfs::core::CameraModelType::EQUIRECTANGULAR;
+            const bool no_intrinsics = !transforms.contains("fl_x") && !transforms.contains("camera_angle_x") &&
+                                       !transforms.contains("fl_y") && !transforms.contains("camera_angle_y");
+            if (no_intrinsics) {
+                // Auto-detect equirectangular if not explicitly set
+                if (camera_model != lfs::core::CameraModelType::EQUIRECTANGULAR) {
+                    LOG_WARN("No camera intrinsics found, assuming equirectangular");
+                    camera_model = lfs::core::CameraModelType::EQUIRECTANGULAR;
+                }
+                fl_x = fl_y = EQUIRECTANGULAR_DUMMY_FOCAL;
             } else {
-                // we should be  here in this scope only for blender - if w!=h then we must throw exception
+                // Blender format: square images use same focal for x/y
                 if (w != h) {
-                    LOG_ERROR("No camera_angle_y but w!=h: {}!={}", w, h);
-                    throw std::runtime_error("no camera_angle_y expected w!=h");
+                    throw std::runtime_error("No camera_angle_y but w!=h");
                 }
                 fl_y = fl_x;
             }
+        }
+
+        // Equirectangular needs dummy focal lengths if not set
+        if (camera_model == lfs::core::CameraModelType::EQUIRECTANGULAR) {
+            if (fl_x < 0)
+                fl_x = EQUIRECTANGULAR_DUMMY_FOCAL;
+            if (fl_y < 0)
+                fl_y = EQUIRECTANGULAR_DUMMY_FOCAL;
         }
 
         float cx = -1, cy = -1;
@@ -202,6 +231,7 @@ namespace lfs::io {
 
         float k1 = 0;
         float k2 = 0;
+        float k3 = 0;
         float p1 = 0;
         float p2 = 0;
         if (transforms.contains("k1")) {
@@ -210,15 +240,19 @@ namespace lfs::io {
         if (transforms.contains("k2")) {
             k2 = float(transforms["k2"]);
         }
+        if (transforms.contains("k3")) {
+            k3 = float(transforms["k3"]);
+        }
         if (transforms.contains("p1")) {
             p1 = float(transforms["p1"]);
         }
         if (transforms.contains("p2")) {
             p2 = float(transforms["p2"]);
         }
-        if (k1 > 0 || k2 > 0 || p1 > 0 || p2 > 0) {
-            LOG_ERROR("Distortion parameters not supported: k1={}, k2={}, p1={}, p2={}", k1, k2, p1, p2);
-            throw std::runtime_error(std::format("GS don't support distortion for now: k1={}, k2={}, p1={}, p2={}", k1, k2, p1, p2));
+        bool is_distorted = (k1 != 0.0f) || (k2 != 0.0f) || (k3 != 0.0f) || (p1 != 0.0f) || (p2 != 0.0f);
+
+        if (is_distorted) {
+            LOG_DEBUG("Blender Loader: identified distortion in data set");
         }
 
         std::vector<CameraData> camerasdata;
@@ -275,15 +309,21 @@ namespace lfs::io {
 
                 camdata._image_path = GetTransformImagePath(dir_path, frame);
 
-                camdata._image_name = std::filesystem::path(camdata._image_path).filename().string();
+                camdata._image_name = lfs::core::path_to_utf8(camdata._image_path.filename());
 
                 camdata._width = w;
                 camdata._height = h;
 
-                camdata._T = T;
-                camdata._R = R;
-                camdata._radial_distortion = lfs::core::Tensor::empty({0}, Device::CPU, DataType::Float32);
-                camdata._tangential_distortion = lfs::core::Tensor::empty({0}, Device::CPU, DataType::Float32);
+                camdata._T = T.contiguous();
+                camdata._R = R.contiguous();
+
+                if (is_distorted) {
+                    camdata._radial_distortion = Tensor::from_vector({k1, k2, k3}, {3}, Device::CPU);
+                    camdata._tangential_distortion = Tensor::from_vector({p1, p2}, {2}, Device::CPU);
+                } else {
+                    camdata._radial_distortion = Tensor::empty({0}, Device::CPU);
+                    camdata._tangential_distortion = Tensor::empty({0}, Device::CPU);
+                }
 
                 camdata._focal_x = fl_x;
                 camdata._focal_y = fl_y;
@@ -314,8 +354,14 @@ namespace lfs::io {
             std::filesystem::is_regular_file(dir_path / "test.txt")) {
             LOG_DEBUG("Found train.txt and test.txt files, loading image splits");
 
-            std::ifstream train_file(dir_path / "train.txt");
-            std::ifstream val_file(dir_path / "test.txt");
+            std::ifstream train_file;
+            std::ifstream val_file;
+            if (!lfs::core::open_file_for_read(dir_path / "train.txt", train_file)) {
+                LOG_WARN("Failed to open train.txt");
+            }
+            if (!lfs::core::open_file_for_read(dir_path / "test.txt", val_file)) {
+                LOG_WARN("Failed to open test.txt");
+            }
 
             std::vector<std::string> train_images;
             std::vector<std::string> val_images;
@@ -358,17 +404,17 @@ namespace lfs::io {
     }
 
     PointCloud load_simple_ply_point_cloud(const std::filesystem::path& filepath) {
-        LOG_DEBUG("Loading simple PLY point cloud from: {}", filepath.string());
+        LOG_DEBUG("Loading simple PLY point cloud from: {}", lfs::core::path_to_utf8(filepath));
 
         if (!std::filesystem::exists(filepath)) {
-            throw std::runtime_error(std::format("PLY file not found: {}", filepath.string()));
+            throw std::runtime_error(std::format("PLY file not found: {}", lfs::core::path_to_utf8(filepath)));
         }
 
         try {
             // Open the PLY file
-            std::ifstream ss(filepath, std::ios::binary);
-            if (!ss) {
-                throw std::runtime_error(std::format("Failed to open PLY file: {}", filepath.string()));
+            std::ifstream ss;
+            if (!lfs::core::open_file_for_read(filepath, std::ios::binary, ss)) {
+                throw std::runtime_error(std::format("Failed to open PLY file: {}", lfs::core::path_to_utf8(filepath)));
             }
 
             // Parse PLY header
@@ -468,10 +514,12 @@ namespace lfs::io {
             }
 
             LOG_INFO("Successfully loaded PLY point cloud with {} points", vertex_count);
-            return PointCloud(positions, color_tensor);
+
+            // Move to CUDA for GPU rendering
+            return PointCloud(positions.cuda(), color_tensor.cuda());
 
         } catch (const std::exception& e) {
-            throw std::runtime_error(std::format("Failed to load PLY file {}: {}", filepath.string(), e.what()));
+            throw std::runtime_error(std::format("Failed to load PLY file {}: {}", lfs::core::path_to_utf8(filepath), e.what()));
         }
     }
 

@@ -26,7 +26,7 @@ namespace lfs::core {
         struct OptimizationParameters {
             size_t iterations = 30'000;
             size_t sh_degree_interval = 1'000;
-            float means_lr = 0.00016f;
+            float means_lr = 0.000016f;
             float shs_lr = 0.0025f;
             float opacity_lr = 0.05f;
             float scaling_lr = 0.005f;
@@ -42,7 +42,6 @@ namespace lfs::core {
             float scale_reg = 0.01f;
             float init_opacity = 0.5f;
             float init_scaling = 0.1f;
-            int num_workers = 2;
             int max_cap = 1000000;
             std::vector<size_t> eval_steps = {7'000, 30'000}; // Steps to evaluate the model
             std::vector<size_t> save_steps = {7'000, 30'000}; // Steps to save the model
@@ -54,7 +53,7 @@ namespace lfs::core {
             bool skip_intermediate = false;                   // Skip intermediate PLY/checkpoint saves (only save final)
             bool no_splash = false;                           // Skip splash screen on startup
             bool no_interop = false;                          // Disable CUDA-GL interop (use CPU fallback)
-            std::string strategy = "mcmc";                    // Optimization strategy: mcmc, default.
+            std::string strategy = "mcmc";                    // Optimization strategy: mcmc, adc.
 
             // Mask parameters
             MaskMode mask_mode = MaskMode::None;      // Attention mask mode
@@ -74,7 +73,7 @@ namespace lfs::core {
             float bilateral_grid_lr = 2e-3f;
             float tv_loss_weight = 10.f;
 
-            // Default strategy specific parameters
+            // adc strategy specific parameters
             float prune_opacity = 0.005f;
             float grow_scale3d = 0.01f;
             float grow_scale2d = 0.05f;
@@ -84,7 +83,7 @@ namespace lfs::core {
             size_t pause_refine_after_reset = 0;
             bool revised_opacity = false;
             bool gut = false;
-            float steps_scaler = 0.f; // If < 0, step size scaling is disabled
+            float steps_scaler = 1.f; // Scales training step counts; values <= 0 disable scaling
 
             // Random initialization parameters
             bool random = false;        // Use random initialization instead of SfM
@@ -105,6 +104,10 @@ namespace lfs::core {
 
             nlohmann::json to_json() const;
             static OptimizationParameters from_json(const nlohmann::json& j);
+
+            // Factory methods for strategy presets
+            static OptimizationParameters mcmc_defaults();
+            static OptimizationParameters adc_defaults();
         };
 
         struct LoadingParams {
@@ -176,9 +179,5 @@ namespace lfs::core {
             const TrainingParameters& params,
             const std::filesystem::path& output_path);
 
-        std::expected<LoadingParams, std::string> read_loading_params_from_json(const std::filesystem::path& path);
-
-        // Find parameter file by searching up from executable directory
-        std::filesystem::path get_parameter_file_path(const std::string& filename);
     } // namespace param
 } // namespace lfs::core

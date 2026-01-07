@@ -11,6 +11,7 @@
 #include "core/parameters.hpp"
 #include "core/tensor.hpp"
 #include "dataset.hpp"
+#include "lfs/kernels/ssim.cuh"
 #include "metrics/metrics.hpp"
 #include "optimizer/scheduler.hpp"
 #include "progress.hpp"
@@ -207,13 +208,19 @@ namespace lfs::training {
         lfs::core::Tensor background_{};
         lfs::core::Tensor bg_mix_buffer_;
         lfs::core::Tensor bg_noise_buffer_; 
+        float* bg_rgb_pinned_ = nullptr; // Pinned host buffer for async copy
         std::unique_ptr<TrainingProgress> progress_;
         size_t train_dataset_size_ = 0;
+
+        // Pre-loaded mask from pipelined dataloader (used in train_step)
+        lfs::core::Tensor pipelined_mask_;
 
         // Bilateral grid for appearance modeling (optional)
         std::unique_ptr<BilateralGrid> bilateral_grid_;
 
         std::unique_ptr<ISparsityOptimizer> sparsity_optimizer_;
+
+        lfs::training::kernels::MaskedFusedL1SSIMWorkspace masked_fused_workspace_;
 
         // Metrics evaluator - handles all evaluation logic
         std::unique_ptr<lfs::training::MetricsEvaluator> evaluator_;
@@ -243,5 +250,8 @@ namespace lfs::training {
         std::function<void()> callback_;
         std::atomic<bool> callback_busy_{false};
         cudaStream_t callback_stream_ = nullptr;
+
+        // GPU-side synchronization event (reusable, avoids CPU blocking)
+        cudaEvent_t img_sync_event_ = nullptr;
     };
 } // namespace lfs::training

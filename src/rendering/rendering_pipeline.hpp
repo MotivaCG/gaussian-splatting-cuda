@@ -83,8 +83,8 @@ namespace lfs::rendering {
             float ortho_scale = DEFAULT_ORTHO_SCALE;
 
             [[nodiscard]] glm::mat4 getProjectionMatrix(const float near_plane = DEFAULT_NEAR_PLANE,
-                                                        const float far = DEFAULT_FAR_PLANE) const {
-                return createProjectionMatrix(viewport_size, fov, orthographic, ortho_scale, near_plane, far);
+                                                        const float far_plane = DEFAULT_FAR_PLANE) const {
+                return createProjectionMatrix(viewport_size, fov, orthographic, ortho_scale, near_plane, far_plane);
             }
         };
 
@@ -149,6 +149,8 @@ namespace lfs::rendering {
         int pbo_index_ = 0;
         int pbo_width_ = 0;
         int pbo_height_ = 0;
+        int allocated_pbo_width_ = 0;
+        int allocated_pbo_height_ = 0;
 
 #ifdef CUDA_GL_INTEROP_ENABLED
         // CUDA-GL interop for direct FBO→CUDA texture readback (eliminates CPU round-trip)

@@ -4,6 +4,10 @@
 
 #include "notification_popup.hpp"
 #include "core/events.hpp"
+#include "core/path_utils.hpp"
+#include "gui/dpi_scale.hpp"
+#include "gui/localization_manager.hpp"
+#include "gui/string_keys.hpp"
 #include "gui/ui_widgets.hpp"
 #include "theme/theme.hpp"
 #include <cmath>
@@ -13,11 +17,12 @@
 namespace lfs::vis::gui {
 
     namespace {
-        constexpr float BUTTON_WIDTH = 100.0f;
-        constexpr float TEXT_WRAP_WIDTH = 30.0f;
+        // Base dimensions (scaled by DPI factor at runtime)
+        constexpr float BASE_BUTTON_WIDTH = 100.0f;
+        constexpr float TEXT_WRAP_WIDTH = 30.0f; // Multiplier for font size, not pixels
         constexpr float POPUP_ALPHA = 0.98f;
         constexpr float BORDER_SIZE = 2.0f;
-        constexpr ImVec2 WINDOW_PADDING = {20.0f, 16.0f};
+        constexpr ImVec2 BASE_WINDOW_PADDING = {20.0f, 16.0f};
         constexpr ImGuiWindowFlags POPUP_FLAGS = ImGuiWindowFlags_AlwaysAutoResize |
                                                  ImGuiWindowFlags_NoCollapse |
                                                  ImGuiWindowFlags_NoDocking;
@@ -55,9 +60,46 @@ namespace lfs::vis::gui {
             }
         });
 
+        state::CudaVersionUnsupported::when([this](const auto& e) {
+            show(Type::WARNING, "Unsupported CUDA Driver",
+                 std::format("Your CUDA driver version ({}.{}) is not supported.\n\n"
+                             "LichtFeld Studio requires CUDA {}.{} or later\n"
+                             "(NVIDIA driver 570+).\n\n"
+                             "Please update your NVIDIA driver for full functionality.",
+                             e.major, e.minor, e.min_major, e.min_minor));
+        });
+
         state::ConfigLoadFailed::when([this](const auto& e) {
             show(Type::FAILURE, "Invalid Config File",
-                 std::format("Could not load '{}':\n\n{}", e.path.filename().string(), e.error));
+                 std::format("Could not load '{}':\n\n{}", lfs::core::path_to_utf8(e.path.filename()), e.error));
+        });
+
+        state::FileDropFailed::when([this](const auto& e) {
+            constexpr size_t MAX_DISPLAY = 5;
+            namespace Notif = lichtfeld::Strings::Notification;
+
+            const size_t count = e.files.size();
+            const size_t display_count = std::min(count, MAX_DISPLAY);
+
+            std::string file_list;
+            file_list.reserve(display_count * 64);
+
+            for (size_t i = 0; i < display_count; ++i) {
+                const std::filesystem::path p(e.files[i]);
+                const bool is_dir = std::filesystem::is_directory(p);
+                file_list += std::format("  - {} ({})\n", lfs::core::path_to_utf8(p.filename()),
+                                         is_dir ? LOC(Notif::DIRECTORY) : LOC(Notif::FILE));
+            }
+            if (count > MAX_DISPLAY) {
+                file_list += std::format("  {} {}\n", LOC(Notif::AND_MORE), count - MAX_DISPLAY);
+            }
+
+            const bool single_dir = count == 1 && std::filesystem::is_directory(e.files[0]);
+            const char* item_type = count == 1 ? (single_dir ? LOC(Notif::DIRECTORY) : LOC(Notif::FILE))
+                                               : LOC(Notif::ITEMS);
+
+            show(Type::FAILURE, LOC(Notif::CANNOT_OPEN),
+                 std::format("{} {}:\n\n{}\n{}", LOC(Notif::DROPPED_NOT_RECOGNIZED), item_type, file_list, e.error));
         });
 
         state::TrainingCompleted::when([this](const auto& e) {
@@ -95,7 +137,7 @@ namespace lfs::vis::gui {
         pending_.push_back({type, title, message, std::move(on_close)});
     }
 
-    void NotificationPopup::render() {
+    void NotificationPopup::render(const ImVec2& viewport_pos, const ImVec2& viewport_size) {
         if (!popup_open_ && !pending_.empty()) {
             current_ = std::move(pending_.front());
             pending_.pop_front();
@@ -108,6 +150,7 @@ namespace lfs::vis::gui {
         }
 
         const auto& t = theme();
+        const float scale = getDpiScale();
 
         ImVec4 accent;
         widgets::ButtonStyle btn_style;
@@ -135,7 +178,9 @@ namespace lfs::vis::gui {
         const ImVec4 title_bg = darken(t.palette.surface, 0.1f);
         const ImVec4 title_bg_active = darken(t.palette.surface, 0.05f);
 
-        const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+        const ImVec2 center = (viewport_size.x > 0 && viewport_size.y > 0)
+                                  ? ImVec2{viewport_pos.x + viewport_size.x * 0.5f, viewport_pos.y + viewport_size.y * 0.5f}
+                                  : ImGui::GetMainViewport()->GetCenter();
         ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, {0.5f, 0.5f});
 
         ImGui::PushStyleColor(ImGuiCol_WindowBg, popup_bg);
@@ -144,7 +189,7 @@ namespace lfs::vis::gui {
         ImGui::PushStyleColor(ImGuiCol_Border, accent);
         ImGui::PushStyleColor(ImGuiCol_Text, t.palette.text);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, BORDER_SIZE);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, WINDOW_PADDING);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(BASE_WINDOW_PADDING.x * scale, BASE_WINDOW_PADDING.y * scale));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, t.sizes.popup_rounding);
 
         if (ImGui::BeginPopupModal(current_.title.c_str(), nullptr, POPUP_FLAGS)) {
@@ -165,10 +210,11 @@ namespace lfs::vis::gui {
             ImGui::Spacing();
             ImGui::Spacing();
 
+            const float button_width = BASE_BUTTON_WIDTH * scale;
             const float avail = ImGui::GetContentRegionAvail().x;
-            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail - BUTTON_WIDTH) * 0.5f);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail - button_width) * 0.5f);
 
-            if (widgets::ColoredButton("OK", btn_style, {BUTTON_WIDTH, 0}) ||
+            if (widgets::ColoredButton("OK", btn_style, {button_width, 0}) ||
                 ImGui::IsKeyPressed(ImGuiKey_Enter)) {
                 popup_open_ = false;
                 if (current_.on_close) {

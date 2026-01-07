@@ -4,6 +4,7 @@
 
 #include "sogs_loader.hpp"
 #include "core/logger.hpp"
+#include "core/path_utils.hpp"
 #include "core/splat_data.hpp"
 #include "formats/sogs.hpp"
 #include "io/error.hpp"
@@ -40,15 +41,15 @@ namespace lfs::io {
 
         // Validation only mode
         if (options.validate_only) {
-            LOG_DEBUG("Validation only mode for SOG: {}", path.string());
+            LOG_DEBUG("Validation only mode for SOG: {}", lfs::core::path_to_utf8(path));
 
             bool valid = false;
 
             // Check if it's a .sog bundle
             if (path.extension() == ".sog" && std::filesystem::is_regular_file(path)) {
                 // Basic validation - check if it's a valid archive
-                std::ifstream file(path, std::ios::binary);
-                if (file) {
+                std::ifstream file;
+                if (lfs::core::open_file_for_read(path, std::ios::binary, file)) {
                     // Check for ZIP/archive header (PK)
                     char header[2];
                     file.read(header, 2);
@@ -96,7 +97,7 @@ namespace lfs::io {
             options.progress(50.0f, "Parsing SOG data...");
         }
 
-        LOG_INFO("Loading SOG file: {}", path.string());
+        LOG_INFO("Loading SOG file: {}", lfs::core::path_to_utf8(path));
         auto splat_result = load_sog(path);
         if (!splat_result) {
             return make_error(ErrorCode::CORRUPTED_DATA,

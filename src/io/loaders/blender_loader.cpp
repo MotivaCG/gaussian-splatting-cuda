@@ -6,6 +6,7 @@
 #include "core/camera.hpp"
 #include "core/image_io.hpp"
 #include "core/logger.hpp"
+#include "core/path_utils.hpp"
 #include "core/point_cloud.hpp"
 #include "formats/transforms.hpp"
 #include "io/error.hpp"
@@ -33,7 +34,7 @@ namespace lfs::io {
     // Priority: exact match, stem+ext (e.g., img.png), full+ext (e.g., img.jpg.png)
     static std::filesystem::path find_mask_path(const std::filesystem::path& base_path,
                                                 const std::string& image_name) {
-        const std::filesystem::path img_path(image_name);
+        const std::filesystem::path img_path = lfs::core::utf8_to_path(image_name);
         const std::filesystem::path stem_path = img_path.parent_path() / img_path.stem();
 
         for (const auto& folder : MASK_FOLDERS) {
@@ -41,7 +42,7 @@ namespace lfs::io {
             if (!std::filesystem::exists(mask_dir))
                 continue;
 
-            if (const auto exact = mask_dir / image_name; std::filesystem::exists(exact))
+            if (const auto exact = mask_dir / img_path; std::filesystem::exists(exact))
                 return exact;
 
             for (const auto& ext : MASK_EXTENSIONS) {
@@ -52,7 +53,7 @@ namespace lfs::io {
             }
 
             for (const auto& ext : MASK_EXTENSIONS) {
-                auto path = mask_dir / image_name;
+                auto path = mask_dir / img_path;
                 path += ext;
                 if (std::filesystem::exists(path))
                     return path;
@@ -97,7 +98,7 @@ namespace lfs::io {
         } else if (path.extension() == ".json") {
             // Direct path to transforms file
             transforms_file = path;
-            LOG_DEBUG("Using direct transforms file: {}", transforms_file.string());
+            LOG_DEBUG("Using direct transforms file: {}", lfs::core::path_to_utf8(transforms_file));
         } else {
             return make_error(ErrorCode::UNSUPPORTED_FORMAT,
                               "Path must be a directory or a JSON file", path);
@@ -105,10 +106,10 @@ namespace lfs::io {
 
         // Validation only mode
         if (options.validate_only) {
-            LOG_DEBUG("Validation only mode for Blender/NeRF: {}", transforms_file.string());
+            LOG_DEBUG("Validation only mode for Blender/NeRF: {}", lfs::core::path_to_utf8(transforms_file));
             // Check if the transforms file is valid JSON
-            std::ifstream file(transforms_file);
-            if (!file) {
+            std::ifstream file;
+            if (!lfs::core::open_file_for_read(transforms_file, file)) {
                 return make_error(ErrorCode::PERMISSION_DENIED,
                                   "Cannot open transforms file for reading", transforms_file);
             }
@@ -150,7 +151,7 @@ namespace lfs::io {
         }
 
         try {
-            LOG_INFO("Loading Blender/NeRF dataset from: {}", transforms_file.string());
+            LOG_INFO("Loading Blender/NeRF dataset from: {}", lfs::core::path_to_utf8(transforms_file));
 
             // Read transforms and create cameras
             auto [camera_infos, scene_center, train_val_split] = read_transforms_cameras_and_images(transforms_file);
@@ -182,7 +183,7 @@ namespace lfs::io {
                         if (img_w != mask_w || img_h != mask_h) {
                             return make_error(ErrorCode::MASK_SIZE_MISMATCH,
                                               std::format("Mask '{}' is {}x{} but image '{}' is {}x{}",
-                                                          mask_path.filename().string(), mask_w, mask_h,
+                                                          lfs::core::path_to_utf8(mask_path.filename()), mask_w, mask_h,
                                                           info._image_name, img_w, img_h),
                                               mask_path);
                         }
@@ -223,16 +224,36 @@ namespace lfs::io {
                 std::move(cameras), dataset_config, lfs::training::CameraDataset::Split::ALL);
 
             if (options.progress) {
-                options.progress(60.0f, "Generating initialization point cloud...");
+                options.progress(60.0f, "Loading point cloud...");
             }
 
-            // Generate random point cloud for initialization
-            // Note: Blender/NeRF datasets don't typically include sparse point clouds
-            // If a pointcloud.ply exists, users should load it separately via the PLY loader
-            LOG_DEBUG("Generating random point cloud for initialization");
-            auto random_pc = generate_random_point_cloud();
-            auto point_cloud = std::make_shared<PointCloud>(std::move(random_pc));
-            LOG_INFO("Generated random point cloud with {} points", point_cloud->size());
+            // Check ply_file_path in transforms.json (nerfstudio format), fallback to pointcloud.ply
+            std::filesystem::path pointcloud_path;
+            if (std::ifstream file; lfs::core::open_file_for_read(transforms_file, file)) {
+                try {
+                    if (const auto json = nlohmann::json::parse(file, nullptr, true, true);
+                        json.contains("ply_file_path")) {
+                        pointcloud_path = base_path / lfs::core::utf8_to_path(json["ply_file_path"].get<std::string>());
+                    }
+                } catch (...) {
+                    // Ignore parse errors - will fallback to default pointcloud.ply
+                }
+            }
+            if (pointcloud_path.empty() || !std::filesystem::exists(pointcloud_path)) {
+                pointcloud_path = base_path / "pointcloud.ply";
+            }
+
+            std::shared_ptr<PointCloud> point_cloud;
+            std::vector<std::string> warnings;
+            if (std::filesystem::exists(pointcloud_path)) {
+                point_cloud = std::make_shared<PointCloud>(load_simple_ply_point_cloud(pointcloud_path));
+                LOG_INFO("Loaded {} points from {}", point_cloud->size(),
+                         lfs::core::path_to_utf8(pointcloud_path.filename()));
+            } else {
+                point_cloud = std::make_shared<PointCloud>(generate_random_point_cloud());
+                LOG_WARN("No PLY found, using {} random points", point_cloud->size());
+                warnings.emplace_back("No point cloud file found, using random initialization");
+            }
 
             if (options.progress) {
                 options.progress(100.0f, "Blender/NeRF loading complete");
@@ -256,7 +277,7 @@ namespace lfs::io {
                 .scene_center = scene_center,
                 .loader_used = name(),
                 .load_time = load_time,
-                .warnings = {"Using random point cloud initialization"}};
+                .warnings = std::move(warnings)};
 
             LOG_INFO("Blender/NeRF dataset loaded successfully in {}ms", load_time.count());
             LOG_INFO("  - {} cameras", num_cameras);

@@ -7,57 +7,34 @@
 
 namespace lfs::vis {
 
-    namespace {
-        constexpr const char* MCMC_CONFIG_FILE = "mcmc_optimization_params.json";
-        constexpr const char* DEFAULT_CONFIG_FILE = "default_optimization_params.json";
-        constexpr const char* LOADING_CONFIG_FILE = "loading_params.json";
-    } // namespace
-
     std::expected<void, std::string> ParameterManager::ensureLoaded() {
         if (loaded_)
             return {};
 
-        const auto mcmc_path = lfs::core::param::get_parameter_file_path(MCMC_CONFIG_FILE);
-        auto mcmc_result = lfs::core::param::read_optim_params_from_json(mcmc_path);
-        if (!mcmc_result) {
-            return std::unexpected("Failed to load MCMC params: " + mcmc_result.error());
-        }
-        mcmc_session_ = std::move(*mcmc_result);
+        mcmc_session_ = lfs::core::param::OptimizationParameters::mcmc_defaults();
         mcmc_current_ = mcmc_session_;
-
-        const auto default_path = lfs::core::param::get_parameter_file_path(DEFAULT_CONFIG_FILE);
-        auto default_result = lfs::core::param::read_optim_params_from_json(default_path);
-        if (!default_result) {
-            return std::unexpected("Failed to load default params: " + default_result.error());
-        }
-        default_session_ = std::move(*default_result);
-        default_current_ = default_session_;
-
-        const auto loading_path = lfs::core::param::get_parameter_file_path(LOADING_CONFIG_FILE);
-        auto loading_result = lfs::core::param::read_loading_params_from_json(loading_path);
-        if (!loading_result) {
-            return std::unexpected("Failed to load loading params: " + loading_result.error());
-        }
-        dataset_config_.loading_params = std::move(*loading_result);
+        adc_session_ = lfs::core::param::OptimizationParameters::adc_defaults();
+        adc_current_ = adc_session_;
+        dataset_config_.loading_params = lfs::core::param::LoadingParams{};
 
         loaded_ = true;
         return {};
     }
 
     lfs::core::param::OptimizationParameters& ParameterManager::getCurrentParams(const std::string_view strategy) {
-        return (strategy == "mcmc") ? mcmc_current_ : default_current_;
+        return (strategy == "mcmc") ? mcmc_current_ : adc_current_;
     }
 
     const lfs::core::param::OptimizationParameters& ParameterManager::getCurrentParams(const std::string_view strategy) const {
-        return (strategy == "mcmc") ? mcmc_current_ : default_current_;
+        return (strategy == "mcmc") ? mcmc_current_ : adc_current_;
     }
 
     void ParameterManager::resetToDefaults(const std::string_view strategy) {
         if (strategy.empty() || strategy == "mcmc") {
             mcmc_current_ = mcmc_session_;
         }
-        if (strategy.empty() || strategy == "default") {
-            default_current_ = default_session_;
+        if (strategy.empty() || strategy == "adc") {
+            adc_current_ = adc_session_;
         }
     }
 
@@ -73,8 +50,8 @@ namespace lfs::vis {
         if (!opt.strategy.empty())
             setActiveStrategy(opt.strategy);
 
-        auto& session = (active_strategy_ == "mcmc") ? mcmc_session_ : default_session_;
-        auto& current = (active_strategy_ == "mcmc") ? mcmc_current_ : default_current_;
+        auto& session = (active_strategy_ == "mcmc") ? mcmc_session_ : adc_session_;
+        auto& current = (active_strategy_ == "mcmc") ? mcmc_current_ : adc_current_;
         session = opt;
         current = opt;
 
@@ -105,7 +82,7 @@ namespace lfs::vis {
         if (active_strategy_ == "mcmc") {
             mcmc_current_ = params;
         } else {
-            default_current_ = params;
+            adc_current_ = params;
         }
         LOG_DEBUG("Current params updated: strategy={}, iter={}, sh={}", params.strategy, params.iterations, params.sh_degree);
     }
@@ -118,14 +95,14 @@ namespace lfs::vis {
             mcmc_session_ = params;
             mcmc_current_ = params;
         } else {
-            default_session_ = params;
-            default_current_ = params;
+            adc_session_ = params;
+            adc_current_ = params;
         }
         LOG_INFO("Imported params: strategy={}, iter={}, sh={}", params.strategy, params.iterations, params.sh_degree);
     }
 
     void ParameterManager::setActiveStrategy(const std::string_view strategy) {
-        if (strategy == "mcmc" || strategy == "default") {
+        if (strategy == "mcmc" || strategy == "adc") {
             active_strategy_ = std::string(strategy);
         }
     }

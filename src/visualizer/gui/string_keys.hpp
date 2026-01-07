@@ -61,6 +61,7 @@ namespace lichtfeld::Strings {
         inline constexpr const char* VIDEO_REALITY_SCAN = "getting_started.video_reality_scan";
         inline constexpr const char* VIDEO_COLMAP = "getting_started.video_colmap";
         inline constexpr const char* VIDEO_LICHTFELD = "getting_started.video_lichtfeld";
+        inline constexpr const char* VIDEO_MASKS = "getting_started.video_masks";
         inline constexpr const char* LOADING = "getting_started.loading";
     } // namespace GettingStarted
 
@@ -509,13 +510,36 @@ namespace lichtfeld::Strings {
         inline constexpr const char* EXIT = "exit_popup.exit";
     } // namespace ExitPopup
 
-    namespace SaveDirPopup {
-        inline constexpr const char* TITLE = "save_dir_popup.title";
-        inline constexpr const char* CONFIGURE_OUTPUT = "save_dir_popup.configure_output";
-        inline constexpr const char* DATASET_LABEL = "save_dir_popup.dataset_label";
-        inline constexpr const char* OUTPUT_DIR = "save_dir_popup.output_dir";
-        inline constexpr const char* HELP_TEXT = "save_dir_popup.help_text";
-    } // namespace SaveDirPopup
+    namespace LoadDatasetPopup {
+        inline constexpr const char* TITLE = "load_dataset_popup.title";
+        inline constexpr const char* CONFIGURE_PATHS = "load_dataset_popup.configure_paths";
+        inline constexpr const char* IMAGES_DIR = "load_dataset_popup.images_dir";
+        inline constexpr const char* SPARSE_DIR = "load_dataset_popup.sparse_dir";
+        inline constexpr const char* MASKS_DIR = "load_dataset_popup.masks_dir";
+        inline constexpr const char* OUTPUT_DIR = "load_dataset_popup.output_dir";
+        inline constexpr const char* HELP_TEXT = "load_dataset_popup.help_text";
+    } // namespace LoadDatasetPopup
+
+    namespace Notification {
+        inline constexpr const char* CANNOT_OPEN = "notification.cannot_open";
+        inline constexpr const char* DROPPED_NOT_RECOGNIZED = "notification.dropped_not_recognized";
+        inline constexpr const char* DIRECTORY = "notification.directory";
+        inline constexpr const char* FILE = "notification.file";
+        inline constexpr const char* ITEMS = "notification.items";
+        inline constexpr const char* AND_MORE = "notification.and_more";
+    } // namespace Notification
+
+    namespace ResumeCheckpointPopup_ {
+        inline constexpr const char* TITLE = "resume_checkpoint_popup.title";
+        inline constexpr const char* CHECKPOINT = "resume_checkpoint_popup.checkpoint";
+        inline constexpr const char* CONFIGURE_PATHS = "resume_checkpoint_popup.configure_paths";
+        inline constexpr const char* FILE = "resume_checkpoint_popup.file";
+        inline constexpr const char* STORED_PATH = "resume_checkpoint_popup.stored_path";
+        inline constexpr const char* NOT_FOUND = "resume_checkpoint_popup.not_found";
+        inline constexpr const char* DATASET_PATH = "resume_checkpoint_popup.dataset_path";
+        inline constexpr const char* INVALID = "resume_checkpoint_popup.invalid";
+        inline constexpr const char* HELP_TEXT = "resume_checkpoint_popup.help_text";
+    } // namespace ResumeCheckpointPopup_
 
     namespace ExportDialog {
         inline constexpr const char* FORMAT = "export_dialog.format";
@@ -544,6 +568,11 @@ namespace lichtfeld::Strings {
         inline constexpr const char* LOSS = "progress.loss";
         inline constexpr const char* GAUSSIANS_COUNT = "progress.gaussians_count";
         inline constexpr const char* EXPORTING = "progress.exporting";
+        inline constexpr const char* IMPORTING = "progress.importing";
+        inline constexpr const char* IMPORT_COMPLETE = "progress.import_complete";
+        inline constexpr const char* IMPORT_FAILED = "progress.import_failed";
+        inline constexpr const char* IMPORT_COMPLETE_TITLE = "progress.import_complete_title";
+        inline constexpr const char* IMPORT_FAILED_TITLE = "progress.import_failed_title";
         inline constexpr const char* NUM_SPLATS = "progress.num_splats";
         inline constexpr const char* STATUS_LABEL = "progress.status_label";
     } // namespace Progress
@@ -596,7 +625,6 @@ namespace lichtfeld::Strings {
         inline constexpr const char* MAX_GAUSSIANS = "training_params.max_gaussians";
         inline constexpr const char* SH_DEGREE = "training_params.sh_degree";
         inline constexpr const char* TILE_MODE = "training_params.tile_mode";
-        inline constexpr const char* NUM_WORKERS = "training_params.num_workers";
         inline constexpr const char* STEPS_SCALER = "training_params.steps_scaler";
         inline constexpr const char* BILATERAL_GRID = "training_params.bilateral_grid";
         inline constexpr const char* MASK_MODE = "training_params.mask_mode";

@@ -23,7 +23,7 @@ class Viewport {
         float rotateCenterSpeed = 0.002f;
         float rotateRollSpeed = 0.01f;
         float translateSpeed = 0.001f;
-        float wasdSpeed = 50.0f;
+        float wasdSpeed = 6.0f;
         float maxWasdSpeed = 100.0f;
         bool isOrbiting = false;
 

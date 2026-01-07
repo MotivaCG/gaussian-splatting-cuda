@@ -4,6 +4,7 @@
 #include "checkpoint.hpp"
 #include "components/bilateral_grid.hpp"
 #include "core/logger.hpp"
+#include "core/path_utils.hpp"
 #include "strategies/istrategy.hpp"
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -18,13 +19,26 @@ namespace lfs::training {
         const BilateralGrid* bilateral_grid) {
 
         try {
+            // Validate input path
+            if (path.empty()) {
+                return std::unexpected("Cannot save checkpoint: output path is empty");
+            }
+
             const auto checkpoint_dir = path / "checkpoints";
-            std::filesystem::create_directories(checkpoint_dir);
+
+            // Create checkpoint directory with error checking
+            std::error_code ec;
+            std::filesystem::create_directories(checkpoint_dir, ec);
+            if (ec) {
+                return std::unexpected("Failed to create checkpoint directory '" +
+                                       lfs::core::path_to_utf8(checkpoint_dir) + "': " + ec.message());
+            }
+
             const auto checkpoint_path = checkpoint_dir / ("checkpoint_" + std::to_string(iteration) + ".resume");
 
-            std::ofstream file(checkpoint_path, std::ios::binary);
-            if (!file) {
-                return std::unexpected("Failed to open: " + checkpoint_path.string());
+            std::ofstream file;
+            if (!lfs::core::open_file_for_write(checkpoint_path, std::ios::binary, file)) {
+                return std::unexpected("Failed to open checkpoint file: " + lfs::core::path_to_utf8(checkpoint_path));
             }
 
             const auto& model = strategy.get_model();
@@ -70,7 +84,7 @@ namespace lfs::training {
             file.write(reinterpret_cast<const char*>(&header), sizeof(header));
 
             LOG_INFO("Checkpoint saved: {} ({} Gaussians, iter {}{})",
-                     checkpoint_path.string(), header.num_gaussians, iteration,
+                     lfs::core::path_to_utf8(checkpoint_path), header.num_gaussians, iteration,
                      bilateral_grid ? ", +bilateral" : "");
             return {};
 
@@ -83,9 +97,9 @@ namespace lfs::training {
         const std::filesystem::path& path) {
 
         try {
-            std::ifstream file(path, std::ios::binary);
-            if (!file) {
-                return std::unexpected("Failed to open: " + path.string());
+            std::ifstream file;
+            if (!lfs::core::open_file_for_read(path, std::ios::binary, file)) {
+                return std::unexpected("Failed to open: " + lfs::core::path_to_utf8(path));
             }
 
             CheckpointHeader header{};
@@ -111,9 +125,9 @@ namespace lfs::training {
         BilateralGrid* bilateral_grid) {
 
         try {
-            std::ifstream file(path, std::ios::binary);
-            if (!file) {
-                return std::unexpected("Failed to open: " + path.string());
+            std::ifstream file;
+            if (!lfs::core::open_file_for_read(path, std::ios::binary, file)) {
+                return std::unexpected("Failed to open: " + lfs::core::path_to_utf8(path));
             }
 
             CheckpointHeader header{};
@@ -163,7 +177,7 @@ namespace lfs::training {
                 strategy.reserve_optimizer_capacity(max_cap);
             }
 
-            // Load params from checkpoint, preserving CLI path overrides
+            // Load params from checkpoint, preserving CLI overrides
             if (header.params_json_size > 0) {
                 file.seekg(static_cast<std::streamoff>(header.params_json_offset));
                 std::string params_str(header.params_json_size, '\0');
@@ -171,6 +185,7 @@ namespace lfs::training {
 
                 const auto cli_data_path = params.dataset.data_path;
                 const auto cli_output_path = params.dataset.output_path;
+                const auto cli_iterations = params.optimization.iterations;
 
                 const auto params_json = nlohmann::json::parse(params_str);
                 if (params_json.contains("optimization")) {
@@ -186,10 +201,12 @@ namespace lfs::training {
                     params.dataset.data_path = cli_data_path;
                 if (!cli_output_path.empty())
                     params.dataset.output_path = cli_output_path;
+                if (cli_iterations > 0)
+                    params.optimization.iterations = cli_iterations;
             }
 
             LOG_INFO("Checkpoint loaded: {} ({} Gaussians, iter {})",
-                     path.string(), header.num_gaussians, header.iteration);
+                     lfs::core::path_to_utf8(path), header.num_gaussians, header.iteration);
             return header.iteration;
 
         } catch (const std::exception& e) {
@@ -201,9 +218,9 @@ namespace lfs::training {
         const std::filesystem::path& path) {
 
         try {
-            std::ifstream file(path, std::ios::binary);
-            if (!file) {
-                return std::unexpected("Failed to open: " + path.string());
+            std::ifstream file;
+            if (!lfs::core::open_file_for_read(path, std::ios::binary, file)) {
+                return std::unexpected("Failed to open: " + lfs::core::path_to_utf8(path));
             }
 
             CheckpointHeader header{};
@@ -236,9 +253,9 @@ namespace lfs::training {
         const std::filesystem::path& path) {
 
         try {
-            std::ifstream file(path, std::ios::binary);
-            if (!file) {
-                return std::unexpected("Failed to open: " + path.string());
+            std::ifstream file;
+            if (!lfs::core::open_file_for_read(path, std::ios::binary, file)) {
+                return std::unexpected("Failed to open: " + lfs::core::path_to_utf8(path));
             }
 
             CheckpointHeader header{};
@@ -268,7 +285,7 @@ namespace lfs::training {
                 }
             }
 
-            LOG_DEBUG("Params loaded from checkpoint: {}", params.dataset.data_path.string());
+            LOG_DEBUG("Params loaded from checkpoint: {}", lfs::core::path_to_utf8(params.dataset.data_path));
             return params;
 
         } catch (const std::exception& e) {

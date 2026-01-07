@@ -3,10 +3,9 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/parameters.hpp"
-#include "core/executable_path.hpp"
 #include "core/logger.hpp"
+#include "core/path_utils.hpp"
 #include <chrono>
-#include <ctime>
 #include <expected>
 #include <filesystem>
 #include <format>
@@ -14,31 +13,18 @@
 #include <iomanip>
 #include <nlohmann/json.hpp>
 #include <sstream>
-#include <string>
-#include <variant>
-#include <vector>
-
-#ifdef _WIN32
-#include <Windows.h>
-#endif
 
 namespace lfs::core {
     namespace param {
         namespace {
-
-            /**
-             * @brief Read and parse a JSON configuration file
-             * @param path Path to the JSON file
-             * @return Expected JSON object or error message
-             */
             std::expected<nlohmann::json, std::string> read_json_file(const std::filesystem::path& path) {
                 if (!std::filesystem::exists(path)) {
-                    return std::unexpected(std::format("Configuration file does not exist: {}", path.string()));
+                    return std::unexpected(std::format("Config file not found: {}", path_to_utf8(path)));
                 }
 
-                std::ifstream file(path);
-                if (!file.is_open()) {
-                    return std::unexpected(std::format("Could not open configuration file: {}", path.string()));
+                std::ifstream file;
+                if (!open_file_for_read(path, file)) {
+                    return std::unexpected(std::format("Cannot open config: {}", path_to_utf8(path)));
                 }
 
                 try {
@@ -46,7 +32,7 @@ namespace lfs::core {
                     buffer << file.rdbuf();
                     return nlohmann::json::parse(buffer.str());
                 } catch (const nlohmann::json::parse_error& e) {
-                    return std::unexpected(std::format("JSON parsing error in {}: {}", path.string(), e.what()));
+                    return std::unexpected(std::format("JSON parse error in {}: {}", path_to_utf8(path), e.what()));
                 }
             }
 
@@ -232,7 +218,6 @@ namespace lfs::core {
             opt_json["scale_reg"] = scale_reg;
             opt_json["init_opacity"] = init_opacity;
             opt_json["init_scaling"] = init_scaling;
-            opt_json["num_workers"] = num_workers;
             opt_json["max_cap"] = max_cap;
             opt_json["eval_steps"] = eval_steps;
             opt_json["save_steps"] = save_steps;
@@ -280,6 +265,23 @@ namespace lfs::core {
             return opt_json;
         }
 
+        OptimizationParameters OptimizationParameters::mcmc_defaults() {
+            return {};
+        }
+
+        OptimizationParameters OptimizationParameters::adc_defaults() {
+            auto p = OptimizationParameters{};
+            p.strategy = "adc";
+            p.opacity_lr = 0.025f;
+            p.stop_refine = 15'000;
+            p.opacity_reg = 0.0f;
+            p.scale_reg = 0.0f;
+            p.init_opacity = 0.1f;
+            p.max_cap = 6'000'000;
+            p.tv_loss_weight = 5.0f;
+            return p;
+        }
+
         OptimizationParameters OptimizationParameters::from_json(const nlohmann::json& json) {
 
             OptimizationParameters params;
@@ -309,16 +311,13 @@ namespace lfs::core {
             if (json.contains("init_scaling")) {
                 params.init_scaling = json["init_scaling"];
             }
-            if (json.contains("num_workers")) {
-                params.num_workers = json["num_workers"];
-            }
             if (json.contains("max_cap")) {
                 params.max_cap = json["max_cap"];
             }
 
             if (json.contains("strategy")) {
                 std::string strategy = json["strategy"];
-                if (strategy == "mcmc" || strategy == "default") {
+                if (strategy == "mcmc" || strategy == "adc") {
                     params.strategy = strategy;
                 } else {
                     LOG_WARN("Invalid strategy '{}' in JSON, using default", strategy);
@@ -466,25 +465,15 @@ namespace lfs::core {
             return params;
         }
 
-        /**
-         * @brief Read optimization parameters from JSON file
-         * @param[in] json file to load
-         * @return Expected OptimizationParameters or error message
-         */
         std::expected<OptimizationParameters, std::string> read_optim_params_from_json(const std::filesystem::path& path) {
             auto json_result = read_json_file(path);
-
             if (!json_result) {
                 return std::unexpected(json_result.error());
             }
 
             const auto& json = *json_result;
-
-            // Extract optimization sub-object if present (supports both flat and nested formats)
+            // Support both flat and nested {"optimization": {...}} formats
             const auto& opt_json = json.contains("optimization") ? json["optimization"] : json;
-
-            OptimizationParameters defaults;
-            verify_optimization_parameters(defaults, opt_json);
 
             try {
                 return OptimizationParameters::from_json(opt_json);
@@ -493,49 +482,31 @@ namespace lfs::core {
             }
         }
 
-        /**
-         * @brief Save full training parameters (dataset + optimization) to JSON
-         * @param params The full training parameters
-         * @param output_path Path to the output directory
-         * @return Expected void or error message
-         */
         std::expected<void, std::string> save_training_parameters_to_json(
             const TrainingParameters& params,
             const std::filesystem::path& output_path) {
-
             try {
                 nlohmann::json json;
-
-                // Dataset configuration
                 json["dataset"] = params.dataset.to_json();
+                json["optimization"] = params.optimization.to_json();
 
-                // Optimization configuration
-                nlohmann::json opt_json = params.optimization.to_json();
-
-                json["optimization"] = opt_json;
-
-                // Add timestamp
-                auto now = std::chrono::system_clock::now();
-                auto time_t = std::chrono::system_clock::to_time_t(now);
+                const auto now = std::chrono::system_clock::now();
+                const auto time_t = std::chrono::system_clock::to_time_t(now);
                 std::stringstream ss;
                 ss << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S");
                 json["timestamp"] = ss.str();
 
-                // Use path directly if .json, otherwise append default filename
                 const std::filesystem::path filepath = (output_path.extension() == ".json")
                                                            ? output_path
                                                            : output_path / "training_config.json";
-                std::ofstream file(filepath);
-                if (!file.is_open()) {
-                    return std::unexpected(std::format("Could not open file for writing: {}", filepath.string()));
+                std::ofstream file;
+                if (!open_file_for_write(filepath, file)) {
+                    return std::unexpected(std::format("Cannot write: {}", path_to_utf8(filepath)));
                 }
 
                 file << json.dump(4);
-                file.close();
-
-                LOG_INFO("Saved training config to: {}", filepath.string());
+                LOG_INFO("Saved config: {}", path_to_utf8(filepath));
                 return {};
-
             } catch (const std::exception& e) {
                 return std::unexpected(std::format("Error saving training parameters: {}", e.what()));
             }
@@ -581,8 +552,8 @@ namespace lfs::core {
         nlohmann::json DatasetConfig::to_json() const {
             nlohmann::json json;
 
-            json["data_path"] = data_path.string();
-            json["output_folder"] = output_path.string();
+            json["data_path"] = path_to_utf8(data_path);
+            json["output_folder"] = path_to_utf8(output_path);
             json["images"] = images;
             json["resize_factor"] = resize_factor;
             json["test_every"] = test_every;
@@ -597,12 +568,13 @@ namespace lfs::core {
         DatasetConfig DatasetConfig::from_json(const nlohmann::json& j) {
             DatasetConfig dataset;
 
-            dataset.data_path = j["data_path"].get<std::string>();
+            // Use utf8_to_path for proper Unicode handling since JSON is UTF-8 encoded
+            dataset.data_path = utf8_to_path(j["data_path"].get<std::string>());
             dataset.images = j["images"].get<std::string>();
             dataset.resize_factor = j["resize_factor"].get<int>();
             dataset.max_width = j["max_width"].get<int>();
             dataset.test_every = j["test_every"].get<int>();
-            dataset.output_path = j["output_folder"].get<std::string>();
+            dataset.output_path = utf8_to_path(j["output_folder"].get<std::string>());
 
             if (j.contains("loading_params")) {
                 dataset.loading_params = LoadingParams::from_json(j["loading_params"]);
@@ -615,50 +587,6 @@ namespace lfs::core {
             }
 
             return dataset;
-        }
-
-        std::expected<LoadingParams, std::string> read_loading_params_from_json(const std::filesystem::path& path) {
-            auto json_result = read_json_file(path);
-
-            if (!json_result) {
-                return std::unexpected(json_result.error());
-            }
-            LoadingParams loading_params;
-            try {
-                loading_params = LoadingParams::from_json(*json_result);
-            } catch (const std::exception& e) {
-                return std::unexpected(std::format("Error reading loading parameters: {}", e.what()));
-            }
-            return loading_params;
-        }
-
-        std::filesystem::path get_parameter_file_path(const std::string& filename) {
-            static constexpr const char* PARAM_DIR = "parameter";
-
-            // Primary: Use runtime-detected resource directory
-            auto runtime_path = lfs::core::getResourceBaseDir() / PARAM_DIR / filename;
-            if (std::filesystem::exists(runtime_path)) {
-                return runtime_path;
-            }
-
-            // Fallback: Search up from executable directory
-#ifdef _WIN32
-            char exe_buf[MAX_PATH];
-            GetModuleFileNameA(nullptr, exe_buf, MAX_PATH);
-            auto search_dir = std::filesystem::path(exe_buf).parent_path();
-#else
-            auto search_dir = std::filesystem::canonical("/proc/self/exe").parent_path();
-#endif
-            while (!search_dir.empty()) {
-                if (const auto path = search_dir / PARAM_DIR / filename; std::filesystem::exists(path)) {
-                    return path;
-                }
-                const auto parent = search_dir.parent_path();
-                if (parent == search_dir)
-                    break;
-                search_dir = parent;
-            }
-            return runtime_path; // Return runtime path even if not found (for error message)
         }
 
     } // namespace param

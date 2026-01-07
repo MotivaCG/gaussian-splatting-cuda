@@ -7,7 +7,9 @@
 #include "core/logger.hpp"
 #include "core/parameter_manager.hpp"
 #include "core/parameters.hpp"
+#include "core/path_utils.hpp"
 #include "core/services.hpp"
+#include "gui/dpi_scale.hpp"
 #include "gui/localization_manager.hpp"
 #include "gui/string_keys.hpp"
 #include "gui/ui_widgets.hpp"
@@ -16,6 +18,7 @@
 #include "visualizer_impl.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <deque>
 #include <filesystem>
@@ -36,7 +39,7 @@ namespace lfs::vis::gui::panels {
         void scale_steps_vector(std::vector<size_t>& steps, const float scaler) {
             std::set<size_t> unique;
             for (const auto s : steps) {
-                if (const auto scaled = static_cast<size_t>(static_cast<float>(s) * scaler); scaled > 0) {
+                if (const auto scaled = static_cast<size_t>(std::lround(static_cast<float>(s) * scaler)); scaled > 0) {
                     unique.insert(scaled);
                 }
             }
@@ -47,7 +50,7 @@ namespace lfs::vis::gui::panels {
             if (scaler <= 0.0f)
                 return;
             const auto scale = [scaler](const size_t v) {
-                return static_cast<size_t>(static_cast<float>(v) * scaler);
+                return static_cast<size_t>(std::lround(static_cast<float>(v) * scaler));
             };
             opt.iterations = scale(opt.iterations);
             opt.start_refine = scale(opt.start_refine);
@@ -154,7 +157,7 @@ namespace lfs::vis::gui::panels {
                 ImGui::TableNextColumn();
                 ImGui::Text("%s", LOC(Training::Dataset::PATH));
                 ImGui::TableNextColumn();
-                ImGui::Text("%s", dataset_params.data_path.filename().string().c_str());
+                ImGui::Text("%s", lfs::core::path_to_utf8(dataset_params.data_path.filename()).c_str());
 
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
@@ -250,10 +253,10 @@ namespace lfs::vis::gui::panels {
                 {
                     const std::string output_display = dataset_params.output_path.empty()
                                                            ? "(not set)"
-                                                           : dataset_params.output_path.filename().string();
+                                                           : lfs::core::path_to_utf8(dataset_params.output_path.filename());
                     ImGui::Text("%s", output_display.c_str());
                     if (!dataset_params.output_path.empty() && ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("%s", dataset_params.output_path.string().c_str());
+                        ImGui::SetTooltip("%s", lfs::core::path_to_utf8(dataset_params.output_path).c_str());
                     }
                 }
 
@@ -465,7 +468,7 @@ namespace lfs::vis::gui::panels {
         if (ImGui::TreeNode(LOC(Training::Section::SAVE_STEPS))) {
             if (can_edit) {
                 static int new_step = 1000;
-                ImGui::InputInt(LOC(TrainingPanel::NEW_STEP), &new_step, 100, 1000);
+                ImGui::InputInt("##new_step", &new_step, 100, 1000);
                 ImGui::SameLine();
                 if (ImGui::Button(LOC(Training::Button::ADD))) {
                     if (new_step > 0 && std::find(opt_params.save_steps.begin(),
@@ -482,7 +485,7 @@ namespace lfs::vis::gui::panels {
                     ImGui::PushID(static_cast<int>(i));
 
                     int step = static_cast<int>(opt_params.save_steps[i]);
-                    ImGui::SetNextItemWidth(100);
+                    ImGui::SetNextItemWidth(100 * getDpiScale());
                     if (ImGui::InputInt("##step", &step, 0, 0)) {
                         if (step > 0) {
                             opt_params.save_steps[i] = static_cast<size_t>(step);
@@ -681,7 +684,7 @@ namespace lfs::vis::gui::panels {
                         ImGui::PushID(static_cast<int>(i + 1000));
 
                         int step = static_cast<int>(opt_params.eval_steps[i]);
-                        ImGui::SetNextItemWidth(100);
+                        ImGui::SetNextItemWidth(100 * getDpiScale());
                         if (ImGui::InputInt("##eval_step", &step, 0, 0)) {
                             if (step > 0) {
                                 opt_params.eval_steps[i] = static_cast<size_t>(step);
@@ -851,8 +854,8 @@ namespace lfs::vis::gui::panels {
             ImGui::TreePop();
         }
 
-        // Pruning/Growing Thresholds (for default strategy)
-        if (opt_params.strategy == "default" && ImGui::TreeNode(LOC(Training::Section::PRUNING_GROWING))) {
+        // Pruning/Growing Thresholds (for adc strategy)
+        if (opt_params.strategy == "adc" && ImGui::TreeNode(LOC(Training::Section::PRUNING_GROWING))) {
             if (ImGui::BeginTable("PruneTable", 2, ImGuiTableFlags_SizingStretchProp)) {
                 ImGui::TableSetupColumn("Property", ImGuiTableColumnFlags_WidthFixed, 140.0f);
                 ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
@@ -975,11 +978,6 @@ namespace lfs::vis::gui::panels {
                     if (ImGui::InputInt("##sparsify_steps", &opt_params.sparsify_steps, 1000, 5000)) {
                         opt_params.sparsify_steps = std::max(1, opt_params.sparsify_steps);
                         const int delta = opt_params.sparsify_steps - prev;
-                        if (delta > 0) {
-                            opt_params.iterations += static_cast<size_t>(delta);
-                        } else if (opt_params.iterations > static_cast<size_t>(-delta)) {
-                            opt_params.iterations -= static_cast<size_t>(-delta);
-                        }
                     }
                     ImGui::PopItemWidth();
                 } else {
@@ -1076,17 +1074,17 @@ namespace lfs::vis::gui::panels {
             ImGui::TableNextColumn();
             if (can_edit) {
                 ImGui::PushItemWidth(-1);
-                static constexpr const char* const STRATEGY_LABELS[] = {"MCMC", "Default"};
+                static constexpr const char* const STRATEGY_LABELS[] = {"MCMC", "ADC"};
                 int current_strategy = (opt_params.strategy == "mcmc") ? 0 : 1;
                 if (ImGui::Combo("##strategy", &current_strategy, STRATEGY_LABELS, 2)) {
-                    const auto new_strategy = (current_strategy == 0) ? "mcmc" : "default";
+                    const auto new_strategy = (current_strategy == 0) ? "mcmc" : "adc";
                     if (new_strategy != opt_params.strategy) {
                         param_manager->setActiveStrategy(new_strategy);
                     }
                 }
                 ImGui::PopItemWidth();
             } else {
-                ImGui::Text("%s", opt_params.strategy == "mcmc" ? "MCMC" : "Default");
+                ImGui::Text("%s", opt_params.strategy == "mcmc" ? "MCMC" : "ADC");
             }
 
             // Iterations
@@ -1156,21 +1154,6 @@ namespace lfs::vis::gui::panels {
                 ImGui::PopItemWidth();
             } else {
                 ImGui::Text("%d", opt_params.tile_mode);
-            }
-
-            // Num Workers
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            ImGui::Text("%s", LOC(TrainingParams::NUM_WORKERS));
-            ImGui::TableNextColumn();
-            if (can_edit) {
-                ImGui::PushItemWidth(-1);
-                if (ImGui::InputInt("##num_workers", &opt_params.num_workers, 1, 4)) {
-                    opt_params.num_workers = std::clamp(opt_params.num_workers, 1, 64);
-                }
-                ImGui::PopItemWidth();
-            } else {
-                ImGui::Text("%d", opt_params.num_workers);
             }
 
             // Steps Scaler
@@ -1294,12 +1277,6 @@ namespace lfs::vis::gui::panels {
             ImGui::TableNextColumn();
             if (can_edit) {
                 if (ImGui::Checkbox("##enable_sparsity", &opt_params.enable_sparsity)) {
-                    const auto steps = static_cast<size_t>(opt_params.sparsify_steps);
-                    if (opt_params.enable_sparsity) {
-                        opt_params.iterations += steps;
-                    } else if (opt_params.iterations > steps) {
-                        opt_params.iterations -= steps;
-                    }
                 }
             } else {
                 ImGui::Text("%s", opt_params.enable_sparsity ? "Enabled" : "Disabled");
