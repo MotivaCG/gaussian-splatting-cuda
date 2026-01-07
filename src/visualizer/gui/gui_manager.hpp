@@ -35,7 +35,7 @@
 #include <ImGuizmo.h>
 
 namespace lfs::core {
-    struct SplatData;
+    class SplatData;
 }
 
 namespace lfs::vis {
