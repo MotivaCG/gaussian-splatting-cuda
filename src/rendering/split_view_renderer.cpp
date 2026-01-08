@@ -381,6 +381,8 @@ namespace lfs::rendering {
                 left_texture,
                 right_texture,
                 request.panels[0].end_position,
+                request.left_texcoord_scale,
+                request.right_texcoord_scale,
                 request.divider_color,
                 request.viewport.size.x);
             !result) {
@@ -406,76 +408,73 @@ namespace lfs::rendering {
     }
 
     Result<void> SplitViewRenderer::compositeSplitView(
-        GLuint left_texture,
-        GLuint right_texture,
-        float split_position,
+        const GLuint left_texture,
+        const GLuint right_texture,
+        const float split_position,
+        const glm::vec2& left_texcoord_scale,
+        const glm::vec2& right_texcoord_scale,
         const glm::vec4& divider_color,
-        int viewport_width) {
+        const int viewport_width) {
 
-        LOG_TRACE("Compositing: left_tex={}, right_tex={}, split={}",
-                  left_texture, right_texture, split_position);
+        constexpr float DIVIDER_WIDTH_PX = 2.0f;
 
-        // Save current state
-        GLint current_viewport[4];
-        glGetIntegerv(GL_VIEWPORT, current_viewport);
-
-        // Disable depth test for compositing
         glDisable(GL_DEPTH_TEST);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-        // Use the split view shader
-        if (auto result = split_shader_.bind(); !result) {
+        if (const auto result = split_shader_.bind(); !result) {
             LOG_ERROR("Failed to bind split shader: {}", result.error());
             return result;
         }
 
-        // Set textures
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, left_texture);
-        if (auto result = split_shader_.set("leftTexture", 0); !result) {
-            LOG_ERROR("Failed to set leftTexture uniform: {}", result.error());
+        if (auto r = split_shader_.set("leftTexture", 0); !r) {
+            LOG_ERROR("Failed to set leftTexture uniform: {}", r.error());
+            return r;
         }
 
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, right_texture);
-        if (auto result = split_shader_.set("rightTexture", 1); !result) {
-            LOG_ERROR("Failed to set rightTexture uniform: {}", result.error());
+        if (auto r = split_shader_.set("rightTexture", 1); !r) {
+            LOG_ERROR("Failed to set rightTexture uniform: {}", r.error());
+            return r;
         }
 
-        // Set other uniforms
-        if (auto result = split_shader_.set("splitPosition", split_position); !result) {
-            LOG_ERROR("Failed to set splitPosition uniform: {}", result.error());
+        if (auto r = split_shader_.set("splitPosition", split_position); !r) {
+            LOG_ERROR("Failed to set splitPosition uniform: {}", r.error());
+            return r;
+        }
+        if (auto r = split_shader_.set("showDivider", 1.0f); !r) {
+            LOG_ERROR("Failed to set showDivider uniform: {}", r.error());
+            return r;
+        }
+        if (auto r = split_shader_.set("dividerColor", divider_color); !r) {
+            LOG_ERROR("Failed to set dividerColor uniform: {}", r.error());
+            return r;
+        }
+        if (auto r = split_shader_.set("dividerWidth", DIVIDER_WIDTH_PX / static_cast<float>(viewport_width)); !r) {
+            LOG_ERROR("Failed to set dividerWidth uniform: {}", r.error());
+            return r;
         }
 
-        // Use float for bool uniform (GLSL converts non-zero to true)
-        if (auto result = split_shader_.set("showDivider", 1.0f); !result) {
-            LOG_ERROR("Failed to set showDivider uniform: {}", result.error());
+        if (auto r = split_shader_.set("leftTexcoordScale", left_texcoord_scale); !r) {
+            LOG_ERROR("Failed to set leftTexcoordScale uniform: {}", r.error());
+            return r;
+        }
+        if (auto r = split_shader_.set("rightTexcoordScale", right_texcoord_scale); !r) {
+            LOG_ERROR("Failed to set rightTexcoordScale uniform: {}", r.error());
+            return r;
         }
 
-        if (auto result = split_shader_.set("dividerColor", divider_color); !result) {
-            LOG_ERROR("Failed to set dividerColor uniform: {}", result.error());
-        }
-
-        // Calculate normalized divider width (2 pixels for typical viewport)
-        float divider_width_pixels = 2.0f;
-        float normalized_divider_width = divider_width_pixels / static_cast<float>(viewport_width);
-
-        if (auto result = split_shader_.set("dividerWidth", normalized_divider_width); !result) {
-            LOG_ERROR("Failed to set dividerWidth uniform: {}", result.error());
-        }
-
-        // Draw the full-screen quad
         VAOBinder vao_bind(quad_vao_);
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
-        LOG_TRACE("Drew composite quad");
-
+        // Restore state
         if (auto result = split_shader_.unbind(); !result) {
             LOG_TRACE("Failed to unbind shader: {}", result.error());
         }
 
-        // Restore state
         glDisable(GL_BLEND);
         glEnable(GL_DEPTH_TEST);
 

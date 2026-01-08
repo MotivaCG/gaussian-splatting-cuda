@@ -113,6 +113,7 @@ namespace lfs::vis::gui {
         save_directory_popup_ = std::make_unique<SaveDirectoryPopup>();
         resume_checkpoint_popup_ = std::make_unique<ResumeCheckpointPopup>();
         exit_confirmation_popup_ = std::make_unique<ExitConfirmationPopup>();
+        disk_space_error_dialog_ = std::make_unique<DiskSpaceErrorDialog>();
 
         // Initialize window states
         window_states_["file_browser"] = false;
@@ -1112,8 +1113,12 @@ namespace lfs::vis::gui {
             resume_checkpoint_popup_->render(viewport_pos_, viewport_size_);
         }
 
-        if (notification_popup_)
+        if (disk_space_error_dialog_)
+            disk_space_error_dialog_->render();
+
+        if (notification_popup_ && !disk_space_error_dialog_->isOpen())
             notification_popup_->render(viewport_pos_, viewport_size_);
+
         if (exit_confirmation_popup_)
             exit_confirmation_popup_->render();
 
@@ -1867,6 +1872,80 @@ namespace lfs::vis::gui {
             }
         });
 
+        state::DiskSpaceSaveFailed::when([this](const auto& e) {
+            if (!e.is_disk_space_error) {
+                if (notification_popup_) {
+                    const std::string title = e.is_checkpoint ? "Checkpoint Save Failed" : "Export Failed";
+                    const std::string msg = e.is_checkpoint
+                                                ? std::format("Failed to save checkpoint at iteration {}:\n\n{}", e.iteration, e.error)
+                                                : std::format("Failed to export:\n\n{}", e.error);
+                    notification_popup_->show(NotificationPopup::Type::FAILURE, title, msg);
+                }
+                return;
+            }
+
+            if (!disk_space_error_dialog_)
+                return;
+
+            const DiskSpaceErrorDialog::ErrorInfo info{
+                .path = e.path,
+                .error_message = e.error,
+                .required_bytes = e.required_bytes,
+                .available_bytes = e.available_bytes,
+                .iteration = e.iteration,
+                .is_checkpoint = e.is_checkpoint};
+
+            if (e.is_checkpoint) {
+                auto on_retry = [this, iteration = e.iteration]() {
+                    if (auto* tm = viewer_->getTrainerManager()) {
+                        if (tm->isFinished() || !tm->isTrainingActive()) {
+                            if (auto* trainer = tm->getTrainer()) {
+                                LOG_INFO("Retrying save at iteration {}", iteration);
+                                trainer->save_final_ply_and_checkpoint(iteration);
+                            }
+                        } else {
+                            tm->requestSaveCheckpoint();
+                        }
+                    }
+                };
+
+                auto on_change_location = [this, iteration = e.iteration](const std::filesystem::path& new_path) {
+                    if (auto* tm = viewer_->getTrainerManager()) {
+                        if (auto* trainer = tm->getTrainer()) {
+                            auto params = trainer->getParams();
+                            params.dataset.output_path = new_path;
+                            trainer->setParams(params);
+                            LOG_INFO("Output path changed to: {}", lfs::core::path_to_utf8(new_path));
+
+                            if (tm->isFinished() || !tm->isTrainingActive()) {
+                                trainer->save_final_ply_and_checkpoint(iteration);
+                            } else {
+                                tm->requestSaveCheckpoint();
+                            }
+                        }
+                    }
+                };
+
+                auto on_cancel = []() {
+                    LOG_WARN("Checkpoint save cancelled by user");
+                };
+
+                disk_space_error_dialog_->show(info, on_retry, on_change_location, on_cancel);
+            } else {
+                auto on_retry = []() {};
+
+                auto on_change_location = [](const std::filesystem::path& new_path) {
+                    LOG_INFO("Re-export manually using File > Export to: {}", lfs::core::path_to_utf8(new_path));
+                };
+
+                auto on_cancel = []() {
+                    LOG_INFO("Export cancelled by user");
+                };
+
+                disk_space_error_dialog_->show(info, on_retry, on_change_location, on_cancel);
+            }
+        });
+
         // Async dataset import
         cmd::LoadFile::when([this](const auto& cmd) {
             if (!cmd.is_dataset) {
@@ -2441,9 +2520,29 @@ namespace lfs::vis::gui {
                 switch (format) {
                 case ExportFormat::PLY: {
                     update_progress(0.1f, "Writing PLY");
-                    lfs::core::save_ply(*splat_data, path.parent_path(), 0, true, lfs::core::path_to_utf8(path.stem()));
-                    success = true;
-                    update_progress(1.0f, "Complete");
+                    const lfs::io::PlySaveOptions options{
+                        .output_path = path,
+                        .binary = true,
+                        .async = false};
+                    if (auto result = lfs::io::save_ply(*splat_data, options); result) {
+                        success = true;
+                        update_progress(1.0f, "Complete");
+                    } else {
+                        error_msg = result.error().message;
+                        // Check if this is a disk space error
+                        if (result.error().code == lfs::io::ErrorCode::INSUFFICIENT_DISK_SPACE) {
+                            // Emit event for disk space error dialog
+                            lfs::core::events::state::DiskSpaceSaveFailed{
+                                .iteration = 0,
+                                .path = path,
+                                .error = result.error().message,
+                                .required_bytes = result.error().required_bytes,
+                                .available_bytes = result.error().available_bytes,
+                                .is_disk_space_error = true,
+                                .is_checkpoint = false}
+                                .emit();
+                        }
+                    }
                     break;
                 }
                 case ExportFormat::SOG: {

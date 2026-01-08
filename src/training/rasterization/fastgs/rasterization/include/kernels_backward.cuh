@@ -275,7 +275,7 @@ namespace fast_lfs::rasterization::kernels::backward {
         const uint* tile_max_n_contributions,
         const uint* tile_n_contributions,
         const uint* bucket_tile_index,
-        const ushort4* bucket_checkpoint_half, // Half-precision: color.rgb + transmittance as 4× fp16 (50% memory reduction)
+        const uint* bucket_checkpoint_uint8,
         float2* grad_mean2d,
         float* grad_conic,
         float* grad_raw_opacity,
@@ -321,12 +321,12 @@ namespace fast_lfs::rasterization::kernels::backward {
             compensated_opacity = conic_opacity.w;
             original_opacity = mip_filter ? __frcp_rn(1.0f + __expf(-raw_opacities[primitive_idx])) : compensated_opacity;
             const float3 color_unclamped = primitive_color[primitive_idx];
-            color = fmaxf(color_unclamped, 0.0f);
-            if (color_unclamped.x >= 0.0f)
+            color = fminf(fmaxf(color_unclamped, 0.0f), config::max_checkpoint_color);
+            if (color_unclamped.x >= 0.0f && color_unclamped.x <= config::max_checkpoint_color)
                 color_grad_factor.x = 1.0f;
-            if (color_unclamped.y >= 0.0f)
+            if (color_unclamped.y >= 0.0f && color_unclamped.y <= config::max_checkpoint_color)
                 color_grad_factor.y = 1.0f;
-            if (color_unclamped.z >= 0.0f)
+            if (color_unclamped.z >= 0.0f && color_unclamped.z <= config::max_checkpoint_color)
                 color_grad_factor.z = 1.0f;
         }
 
@@ -349,25 +349,23 @@ namespace fast_lfs::rasterization::kernels::backward {
         float3 grad_color_pixel;
         float grad_alpha_common;
 
-        // Pointer to this bucket's checkpoint data (half-precision color + transmittance)
-        bucket_checkpoint_half += bucket_idx * config::block_size_blend;
+        bucket_checkpoint_uint8 += bucket_idx * config::block_size_blend;
         __shared__ uint collected_last_contributor[32];
         __shared__ float4 collected_color_pixel_after_transmittance[32];
         __shared__ float4 collected_grad_info_pixel[32];
 
-// iterate over all pixels in the tile
 #pragma unroll
         for (int i = 0; i < config::block_size_blend + 31; ++i) {
             if (i % 32 == 0) {
                 const uint local_idx = i + lane_idx;
-                // Load color + transmittance from half-precision checkpoint (50% memory reduction, no recomputation)
-                // Use __ushort_as_half to properly interpret the bit pattern
-                const ushort4 checkpoint_half = bucket_checkpoint_half[local_idx];
+                const uint packed = bucket_checkpoint_uint8[local_idx];
+                constexpr float COLOR_INV_SCALE = config::max_checkpoint_color / 255.0f;
+                constexpr float TRANS_INV_SCALE = 1.0f / 255.0f;
                 const float3 checkpoint_color = make_float3(
-                    __half2float(__ushort_as_half(checkpoint_half.x)),
-                    __half2float(__ushort_as_half(checkpoint_half.y)),
-                    __half2float(__ushort_as_half(checkpoint_half.z)));
-                const float checkpoint_transmittance = __half2float(__ushort_as_half(checkpoint_half.w));
+                    static_cast<float>(packed & 0xFF) * COLOR_INV_SCALE,
+                    static_cast<float>((packed >> 8) & 0xFF) * COLOR_INV_SCALE,
+                    static_cast<float>((packed >> 16) & 0xFF) * COLOR_INV_SCALE);
+                const float checkpoint_transmittance = static_cast<float>((packed >> 24) & 0xFF) * TRANS_INV_SCALE;
                 const uint2 pixel_coords = {start_pixel_coords.x + local_idx % config::tile_width, start_pixel_coords.y + local_idx / config::tile_width};
                 const uint pixel_idx = width * pixel_coords.y + pixel_coords.x;
                 const bool pixel_in_bounds = pixel_coords.x < width && pixel_coords.y < height;

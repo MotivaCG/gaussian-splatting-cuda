@@ -17,7 +17,8 @@ namespace fast_lfs::rasterization::config {
     DEF float min_alpha_threshold = 1.0f / min_alpha_threshold_rcp; // 0.00392156862
     DEF float max_fragment_alpha = 0.999f;                          // 0.99f in original 3dgs
     DEF float transmittance_threshold = 1e-4f;
-    DEF float max_raw_scale = 20.0f; // exp(40) ≈ 2.35e17, safe margin before overflow
+    DEF float max_raw_scale = 20.0f;       // exp(40) ≈ 2.35e17, safe margin before overflow
+    DEF float max_checkpoint_color = 4.0f; // max color for uint8 checkpoint packing (SH output typically < 2.0)
     // block size constants
     DEF int block_size_preprocess = 128;
     DEF int block_size_preprocess_backward = 128;
@@ -31,8 +32,7 @@ namespace fast_lfs::rasterization::config {
     DEF int n_sequential_threshold = 4;
     // checkpoint interval for gradient computation (how often to save intermediate blending state)
     // higher values = less memory, more recomputation in backward pass
-    // 32: baseline (2.6 GB), 64: 1.3 GB, 128: 650 MB, 256: 325 MB
-    // NOTE: Currently only 32 is supported. Larger values require redesigning bucket/checkpoint separation.
+    // 32: baseline, 64: 50% less memory but requires recomputation in backward
     DEF int checkpoint_interval = 32;
 } // namespace fast_lfs::rasterization::config
 
