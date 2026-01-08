@@ -139,15 +139,12 @@ namespace fast_lfs::rasterization {
 
     struct PerBucketBuffers {
         uint* tile_index;
-        ushort4* checkpoint_half; // Half-precision: color.rgb + transmittance as 4× fp16 (8 bytes vs 16 bytes = 50% savings)
+        uint* checkpoint_uint8; // packed RGBA as 4x uint8 (colors [0,4], transmittance [0,1])
 
         static PerBucketBuffers from_blob(char*& blob, int n_buckets) {
             PerBucketBuffers buffers;
-            // tile_index: only needs n_buckets elements (one per bucket)
-            // checkpoint_half: ushort4 stores 4 half values (color.r, color.g, color.b, transmittance)
-            // Memory: 8 bytes/pixel vs 16 bytes/pixel (float4) = 50% savings, no recomputation needed
             obtain(blob, buffers.tile_index, n_buckets, 128);
-            obtain(blob, buffers.checkpoint_half, n_buckets * config::block_size_blend, 128);
+            obtain(blob, buffers.checkpoint_uint8, n_buckets * config::block_size_blend, 128);
             return buffers;
         }
     };

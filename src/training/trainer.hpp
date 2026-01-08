@@ -93,9 +93,9 @@ namespace lfs::training {
         const lfs::core::param::TrainingParameters& getParams() const { return params_; }
         void setParams(const lfs::core::param::TrainingParameters& params) { params_ = params; }
 
-        // Checkpoint methods
         std::expected<void, std::string> save_checkpoint(int iteration);
         std::expected<int, std::string> load_checkpoint(const std::filesystem::path& checkpoint_path);
+        void save_final_ply_and_checkpoint(int iteration);
 
         // Orderly shutdown - GPU sync, wait for async saves, release resources. Idempotent.
         void shutdown();
