@@ -50,7 +50,6 @@ namespace lfs::training {
         } else {
             K_tensor = viewpoint_camera.K().contiguous();
         }
-        const float* K_ptr = K_tensor.ptr<float>();
 
         // Get Gaussian parameters (activated) - ensure contiguous
         auto means = gaussian_model.get_means().contiguous();
@@ -88,6 +87,24 @@ namespace lfs::training {
         // Convert from lfs::core::CameraModelType (enum class) to global CameraModelType (plain enum) for CUDA kernels
         const ::CameraModelType camera_model = static_cast<::CameraModelType>(
             static_cast<int>(viewpoint_camera.camera_model_type()));
+
+        // For equirectangular cameras in tile mode, encode tile info in K matrix.
+        // The CUDA kernels read these values as:
+        //   K[0][0] (focal_length.x) = full_image_width
+        //   K[1][1] (focal_length.y) = full_image_height
+        //   K[0][2] (principal_point.x) = tile_x_offset
+        //   K[1][2] (principal_point.y) = tile_y_offset
+        // This avoids changing all function interfaces for a camera-specific fix.
+        if (camera_model == CameraModelType::EQUIRECTANGULAR) {
+            auto K_cpu = viewpoint_camera.K().cpu().contiguous();
+            auto K_acc = K_cpu.accessor<float, 3>();
+            K_acc(0, 0, 0) = static_cast<float>(full_image_width);
+            K_acc(0, 1, 1) = static_cast<float>(full_image_height);
+            K_acc(0, 0, 2) = static_cast<float>(tile_x_offset);
+            K_acc(0, 1, 2) = static_cast<float>(tile_y_offset);
+            K_tensor = K_cpu.to(core::Device::CUDA).contiguous();
+        }
+        const float* K_ptr = K_tensor.ptr<float>();
 
         // Distortion coefficients
         const core::Tensor radial_dist = viewpoint_camera.radial_distortion();

@@ -372,7 +372,21 @@ namespace lfs::vis {
         });
 
         state::PLYRemoved::when([this](const auto&) {
-            LOG_DEBUG("PLY removed, marking render dirty");
+            std::lock_guard<std::mutex> lock(settings_mutex_);
+
+            // If in PLY comparison mode, check if we still have enough nodes
+            if (settings_.split_view_mode == SplitViewMode::PLYComparison) {
+                auto* scene_manager = services().sceneOrNull();
+                if (scene_manager) {
+                    auto visible_nodes = scene_manager->getScene().getVisibleNodes();
+                    if (visible_nodes.size() < 2) {
+                        LOG_DEBUG("PLY removed, disabling split view (not enough PLYs)");
+                        settings_.split_view_mode = SplitViewMode::Disabled;
+                        settings_.split_view_offset = 0;
+                    }
+                }
+            }
+
             markDirty();
         });
 
@@ -527,7 +541,11 @@ namespace lfs::vis {
                 static_cast<int>(context.viewport_region->height));
         }
 
-        glm::ivec2 render_size = viewport_size;
+        // Apply render scale to reduce VRAM usage (clamped 0.25-1.0)
+        const float scale = std::clamp(settings_.render_scale, 0.25f, 1.0f);
+        glm::ivec2 render_size = glm::ivec2(
+            static_cast<int>(viewport_size.x * scale),
+            static_cast<int>(viewport_size.y * scale));
 
         // GT comparison mode: use actual camera dimensions
         if (settings_.split_view_mode == SplitViewMode::GTComparison && current_camera_id_ >= 0) {
@@ -815,6 +833,10 @@ namespace lfs::vis {
 
         glViewport(0, 0, context.viewport.frameBufferSize.x, context.viewport.frameBufferSize.y);
 
+        // Clear full framebuffer first to avoid artifacts in gaps between UI elements
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+
         // Set viewport region with scissor clipping (Y flipped for OpenGL)
         if (context.viewport_region) {
             const GLint x = static_cast<GLint>(context.viewport_region->x);
@@ -895,8 +917,11 @@ namespace lfs::vis {
 
             if (result) {
                 cached_result_ = *result;
+                // Store viewport size for coordinate calculations in getDepthAtPixel
+                cached_result_size_ = render_size;
             } else {
                 LOG_ERROR("Failed to render split view: {}", result.error());
+                cached_result_size_ = {0, 0};
             }
 
             renderOverlays(context);
@@ -1235,6 +1260,9 @@ namespace lfs::vis {
             LOG_TRACE("Creating PLY comparison split view: {} vs {}",
                       visible_nodes[left_idx]->name, visible_nodes[right_idx]->name);
 
+            // PLY comparison uses exact viewport-sized framebuffers, so scale is 1.0
+            const glm::vec2 texcoord_scale(1.0f, 1.0f);
+
             return lfs::rendering::SplitViewRequest{
                 .panels = {
                     {.content_type = lfs::rendering::PanelContentType::Model3D,
@@ -1263,7 +1291,9 @@ namespace lfs::vis {
                 .ring_width = settings_.ring_width,
                 .show_dividers = true,
                 .divider_color = glm::vec4(1.0f, 0.85f, 0.0f, 1.0f),
-                .show_labels = true};
+                .show_labels = true,
+                .left_texcoord_scale = texcoord_scale,
+                .right_texcoord_scale = texcoord_scale};
         }
 
         return std::nullopt;
@@ -1452,7 +1482,8 @@ namespace lfs::vis {
         }
 
         // Grid (render last for proper wireframe compositing)
-        if (settings_.show_grid && engine_) {
+        // Don't render grid in split view mode as it would render over the split line
+        if (settings_.show_grid && engine_ && settings_.split_view_mode == SplitViewMode::Disabled) {
             if (const auto result = engine_->renderGrid(
                     viewport,
                     static_cast<lfs::rendering::GridPlane>(settings_.grid_plane),
@@ -1464,29 +1495,59 @@ namespace lfs::vis {
     }
 
     float RenderingManager::getDepthAtPixel(int x, int y) const {
-        if (!cached_result_.valid || !cached_result_.depth || !cached_result_.depth->is_valid()) {
+        if (!cached_result_.valid) {
             return -1.0f;
         }
 
-        const auto& depth = *cached_result_.depth;
-        // depth is [1, H, W]
+        const lfs::core::Tensor* depth_ptr = nullptr;
+        const int viewport_width = cached_result_size_.x;
+        const int viewport_height = cached_result_size_.y;
+
+        if (viewport_width <= 0 || viewport_height <= 0) {
+            return -1.0f;
+        }
+
+        if (cached_result_.split_position > 0.0f && cached_result_.depth && cached_result_.depth->is_valid()) {
+            const float normalized_x = static_cast<float>(x) / static_cast<float>(viewport_width);
+
+            if (normalized_x >= cached_result_.split_position &&
+                cached_result_.depth_right && cached_result_.depth_right->is_valid()) {
+                depth_ptr = cached_result_.depth_right.get();
+            } else {
+                depth_ptr = cached_result_.depth.get();
+            }
+        } else if (cached_result_.depth && cached_result_.depth->is_valid()) {
+            depth_ptr = cached_result_.depth.get();
+        }
+
+        if (!depth_ptr) {
+            return -1.0f;
+        }
+
+        const auto& depth = *depth_ptr;
         if (depth.ndim() != 3) {
             return -1.0f;
         }
 
-        int height = static_cast<int>(depth.size(1));
-        int width = static_cast<int>(depth.size(2));
+        const int depth_height = static_cast<int>(depth.size(1));
+        const int depth_width = static_cast<int>(depth.size(2));
 
-        if (x < 0 || x >= width || y < 0 || y >= height) {
+        int scaled_x = x;
+        int scaled_y = y;
+        if (viewport_width > 0 && viewport_height > 0 &&
+            (depth_width != viewport_width || depth_height != viewport_height)) {
+            scaled_x = static_cast<int>(static_cast<float>(x) * depth_width / viewport_width);
+            scaled_y = static_cast<int>(static_cast<float>(y) * depth_height / viewport_height);
+        }
+
+        if (scaled_x < 0 || scaled_x >= depth_width || scaled_y < 0 || scaled_y >= depth_height) {
             return -1.0f;
         }
 
-        // Copy single pixel from GPU to CPU
         auto depth_cpu = depth.cpu();
         const float* data = depth_cpu.ptr<float>();
-        float d = data[y * width + x];
+        const float d = data[scaled_y * depth_width + scaled_x];
 
-        // Check for invalid depth (large value means no hit)
         if (d > 1e9f) {
             return -1.0f;
         }

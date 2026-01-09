@@ -125,6 +125,7 @@ namespace {
             ::args::Flag use_bilateral_grid(parser, "bilateral_grid", "Enable bilateral grid filtering", {"bilateral-grid"});
             ::args::Flag enable_eval(parser, "eval", "Enable evaluation during training", {"eval"});
             ::args::Flag headless(parser, "headless", "Disable visualization during training", {"headless"});
+            ::args::Flag auto_train(parser, "train", "Start training immediately on startup", {"train"});
             ::args::Flag no_splash(parser, "no_splash", "Skip splash screen on startup", {"no-splash"});
             ::args::Flag no_interop(parser, "no_interop", "Disable CUDA-GL interop (use CPU fallback for display)", {"no-interop"});
             ::args::Flag enable_save_eval_images(parser, "save_eval_images", "Save eval images and depth maps", {"save-eval-images"});
@@ -403,6 +404,7 @@ namespace {
                                         use_bilateral_grid_flag = bool(use_bilateral_grid),
                                         enable_eval_flag = bool(enable_eval),
                                         headless_flag = bool(headless),
+                                        auto_train_flag = bool(auto_train),
                                         no_splash_flag = bool(no_splash),
                                         no_interop_flag = bool(no_interop),
                                         enable_save_eval_images_flag = bool(enable_save_eval_images),
@@ -454,6 +456,7 @@ namespace {
                 setFlag(use_bilateral_grid_flag, opt.use_bilateral_grid);
                 setFlag(enable_eval_flag, opt.enable_eval);
                 setFlag(headless_flag, opt.headless);
+                setFlag(auto_train_flag, opt.auto_train);
                 setFlag(no_splash_flag, opt.no_splash);
                 setFlag(no_interop_flag, opt.no_interop);
                 setFlag(enable_save_eval_images_flag, opt.enable_save_eval_images);

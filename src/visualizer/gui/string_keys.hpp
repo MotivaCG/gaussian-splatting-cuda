@@ -217,6 +217,54 @@ namespace lichtfeld::Strings {
             inline constexpr const char* MASK_THRESHOLD = "training.tooltip.mask_threshold";
             inline constexpr const char* MIP_FILTER = "training.tooltip.mip_filter";
             inline constexpr const char* KEEP_MODEL = "training.tooltip.keep_model";
+            inline constexpr const char* STRATEGY = "training.tooltip.strategy";
+            inline constexpr const char* ITERATIONS = "training.tooltip.iterations";
+            inline constexpr const char* MAX_GAUSSIANS = "training.tooltip.max_gaussians";
+            inline constexpr const char* SH_DEGREE = "training.tooltip.sh_degree";
+            inline constexpr const char* TILE_MODE = "training.tooltip.tile_mode";
+            inline constexpr const char* STEPS_SCALER = "training.tooltip.steps_scaler";
+            inline constexpr const char* BILATERAL_GRID = "training.tooltip.bilateral_grid";
+            inline constexpr const char* MASK_MODE = "training.tooltip.mask_mode";
+            inline constexpr const char* SPARSITY = "training.tooltip.sparsity";
+            inline constexpr const char* GUT = "training.tooltip.gut";
+            inline constexpr const char* BG_MODULATION = "training.tooltip.bg_modulation";
+            inline constexpr const char* EVALUATION = "training.tooltip.evaluation";
+            inline constexpr const char* GRADIENT_THR = "training.tooltip.gradient_thr";
+            inline constexpr const char* OPACITY_REG = "training.tooltip.opacity_reg";
+            inline constexpr const char* SCALE_REG = "training.tooltip.scale_reg";
+            inline constexpr const char* LAMBDA_DSSIM = "training.tooltip.lambda_dssim";
+            inline constexpr const char* TV_LOSS_WEIGHT = "training.tooltip.tv_loss_weight";
+            inline constexpr const char* REFINE_EVERY = "training.tooltip.refine_every";
+            inline constexpr const char* START_REFINE = "training.tooltip.start_refine";
+            inline constexpr const char* STOP_REFINE = "training.tooltip.stop_refine";
+            inline constexpr const char* RESET_EVERY = "training.tooltip.reset_every";
+            inline constexpr const char* SH_UPGRADE_EVERY = "training.tooltip.sh_upgrade_every";
+            inline constexpr const char* INIT_OPACITY = "training.tooltip.init_opacity";
+            inline constexpr const char* INIT_SCALING = "training.tooltip.init_scaling";
+            inline constexpr const char* RANDOM_INIT = "training.tooltip.random_init";
+            inline constexpr const char* NUM_POINTS = "training.tooltip.num_points";
+            inline constexpr const char* EXTENT = "training.tooltip.extent";
+            inline constexpr const char* RESIZE_FACTOR = "training.tooltip.resize_factor";
+            inline constexpr const char* MAX_WIDTH = "training.tooltip.max_width";
+            inline constexpr const char* CPU_CACHE = "training.tooltip.cpu_cache";
+            inline constexpr const char* FS_CACHE = "training.tooltip.fs_cache";
+            inline constexpr const char* TEST_EVERY = "training.tooltip.test_every";
+            inline constexpr const char* SAVE_STEPS = "training.tooltip.save_steps";
+            inline constexpr const char* LR_POSITION = "training.tooltip.lr_position";
+            inline constexpr const char* LR_SH_COEFF = "training.tooltip.lr_sh_coeff";
+            inline constexpr const char* LR_OPACITY = "training.tooltip.lr_opacity";
+            inline constexpr const char* LR_SCALING = "training.tooltip.lr_scaling";
+            inline constexpr const char* LR_ROTATION = "training.tooltip.lr_rotation";
+            inline constexpr const char* BTN_START = "training.tooltip.btn_start";
+            inline constexpr const char* BTN_RESUME = "training.tooltip.btn_resume";
+            inline constexpr const char* BTN_PAUSE = "training.tooltip.btn_pause";
+            inline constexpr const char* BTN_STOP = "training.tooltip.btn_stop";
+            inline constexpr const char* BTN_RESET = "training.tooltip.btn_reset";
+            inline constexpr const char* BTN_CLEAR = "training.tooltip.btn_clear";
+            inline constexpr const char* BTN_SAVE_CHECKPOINT = "training.tooltip.btn_save_checkpoint";
+            inline constexpr const char* SAVE_STEP_INPUT = "training.tooltip.save_step_input";
+            inline constexpr const char* SAVE_STEP_ADD = "training.tooltip.save_step_add";
+            inline constexpr const char* SAVE_STEP_REMOVE = "training.tooltip.save_step_remove";
         } // namespace Tooltip
 
         namespace Status {
@@ -385,6 +433,7 @@ namespace lichtfeld::Strings {
         inline constexpr const char* EQUIRECTANGULAR = "main_panel.equirectangular";
         inline constexpr const char* GUT_MODE = "main_panel.gut_mode";
         inline constexpr const char* MIP_FILTER = "main_panel.mip_filter";
+        inline constexpr const char* RENDER_SCALE = "main_panel.render_scale";
         inline constexpr const char* SELECTION_COLORS = "main_panel.selection_colors";
         inline constexpr const char* COMMITTED = "main_panel.committed";
         inline constexpr const char* PREVIEW = "main_panel.preview";
@@ -495,12 +544,23 @@ namespace lichtfeld::Strings {
     namespace Tooltip {
         inline constexpr const char* GUT_MODE = "tooltip.gut_mode";
         inline constexpr const char* MIP_FILTER = "tooltip.mip_filter";
+        inline constexpr const char* RENDER_SCALE = "tooltip.render_scale";
         inline constexpr const char* POINT_CLOUD_FORCED = "tooltip.point_cloud_forced";
         inline constexpr const char* DESATURATE_UNSELECTED = "tooltip.desaturate_unselected";
         inline constexpr const char* LOCKED = "tooltip.locked";
         inline constexpr const char* UNLOCKED = "tooltip.unlocked";
         inline constexpr const char* POINT_SIZE = "tooltip.point_size";
         inline constexpr const char* SCALE_CAMERA = "tooltip.scale_camera";
+        inline constexpr const char* SH_DEGREE = "tooltip.sh_degree";
+        inline constexpr const char* EQUIRECTANGULAR = "tooltip.equirectangular";
+        inline constexpr const char* FOV = "tooltip.fov";
+        inline constexpr const char* BACKGROUND = "tooltip.background";
+        inline constexpr const char* COORD_AXES = "tooltip.coord_axes";
+        inline constexpr const char* PIVOT = "tooltip.pivot";
+        inline constexpr const char* GRID = "tooltip.grid";
+        inline constexpr const char* CAMERA_FRUSTUMS = "tooltip.camera_frustums";
+        inline constexpr const char* POINT_CLOUD_MODE = "tooltip.point_cloud_mode";
+        inline constexpr const char* SELECTION_COLORS = "tooltip.selection_colors";
     } // namespace Tooltip
 
     namespace ExitPopup {
