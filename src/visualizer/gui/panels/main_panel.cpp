@@ -143,11 +143,17 @@ namespace lfs::vis::gui::panels {
             settings.background_color = glm::vec3(bg_color[0], bg_color[1], bg_color[2]);
             settings_changed = true;
         }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", LOC(Tooltip::BACKGROUND));
+        }
 
         // Coordinate Axes
         ImGui::Separator();
         if (ImGui::Checkbox(LOC(MainPanel::SHOW_COORD_AXES), &settings.show_coord_axes)) {
             settings_changed = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", LOC(Tooltip::COORD_AXES));
         }
 
         if (settings.show_coord_axes) {
@@ -183,6 +189,9 @@ namespace lfs::vis::gui::panels {
         if (ImGui::Checkbox(LOC(MainPanel::SHOW_PIVOT), &settings.show_pivot)) {
             settings_changed = true;
         }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", LOC(Tooltip::PIVOT));
+        }
 
         // Grid checkbox and settings
         ImGui::Separator();
@@ -195,6 +204,9 @@ namespace lfs::vis::gui::panels {
                 .plane = static_cast<int>(settings.grid_plane),
                 .opacity = settings.grid_opacity}
                 .emit();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", LOC(Tooltip::GRID));
         }
 
         // Show grid settings only when grid is enabled
@@ -234,6 +246,9 @@ namespace lfs::vis::gui::panels {
         if (ImGui::Checkbox(LOC(MainPanel::CAMERA_FRUSTUMS), &settings.show_camera_frustums)) {
             settings_changed = true;
         }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", LOC(Tooltip::CAMERA_FRUSTUMS));
+        }
 
         if (settings.show_camera_frustums) {
             ImGui::Indent();
@@ -254,10 +269,10 @@ namespace lfs::vis::gui::panels {
                 .voxel_size = settings.voxel_size}
                 .emit();
         }
-        ImGui::EndDisabled();
-        if (force_point_cloud && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("%s", LOC(Tooltip::POINT_CLOUD_FORCED));
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("%s", force_point_cloud ? LOC(Tooltip::POINT_CLOUD_FORCED) : LOC(Tooltip::POINT_CLOUD_MODE));
         }
+        ImGui::EndDisabled();
 
         if (settings.point_cloud_mode || force_point_cloud) {
             ImGui::Indent();
@@ -273,7 +288,11 @@ namespace lfs::vis::gui::panels {
 
         // Selection Colors
         ImGui::Separator();
-        if (ImGui::CollapsingHeader(LOC(MainPanel::SELECTION_COLORS))) {
+        bool selection_colors_open = ImGui::CollapsingHeader(LOC(MainPanel::SELECTION_COLORS));
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", LOC(Tooltip::SELECTION_COLORS));
+        }
+        if (selection_colors_open) {
             ImGui::Indent();
 
             auto color_edit = [&](const char* label, glm::vec3& color) {
@@ -308,7 +327,7 @@ namespace lfs::vis::gui::panels {
         ImGui::Separator();
 
         float fov = settings.fov;
-        if (widgets::SliderWithReset(LOC(MainPanel::FOV), &fov, 45.0f, 120.0f, 75.0f)) {
+        if (widgets::SliderWithReset(LOC(MainPanel::FOV), &fov, 45.0f, 120.0f, 75.0f, LOC(Tooltip::FOV))) {
             render_manager->setFov(fov);
 
             ui::RenderSettingsChanged{
@@ -336,6 +355,9 @@ namespace lfs::vis::gui::panels {
                 .equirectangular = std::nullopt}
                 .emit();
         }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", LOC(Tooltip::SH_DEGREE));
+        }
 
         if (ImGui::Checkbox(LOC(MainPanel::EQUIRECTANGULAR), &settings.equirectangular)) {
             settings_changed = true;
@@ -348,6 +370,9 @@ namespace lfs::vis::gui::panels {
                 .background_color = std::nullopt,
                 .equirectangular = settings.equirectangular}
                 .emit();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", LOC(Tooltip::EQUIRECTANGULAR));
         }
 
         // GUT (Gaussian Unscented Transform) for non-pinhole cameras
@@ -366,6 +391,14 @@ namespace lfs::vis::gui::panels {
         }
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("%s", LOC(Tooltip::MIP_FILTER));
+        }
+
+        // Render Scale (VRAM optimization)
+        ImGui::Separator();
+        if (widgets::SliderWithReset(LOC(MainPanel::RENDER_SCALE), &settings.render_scale, 0.25f, 1.0f, 1.0f,
+                                     LOC(Tooltip::RENDER_SCALE))) {
+            settings_changed = true;
+            render_manager->updateSettings(settings);
         }
     }
 

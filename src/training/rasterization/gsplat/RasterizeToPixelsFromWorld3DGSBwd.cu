@@ -147,11 +147,26 @@ namespace gsplat_lfs {
             OpenCVFisheyeCameraModel camera_model(cm_params);
             ray = camera_model.image_point_to_world_ray_shutter_pose(vec2(px, py), rs_params);
         } else if (camera_model_type == CameraModelType::EQUIRECTANGULAR) {
+            // For equirectangular cameras in tile mode, the K matrix encodes tile information:
+            //   K[0][0] (focal_length.x) = full_image_width
+            //   K[1][1] (focal_length.y) = full_image_height
+            //   K[0][2] (principal_point.x) = tile_x_offset
+            //   K[1][2] (principal_point.y) = tile_y_offset
+            // This avoids changing all function interfaces for a camera-specific fix.
+            const uint32_t full_image_width = static_cast<uint32_t>(focal_length.x);
+            const uint32_t full_image_height = static_cast<uint32_t>(focal_length.y);
+            const float tile_x_offset = principal_point.x;
+            const float tile_y_offset = principal_point.y;
+
             EquirectangularCameraModel::Parameters cm_params = {};
-            cm_params.resolution = {image_width, image_height};
+            cm_params.resolution = {full_image_width, full_image_height};
             cm_params.shutter_type = rs_type;
             EquirectangularCameraModel camera_model(cm_params);
-            ray = camera_model.image_point_to_world_ray_shutter_pose(vec2(px, py), rs_params);
+
+            // Convert tile-local pixel coords to full image coords for correct angular mapping
+            const float px_full = px + tile_x_offset;
+            const float py_full = py + tile_y_offset;
+            ray = camera_model.image_point_to_world_ray_shutter_pose(vec2(px_full, py_full), rs_params);
         } else if (camera_model_type == CameraModelType::THIN_PRISM_FISHEYE) {
             ThinPrismFisheyeCameraModel<>::Parameters cm_params = {};
             cm_params.resolution = {image_width, image_height};

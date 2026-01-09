@@ -182,6 +182,7 @@ namespace lfs::vis {
         bool window_initialized_ = false;
         bool gui_initialized_ = false;
         bool tools_initialized_ = false;
+        bool pending_auto_train_ = false;
     };
 
 } // namespace lfs::vis

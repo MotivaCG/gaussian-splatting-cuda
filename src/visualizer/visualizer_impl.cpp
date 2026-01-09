@@ -343,6 +343,13 @@ namespace lfs::vis {
         if (selection_tool_ && selection_tool_->isEnabled() && tool_context_) {
             selection_tool_->update(*tool_context_);
         }
+
+        // Auto-start training if --train flag was passed
+        if (pending_auto_train_ && trainer_manager_ && trainer_manager_->canStart()) {
+            pending_auto_train_ = false;
+            LOG_INFO("Auto-starting training (--train flag)");
+            cmd::StartTraining{}.emit();
+        }
     }
 
     void VisualizerImpl::render() {
@@ -708,6 +715,7 @@ namespace lfs::vis {
         if (parameter_manager_) {
             parameter_manager_->setSessionDefaults(params);
         }
+        pending_auto_train_ = params.optimization.auto_train;
     }
 
     std::expected<void, std::string> VisualizerImpl::loadPLY(const std::filesystem::path& path) {

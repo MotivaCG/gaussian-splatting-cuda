@@ -51,6 +51,7 @@ namespace lfs::core {
             bool enable_save_eval_images = true;              // Save during evaluation images
             bool headless = false;                            // Disable visualization during training
             bool skip_intermediate = false;                   // Skip intermediate PLY/checkpoint saves (only save final)
+            bool auto_train = false;                          // Start training immediately on startup
             bool no_splash = false;                           // Skip splash screen on startup
             bool no_interop = false;                          // Disable CUDA-GL interop (use CPU fallback)
             std::string strategy = "mcmc";                    // Optimization strategy: mcmc, adc.
