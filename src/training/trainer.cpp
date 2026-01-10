@@ -32,6 +32,8 @@
 #include <memory>
 #include <nvtx3/nvToolsExt.h>
 
+#include "mask_penalty.hpp" //matting modes
+
 namespace lfs::training {
 
     // Tile configuration for memory-efficient training
@@ -339,6 +341,40 @@ namespace lfs::training {
                     // Gradient: 2 * (alpha - mean) * weight / count, only in FG
                     const float var_grad_scale = 2.0f * kAlphaVarianceWeight / fg_count;
                     grad_alpha = grad_alpha + deviation * var_grad_scale;
+                }
+            }
+
+            // -----------------------------------------------------------------
+            // 4. Pixel-based opacity penalty
+            //
+            // Applies temporal-scheduled penalty based on rendered alpha:
+            // - Inside mask: penalizes transparency (want opaque)
+            // - Outside mask: penalizes opacity (want transparent)
+            // -----------------------------------------------------------------
+            if (alpha.is_valid()) {
+                const int iter = current_iteration_.load();
+                const int total_iters = static_cast<int>(params_.optimization.iterations);
+
+                auto penalty_result = mask_penalty::compute_and_apply_full_penalty(
+                    loss,
+                    grad,
+                    alpha,
+                    mask_2d,
+                    iter,
+                    total_iters,
+                    opt_params.mask_opacity_penalty_weight);
+
+                if (penalty_result.applied()) {
+                    loss = penalty_result.modified_loss;
+                    grad = penalty_result.modified_grad_image;
+
+                    // Accumulate alpha gradient with penalty scaling
+                    if (grad_alpha.is_valid()) {
+                        grad_alpha = grad_alpha.mul(1.0f + penalty_result.penalty_value)
+                                         .add(penalty_result.grad_alpha);
+                    } else {
+                        grad_alpha = penalty_result.grad_alpha;
+                    }
                 }
             }
             
@@ -1044,19 +1080,18 @@ namespace lfs::training {
                 r_output = output; // Save last tile for densification
                 nvtxRangePop();
 
-                 // Apply background noise if enabled
-                lfs::core::Tensor processed_image = output.image;
-                if (params_.optimization.bg_noise) {
-                    nvtxRangePush("apply_background_noise");
-                    processed_image = apply_background_noise(output.image, output.alpha, iter);
-                    nvtxRangePop();
-                }
-
                 // Apply bilateral grid if enabled (before loss computation)
                 lfs::core::Tensor corrected_image = output.image;
                 if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
                     nvtxRangePush("bilateral_grid_forward");
                     corrected_image = bilateral_grid_->apply(output.image, cam->uid());
+                    nvtxRangePop();
+                }
+
+                // Apply background noise if enabled
+                if (params_.optimization.bg_noise) {
+                    nvtxRangePush("apply_background_noise");
+                    corrected_image = apply_background_noise(corrected_image, output.alpha, iter);
                     nvtxRangePop();
                 }
 
