@@ -220,6 +220,7 @@ namespace lfs::training {
         std::unique_ptr<ISparsityOptimizer> sparsity_optimizer_;
 
         lfs::training::kernels::MaskedFusedL1SSIMWorkspace masked_fused_workspace_;
+        lfs::training::kernels::MaskedFusedL1SSIMWorkspace masked_fused_workspace_bg_; // For matting modes (BG pass)
 
         // Metrics evaluator - handles all evaluation logic
         std::unique_ptr<lfs::training::MetricsEvaluator> evaluator_;

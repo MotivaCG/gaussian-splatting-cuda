@@ -222,159 +222,126 @@ namespace lfs::training {
             }
         } else if (mode == param::MaskMode::HardMatting || mode == param::MaskMode::SoftMatting) {
 
-            // -----------------------------------------------------------------
-            // Matting (Binary, Error-Tolerant, Hole-Closing)
-            // Supports both HardMatting (no cores) and SoftMatting (with cores)
-            // -----------------------------------------------------------------
-
-            //TODO create a fused kernel as the original ls does
-            const Tensor mask_expanded = mask_2d.unsqueeze(0).expand({static_cast<int>(rendered.shape()[0]),
-                                                                      static_cast<int>(mask_2d.shape()[0]),
-                                                                      static_cast<int>(mask_2d.shape()[1])});
-            const Tensor mask_sum = mask_expanded.sum() + EPSILON;
-
-            // Fixed defaults (not user-configurable): conservative, hole-closing.
             constexpr float kBgPhotometricRatio = 0.05f;
             constexpr float kBgAlphaPenaltyWeight = 0.10f;
             constexpr float kBgAlphaPenaltyPower = 2.0f;
             constexpr float kFgMinAlpha = 0.90f;
             constexpr float kFgAlphaFloorWeight = 0.12f;
 
-            // -----------------------------------------------------------------
-            // Validate cores for SoftMatting mode
-            // -----------------------------------------------------------------
             const bool use_cores = (mode == param::MaskMode::SoftMatting);
 
             if (use_cores) {
                 if (!fg_core_2d || !bg_core_2d || !fg_core_2d->is_valid() || !bg_core_2d->is_valid()) {
                     return std::unexpected(
-                        "MaskMode::SoftMatting requires fg_core_2d and bg_core_2d (eroded cores). "
-                        "Compute/cache them in Camera and pass pointers here.");
+                        "MaskMode::SoftMatting requires fg_core_2d and bg_core_2d (eroded cores).");
                 }
             }
 
-            // -----------------------------------------------------------------
-            // Build BG mask (same shape as mask_2d) and expand to [C,H,W]
-            // -----------------------------------------------------------------
-            static thread_local lfs::core::Tensor one_2d;
-            if (one_2d.is_empty() || one_2d.device() != mask_2d.device() || one_2d.shape() != mask_2d.shape()) {
-                one_2d = lfs::core::Tensor::full(mask_2d.shape(), 1.0f, mask_2d.device());
+            // ---------------------------------------------------------------------
+            // 1. Build BG mask (1 - mask)
+            // ---------------------------------------------------------------------
+            static thread_local Tensor bg_mask_2d;
+            if (bg_mask_2d.is_empty() || bg_mask_2d.shape() != mask_2d.shape() || bg_mask_2d.device() != mask_2d.device()) {
+                bg_mask_2d = Tensor::empty(mask_2d.shape(), mask_2d.device(), DataType::Float32);
             }
+            bg_mask_2d.copy_(mask_2d);
+            bg_mask_2d.mul_(-1.0f);
+            bg_mask_2d.add_(1.0f);
 
-            const lfs::core::Tensor bg_mask_2d = one_2d - mask_2d;
-
-            const lfs::core::Tensor bg_mask_expanded =
-                bg_mask_2d.unsqueeze(0).expand({static_cast<int>(rendered.shape()[0]),
-                                                static_cast<int>(mask_2d.shape()[0]),
-                                                static_cast<int>(mask_2d.shape()[1])});
-
-            // -----------------------------------------------------------------
-            // Normalization factors as floats (avoid Tensor / Tensor(scalar))
-            // -----------------------------------------------------------------
-            const float sum_fg_f_raw = mask_sum.item<float>(); // Matting-only sync
-            const float sum_fg_f = (sum_fg_f_raw > EPSILON) ? sum_fg_f_raw : EPSILON;
-
-            const float total_f = static_cast<float>(rendered.numel());
-            const float sum_fg_noeps = (sum_fg_f > EPSILON) ? (sum_fg_f - EPSILON) : 0.0f;
-            const float sum_bg_f = std::max(total_f - sum_fg_noeps, EPSILON);
-
-            // -----------------------------------------------------------------
-            // L1: FG + ratio * BG
-            // -----------------------------------------------------------------
-            const lfs::core::Tensor diff = rendered - gt_image;
-            const lfs::core::Tensor l1_diff = diff.abs();
-            const lfs::core::Tensor sign_diff = diff.sign();
-
-            const lfs::core::Tensor l1_fg = (l1_diff * mask_expanded).sum() / sum_fg_f;
-            const lfs::core::Tensor l1_grad_fg = (sign_diff * mask_expanded) / sum_fg_f;
-
-            const lfs::core::Tensor l1_bg = (l1_diff * bg_mask_expanded).sum() / sum_bg_f;
-            const lfs::core::Tensor l1_grad_bg = (sign_diff * bg_mask_expanded) / sum_bg_f;
-
-            lfs::core::Tensor l1_total = l1_fg + l1_bg * kBgPhotometricRatio;
-            lfs::core::Tensor l1_grad = l1_grad_fg + l1_grad_bg * kBgPhotometricRatio;
-
-            // -----------------------------------------------------------------
-            // Optional DSSIM mixed with masked weighting (FG + weak BG)
-            // -----------------------------------------------------------------
+            // ---------------------------------------------------------------------
+            // 2. Photometric loss: FG (full weight) + BG (reduced weight)
+            // ---------------------------------------------------------------------
             if (opt_params.lambda_dssim > 0.0f) {
-                static thread_local lfs::core::Tensor one_scalar;
-                if (one_scalar.is_empty() || one_scalar.device() != rendered.device()) {
-                    one_scalar = lfs::core::Tensor::full({}, 1.0f, rendered.device());
+                // FG pass
+                auto [fg_loss, fg_ctx] = lfs::training::kernels::masked_fused_l1_ssim_forward(
+                    rendered, gt_image, mask_2d, opt_params.lambda_dssim, masked_fused_workspace_);
+                Tensor fg_grad = lfs::training::kernels::masked_fused_l1_ssim_backward(fg_ctx, masked_fused_workspace_);
+
+                // BG pass
+                auto [bg_loss, bg_ctx] = lfs::training::kernels::masked_fused_l1_ssim_forward(
+                    rendered, gt_image, bg_mask_2d, opt_params.lambda_dssim, masked_fused_workspace_bg_);
+                Tensor bg_grad = lfs::training::kernels::masked_fused_l1_ssim_backward(bg_ctx, masked_fused_workspace_bg_);
+
+                loss = fg_loss + bg_loss * kBgPhotometricRatio;
+                grad = fg_grad + bg_grad * kBgPhotometricRatio;
+
+                if (grad.ndim() == 4 && rendered.ndim() == 3) {
+                    grad = grad.squeeze(0);
                 }
-
-                const auto rendered_4d = rendered.unsqueeze(0);
-                const auto gt_4d = gt_image.unsqueeze(0);
-
-                auto ssim_result = lfs::training::kernels::ssim_forward_map(rendered_4d, gt_4d, false);
-                const lfs::core::Tensor ssim_map_3d = ssim_result.ssim_map.squeeze(0);
-
-                const lfs::core::Tensor ssim_fg = (ssim_map_3d * mask_expanded).sum() / sum_fg_f;
-                const lfs::core::Tensor ssim_loss_fg = one_scalar - ssim_fg;
-
-                const lfs::core::Tensor ssim_bg = (ssim_map_3d * bg_mask_expanded).sum() / sum_bg_f;
-                const lfs::core::Tensor ssim_loss_bg = one_scalar - ssim_bg;
-
-                const lfs::core::Tensor ssim_loss_total = ssim_loss_fg + ssim_loss_bg * kBgPhotometricRatio;
-
-                const float l1_weight = 1.0f - opt_params.lambda_dssim;
-                const float ssim_weight = opt_params.lambda_dssim;
-
-                loss = l1_total * l1_weight + ssim_loss_total * ssim_weight;
-
-                const lfs::core::Tensor mask_4d = mask_expanded.unsqueeze(0);
-                const lfs::core::Tensor bg_4d = bg_mask_expanded.unsqueeze(0);
-
-                const lfs::core::Tensor dL_dmap =
-                    (mask_4d / sum_fg_f + (bg_4d / sum_bg_f) * kBgPhotometricRatio) * (-1.0f);
-
-                const lfs::core::Tensor ssim_grad =
-                    lfs::training::kernels::ssim_backward_with_grad_map(ssim_result.ctx, dL_dmap).squeeze(0);
-
-                grad = l1_grad * l1_weight + ssim_grad * ssim_weight;
             } else {
-                loss = l1_total;
-                grad = l1_grad;
+                // Pure L1
+                const Tensor mask_exp = mask_2d.unsqueeze(0).expand({static_cast<int>(rendered.shape()[0]),
+                                                                     static_cast<int>(mask_2d.shape()[0]),
+                                                                     static_cast<int>(mask_2d.shape()[1])});
+                const Tensor bg_exp = bg_mask_2d.unsqueeze(0).expand({static_cast<int>(rendered.shape()[0]),
+                                                                      static_cast<int>(mask_2d.shape()[0]),
+                                                                      static_cast<int>(mask_2d.shape()[1])});
+
+                const float fg_sum = mask_exp.sum().item<float>() + EPSILON;
+                const float bg_sum = bg_exp.sum().item<float>() + EPSILON;
+
+                const Tensor diff = rendered - gt_image;
+                const Tensor l1 = diff.abs();
+                const Tensor sign = diff.sign();
+
+                loss = (l1 * mask_exp).sum() / fg_sum + (l1 * bg_exp).sum() / bg_sum * kBgPhotometricRatio;
+                grad = sign * mask_exp / fg_sum + sign * bg_exp / bg_sum * kBgPhotometricRatio;
             }
 
-            // -----------------------------------------------------------------
-            // Alpha regularization:
-            //  HardMatting: Direct inside/outside mask regularization
-            //  SoftMatting: Core-only regularization (more conservative)
-            // -----------------------------------------------------------------
+            // ---------------------------------------------------------------------
+            // 3. Alpha regularization
+            // ---------------------------------------------------------------------
             if (alpha.is_valid()) {
-                const lfs::core::Tensor alpha_2d = (alpha.ndim() == 3) ? alpha.squeeze(0) : alpha;
-                const float inv_pixels = 1.0f / static_cast<float>(alpha_2d.numel());
+                const Tensor alpha_2d = (alpha.ndim() == 3) ? alpha.squeeze(0) : alpha;
+                const float inv_px = 1.0f / static_cast<float>(alpha_2d.numel());
 
-                grad_alpha = lfs::core::Tensor::zeros_like(alpha_2d);
+                grad_alpha = Tensor::zeros_like(alpha_2d);
 
-                // Select regularization masks based on mode
-                const lfs::core::Tensor& bg_reg_mask = use_cores ? *bg_core_2d : bg_mask_2d;
-                const lfs::core::Tensor& fg_reg_mask = use_cores ? *fg_core_2d : mask_2d;
+                const Tensor& bg_reg = use_cores ? *bg_core_2d : bg_mask_2d;
+                const Tensor& fg_reg = use_cores ? *fg_core_2d : mask_2d;
 
-                // (a) BG cleanup: alpha -> 0 on background region
+                // (a) BG cleanup: push alpha toward 0 in background regions
                 {
-                    const lfs::core::Tensor bg_weights = bg_reg_mask.pow(kBgAlphaPenaltyPower);
-                    const lfs::core::Tensor bg_penalty = (alpha_2d * bg_weights).mean() * kBgAlphaPenaltyWeight;
+                    const Tensor bg_w = bg_reg.pow(kBgAlphaPenaltyPower);
+                    const Tensor bg_penalty = (alpha_2d * bg_w).mean() * kBgAlphaPenaltyWeight;
                     loss = loss + bg_penalty;
-
-                    grad_alpha = grad_alpha + bg_weights * (kBgAlphaPenaltyWeight * inv_pixels);
+                    grad_alpha = grad_alpha + bg_w * (kBgAlphaPenaltyWeight * inv_px);
                 }
 
-                // (b) FG alpha floor: enforce alpha >= kFgMinAlpha on foreground region
+                // (b) FG alpha floor: enforce alpha >= kFgMinAlpha in foreground regions
                 {
-                    const lfs::core::Tensor delta = alpha_2d - kFgMinAlpha;
-                    const lfs::core::Tensor gap = (delta * -1.0f).relu();
-
-                    const lfs::core::Tensor floor_penalty = (gap * fg_reg_mask).mean() * kFgAlphaFloorWeight;
+                    const Tensor delta = alpha_2d - kFgMinAlpha;
+                    const Tensor gap = (delta * -1.0f).relu();
+                    const Tensor floor_penalty = (gap * fg_reg).mean() * kFgAlphaFloorWeight;
                     loss = loss + floor_penalty;
 
-                    const lfs::core::Tensor active = delta.lt(0.0f).to(lfs::core::DataType::Float32);
-                    grad_alpha = grad_alpha + (active * fg_reg_mask) * (-kFgAlphaFloorWeight * inv_pixels);
+                    const Tensor active = delta.lt(0.0f).to(DataType::Float32);
+                    grad_alpha = grad_alpha + (active * fg_reg) * (-kFgAlphaFloorWeight * inv_px);
+                }
+
+                // (c) FG alpha consistency: penalize variance within foreground
+                //     This prevents isolated semi-transparent splats in uniform-color regions
+                //     where the photometric loss provides weak gradients
+                {
+                    constexpr float kAlphaVarianceWeight = 0.15f;
+
+                    // Compute mean alpha within FG region
+                    const Tensor fg_alpha = alpha_2d * fg_reg;
+                    const float fg_count = fg_reg.sum().item<float>() + EPSILON;
+                    const float fg_mean = fg_alpha.sum().item<float>() / fg_count;
+
+                    // Variance = E[(x - mean)^2] over FG pixels
+                    const Tensor deviation = (alpha_2d - fg_mean) * fg_reg;
+                    const Tensor variance = (deviation.pow(2.0f)).sum() / fg_count;
+
+                    loss = loss + variance * kAlphaVarianceWeight;
+
+                    // Gradient: 2 * (alpha - mean) * weight / count, only in FG
+                    const float var_grad_scale = 2.0f * kAlphaVarianceWeight / fg_count;
+                    grad_alpha = grad_alpha + deviation * var_grad_scale;
                 }
             }
-
-            return MaskLossResult{.loss = loss, .grad_image = grad, .grad_alpha = grad_alpha};
+            
         } else {
             auto fallback = compute_photometric_loss_with_gradient(rendered, gt_image, opt_params);
             if (!fallback) {
