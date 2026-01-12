@@ -33,6 +33,7 @@
 #include <nvtx3/nvToolsExt.h>
 
 #include "mask_penalty.hpp" //matting modes
+#include "mask_pruning.hpp"
 
 namespace lfs::training {
 
@@ -146,7 +147,8 @@ namespace lfs::training {
         return {};
     }
 
-    std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric_loss_with_mask(
+    
+std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric_loss_with_mask(
         const lfs::core::Tensor& rendered,
         const lfs::core::Tensor& gt_image,
         const lfs::core::Tensor& mask,
@@ -173,7 +175,7 @@ namespace lfs::training {
                 grad = lfs::training::kernels::masked_fused_l1_ssim_backward(ctx, masked_fused_workspace_);
                 loss = loss_tensor;
 
-                // Squeeze gradient to match input dimensions (loss is scalar, no adjustment needed)
+                // Squeeze gradient to match input dimensions
                 if (grad.ndim() == 4 && rendered.ndim() == 3) {
                     grad = grad.squeeze(0);
                 }
@@ -222,13 +224,12 @@ namespace lfs::training {
                 loss = loss + alpha_loss;
                 grad_alpha = (alpha_2d - mask_2d).sign() * (ALPHA_CONSISTENCY_WEIGHT / static_cast<float>(alpha_2d.numel()));
             }
-        } else if (mode == param::MaskMode::HardMatting || mode == param::MaskMode::SoftMatting) {
 
-            constexpr float kBgPhotometricRatio = 0.05f;
-            constexpr float kBgAlphaPenaltyWeight = 0.10f;
-            constexpr float kBgAlphaPenaltyPower = 2.0f;
-            constexpr float kFgMinAlpha = 0.90f;
-            constexpr float kFgAlphaFloorWeight = 0.12f;
+        } else if (mode == param::MaskMode::HardMatting || mode == param::MaskMode::SoftMatting) {
+            // =====================================================================
+            // OPTIMIZED SOFTMATTING - SINGLE PASS APPROACH (like old attention-mask)
+            // =====================================================================
+            // Key optimization: ONE photometric pass with weighted mask instead of TWO separate passes
 
             const bool use_cores = (mode == param::MaskMode::SoftMatting);
 
@@ -239,145 +240,87 @@ namespace lfs::training {
                 }
             }
 
-            // ---------------------------------------------------------------------
-            // 1. Build BG mask (1 - mask)
-            // ---------------------------------------------------------------------
-            static thread_local Tensor bg_mask_2d;
-            if (bg_mask_2d.is_empty() || bg_mask_2d.shape() != mask_2d.shape() || bg_mask_2d.device() != mask_2d.device()) {
-                bg_mask_2d = Tensor::empty(mask_2d.shape(), mask_2d.device(), DataType::Float32);
+            // Build weight map: full weight inside mask + reduced weight outside
+            // This mimics the old attention-mask behavior where background gets some supervision
+            constexpr float kBgPhotometricRatio = 0.05f;
+
+            Tensor weight_map;
+            {
+                // weight_map = mask + (1 - mask) * kBgPhotometricRatio
+                // This gives 1.0 inside mask, ~0.05 outside mask
+                static thread_local Tensor bg_mask_2d;
+                if (bg_mask_2d.is_empty() || bg_mask_2d.shape() != mask_2d.shape() || bg_mask_2d.device() != mask_2d.device()) {
+                    bg_mask_2d = Tensor::empty(mask_2d.shape(), mask_2d.device(), DataType::Float32);
+                }
+                bg_mask_2d.copy_(mask_2d);
+                bg_mask_2d.mul_(-1.0f);
+                bg_mask_2d.add_(1.0f);
+
+                weight_map = mask_2d + bg_mask_2d * kBgPhotometricRatio;
             }
-            bg_mask_2d.copy_(mask_2d);
-            bg_mask_2d.mul_(-1.0f);
-            bg_mask_2d.add_(1.0f);
 
-            // ---------------------------------------------------------------------
-            // 2. Photometric loss: FG (full weight) + BG (reduced weight)
-            // ---------------------------------------------------------------------
+            // SINGLE photometric pass with weighted mask
             if (opt_params.lambda_dssim > 0.0f) {
-                // FG pass
-                auto [fg_loss, fg_ctx] = lfs::training::kernels::masked_fused_l1_ssim_forward(
-                    rendered, gt_image, mask_2d, opt_params.lambda_dssim, masked_fused_workspace_);
-                Tensor fg_grad = lfs::training::kernels::masked_fused_l1_ssim_backward(fg_ctx, masked_fused_workspace_);
+                auto [loss_tensor, ctx] = lfs::training::kernels::masked_fused_l1_ssim_forward(
+                    rendered, gt_image, weight_map, opt_params.lambda_dssim, masked_fused_workspace_);
 
-                // BG pass
-                auto [bg_loss, bg_ctx] = lfs::training::kernels::masked_fused_l1_ssim_forward(
-                    rendered, gt_image, bg_mask_2d, opt_params.lambda_dssim, masked_fused_workspace_bg_);
-                Tensor bg_grad = lfs::training::kernels::masked_fused_l1_ssim_backward(bg_ctx, masked_fused_workspace_bg_);
-
-                loss = fg_loss + bg_loss * kBgPhotometricRatio;
-                grad = fg_grad + bg_grad * kBgPhotometricRatio;
+                grad = lfs::training::kernels::masked_fused_l1_ssim_backward(ctx, masked_fused_workspace_);
+                loss = loss_tensor;
 
                 if (grad.ndim() == 4 && rendered.ndim() == 3) {
                     grad = grad.squeeze(0);
                 }
             } else {
-                // Pure L1
-                const Tensor mask_exp = mask_2d.unsqueeze(0).expand({static_cast<int>(rendered.shape()[0]),
-                                                                     static_cast<int>(mask_2d.shape()[0]),
-                                                                     static_cast<int>(mask_2d.shape()[1])});
-                const Tensor bg_exp = bg_mask_2d.unsqueeze(0).expand({static_cast<int>(rendered.shape()[0]),
-                                                                      static_cast<int>(mask_2d.shape()[0]),
-                                                                      static_cast<int>(mask_2d.shape()[1])});
-
-                const float fg_sum = mask_exp.sum().item<float>() + EPSILON;
-                const float bg_sum = bg_exp.sum().item<float>() + EPSILON;
+                // Pure L1 with weighted mask
+                const Tensor weight_exp = weight_map.unsqueeze(0).expand({static_cast<int>(rendered.shape()[0]),
+                                                                          static_cast<int>(mask_2d.shape()[0]),
+                                                                          static_cast<int>(mask_2d.shape()[1])});
+                const Tensor weight_sum = weight_exp.sum() + EPSILON;
 
                 const Tensor diff = rendered - gt_image;
                 const Tensor l1 = diff.abs();
                 const Tensor sign = diff.sign();
 
-                loss = (l1 * mask_exp).sum() / fg_sum + (l1 * bg_exp).sum() / bg_sum * kBgPhotometricRatio;
-                grad = sign * mask_exp / fg_sum + sign * bg_exp / bg_sum * kBgPhotometricRatio;
+                loss = (l1 * weight_exp).sum() / weight_sum;
+                grad = sign * weight_exp / weight_sum;
             }
 
-            // ---------------------------------------------------------------------
-            // 3. Alpha regularization
-            // ---------------------------------------------------------------------
+            // Simple alpha regularization (fast, like old trainer)
             if (alpha.is_valid()) {
                 const Tensor alpha_2d = (alpha.ndim() == 3) ? alpha.squeeze(0) : alpha;
-                const float inv_px = 1.0f / static_cast<float>(alpha_2d.numel());
 
-                grad_alpha = Tensor::zeros_like(alpha_2d);
+                // Use pixelBasedOpacityPenalty approach from old trainer
+                // This is much faster than the complex multi-term approach
+                const float penalty_weight = opt_params.mask_opacity_penalty_weight;
 
-                const Tensor& bg_reg = use_cores ? *bg_core_2d : bg_mask_2d;
-                const Tensor& fg_reg = use_cores ? *fg_core_2d : mask_2d;
+                if (penalty_weight > 0.0f) {
+                    constexpr float kIn = 0.667f;  // Weight for penalizing transparency inside mask
+                    constexpr float kOut = 0.333f; // Weight for penalizing opacity outside mask
 
-                // (a) BG cleanup: push alpha toward 0 in background regions
-                {
-                    const Tensor bg_w = bg_reg.pow(kBgAlphaPenaltyPower);
-                    const Tensor bg_penalty = (alpha_2d * bg_w).mean() * kBgAlphaPenaltyWeight;
-                    loss = loss + bg_penalty;
-                    grad_alpha = grad_alpha + bg_w * (kBgAlphaPenaltyWeight * inv_px);
-                }
+                    // Binary mask for inside/outside
+                    const Tensor fg_mask = mask_2d.gt(0.5f).to(DataType::Float32);
+                    const Tensor bg_mask = Tensor::full(mask_2d.shape(), 1.0f, mask_2d.device()) - fg_mask;
 
-                // (b) FG alpha floor: enforce alpha >= kFgMinAlpha in foreground regions
-                {
-                    const Tensor delta = alpha_2d - kFgMinAlpha;
-                    const Tensor gap = (delta * -1.0f).relu();
-                    const Tensor floor_penalty = (gap * fg_reg).mean() * kFgAlphaFloorWeight;
-                    loss = loss + floor_penalty;
+                    // Penalty computation
+                    const float num_pixels = static_cast<float>(alpha_2d.numel());
+                    const Tensor inside_penalty_map = (Tensor::full(alpha_2d.shape(), 1.0f, alpha_2d.device()) - alpha_2d) * fg_mask;
+                    const Tensor outside_penalty_map = alpha_2d * bg_mask;
 
-                    const Tensor active = delta.lt(0.0f).to(DataType::Float32);
-                    grad_alpha = grad_alpha + (active * fg_reg) * (-kFgAlphaFloorWeight * inv_px);
-                }
+                    const Tensor total_penalty = (inside_penalty_map.sum() * kIn + outside_penalty_map.sum() * kOut) / num_pixels;
+                    const float penalty_scalar = total_penalty.item<float>() * penalty_weight;
 
-                // (c) FG alpha consistency: penalize variance within foreground
-                //     This prevents isolated semi-transparent splats in uniform-color regions
-                //     where the photometric loss provides weak gradients
-                {
-                    constexpr float kAlphaVarianceWeight = 0.15f;
+                    // Add penalty to loss (multiplicative + small additive component)
+                    loss = loss * (1.0f + penalty_scalar) + total_penalty * 0.01f * penalty_weight;
 
-                    // Compute mean alpha within FG region
-                    const Tensor fg_alpha = alpha_2d * fg_reg;
-                    const float fg_count = fg_reg.sum().item<float>() + EPSILON;
-                    const float fg_mean = fg_alpha.sum().item<float>() / fg_count;
+                    // Gradient w.r.t. alpha
+                    const float grad_scale = penalty_weight / num_pixels;
+                    grad_alpha = bg_mask * (kOut * grad_scale) - fg_mask * (kIn * grad_scale);
 
-                    // Variance = E[(x - mean)^2] over FG pixels
-                    const Tensor deviation = (alpha_2d - fg_mean) * fg_reg;
-                    const Tensor variance = (deviation.pow(2.0f)).sum() / fg_count;
-
-                    loss = loss + variance * kAlphaVarianceWeight;
-
-                    // Gradient: 2 * (alpha - mean) * weight / count, only in FG
-                    const float var_grad_scale = 2.0f * kAlphaVarianceWeight / fg_count;
-                    grad_alpha = grad_alpha + deviation * var_grad_scale;
+                    // Scale image gradient by penalty factor for consistency
+                    grad = grad * (1.0f + penalty_scalar);
                 }
             }
 
-            // -----------------------------------------------------------------
-            // 4. Pixel-based opacity penalty
-            //
-            // Applies temporal-scheduled penalty based on rendered alpha:
-            // - Inside mask: penalizes transparency (want opaque)
-            // - Outside mask: penalizes opacity (want transparent)
-            // -----------------------------------------------------------------
-            if (alpha.is_valid()) {
-                const int iter = current_iteration_.load();
-                const int total_iters = static_cast<int>(params_.optimization.iterations);
-
-                auto penalty_result = mask_penalty::compute_and_apply_full_penalty(
-                    loss,
-                    grad,
-                    alpha,
-                    mask_2d,
-                    iter,
-                    total_iters,
-                    opt_params.mask_opacity_penalty_weight);
-
-                if (penalty_result.applied()) {
-                    loss = penalty_result.modified_loss;
-                    grad = penalty_result.modified_grad_image;
-
-                    // Accumulate alpha gradient with penalty scaling
-                    if (grad_alpha.is_valid()) {
-                        grad_alpha = grad_alpha.mul(1.0f + penalty_result.penalty_value)
-                                         .add(penalty_result.grad_alpha);
-                    } else {
-                        grad_alpha = penalty_result.grad_alpha;
-                    }
-                }
-            }
-            
         } else {
             auto fallback = compute_photometric_loss_with_gradient(rendered, gt_image, opt_params);
             if (!fallback) {
@@ -1601,6 +1544,49 @@ namespace lfs::training {
             // Ensure callback is finished before final save
             if (callback_busy_.load()) {
                 cudaStreamSynchronize(callback_stream_);
+            }
+
+            // -----------------------------------------------------------------
+            // Post-training mask-based pruning
+            //
+            // For matting modes, remove splats that don't align with masks:
+            // - Center-vote: splats whose center is outside mask in most views
+            // - Leakage: splats whose footprint extends outside mask boundary
+            // -----------------------------------------------------------------
+            if (params_.optimization.mask_mode == lfs::core::param::MaskMode::HardMatting ||
+                params_.optimization.mask_mode == lfs::core::param::MaskMode::SoftMatting) {
+
+                LOG_INFO("Running post-training mask-based pruning...");
+
+                mask_pruning::CenterVotePruningConfig center_cfg;
+                center_cfg.vote_ratio_threshold = 0.80f;
+                center_cfg.min_visibility_count = 3;
+                center_cfg.invert_masks = params_.optimization.invert_masks;
+
+                mask_pruning::LeakagePruningConfig leak_cfg;
+                leak_cfg.enabled = true;
+                leak_cfg.leak_keep_threshold = 0.90f;
+                leak_cfg.per_view_leak_fraction = 0.50f;
+                leak_cfg.min_visibility_count = 1;
+                leak_cfg.min_pixel_radius = 2.0f;
+                leak_cfg.sample_points = 8;
+                leak_cfg.dilate_px = 2;
+                leak_cfg.invert_masks = params_.optimization.invert_masks;
+
+                auto pruning_result = mask_pruning::prune_after_training(
+                    *strategy_,
+                    *train_dataset_,
+                    center_cfg,
+                    leak_cfg);
+
+
+                if (!pruning_result) {
+                    LOG_WARN("Post-training pruning failed: {}", pruning_result.error());
+                } else if (pruning_result->splats_removed > 0) {
+                    LOG_INFO("Pruning complete: removed {} splats ({:.1f}%)",
+                             pruning_result->splats_removed,
+                             pruning_result->removal_ratio() * 100.0f);
+                }
             }
 
             // Final save if not already saved by stop request

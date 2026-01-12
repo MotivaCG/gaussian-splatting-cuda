@@ -86,6 +86,7 @@ set(TRAINING_NEW_SOURCES
     checkpoint.cpp
     trainer.cpp
     training_setup.cpp
+    mask_prunning.cpp
 )
 
 # lfs_training - Training module with optimizer
