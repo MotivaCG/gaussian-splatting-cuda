@@ -90,6 +90,11 @@ namespace lfs::rendering {
         bool is_depth_format_ = false;  // True if R32F, false if RGBA8
         bool external_texture_ = false; // True if texture is externally owned (don't delete)
 
+        // Cached tensors for format conversion (avoid per-frame allocations)
+        mutable Tensor cached_alpha_;
+        mutable Tensor cached_rgba_;
+        mutable Tensor cached_uint8_;
+
     public:
         CudaGLInteropTextureImpl();
         ~CudaGLInteropTextureImpl();
@@ -100,7 +105,7 @@ namespace lfs::rendering {
         Result<void> resize(int new_width, int new_height);
         Result<void> updateFromTensor(const Tensor& image);
         Result<void> updateDepthFromTensor(const Tensor& depth); // Single-channel float
-        Result<void> readToTensor(Tensor& output);
+        Result<void> readToTensor(Tensor& output, int target_width = 0, int target_height = 0);
         GLuint getTextureID() const { return texture_id_; }
         int getWidth() const { return width_; }
         int getHeight() const { return height_; }

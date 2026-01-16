@@ -167,7 +167,8 @@ namespace gsplat_lfs {
         const float* scales,      // [N, 3]
         const float* colors,      // [C, N, channels]
         const float* opacities,   // [C, N]
-        const float* backgrounds, // [C, channels] (can be nullptr)
+        const float* backgrounds, // [C, channels] (can be nullptr) - solid color
+        const float* bg_images,   // [C, channels, H, W] (can be nullptr) - per-pixel background
         const bool* masks,        // [C, tile_height, tile_width] (can be nullptr)
         // dimensions
         uint32_t C,
@@ -207,7 +208,8 @@ namespace gsplat_lfs {
         const float* scales,      // [N, 3]
         const float* colors,      // [C, N, channels]
         const float* opacities,   // [C, N]
-        const float* backgrounds, // [C, channels] optional
+        const float* backgrounds, // [C, channels] optional - solid color
+        const float* bg_images,   // [C, channels, H, W] optional - per-pixel background
         const bool* masks,        // optional
         // dimensions
         uint32_t C,
@@ -276,7 +278,8 @@ namespace gsplat_lfs {
         const float* opacities, // [N]
         const float* sh_coeffs, // [N, K, 3]
         uint32_t sh_degree,
-        const float* backgrounds, // [C, channels] optional
+        const float* backgrounds, // [C, channels] optional - solid color
+        const float* bg_images,   // [C, channels, H, W] optional - per-pixel background
         const bool* masks,        // optional
         // dimensions
         uint32_t N,
@@ -315,7 +318,8 @@ namespace gsplat_lfs {
         const float* opacities, // [N]
         const float* sh_coeffs, // [N, K, 3]
         uint32_t sh_degree,
-        const float* backgrounds, // [C, channels] optional
+        const float* backgrounds, // [C, channels] optional - solid color
+        const float* bg_images,   // [C, channels, H, W] optional - per-pixel background
         const bool* masks,        // optional
         // dimensions
         uint32_t N,

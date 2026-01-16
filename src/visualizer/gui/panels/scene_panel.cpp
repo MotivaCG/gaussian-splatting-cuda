@@ -13,6 +13,7 @@
 #include "gui/localization_manager.hpp"
 #include "gui/panels/scene_panel.hpp"
 #include "gui/string_keys.hpp"
+#include "gui/ui_widgets.hpp"
 #include "gui/utils/windows_utils.hpp"
 #include "gui/windows/image_preview.hpp"
 #include "internal/resource_paths.hpp"
@@ -68,7 +69,7 @@ namespace lfs::vis::gui {
 
         void showDisabledDeleteTooltip(const bool is_protected) {
             if (is_protected && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                ImGui::SetTooltip("%s", LOC(lichtfeld::Strings::Scene::CANNOT_DELETE_TRAINING));
+                widgets::SetThemedTooltip("%s", LOC(lichtfeld::Strings::Scene::CANNOT_DELETE_TRAINING));
             }
         }
     } // namespace
@@ -94,6 +95,7 @@ namespace lfs::vis::gui {
         m_icons.camera = loadSceneIcon("camera.png");
         m_icons.splat = loadSceneIcon("splat.png");
         m_icons.cropbox = loadSceneIcon("cropbox.png");
+        m_icons.ellipsoid = loadSceneIcon("ellipsoid.png");
         m_icons.pointcloud = loadSceneIcon("pointcloud.png");
         m_icons.mask = loadSceneIcon("mask.png");
         m_icons.trash = loadSceneIcon("trash.png");
@@ -112,6 +114,7 @@ namespace lfs::vis::gui {
         deleteTexture(m_icons.camera);
         deleteTexture(m_icons.splat);
         deleteTexture(m_icons.cropbox);
+        deleteTexture(m_icons.ellipsoid);
         deleteTexture(m_icons.pointcloud);
         deleteTexture(m_icons.mask);
         deleteTexture(m_icons.trash);
@@ -249,10 +252,133 @@ namespace lfs::vis::gui {
 
         renderModelsFolder(scene, selected_names);
 
+        // Render background settings section
+        renderBackgroundSection();
+
         ImGui::EndChild();
 
         ImGui::PopStyleColor(3);
         ImGui::PopStyleVar(3);
+    }
+
+    // Helper function to create Apple-style ellipsis for long filenames
+    // Preserves beginning and extension, e.g. "thisIsAVeryLong...name.png"
+    static std::string ellipsizeFilename(const std::string& filename, size_t maxLen) {
+        if (filename.length() <= maxLen)
+            return filename;
+
+        // Find the extension
+        const size_t dotPos = filename.rfind('.');
+        if (dotPos == std::string::npos || dotPos == 0) {
+            // No extension, just truncate with ellipsis
+            if (maxLen > 3)
+                return filename.substr(0, maxLen - 3) + "...";
+            return filename.substr(0, maxLen);
+        }
+
+        const std::string extension = filename.substr(dotPos); // includes the dot
+        const std::string baseName = filename.substr(0, dotPos);
+
+        // Calculate how much space we have for the base name
+        // We need: some_prefix + "..." + extension
+        const size_t ellipsisLen = 3;
+        const size_t extLen = extension.length();
+
+        if (maxLen <= ellipsisLen + extLen + 2) {
+            // Not enough space, just show truncated with extension
+            return filename.substr(0, 2) + "..." + extension;
+        }
+
+        const size_t prefixLen = maxLen - ellipsisLen - extLen;
+        return baseName.substr(0, prefixLen) + "..." + extension;
+    }
+
+    void ScenePanel::renderBackgroundSection() {
+        // Get parameter manager to check background settings
+        auto* param_manager = services().paramsOrNull();
+        if (!param_manager)
+            return;
+
+        if (const auto result = param_manager->ensureLoaded(); !result)
+            return;
+
+        const auto& opt_params = param_manager->getActiveParams();
+
+        // Only show section if background image mode is selected and an image is set
+        if (opt_params.bg_mode != lfs::core::param::BackgroundMode::Image || opt_params.bg_image_path.empty())
+            return;
+
+        static constexpr ImGuiTreeNodeFlags FOLDER_FLAGS =
+            ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_OpenOnArrow;
+
+        const auto& t = theme();
+        const float scale = getDpiScale();
+        const float ICON_SIZE = 16.0f * scale;
+        const ImVec2 icon_sz{ICON_SIZE, ICON_SIZE};
+
+        ImGui::Separator();
+
+        if (ImGui::TreeNodeEx(LOC(lichtfeld::Strings::Scene::BACKGROUND), FOLDER_FLAGS)) {
+            // Draw row background
+            const ImVec2 row_min = ImGui::GetCursorScreenPos();
+            const float window_left = ImGui::GetWindowPos().x;
+            const float window_right = window_left + ImGui::GetWindowWidth();
+            const float ROW_PADDING = 2.0f * scale;
+            const float row_height = ImGui::GetTextLineHeight() + ROW_PADDING;
+            ImDrawList* const draw_list = ImGui::GetWindowDrawList();
+
+            const ImU32 row_color = (m_rowIndex++ % 2 == 0) ? t.row_even_u32() : t.row_odd_u32();
+            draw_list->AddRectFilled(
+                ImVec2(window_left, row_min.y),
+                ImVec2(window_right, row_min.y + row_height),
+                row_color);
+
+            // Camera icon (same as images in Cameras section)
+            if (m_icons.camera) {
+                ImGui::Image(static_cast<ImTextureID>(m_icons.camera), icon_sz, {0, 0}, {1, 1},
+                             ImVec4(0.7f, 0.7f, 0.9f, 0.9f), {0, 0, 0, 0});
+                ImGui::SameLine();
+            }
+
+            // Get filename and create ellipsized version for display
+            const std::string full_name = lfs::core::path_to_utf8(opt_params.bg_image_path.filename());
+            const std::string display_name = ellipsizeFilename(full_name, 24);
+
+            // Make selectable to allow clicking to view image
+            if (ImGui::Selectable(display_name.c_str(), false, ImGuiSelectableFlags_None)) {
+                // Single click - could select
+            }
+
+            // Double-click to open image preview
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                if (m_imagePreview) {
+                    // Create a temporary vector with just this image for the preview
+                    std::vector<std::filesystem::path> bg_image_paths = {opt_params.bg_image_path};
+                    m_imagePreview->open(bg_image_paths, 0);
+                    m_showImagePreview = true;
+                }
+            }
+
+            // Show full path tooltip on hover
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s\n(Double-click to preview)", lfs::core::path_to_utf8(opt_params.bg_image_path).c_str());
+            }
+
+            // Context menu for the background image
+            theme().pushContextMenuStyle();
+            if (ImGui::BeginPopupContextItem("##BackgroundImageMenu")) {
+                if (ImGui::MenuItem(LOC(TrainingParams::BG_IMAGE_CLEAR))) {
+                    // Get mutable params and clear
+                    auto& mutable_params = param_manager->getActiveParams();
+                    mutable_params.bg_image_path.clear();
+                    mutable_params.bg_mode = lfs::core::param::BackgroundMode::SolidColor;
+                }
+                ImGui::EndPopup();
+            }
+            Theme::popContextMenuStyle();
+
+            ImGui::TreePop();
+        }
     }
 
     void ScenePanel::renderModelsFolder(const Scene& scene, const std::unordered_set<std::string>& selected_names) {
@@ -336,6 +462,7 @@ namespace lfs::vis::gui {
         const bool is_selected = selected_names.contains(node.name);
         const bool is_group = (node.type == NodeType::GROUP);
         const bool is_cropbox = (node.type == NodeType::CROPBOX);
+        const bool is_ellipsoid = (node.type == NodeType::ELLIPSOID);
         const bool is_dataset = (node.type == NodeType::DATASET);
         const bool is_camera_group = (node.type == NodeType::CAMERA_GROUP);
         const bool is_camera = (node.type == NodeType::CAMERA);
@@ -347,39 +474,38 @@ namespace lfs::vis::gui {
         const auto* parent_node = scene.getNodeById(node.parent_id);
         const bool parent_is_dataset = parent_node && parent_node->type == NodeType::DATASET;
 
-        const auto& t = theme();
+        const auto& thm = theme();
         const float scale = getDpiScale();
         ImDrawList* const draw_list = ImGui::GetWindowDrawList();
 
-        const float ROW_PADDING = 2.0f * scale;
-        constexpr ImU32 HIGHLIGHT_COLOR = IM_COL32(80, 120, 180, 180);
-        constexpr ImU32 SELECTION_COLOR_BASE = IM_COL32(60, 100, 160, 200);
-        constexpr ImU32 SELECTION_COLOR_FLASH = IM_COL32(140, 180, 240, 230);
+        const float row_padding = 2.0f * scale;
+        const ImU32 highlight_color = thm.overlay_highlight_u32();
+        const ImU32 selection_base = thm.overlay_selection_u32();
+        const ImU32 selection_flash = thm.overlay_selection_flash_u32();
 
         const ImVec2 row_min = ImGui::GetCursorScreenPos();
         const float window_left = ImGui::GetWindowPos().x;
         const float window_right = window_left + ImGui::GetWindowWidth();
-        const float row_height = ImGui::GetTextLineHeight() + ROW_PADDING;
+        const float row_height = ImGui::GetTextLineHeight() + row_padding;
 
-        // Compute row color
         ImU32 row_color;
         if (is_selected) {
             if (m_selectionFlashIntensity > 0.0f) {
-                const ImVec4 base = ImGui::ColorConvertU32ToFloat4(SELECTION_COLOR_BASE);
-                const ImVec4 flash = ImGui::ColorConvertU32ToFloat4(SELECTION_COLOR_FLASH);
-                const float invFlash = 1.0f - m_selectionFlashIntensity;
+                const ImVec4 base = ImGui::ColorConvertU32ToFloat4(selection_base);
+                const ImVec4 flash = ImGui::ColorConvertU32ToFloat4(selection_flash);
+                const float interp = 1.0f - m_selectionFlashIntensity;
                 row_color = ImGui::ColorConvertFloat4ToU32(ImVec4(
-                    flash.x + (base.x - flash.x) * invFlash,
-                    flash.y + (base.y - flash.y) * invFlash,
-                    flash.z + (base.z - flash.z) * invFlash,
-                    flash.w + (base.w - flash.w) * invFlash));
+                    flash.x + (base.x - flash.x) * interp,
+                    flash.y + (base.y - flash.y) * interp,
+                    flash.z + (base.z - flash.z) * interp,
+                    flash.w + (base.w - flash.w) * interp));
             } else {
-                row_color = SELECTION_COLOR_BASE;
+                row_color = selection_base;
             }
         } else if (is_highlighted_cam) {
-            row_color = HIGHLIGHT_COLOR;
+            row_color = highlight_color;
         } else {
-            row_color = (m_rowIndex++ % 2 == 0) ? t.row_even_u32() : t.row_odd_u32();
+            row_color = (m_rowIndex++ % 2 == 0) ? thm.row_even_u32() : thm.row_odd_u32();
         }
 
         draw_list->AddRectFilled(
@@ -399,17 +525,17 @@ namespace lfs::vis::gui {
 
         const bool can_drag = canReparent(node, nullptr, scene);
         const bool is_training_protected = isNodeProtectedDuringTraining(node, scene);
-        const bool is_deletable = !is_camera && !is_camera_group && !is_cropbox && !parent_is_dataset && !is_training_protected;
+        const bool is_deletable = !is_camera && !is_camera_group && !parent_is_dataset && !is_training_protected;
 
         // Button style for all icon buttons
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, withAlpha(t.palette.surface_bright, 0.5f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, withAlpha(t.palette.surface_bright, 0.7f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, withAlpha(thm.palette.surface_bright, 0.5f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, withAlpha(thm.palette.surface_bright, 0.7f));
 
         // [Grip] - drag indicator
         if (m_icons.grip) {
             const ImVec4 grip_tint = can_drag
-                                         ? withAlpha(t.palette.text_dim, 0.5f)
+                                         ? withAlpha(thm.palette.text_dim, 0.5f)
                                          : ImVec4(0, 0, 0, 0);
             ImGui::Image(static_cast<ImTextureID>(m_icons.grip), icon_sz, {0, 0}, {1, 1}, grip_tint, {0, 0, 0, 0});
             ImGui::SameLine(0.0f, ICON_SPACING);
@@ -429,11 +555,11 @@ namespace lfs::vis::gui {
         if (is_deletable && m_icons.trash) {
             const ImVec4 trash_tint = is_selected
                                           ? ImVec4(1.0f, 0.6f, 0.6f, 0.9f)
-                                          : withAlpha(t.palette.text_dim, 0.5f);
+                                          : withAlpha(thm.palette.text_dim, 0.5f);
             if (ImGui::ImageButton("##del", static_cast<ImTextureID>(m_icons.trash), icon_sz, {0, 0}, {1, 1}, {0, 0, 0, 0}, trash_tint))
                 cmd::RemovePLY{.name = node.name, .keep_children = false}.emit();
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", LOC(lichtfeld::Strings::Scene::DELETE_NODE));
+                widgets::SetThemedTooltip("%s", LOC(lichtfeld::Strings::Scene::DELETE_NODE));
             ImGui::SameLine(0.0f, ICON_SPACING);
         }
 
@@ -481,6 +607,9 @@ namespace lfs::vis::gui {
             } else if (is_cropbox) {
                 type_tex = m_icons.cropbox;
                 type_tint = ImVec4(1.0f, 0.7f, 0.3f, 0.9f);
+            } else if (is_ellipsoid) {
+                type_tex = m_icons.ellipsoid;
+                type_tint = ImVec4(0.3f, 0.8f, 1.0f, 0.9f); // Cyan to match ellipsoid color
             } else if (is_pointcloud) {
                 type_tex = m_icons.pointcloud;
                 type_tint = ImVec4(0.8f, 0.5f, 1.0f, 0.8f);
@@ -518,7 +647,7 @@ namespace lfs::vis::gui {
             if (is_pointcloud) {
                 const size_t count = node.point_cloud ? node.point_cloud->size() : 0;
                 label += std::format("  ({:L})", count);
-            } else if (!is_group && !is_dataset && !is_camera_group && !is_camera && !is_cropbox) {
+            } else if (!is_group && !is_dataset && !is_camera_group && !is_camera && !is_cropbox && !is_ellipsoid) {
                 label += std::format("  ({:L})", node.gaussian_count);
             }
 
@@ -539,9 +668,11 @@ namespace lfs::vis::gui {
                 ImGui::EndDragDropSource();
             }
 
-            // Drop target (only groups accept children)
-            if (is_group)
-                handleDragDrop(node.name, true);
+            // Drop target: groups accept splat/group/pointcloud, splat/pointcloud accept crop tools
+            const bool is_splat = (node.type == NodeType::SPLAT);
+            const bool can_be_parent = is_group || is_splat || is_pointcloud;
+            if (can_be_parent)
+                handleDragDrop(node.name, can_be_parent);
 
             // Selection - emit event, let SceneManager handle state
             // Camera nodes don't participate in selection - they have their own interactions
@@ -652,11 +783,44 @@ namespace lfs::vis::gui {
                 }
 
                 if (is_cropbox) {
+                    if (ImGui::MenuItem(LOC(lichtfeld::Strings::Common::APPLY))) {
+                        cmd::ApplyCropBox{}.emit();
+                    }
+                    ImGui::Separator();
                     if (ImGui::MenuItem(LOC(lichtfeld::Strings::Scene::FIT_TO_SCENE))) {
                         cmd::FitCropBoxToScene{.use_percentile = false}.emit();
                     }
                     if (ImGui::MenuItem(LOC(lichtfeld::Strings::Scene::FIT_TO_SCENE_TRIMMED))) {
                         cmd::FitCropBoxToScene{.use_percentile = true}.emit();
+                    }
+                    if (ImGui::MenuItem(LOC(lichtfeld::Strings::Scene::RESET_CROP))) {
+                        cmd::ResetCropBox{}.emit();
+                    }
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(LOC(lichtfeld::Strings::Scene::DELETE_ITEM))) {
+                        cmd::RemovePLY{.name = node.name, .keep_children = false}.emit();
+                    }
+                    finishNode();
+                    return;
+                }
+
+                if (is_ellipsoid) {
+                    if (ImGui::MenuItem(LOC(lichtfeld::Strings::Common::APPLY))) {
+                        cmd::ApplyEllipsoid{}.emit();
+                    }
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(LOC(lichtfeld::Strings::Scene::FIT_TO_SCENE))) {
+                        cmd::FitEllipsoidToScene{.use_percentile = false}.emit();
+                    }
+                    if (ImGui::MenuItem(LOC(lichtfeld::Strings::Scene::FIT_TO_SCENE_TRIMMED))) {
+                        cmd::FitEllipsoidToScene{.use_percentile = true}.emit();
+                    }
+                    if (ImGui::MenuItem(LOC(lichtfeld::Strings::Scene::RESET_CROP))) {
+                        cmd::ResetEllipsoid{}.emit();
+                    }
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(LOC(lichtfeld::Strings::Scene::DELETE_ITEM))) {
+                        cmd::RemovePLY{.name = node.name, .keep_children = false}.emit();
                     }
                     finishNode();
                     return;
@@ -671,6 +835,19 @@ namespace lfs::vis::gui {
                     }
                     ImGui::Separator();
                 }
+
+                // Add crop tools for splat and pointcloud nodes
+                const bool is_splat = (node.type == NodeType::SPLAT);
+                if (is_splat || is_pointcloud) {
+                    if (ImGui::MenuItem(LOC(lichtfeld::Strings::Scene::ADD_CROP_BOX))) {
+                        cmd::AddCropBox{.node_name = node.name}.emit();
+                    }
+                    if (ImGui::MenuItem(LOC(lichtfeld::Strings::Scene::ADD_CROP_ELLIPSOID))) {
+                        cmd::AddCropEllipsoid{.node_name = node.name}.emit();
+                    }
+                    ImGui::Separator();
+                }
+
                 if (!is_group && ImGui::MenuItem(LOC(lichtfeld::Strings::Scene::EXPORT))) {
                     cmd::ShowWindow{.window_name = "export_dialog", .show = true}.emit();
                 }
@@ -756,7 +933,18 @@ namespace lfs::vis::gui {
     }
 
     bool ScenePanel::canReparent(const SceneNode& node, const SceneNode* target, const Scene& scene) {
-        // Only SPLAT, GROUP, and POINTCLOUD nodes at root level can be reparented
+        // CROPBOX and ELLIPSOID can be moved to SPLAT or POINTCLOUD nodes
+        if (node.type == NodeType::CROPBOX || node.type == NodeType::ELLIPSOID) {
+            if (!target)
+                return false; // Cannot move to root
+            if (target->type != NodeType::SPLAT && target->type != NodeType::POINTCLOUD)
+                return false;
+            if (target->id == node.parent_id)
+                return false; // Already a child of this target
+            return true;
+        }
+
+        // Only SPLAT, GROUP, and POINTCLOUD nodes can be reparented
         if (node.type != NodeType::SPLAT && node.type != NodeType::GROUP && node.type != NodeType::POINTCLOUD)
             return false;
 
@@ -785,19 +973,36 @@ namespace lfs::vis::gui {
         return true;
     }
 
-    bool ScenePanel::handleDragDrop(const std::string& target_name, const bool is_group_target) {
+    bool ScenePanel::handleDragDrop(const std::string& target_name, const bool is_container_target) {
         if (!ImGui::BeginDragDropTarget())
             return false;
 
         bool handled = false;
-        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("SCENE_NODE")) {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("SCENE_NODE", ImGuiDragDropFlags_AcceptPeekOnly)) {
             const char* dragged_name = static_cast<const char*>(payload->Data);
-            if (dragged_name != target_name) {
-                cmd::ReparentNode{
-                    .node_name = std::string(dragged_name),
-                    .new_parent_name = is_group_target ? target_name : ""}
-                    .emit();
-                handled = true;
+            if (dragged_name == target_name) {
+                ImGui::EndDragDropTarget();
+                return false;
+            }
+
+            // Get scene from services to validate the drop
+            const auto* sm = services().sceneOrNull();
+            if (!sm) {
+                ImGui::EndDragDropTarget();
+                return false;
+            }
+            const auto& scene = sm->getScene();
+            const auto* dragged = scene.getNode(dragged_name);
+            const auto* target = target_name.empty() ? nullptr : scene.getNode(target_name);
+
+            if (dragged && canReparent(*dragged, target, scene)) {
+                if (ImGui::AcceptDragDropPayload("SCENE_NODE")) {
+                    cmd::ReparentNode{
+                        .node_name = std::string(dragged_name),
+                        .new_parent_name = is_container_target ? target_name : ""}
+                        .emit();
+                    handled = true;
+                }
             }
         }
 

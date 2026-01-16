@@ -93,9 +93,10 @@ namespace lfs::vis {
         resize_cursor_ = glfwCreateStandardCursor(GLFW_HRESIZE_CURSOR);
         hand_cursor_ = glfwCreateStandardCursor(GLFW_HAND_CURSOR);
 
-        // Cache movement key bindings and register for updates
         refreshMovementKeyCache();
         bindings_.setOnBindingsChanged([this]() { refreshMovementKeyCache(); });
+
+        ui::GTComparisonModeChanged::when([this](const auto& event) { gt_comparison_active_ = event.enabled; });
     }
 
     void InputController::refreshMovementKeyCache() {
@@ -390,8 +391,9 @@ namespace lfs::vis {
             case input::Action::SELECTION_REPLACE:
             case input::Action::SELECTION_ADD:
             case input::Action::SELECTION_REMOVE:
-                // Skip selection if clicking on viewport gizmo
-                if (!over_gui && !over_gizmo && tool_context_) {
+                // Skip selection if clicking on viewport gizmo or ImGuizmo
+                if (!over_gui && !over_gizmo && tool_context_ &&
+                    !ImGuizmo::IsOver() && !ImGuizmo::IsUsing()) {
                     if (selection_tool_ && selection_tool_->isEnabled()) {
                         if (selection_tool_->handleMouseButton(button, action, mods, x, y, *tool_context_)) {
                             drag_mode_ = DragMode::Brush;
@@ -614,9 +616,10 @@ namespace lfs::vis {
             }
         }
 
-        // Skip selection if viewport gizmo is being dragged
+        // Skip selection if viewport gizmo or ImGuizmo is being dragged
         const bool gizmo_dragging = services().guiOrNull() && services().guiOrNull()->isViewportGizmoDragging();
-        if (selection_tool_ && selection_tool_->isEnabled() && tool_context_ && !gizmo_dragging) {
+        if (selection_tool_ && selection_tool_->isEnabled() && tool_context_ && !gizmo_dragging &&
+            !ImGuizmo::IsUsing()) {
             if (drag_mode_ == DragMode::Brush) {
                 selection_tool_->handleMouseMove(x, y, *tool_context_);
                 last_mouse_pos_ = {x, y};
@@ -630,11 +633,15 @@ namespace lfs::vis {
         glm::vec2 pos(x, y);
         last_mouse_pos_ = current_pos;
 
-        // Node rectangle dragging
+        // Node rectangle dragging - cancel if ImGuizmo takes over
         if (is_node_rect_dragging_) {
-            node_rect_end_ = glm::vec2(static_cast<float>(x), static_cast<float>(y));
-            if (tool_context_)
-                tool_context_->requestRender();
+            if (ImGuizmo::IsUsing()) {
+                is_node_rect_dragging_ = false;
+            } else {
+                node_rect_end_ = glm::vec2(static_cast<float>(x), static_cast<float>(y));
+                if (tool_context_)
+                    tool_context_->requestRender();
+            }
         }
 
         // Block camera dragging if ImGuizmo is being used
@@ -836,9 +843,20 @@ namespace lfs::vis {
                     cmd::PasteSelection{}.emit();
                     return;
 
-                case input::Action::APPLY_CROP_BOX:
+                case input::Action::APPLY_CROP_BOX: {
+                    // Check if ellipsoid is selected, otherwise apply cropbox
+                    if (tool_context_) {
+                        if (auto* sm = tool_context_->getSceneManager()) {
+                            const auto ellipsoid_id = sm->getSelectedNodeEllipsoidId();
+                            if (ellipsoid_id != NULL_NODE) {
+                                cmd::ApplyEllipsoid{}.emit();
+                                return;
+                            }
+                        }
+                    }
                     cmd::ApplyCropBox{}.emit();
                     return;
+                }
 
                 case input::Action::CYCLE_BRUSH_MODE:
                     if (brush_tool_ && brush_tool_->isEnabled() && tool_context_) {
@@ -1179,14 +1197,12 @@ namespace lfs::vis {
                      center_x, center_y, cx_expected, cy_expected);
         }
 
-        // Set the FOV
+        const bool is_equirectangular =
+            cam_data->camera_model_type() == lfs::core::CameraModelType::EQUIRECTANGULAR;
+
         ui::RenderSettingsChanged{
-            .sh_degree = std::nullopt,
-            .fov = fov_y_deg,
-            .scaling_modifier = std::nullopt,
-            .antialiasing = std::nullopt,
-            .background_color = std::nullopt,
-            .equirectangular = std::nullopt}
+            .fov = is_equirectangular ? std::nullopt : std::optional(fov_y_deg),
+            .equirectangular = is_equirectangular}
             .emit();
 
         // Force immediate camera update
@@ -1307,19 +1323,20 @@ namespace lfs::vis {
     }
 
     void InputController::onCameraMovementStart() {
+        const auto now = std::chrono::steady_clock::now();
         if (!camera_is_moving_) {
             camera_is_moving_ = true;
-            last_camera_movement_time_ = std::chrono::steady_clock::now();
+            last_camera_movement_time_ = now;
 
-            // Pause training f it's running
-            if (services().trainerOrNull() && services().trainerOrNull()->isRunning()) {
-                services().trainerOrNull()->pauseTrainingTemporary();
+            if (gt_comparison_active_)
+                cmd::ToggleGTComparison{}.emit();
+
+            if (auto* trainer = services().trainerOrNull(); trainer && trainer->isRunning()) {
+                trainer->pauseTrainingTemporary();
                 training_was_paused_by_camera_ = true;
-                LOG_INFO("Camera movement detected - pausing training temporarily");
             }
         } else {
-            // Update movement time
-            last_camera_movement_time_ = std::chrono::steady_clock::now();
+            last_camera_movement_time_ = now;
         }
     }
 
@@ -1426,11 +1443,9 @@ namespace lfs::vis {
             return input::ToolMode::BRUSH;
         if (align_tool_ && align_tool_->isEnabled())
             return input::ToolMode::ALIGN;
-        // Check GUI tool mode for CropBox (and transform tools)
+        // Check GUI tool mode for transform tools
         if (services().guiOrNull()) {
             const auto gui_tool = services().guiOrNull()->getCurrentToolMode();
-            if (gui_tool == gui::panels::ToolType::CropBox)
-                return input::ToolMode::CROP_BOX;
             if (gui_tool == gui::panels::ToolType::Translate)
                 return input::ToolMode::TRANSLATE;
             if (gui_tool == gui::panels::ToolType::Rotate)

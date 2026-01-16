@@ -10,6 +10,7 @@
 #include <cstring>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <format>
 #include <fstream>
 #include <iomanip>
 #include <numeric>
@@ -2367,7 +2368,12 @@ namespace lfs::core {
         void* data_ptr = nullptr;
         cudaError_t err = cudaMalloc(&data_ptr, total_bytes);
         if (err != cudaSuccess) {
-            throw TensorError("cudaMalloc failed in zeros_direct: " + std::string(cudaGetErrorString(err)));
+            std::string error_str = cudaGetErrorString(err);
+            cudaGetLastError(); // Clear sticky error state
+            throw TensorError(std::format(
+                "CUDA allocation failed ({}): {} bytes ({:.2f} GB). "
+                "Try reducing max_cap, sh_degree, or image resolution.",
+                error_str, total_bytes, total_bytes / (1024.0 * 1024.0 * 1024.0)));
         }
 
         // Zero full capacity

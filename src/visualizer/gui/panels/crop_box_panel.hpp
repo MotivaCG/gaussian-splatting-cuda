@@ -5,6 +5,9 @@
 #pragma once
 
 #include "gui/ui_context.hpp"
+#include "scene/scene.hpp"
+#include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 namespace lfs::vis::gui::panels {
 
@@ -14,6 +17,11 @@ namespace lfs::vis::gui::panels {
     struct CropBoxState {
         bool show_crop_box = false;
         bool use_crop_box = false;
+
+        // Euler display state - avoids gimbal lock from constant decomposition
+        glm::vec3 euler_display{0.0f};
+        NodeId euler_display_node{NULL_NODE};
+        glm::quat euler_display_rotation{1.0f, 0.0f, 0.0f, 0.0f};
 
         static CropBoxState& getInstance() {
             static CropBoxState instance;

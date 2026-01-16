@@ -321,13 +321,17 @@ namespace lfs::rendering {
         return {};
     }
 
-    Result<void> CudaGLInteropTextureImpl<true>::readToTensor(Tensor& output) {
+    Result<void> CudaGLInteropTextureImpl<true>::readToTensor(Tensor& output, int target_width, int target_height) {
         LOG_TIMER_TRACE("CudaGLInteropTextureImpl<true>::readToTensor");
 
         if (!is_registered_) {
             LOG_ERROR("Texture not registered");
             return std::unexpected("Texture not registered");
         }
+
+        // Use target dimensions if provided, otherwise use full texture dimensions
+        const int out_width = (target_width > 0 && target_width <= width_) ? target_width : width_;
+        const int out_height = (target_height > 0 && target_height <= height_) ? target_height : height_;
 
         // Map CUDA resource
         auto raw_resource = static_cast<cudaGraphicsResource_t>(cuda_resource_.get());
@@ -358,29 +362,30 @@ namespace lfs::rendering {
                                                cudaGetErrorString(err)));
         }
 
-        // Allocate output tensor if needed [H, W, 3] in float32
-        if (!output.is_valid() || output.size(0) != static_cast<size_t>(height_) ||
-            output.size(1) != static_cast<size_t>(width_) || output.size(2) != 3) {
-            output = Tensor::empty({static_cast<size_t>(height_),
-                                    static_cast<size_t>(width_),
+        // Allocate output tensor [H, W, 3] in float32
+        if (!output.is_valid() || output.size(0) != static_cast<size_t>(out_height) ||
+            output.size(1) != static_cast<size_t>(out_width) || output.size(2) != 3) {
+            output = Tensor::empty({static_cast<size_t>(out_height),
+                                    static_cast<size_t>(out_width),
                                     3},
                                    lfs::core::Device::CUDA, lfs::core::DataType::Float32);
         }
 
-        // Allocate temp buffer for RGBA data
-        auto rgba_temp = Tensor::empty({static_cast<size_t>(height_),
-                                        static_cast<size_t>(width_),
+        // Allocate temp buffer for RGBA data (only the region we need)
+        auto rgba_temp = Tensor::empty({static_cast<size_t>(out_height),
+                                        static_cast<size_t>(out_width),
                                         4},
                                        lfs::core::Device::CUDA, lfs::core::DataType::Float32);
 
         // Copy from CUDA array to temp buffer (RGBA float32)
+        // Only copy the target region (top-left corner of the texture)
         err = cudaMemcpy2DFromArray(
             rgba_temp.ptr<float>(),
-            width_ * 4 * sizeof(float), // pitch
+            out_width * 4 * sizeof(float), // dst pitch
             cuda_array,
-            0, 0,                       // offset
-            width_ * 4 * sizeof(float), // width in bytes
-            height_,
+            0, 0,                          // src offset (x, y)
+            out_width * 4 * sizeof(float), // width in bytes to copy
+            out_height,                    // height (rows) to copy
             cudaMemcpyDeviceToDevice);
 
         if (err != cudaSuccess) {
@@ -392,7 +397,7 @@ namespace lfs::rendering {
         // Extract RGB channels (drop alpha)
         output = rgba_temp.slice(2, 0, 3).contiguous();
 
-        LOG_TRACE("Successfully read texture to tensor");
+        LOG_TRACE("Successfully read texture to tensor ({}x{})", out_width, out_height);
         return {};
     }
 
@@ -486,24 +491,45 @@ namespace lfs::rendering {
                                                cudaGetErrorString(err)));
         }
 
-        // Convert to RGBA uint8 if needed
-        Tensor rgba_image;
-        if (c == 3) {
-            LOG_TIMER_TRACE("CudaGLInteropTextureImpl<true>::channels");
-            // Add alpha channel
-            rgba_image = Tensor::cat({image, Tensor::ones({static_cast<size_t>(h), static_cast<size_t>(w), 1},
-                                                          image.device(), image.dtype())},
-                                     2);
-            LOG_TRACE("Added alpha channel to image");
-        } else {
-            rgba_image = image;
+        // Convert to RGBA uint8 using cached tensors to avoid per-frame allocations
+        const bool need_alpha = (c == 3);
+        const size_t sh = static_cast<size_t>(h);
+        const size_t sw = static_cast<size_t>(w);
+
+        // Ensure cached RGBA buffer has correct size
+        if (!cached_rgba_.is_valid() ||
+            cached_rgba_.size(0) != sh ||
+            cached_rgba_.size(1) != sw ||
+            cached_rgba_.device() != image.device()) {
+            cached_rgba_ = Tensor::empty({sh, sw, 4}, image.device(), image.dtype());
         }
 
-        // Ensure proper format (uint8)
-        if (rgba_image.dtype() != lfs::core::DataType::UInt8) {
-            LOG_TIMER_TRACE("Converted image to uint8");
-            rgba_image = (rgba_image.clamp(0.0f, 1.0f) * 255.0f).to(lfs::core::DataType::UInt8);
+        // Ensure cached uint8 buffer has correct size
+        if (!cached_uint8_.is_valid() ||
+            cached_uint8_.size(0) != sh ||
+            cached_uint8_.size(1) != sw) {
+            cached_uint8_ = Tensor::empty({sh, sw, 4}, image.device(), lfs::core::DataType::UInt8);
         }
+
+        // Build RGBA: copy RGB channels and set alpha
+        if (need_alpha) {
+            LOG_TIMER_TRACE("CudaGLInteropTextureImpl<true>::channels");
+            // Copy RGB into first 3 channels of cached RGBA
+            cached_rgba_.slice(2, 0, 3).copy_(image);
+            // Set alpha channel to 1.0
+            cached_rgba_.slice(2, 3, 4).fill_(1.0f);
+        } else {
+            cached_rgba_.copy_(image);
+        }
+
+        // Convert to uint8: clamp, scale, and convert in-place to cached buffer
+        if (cached_rgba_.dtype() != lfs::core::DataType::UInt8) {
+            LOG_TIMER_TRACE("Converted image to uint8");
+            cached_uint8_.copy_((cached_rgba_.clamp(0.0f, 1.0f) * 255.0f).to(lfs::core::DataType::UInt8));
+        }
+
+        const Tensor& rgba_image =
+            (cached_rgba_.dtype() == lfs::core::DataType::UInt8) ? cached_rgba_ : cached_uint8_;
 
         // Copy to CUDA array
         err = cudaMemcpy2DToArray(

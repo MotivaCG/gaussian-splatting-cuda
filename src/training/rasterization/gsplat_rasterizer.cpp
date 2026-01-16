@@ -22,7 +22,8 @@ namespace lfs::training {
         float scaling_modifier,
         bool antialiased,
         GsplatRenderMode render_mode,
-        bool use_gut) {
+        bool use_gut,
+        const core::Tensor& bg_image) {
 
         // Begin arena frame for memory allocation
         auto& arena = core::GlobalArenaManager::instance().get_arena();
@@ -71,10 +72,17 @@ namespace lfs::training {
         const float* quats_ptr = quats.ptr<float>();
         const float* sh_coeffs_ptr = sh_coeffs.ptr<float>();
 
-        // Background color
-        const float* bg_ptr = nullptr;
-        if (bg_color.is_valid() && bg_color.numel() > 0) {
-            bg_ptr = bg_color.ptr<float>();
+        // Background color and image pointers
+        // bg_color and bg_image are mutually exclusive - use one or the other
+        const bool use_bg_image = bg_image.is_valid() && !bg_image.is_empty();
+        const float* bg_color_ptr = nullptr;
+        const float* bg_image_ptr = nullptr;
+
+        if (use_bg_image) {
+            // Use per-pixel background image - passed directly to gsplat kernel
+            bg_image_ptr = bg_image.ptr<float>();
+        } else if (bg_color.is_valid() && bg_color.numel() > 0) {
+            bg_color_ptr = bg_color.ptr<float>();
         }
 
         // Settings
@@ -253,8 +261,9 @@ namespace lfs::training {
             opacities_ptr,
             sh_coeffs_ptr,
             sh_degree,
-            bg_ptr,
-            nullptr, // masks
+            bg_color_ptr,
+            bg_image_ptr, // per-pixel background image
+            nullptr,      // masks
             N,
             C,
             K,
@@ -332,6 +341,9 @@ namespace lfs::training {
             render_output.depth = final_depth.squeeze(0).permute({2, 0, 1}).contiguous();
         }
 
+        // NOTE: Background image blending is now handled inside gsplat kernel directly
+        // No post-blending needed - bg_image participates in compositing
+
         render_output.width = static_cast<int>(image_width);
         render_output.height = static_cast<int>(image_height);
 
@@ -366,6 +378,7 @@ namespace lfs::training {
         ctx.K_ptr = K_ptr;
         ctx.K_tensor = K_tensor;
         ctx.bg_color = bg_color;
+        ctx.bg_image = bg_image; // Save bg_image for backward pass
 
         // Distortion coefficients
         ctx.radial_ptr = radial_ptr;
@@ -489,10 +502,16 @@ namespace lfs::training {
 
         UnscentedTransformParameters ut_params;
 
-        // Get background pointer
-        const float* bg_ptr = nullptr;
-        if (ctx.bg_color.is_valid() && ctx.bg_color.numel() > 0) {
-            bg_ptr = ctx.bg_color.ptr<float>();
+        // Get background color and image pointers (same as forward)
+        const bool use_bg_image = ctx.bg_image.is_valid() && !ctx.bg_image.is_empty();
+        const float* bg_color_ptr = nullptr;
+        const float* bg_image_ptr = nullptr;
+
+        if (use_bg_image) {
+            // Use per-pixel background image
+            bg_image_ptr = ctx.bg_image.ptr<float>();
+        } else if (ctx.bg_color.is_valid() && ctx.bg_color.numel() > 0) {
+            bg_color_ptr = ctx.bg_color.ptr<float>();
         }
 
         // Debug: check for errors before gsplat backward
@@ -510,8 +529,9 @@ namespace lfs::training {
             ctx.opacities.ptr<float>(),
             ctx.sh_coeffs.ptr<float>(),
             ctx.sh_degree,
-            bg_ptr,
-            nullptr, // masks
+            bg_color_ptr,
+            bg_image_ptr, // per-pixel background image
+            nullptr,      // masks
             N,
             1, // C
             K,

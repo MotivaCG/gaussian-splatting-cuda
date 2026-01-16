@@ -42,6 +42,14 @@ namespace lfs::core {
                                 const lfs::geometry::BoundingBox& bounding_box,
                                 bool inverse = false);
 
+    // Soft crop by ellipsoid: mark gaussians as deleted if outside ellipsoid
+    // transform: world-to-ellipsoid-local transform (combined with node world transform)
+    // radii: ellipsoid semi-axes
+    Tensor soft_crop_by_ellipsoid(SplatData& splat_data,
+                                  const glm::mat4& transform,
+                                  const glm::vec3& radii,
+                                  bool inverse = false);
+
     /**
      * @brief Randomly select a subset of splats
      * @param splat_data The splat data to modify (modified in-place)

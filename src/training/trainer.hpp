@@ -22,6 +22,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <stop_token>
+#include <unordered_map>
 
 // Forward declaration for Scene
 namespace lfs::vis {
@@ -91,7 +92,7 @@ namespace lfs::training {
         std::shared_mutex& getRenderMutex() const { return render_mutex_; }
 
         const lfs::core::param::TrainingParameters& getParams() const { return params_; }
-        void setParams(const lfs::core::param::TrainingParameters& params) { params_ = params; }
+        void setParams(const lfs::core::param::TrainingParameters& params);
 
         std::expected<void, std::string> save_checkpoint(int iteration);
         std::expected<int, std::string> load_checkpoint(const std::filesystem::path& checkpoint_path);
@@ -132,6 +133,11 @@ namespace lfs::training {
             const lfs::core::Tensor& rendered,
             const lfs::core::Tensor& alpha,
             int iter);
+        // Returns the resized background image for the given camera dimensions
+        // Returns empty tensor if no background image is set
+        lfs::core::Tensor get_background_image_for_camera(int width, int height);
+
+        lfs::core::Tensor get_random_background_for_camera(int width, int height, int iteration);
 
         // Protected method for processing a single training step
         std::expected<StepResult, std::string> train_step(
@@ -208,6 +214,9 @@ namespace lfs::training {
         lfs::core::Tensor background_{};
         lfs::core::Tensor bg_mix_buffer_;
         lfs::core::Tensor bg_noise_buffer_; 
+        lfs::core::Tensor bg_image_base_{};                              // Original background image [C, H, W]
+        std::unordered_map<uint64_t, lfs::core::Tensor> bg_image_cache_; // Cache of resized bg images keyed by (H << 32) | W
+        lfs::core::Tensor random_bg_buffer_{};                           // Reusable buffer for random background
         std::unique_ptr<TrainingProgress> progress_;
         size_t train_dataset_size_ = 0;
 

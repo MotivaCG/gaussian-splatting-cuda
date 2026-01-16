@@ -4,7 +4,6 @@
 
 #include "gui/panels/tools_panel.hpp"
 #include "gui/gui_manager.hpp"
-#include "gui/panels/crop_box_panel.hpp"
 #include "gui/panels/transform_panel.hpp"
 #include "visualizer_impl.hpp"
 #include <imgui.h>
@@ -20,10 +19,6 @@ namespace lfs::vis::gui::panels {
         const TransformSpace transform_space = gui_manager->getGizmoToolbarState().transform_space;
 
         DrawTransformControls(ctx, current_tool, transform_space, gui_manager->getTransformPanelState());
-
-        if (current_tool == ToolType::CropBox) {
-            DrawCropBoxControls(ctx);
-        }
     }
 
 } // namespace lfs::vis::gui::panels

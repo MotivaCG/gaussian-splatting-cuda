@@ -8,6 +8,10 @@
 #include "core/events.hpp"
 #include "core/image_io.hpp"
 #include "core/logger.hpp"
+#include "core/parameter_manager.hpp"
+#include "core/parameters.hpp"
+#include "core/path_utils.hpp"
+#include "core/services.hpp"
 #include "gui/dpi_scale.hpp"
 #include "gui/localization_manager.hpp"
 #include "gui/panels/main_panel.hpp"
@@ -15,6 +19,7 @@
 #include "gui/panels/training_panel.hpp"
 #include "gui/string_keys.hpp"
 #include "gui/ui_widgets.hpp"
+#include "gui/utils/windows_utils.hpp"
 #include "internal/resource_paths.hpp"
 #include "scene/scene_manager.hpp"
 #include "theme/theme.hpp"
@@ -31,6 +36,7 @@ namespace lfs::vis::gui::panels {
 
     using namespace lfs::core::events;
     using namespace lichtfeld::Strings;
+    using lfs::vis::services;
 
     namespace {
         // Selection group icons (Tabler Icons - MIT license)
@@ -138,13 +144,14 @@ namespace lfs::vis::gui::panels {
         // Background Color
         ImGui::Separator();
         ImGui::Text("%s", LOC(MainPanel::BACKGROUND));
+
         float bg_color[3] = {settings.background_color.x, settings.background_color.y, settings.background_color.z};
         if (ImGui::ColorEdit3(LOC(MainPanel::COLOR), bg_color)) {
             settings.background_color = glm::vec3(bg_color[0], bg_color[1], bg_color[2]);
             settings_changed = true;
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("%s", LOC(Tooltip::BACKGROUND));
+            widgets::SetThemedTooltip("%s", LOC(Tooltip::BACKGROUND));
         }
 
         // Coordinate Axes
@@ -153,7 +160,7 @@ namespace lfs::vis::gui::panels {
             settings_changed = true;
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("%s", LOC(Tooltip::COORD_AXES));
+            widgets::SetThemedTooltip("%s", LOC(Tooltip::COORD_AXES));
         }
 
         if (settings.show_coord_axes) {
@@ -190,7 +197,7 @@ namespace lfs::vis::gui::panels {
             settings_changed = true;
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("%s", LOC(Tooltip::PIVOT));
+            widgets::SetThemedTooltip("%s", LOC(Tooltip::PIVOT));
         }
 
         // Grid checkbox and settings
@@ -206,7 +213,7 @@ namespace lfs::vis::gui::panels {
                 .emit();
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("%s", LOC(Tooltip::GRID));
+            widgets::SetThemedTooltip("%s", LOC(Tooltip::GRID));
         }
 
         // Show grid settings only when grid is enabled
@@ -247,7 +254,7 @@ namespace lfs::vis::gui::panels {
             settings_changed = true;
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("%s", LOC(Tooltip::CAMERA_FRUSTUMS));
+            widgets::SetThemedTooltip("%s", LOC(Tooltip::CAMERA_FRUSTUMS));
         }
 
         if (settings.show_camera_frustums) {
@@ -270,7 +277,7 @@ namespace lfs::vis::gui::panels {
                 .emit();
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("%s", force_point_cloud ? LOC(Tooltip::POINT_CLOUD_FORCED) : LOC(Tooltip::POINT_CLOUD_MODE));
+            widgets::SetThemedTooltip("%s", force_point_cloud ? LOC(Tooltip::POINT_CLOUD_FORCED) : LOC(Tooltip::POINT_CLOUD_MODE));
         }
         ImGui::EndDisabled();
 
@@ -290,7 +297,7 @@ namespace lfs::vis::gui::panels {
         ImGui::Separator();
         bool selection_colors_open = ImGui::CollapsingHeader(LOC(MainPanel::SELECTION_COLORS));
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("%s", LOC(Tooltip::SELECTION_COLORS));
+            widgets::SetThemedTooltip("%s", LOC(Tooltip::SELECTION_COLORS));
         }
         if (selection_colors_open) {
             ImGui::Indent();
@@ -310,13 +317,20 @@ namespace lfs::vis::gui::panels {
             ImGui::Unindent();
         }
 
-        // Selection Behavior
+        // Desaturation Options
         ImGui::Separator();
         if (ImGui::Checkbox(LOC(MainPanel::DESATURATE_UNSELECTED), &settings.desaturate_unselected)) {
             settings_changed = true;
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("%s", LOC(Tooltip::DESATURATE_UNSELECTED));
+            widgets::SetThemedTooltip("%s", LOC(Tooltip::DESATURATE_UNSELECTED));
+        }
+
+        if (ImGui::Checkbox(LOC(MainPanel::DESATURATE_CROPPING), &settings.desaturate_cropping)) {
+            settings_changed = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            widgets::SetThemedTooltip("%s", LOC(Tooltip::DESATURATE_CROPPING));
         }
 
         // Apply settings changes if any
@@ -356,7 +370,7 @@ namespace lfs::vis::gui::panels {
                 .emit();
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("%s", LOC(Tooltip::SH_DEGREE));
+            widgets::SetThemedTooltip("%s", LOC(Tooltip::SH_DEGREE));
         }
 
         if (ImGui::Checkbox(LOC(MainPanel::EQUIRECTANGULAR), &settings.equirectangular)) {
@@ -372,7 +386,7 @@ namespace lfs::vis::gui::panels {
                 .emit();
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("%s", LOC(Tooltip::EQUIRECTANGULAR));
+            widgets::SetThemedTooltip("%s", LOC(Tooltip::EQUIRECTANGULAR));
         }
 
         // GUT (Gaussian Unscented Transform) for non-pinhole cameras
@@ -381,7 +395,7 @@ namespace lfs::vis::gui::panels {
             render_manager->updateSettings(settings);
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("%s", LOC(Tooltip::GUT_MODE));
+            widgets::SetThemedTooltip("%s", LOC(Tooltip::GUT_MODE));
         }
 
         // Mip Filter (anti-aliasing for distant/small Gaussians)
@@ -390,7 +404,7 @@ namespace lfs::vis::gui::panels {
             render_manager->updateSettings(settings);
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("%s", LOC(Tooltip::MIP_FILTER));
+            widgets::SetThemedTooltip("%s", LOC(Tooltip::MIP_FILTER));
         }
 
         // Render Scale (VRAM optimization)
@@ -474,7 +488,7 @@ namespace lfs::vis::gui::panels {
                 ImGui::PopStyleColor(3);
 
                 if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("%s", is_locked ? LOC(Tooltip::LOCKED) : LOC(Tooltip::UNLOCKED));
+                    widgets::SetThemedTooltip("%s", is_locked ? LOC(Tooltip::LOCKED) : LOC(Tooltip::UNLOCKED));
                 }
                 ImGui::SameLine();
 

@@ -74,8 +74,15 @@ namespace lfs::core {
             EVENT(MergeGroup, std::string name;);                                     // Merge group children into single PLY
             EVENT(SetNodeLocked, std::string name; bool locked;);                     // Lock/unlock node for editing
             EVENT(CropPLY, lfs::geometry::BoundingBox crop_box; bool inverse;);
+            EVENT(CropPLYEllipsoid, glm::mat4 world_transform; glm::vec3 radii; bool inverse;);
             EVENT(ApplyCropBox, );
+            EVENT(ApplyEllipsoid, );
+            EVENT(AddCropBox, std::string node_name;);       // Add cropbox to splat node
+            EVENT(AddCropEllipsoid, std::string node_name;); // Add ellipsoid to splat node
+            EVENT(ResetCropBox, );                           // Reset selected cropbox
+            EVENT(ResetEllipsoid, );                         // Reset selected ellipsoid
             EVENT(FitCropBoxToScene, bool use_percentile;);
+            EVENT(FitEllipsoidToScene, bool use_percentile;);
             EVENT(ToggleCropInverse, );
             EVENT(CyclePLY, );
             EVENT(CycleSelectionVisualization, );
@@ -208,6 +215,10 @@ namespace lfs::core {
                   glm::vec3 max_bounds;
                   bool enabled;);
             EVENT(CropBoxVisibilityChanged, bool visible;);
+            EVENT(EllipsoidChanged,
+                  glm::vec3 radii;
+                  bool enabled;);
+            EVENT(EllipsoidVisibilityChanged, bool visible;);
             EVENT(ConsoleResult, std::string command; std::string result;);
             EVENT(SplitPositionChanged, float position;);
             EVENT(GTComparisonModeChanged, bool enabled;);

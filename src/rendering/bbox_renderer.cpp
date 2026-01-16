@@ -29,7 +29,7 @@ namespace lfs::rendering {
         BoundingBox::setBounds(min, max);
         createCubeGeometry();
 
-        if (isInitialized()) {            
+        if (isInitialized()) {
             if (auto result = setupVertexData(); !result) {
                 LOG_ERROR("Failed to setup vertex data for render bounding box: {}", result.error());
             }

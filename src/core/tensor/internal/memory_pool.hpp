@@ -345,6 +345,7 @@ namespace lfs::core {
                 err = cudaMalloc(&ptr, bytes);
                 if (err != cudaSuccess) {
                     LOG_ERROR(std::string("[MEM] cudaMalloc retry failed: ") + cudaGetErrorString(err));
+                    cudaGetLastError(); // Clear sticky error state for clean recovery
                     return nullptr;
                 }
             }
@@ -388,6 +389,8 @@ namespace lfs::core {
             if (++log_counter % 2000 == 0) {
                 if constexpr (ENABLE_ALLOCATION_PROFILING) {
                     AllocationProfiler::instance().print_top_allocators(30);
+                    AllocationProfiler::instance().print_active_allocations(30);
+                    AllocationProfiler::instance().print_tensor_allocations(30);
                 }
 
 #if CUDART_VERSION >= 12080

@@ -25,7 +25,8 @@ namespace lfs::vis::gui {
         constexpr ImVec2 BASE_WINDOW_PADDING = {20.0f, 16.0f};
         constexpr ImGuiWindowFlags POPUP_FLAGS = ImGuiWindowFlags_AlwaysAutoResize |
                                                  ImGuiWindowFlags_NoCollapse |
-                                                 ImGuiWindowFlags_NoDocking;
+                                                 ImGuiWindowFlags_NoDocking |
+                                                 ImGuiWindowFlags_NoSavedSettings;
     } // namespace
 
     using namespace lfs::core::events;
@@ -114,17 +115,29 @@ namespace lfs::vis::gui {
                 show(Type::INFO, "Training Complete", message,
                      []() { cmd::SwitchToLatestCheckpoint{}.emit(); });
             } else {
-                // Format error message for better clarity
                 std::string error_msg = e.error.value_or("Unknown error occurred during training.");
 
                 // Check if this is an OOM error and format it clearly
-                if (error_msg.find("OUT_OF_MEMORY") != std::string::npos) {
-                    error_msg = "Out of GPU memory!\n\n"
-                                "The scene is too large for available GPU memory.\n\n"
-                                "Suggestions:\n"
-                                "  - Reduce image resolution (--resize-factor)\n"
-                                "  - Enable tile mode (--tile-mode 2 or 4)\n"
-                                "  - Reduce max Gaussians (--max-cap)";
+                if (error_msg.find("CUDA out of memory") != std::string::npos ||
+                    error_msg.find("OUT_OF_MEMORY") != std::string::npos) {
+                    std::string size_info;
+                    auto gb_pos = error_msg.find(" GB)");
+                    if (gb_pos != std::string::npos) {
+                        auto paren_pos = error_msg.rfind('(', gb_pos);
+                        if (paren_pos != std::string::npos) {
+                            size_info = error_msg.substr(paren_pos + 1, gb_pos - paren_pos + 3);
+                        }
+                    }
+
+                    error_msg = "Out of GPU memory!\n\n";
+                    if (!size_info.empty()) {
+                        error_msg += "Tried to allocate " + size_info + "\n\n";
+                    }
+                    error_msg += "Suggestions:\n"
+                                 "  - Reduce max Gaussians (max_cap)\n"
+                                 "  - Lower spherical harmonics degree (sh_degree)\n"
+                                 "  - Reduce image resolution (resize_factor)\n"
+                                 "  - Enable tile mode for large images";
                 }
 
                 show(Type::FAILURE, "Training Failed", error_msg);

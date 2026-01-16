@@ -23,12 +23,14 @@ add_library(lfs_visualizer STATIC
 
         # GUI system
         gui/gui_manager.cpp
+        gui/gizmo_transform.cpp
         gui/html_viewer_export.cpp
         gui/ui_widgets.cpp
         gui/localization_manager.cpp
         gui/panels/main_panel.cpp
         gui/panels/training_panel.cpp
         gui/panels/crop_box_panel.cpp
+        gui/panels/ellipsoid_panel.cpp
         gui/panels/transform_panel.cpp
         gui/panels/gizmo_toolbar.cpp
         gui/panels/scene_panel.cpp
@@ -62,6 +64,7 @@ add_library(lfs_visualizer STATIC
         # Command system (undo/redo)
         command/command_history.cpp
         command/commands/cropbox_command.cpp
+        command/commands/ellipsoid_command.cpp
         command/commands/crop_command.cpp
         command/commands/selection_command.cpp
         command/commands/saturation_command.cpp

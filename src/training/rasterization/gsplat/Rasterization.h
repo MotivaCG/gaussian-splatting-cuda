@@ -22,7 +22,8 @@ namespace gsplat_lfs {
         const float* scales,      // [N, 3]
         const float* colors,      // [C, N, CDIM]
         const float* opacities,   // [C, N]
-        const float* backgrounds, // [C, CDIM] optional (can be nullptr)
+        const float* backgrounds, // [C, CDIM] optional (can be nullptr) - solid color
+        const float* bg_images,   // [C, CDIM, H, W] optional (can be nullptr) - per-pixel background
         const bool* masks,        // [C, tile_height, tile_width] optional
         // dimensions
         uint32_t C,
@@ -62,7 +63,8 @@ namespace gsplat_lfs {
         const float* scales,      // [N, 3]
         const float* colors,      // [C, N, CDIM]
         const float* opacities,   // [C, N]
-        const float* backgrounds, // [C, CDIM] optional
+        const float* backgrounds, // [C, CDIM] optional - solid color
+        const float* bg_images,   // [C, CDIM, H, W] optional - per-pixel background
         const bool* masks,        // optional
         // dimensions
         uint32_t C,

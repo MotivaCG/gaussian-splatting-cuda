@@ -23,6 +23,7 @@
 #include "rasterization/gsplat_rasterizer.hpp"
 #include "strategies/adc.hpp"
 #include "strategies/mcmc.hpp"
+#include "training/kernels/grad_alpha.hpp"
 #include "visualizer/scene/scene.hpp"
 
 #include <atomic>
@@ -678,8 +679,46 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                 }
             }
 
-            // Initialize background color tensor [3] = [0, 0, 0]
-            background_ = lfs::core::Tensor::zeros({3}, lfs::core::Device::CUDA, lfs::core::DataType::Float32);
+            // Initialize background color tensor from params
+            {
+                const auto& bg_color = params.optimization.bg_color;
+                background_ = lfs::core::Tensor::empty({3}, lfs::core::Device::CPU, lfs::core::DataType::Float32);
+                auto* bg_ptr = background_.ptr<float>();
+                bg_ptr[0] = bg_color[0];
+                bg_ptr[1] = bg_color[1];
+                bg_ptr[2] = bg_color[2];
+                background_ = background_.to(lfs::core::Device::CUDA);
+                LOG_INFO("Background color set to RGB({:.2f}, {:.2f}, {:.2f})", bg_color[0], bg_color[1], bg_color[2]);
+            }
+
+            // Load background image if specified
+            if (params.optimization.bg_mode == lfs::core::param::BackgroundMode::Image &&
+                !params.optimization.bg_image_path.empty() &&
+                std::filesystem::exists(params.optimization.bg_image_path)) {
+                try {
+                    auto& loader = lfs::io::CacheLoader::getInstance();
+                    lfs::io::LoadParams load_params{
+                        .resize_factor = 1,
+                        .max_width = 0, // No max width limit
+                        .cuda_stream = nullptr};
+                    bg_image_base_ = loader.load_cached_image(params.optimization.bg_image_path, load_params);
+                    if (bg_image_base_.device() != lfs::core::Device::CUDA) {
+                        bg_image_base_ = bg_image_base_.to(lfs::core::Device::CUDA);
+                    }
+                    if (bg_image_base_.shape()[0] != 3) {
+                        LOG_WARN("Background image has {} channels, expected 3 (RGB)", bg_image_base_.shape()[0]);
+                        bg_image_base_ = {};
+                        params_.optimization.bg_mode = lfs::core::param::BackgroundMode::SolidColor;
+                    } else {
+                        LOG_INFO("Background image: {} [{}x{}]",
+                                 lfs::core::path_to_utf8(params.optimization.bg_image_path),
+                                 bg_image_base_.shape()[2], bg_image_base_.shape()[1]);
+                    }
+                } catch (const std::exception& e) {
+                    LOG_WARN("Failed to load background image: {}", e.what());
+                    params_.optimization.bg_mode = lfs::core::param::BackgroundMode::SolidColor;
+                }
+            }
 
             // Create progress bar based on headless flag
             if (params.optimization.headless) {
@@ -700,6 +739,33 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                     return std::unexpected(std::format("Failed to resume from checkpoint: {}", resume_result.error()));
                 }
                 LOG_INFO("Resumed training from checkpoint at iteration {}", *resume_result);
+
+                // Reload bg_image if checkpoint restored different settings
+                if (params_.optimization.bg_mode == lfs::core::param::BackgroundMode::Image &&
+                    !params_.optimization.bg_image_path.empty() &&
+                    std::filesystem::exists(params_.optimization.bg_image_path) &&
+                    !bg_image_base_.is_valid()) {
+                    try {
+                        auto& loader = lfs::io::CacheLoader::getInstance();
+                        lfs::io::LoadParams load_params{.resize_factor = 1, .max_width = 0, .cuda_stream = nullptr};
+                        bg_image_base_ = loader.load_cached_image(params_.optimization.bg_image_path, load_params);
+                        if (bg_image_base_.device() != lfs::core::Device::CUDA) {
+                            bg_image_base_ = bg_image_base_.to(lfs::core::Device::CUDA);
+                        }
+                        if (bg_image_base_.shape()[0] != 3) {
+                            LOG_WARN("Background image has {} channels, expected 3", bg_image_base_.shape()[0]);
+                            bg_image_base_ = {};
+                            params_.optimization.bg_mode = lfs::core::param::BackgroundMode::SolidColor;
+                        } else {
+                            LOG_INFO("Background image from checkpoint: {} [{}x{}]",
+                                     lfs::core::path_to_utf8(params_.optimization.bg_image_path),
+                                     bg_image_base_.shape()[2], bg_image_base_.shape()[1]);
+                        }
+                    } catch (const std::exception& e) {
+                        LOG_WARN("Failed to load background image from checkpoint: {}", e.what());
+                        params_.optimization.bg_mode = lfs::core::param::BackgroundMode::SolidColor;
+                    }
+                }
             }
 
             // Print configuration
@@ -761,6 +827,63 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
         initialized_ = false;
         is_running_ = false;
         training_complete_ = false;
+    }
+
+    void Trainer::setParams(const lfs::core::param::TrainingParameters& params) {
+        // Check if background image path changed and needs to be (re)loaded
+        const bool bg_image_path_changed =
+            params.optimization.bg_image_path != params_.optimization.bg_image_path;
+        const bool bg_mode_is_image =
+            params.optimization.bg_mode == lfs::core::param::BackgroundMode::Image;
+
+        // Update params first
+        params_ = params;
+
+        // Load/reload background image if needed
+        if (bg_mode_is_image && bg_image_path_changed &&
+            !params.optimization.bg_image_path.empty() &&
+            std::filesystem::exists(params.optimization.bg_image_path)) {
+            try {
+                auto& loader = lfs::io::CacheLoader::getInstance();
+                lfs::io::LoadParams load_params{
+                    .resize_factor = 1,
+                    .max_width = 0,
+                    .cuda_stream = nullptr};
+                bg_image_base_ = loader.load_cached_image(params.optimization.bg_image_path, load_params);
+                if (bg_image_base_.device() != lfs::core::Device::CUDA) {
+                    bg_image_base_ = bg_image_base_.to(lfs::core::Device::CUDA);
+                }
+                bg_image_cache_.clear();
+                if (bg_image_base_.shape()[0] != 3) {
+                    LOG_WARN("Background image has {} channels, expected 3 (RGB)", bg_image_base_.shape()[0]);
+                    bg_image_base_ = {};
+                    params_.optimization.bg_mode = lfs::core::param::BackgroundMode::SolidColor;
+                } else {
+                    LOG_INFO("Background image: {} [{}x{}]",
+                             lfs::core::path_to_utf8(params.optimization.bg_image_path),
+                             bg_image_base_.shape()[2], bg_image_base_.shape()[1]);
+                }
+            } catch (const std::exception& e) {
+                LOG_WARN("Failed to load background image: {}", e.what());
+                params_.optimization.bg_mode = lfs::core::param::BackgroundMode::SolidColor;
+            }
+        }
+
+        if (!bg_mode_is_image && (bg_image_base_.is_valid() || !bg_image_cache_.empty())) {
+            bg_image_cache_.clear();
+            bg_image_base_ = {};
+        }
+
+        // Update background color tensor if changed
+        const auto& bg_color = params.optimization.bg_color;
+        if (background_.is_valid()) {
+            auto bg_cpu = lfs::core::Tensor::empty({3}, lfs::core::Device::CPU, lfs::core::DataType::Float32);
+            auto* bg_ptr = bg_cpu.ptr<float>();
+            bg_ptr[0] = bg_color[0];
+            bg_ptr[1] = bg_color[1];
+            bg_ptr[2] = bg_color[2];
+            background_ = bg_cpu.to(lfs::core::Device::CUDA);
+        }
     }
 
     void Trainer::handle_control_requests(int iter, std::stop_token stop_token) {
@@ -962,6 +1085,71 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
         return out;
     }
 
+    lfs::core::Tensor Trainer::get_background_image_for_camera(int width, int height) {
+        // Return empty tensor if no background image is loaded
+        if (!bg_image_base_.is_valid() || bg_image_base_.is_empty()) {
+            return lfs::core::Tensor();
+        }
+
+        // Check cache first - key is (height << 32) | width
+        const uint64_t cache_key = (static_cast<uint64_t>(height) << 32) | static_cast<uint64_t>(width);
+        auto it = bg_image_cache_.find(cache_key);
+        if (it != bg_image_cache_.end()) {
+            return it->second;
+        }
+
+        // Resize background image to match camera dimensions
+        const int src_h = static_cast<int>(bg_image_base_.shape()[1]);
+        const int src_w = static_cast<int>(bg_image_base_.shape()[2]);
+        const int channels = static_cast<int>(bg_image_base_.shape()[0]);
+
+        // If dimensions match, use the original
+        if (src_w == width && src_h == height) {
+            bg_image_cache_[cache_key] = bg_image_base_;
+            return bg_image_base_;
+        }
+
+        // Create resized tensor
+        auto resized = lfs::core::Tensor::empty(
+            {static_cast<size_t>(channels), static_cast<size_t>(height), static_cast<size_t>(width)},
+            lfs::core::Device::CUDA,
+            lfs::core::DataType::Float32);
+
+        // Use bilinear resize kernel
+        kernels::launch_bilinear_resize_chw(
+            bg_image_base_.ptr<float>(),
+            resized.ptr<float>(),
+            channels,
+            src_h, src_w,
+            height, width,
+            nullptr // default stream
+        );
+
+        // Cache the resized image
+        bg_image_cache_[cache_key] = resized;
+        LOG_DEBUG("Background image resized: {}x{} -> {}x{}", src_w, src_h, width, height);
+
+        return resized;
+    }
+
+    lfs::core::Tensor Trainer::get_random_background_for_camera(int width, int height, int iteration) {
+        const size_t required_size = 3 * static_cast<size_t>(height) * static_cast<size_t>(width);
+
+        if (!random_bg_buffer_.is_valid() || random_bg_buffer_.numel() != required_size) {
+            random_bg_buffer_ = lfs::core::Tensor::empty(
+                {3, static_cast<size_t>(height), static_cast<size_t>(width)},
+                lfs::core::Device::CUDA,
+                lfs::core::DataType::Float32);
+        }
+
+        kernels::launch_random_background(
+            random_bg_buffer_.ptr<float>(),
+            height, width,
+            static_cast<uint64_t>(iteration),
+            nullptr);
+
+        return random_bg_buffer_;
+    }
 
     std::expected<Trainer::StepResult, std::string> Trainer::train_step(
         int iter,
@@ -1009,6 +1197,13 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
             nvtxRangePush("background_for_step");
             lfs::core::Tensor& bg = background_for_step(iter);
             nvtxRangePop();
+
+            lfs::core::Tensor bg_image;
+            if (params_.optimization.bg_mode == lfs::core::param::BackgroundMode::Image) {
+                bg_image = get_background_image_for_camera(cam->image_width(), cam->image_height());
+            } else if (params_.optimization.bg_mode == lfs::core::param::BackgroundMode::Random) {
+                bg_image = get_random_background_for_camera(cam->image_width(), cam->image_height(), iter);
+            }
 
             // Configurable tile-based training to reduce peak memory
             const int full_width = cam->image_width();
@@ -1067,6 +1262,20 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                     gt_tile = tile_h.slice(1, tile_x_offset, tile_x_offset + tile_width);
                 }
 
+                // Extract background image tile (if using background image)
+                lfs::core::Tensor bg_tile;
+                if (bg_image.is_valid() && !bg_image.is_empty()) {
+                    if (num_tiles == 1) {
+                        // No tiling - use full image
+                        bg_tile = bg_image;
+                    } else {
+                        // CHW layout: bg_image is [3, H, W]
+                        // Slice both height and width dimensions
+                        auto tile_h = bg_image.slice(1, tile_y_offset, tile_y_offset + tile_height);
+                        bg_tile = tile_h.slice(2, tile_x_offset, tile_x_offset + tile_width);
+                    }
+                }
+
                 // Render the tile
                 nvtxRangePush("rasterize_forward");
 
@@ -1081,7 +1290,7 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                     auto rasterize_result = gsplat_rasterize_forward(
                         *cam, strategy_->get_model(), bg,
                         tile_x_offset, tile_y_offset, tw, th,
-                        1.0f, false, GsplatRenderMode::RGB, true);
+                        1.0f, false, GsplatRenderMode::RGB, true, bg_tile);
 
                     if (!rasterize_result) {
                         nvtxRangePop(); // rasterize_forward
@@ -1098,7 +1307,7 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                         tile_x_offset, tile_y_offset,
                         (num_tiles > 1) ? tile_width : 0, // 0 means full image
                         (num_tiles > 1) ? tile_height : 0,
-                        params_.optimization.mip_filter);
+                        params_.optimization.mip_filter, bg_tile);
 
                     // Check for OOM error
                     if (!rasterize_result) {

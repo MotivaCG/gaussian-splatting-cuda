@@ -30,7 +30,8 @@ namespace gsplat_lfs {
         const vec3* __restrict__ scales,          // [N, 3]
         const scalar_t* __restrict__ colors,      // [C, N, CDIM] or [nnz, CDIM]
         const scalar_t* __restrict__ opacities,   // [C, N] or [nnz]
-        const scalar_t* __restrict__ backgrounds, // [C, CDIM]
+        const scalar_t* __restrict__ backgrounds, // [C, CDIM] - solid color (mutually exclusive with bg_images)
+        const scalar_t* __restrict__ bg_images,   // [C, CDIM, H, W] - per-pixel background (mutually exclusive with backgrounds)
         const bool* __restrict__ masks,           // [C, tile_height, tile_width]
         const uint32_t image_width,
         const uint32_t image_height,
@@ -71,6 +72,9 @@ namespace gsplat_lfs {
         last_ids += cid * image_height * image_width;
         if (backgrounds != nullptr) {
             backgrounds += cid * CDIM;
+        }
+        if (bg_images != nullptr) {
+            bg_images += cid * CDIM * image_height * image_width;
         }
         if (masks != nullptr) {
             masks += cid * tile_height * tile_width;
@@ -181,8 +185,14 @@ namespace gsplat_lfs {
         if (masks != nullptr && inside && !masks[tile_id]) {
 #pragma unroll
             for (uint32_t k = 0; k < CDIM; ++k) {
-                render_colors[pix_id * CDIM + k] =
-                    backgrounds == nullptr ? 0.0f : backgrounds[k];
+                float bg_val = 0.0f;
+                if (bg_images != nullptr) {
+                    // bg_images is [CDIM, H, W] for this camera
+                    bg_val = bg_images[k * image_height * image_width + pix_id];
+                } else if (backgrounds != nullptr) {
+                    bg_val = backgrounds[k];
+                }
+                render_colors[pix_id * CDIM + k] = bg_val;
             }
             return;
         }
@@ -307,9 +317,14 @@ namespace gsplat_lfs {
             render_alphas[pix_id] = 1.0f - T;
 #pragma unroll
             for (uint32_t k = 0; k < CDIM; ++k) {
-                render_colors[pix_id * CDIM + k] =
-                    backgrounds == nullptr ? pix_out[k]
-                                           : (pix_out[k] + T * backgrounds[k]);
+                float bg_val = 0.0f;
+                if (bg_images != nullptr) {
+                    // bg_images is [CDIM, H, W] for this camera
+                    bg_val = bg_images[k * image_height * image_width + pix_id];
+                } else if (backgrounds != nullptr) {
+                    bg_val = backgrounds[k];
+                }
+                render_colors[pix_id * CDIM + k] = pix_out[k] + T * bg_val;
             }
             // index in bin of last gaussian in this pixel
             last_ids[pix_id] = static_cast<int32_t>(cur_idx);
@@ -328,6 +343,7 @@ namespace gsplat_lfs {
         const float* colors,
         const float* opacities,
         const float* backgrounds,
+        const float* bg_images,
         const bool* masks,
         uint32_t C,
         uint32_t N,
@@ -396,6 +412,7 @@ namespace gsplat_lfs {
                 colors,
                 opacities,
                 backgrounds,
+                bg_images,
                 masks,
                 image_width,
                 image_height,
@@ -430,6 +447,7 @@ namespace gsplat_lfs {
         const float* colors,                                                   \
         const float* opacities,                                                \
         const float* backgrounds,                                              \
+        const float* bg_images,                                                \
         const bool* masks,                                                     \
         uint32_t C,                                                            \
         uint32_t N,                                                            \

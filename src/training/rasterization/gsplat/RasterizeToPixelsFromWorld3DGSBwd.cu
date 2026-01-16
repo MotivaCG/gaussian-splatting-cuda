@@ -32,7 +32,8 @@ namespace gsplat_lfs {
         const vec3* __restrict__ scales,          // [N, 3]
         const scalar_t* __restrict__ colors,      // [C, N, CDIM] or [nnz, CDIM]
         const scalar_t* __restrict__ opacities,   // [C, N] or [nnz]
-        const scalar_t* __restrict__ backgrounds, // [C, CDIM] or [nnz, CDIM]
+        const scalar_t* __restrict__ backgrounds, // [C, CDIM] - solid color (mutually exclusive with bg_images)
+        const scalar_t* __restrict__ bg_images,   // [C, CDIM, H, W] - per-pixel background (mutually exclusive with backgrounds)
         const bool* __restrict__ masks,           // [C, tile_height, tile_width]
         const uint32_t image_width,
         const uint32_t image_height,
@@ -81,6 +82,9 @@ namespace gsplat_lfs {
         v_render_alphas += cid * image_height * image_width;
         if (backgrounds != nullptr) {
             backgrounds += cid * CDIM;
+        }
+        if (bg_images != nullptr) {
+            bg_images += cid * CDIM * image_height * image_width;
         }
         if (masks != nullptr) {
             masks += cid * tile_height * tile_width;
@@ -348,11 +352,19 @@ namespace gsplat_lfs {
 
                     v_alpha += T_final * ra * v_render_a;
                     // contribution from background pixel
-                    if (backgrounds != nullptr) {
+                    // Use per-pixel background if bg_images is provided, otherwise use solid color
+                    if (bg_images != nullptr || backgrounds != nullptr) {
                         float accum = 0.f;
 #pragma unroll
                         for (uint32_t k = 0; k < CDIM; ++k) {
-                            accum += backgrounds[k] * v_render_c[k];
+                            float bg_val;
+                            if (bg_images != nullptr) {
+                                // bg_images is [CDIM, H, W] for this camera
+                                bg_val = bg_images[k * image_height * image_width + pix_id];
+                            } else {
+                                bg_val = backgrounds[k];
+                            }
+                            accum += bg_val * v_render_c[k];
                         }
                         v_alpha += -T_final * ra * accum;
                     }
@@ -426,6 +438,7 @@ namespace gsplat_lfs {
         const float* colors,
         const float* opacities,
         const float* backgrounds,
+        const float* bg_images,
         const bool* masks,
         uint32_t C,
         uint32_t N,
@@ -495,6 +508,7 @@ namespace gsplat_lfs {
                 colors,
                 opacities,
                 backgrounds,
+                bg_images,
                 masks,
                 image_width,
                 image_height,
@@ -535,6 +549,7 @@ namespace gsplat_lfs {
         const float* colors,                                                   \
         const float* opacities,                                                \
         const float* backgrounds,                                              \
+        const float* bg_images,                                                \
         const bool* masks,                                                     \
         uint32_t C,                                                            \
         uint32_t N,                                                            \

@@ -406,6 +406,11 @@ namespace lfs::vis {
             .has_focus = gui_manager_ && gui_manager_->isViewportFocused(),
             .scene_manager = scene_manager_.get()};
 
+        if (gui_manager_) {
+            rendering_manager_->setCropboxGizmoActive(gui_manager_->isCropboxGizmoActive());
+            rendering_manager_->setEllipsoidGizmoActive(gui_manager_->isEllipsoidGizmoActive());
+        }
+
         rendering_manager_->renderFrame(context, scene_manager_.get());
 
         gui_manager_->render();
@@ -421,8 +426,8 @@ namespace lfs::vis {
             // Dirty or active input (WASD/orbit/pan): poll for smooth interaction
             window_manager_->pollEvents();
         } else if (is_training) {
-            // Training: short wait for UI responsiveness
-            constexpr double TRAINING_WAIT_SEC = 0.016; // ~60 Hz
+            // Training: longer wait to reduce GPU load and memory fragmentation
+            constexpr double TRAINING_WAIT_SEC = 0.1; // ~10 Hz
             window_manager_->waitEvents(TRAINING_WAIT_SEC);
         } else {
             // Idle: long wait to minimize CPU usage (VSync still applies on wake)
@@ -764,6 +769,10 @@ namespace lfs::vis {
 
         LOG_INFO("Loading checkpoint for training: {}", lfs::core::path_to_utf8(path));
         return data_loader_->loadCheckpointForTraining(path);
+    }
+
+    void VisualizerImpl::consolidateModels() {
+        scene_manager_->consolidateNodeModels();
     }
 
     void VisualizerImpl::clearScene() {

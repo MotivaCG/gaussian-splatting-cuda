@@ -100,8 +100,32 @@ namespace lfs::vis {
             handleCropActivePly(cmd.crop_box, cmd.inverse);
         });
 
+        cmd::CropPLYEllipsoid::when([this](const auto& cmd) {
+            handleCropByEllipsoid(cmd.world_transform, cmd.radii, cmd.inverse);
+        });
+
         cmd::FitCropBoxToScene::when([this](const auto& cmd) {
             updateCropBoxToFitScene(cmd.use_percentile);
+        });
+
+        cmd::FitEllipsoidToScene::when([this](const auto& cmd) {
+            updateEllipsoidToFitScene(cmd.use_percentile);
+        });
+
+        cmd::AddCropBox::when([this](const auto& cmd) {
+            handleAddCropBox(cmd.node_name);
+        });
+
+        cmd::AddCropEllipsoid::when([this](const auto& cmd) {
+            handleAddCropEllipsoid(cmd.node_name);
+        });
+
+        cmd::ResetCropBox::when([this](const auto&) {
+            handleResetCropBox();
+        });
+
+        cmd::ResetEllipsoid::when([this](const auto&) {
+            handleResetEllipsoid();
         });
 
         cmd::RenamePLY::when([this](const auto& cmd) {
@@ -212,15 +236,6 @@ namespace lfs::vis {
 
             scene_.addNode(name, std::make_unique<lfs::core::SplatData>(std::move(**splat_data)));
 
-            // Create cropbox as child of this splat
-            const auto* splat_node = scene_.getNode(name);
-            if (splat_node) {
-                const NodeId cropbox_id = scene_.getOrCreateCropBoxForSplat(splat_node->id);
-                if (cropbox_id != NULL_NODE) {
-                    LOG_DEBUG("Created cropbox for '{}'", name);
-                }
-            }
-
             // Update content state
             {
                 std::lock_guard<std::mutex> lock(state_mutex_);
@@ -281,7 +296,6 @@ namespace lfs::vis {
             emitSceneChanged();
             updateCropBoxToFitScene(true);
             selectNode(name);
-            tools::SetToolbarTool{.tool_mode = static_cast<int>(gui::panels::ToolType::CropBox)}.emit();
 
             LOG_INFO("Loaded '{}' with {} gaussians", name, gaussian_count);
 
@@ -329,11 +343,6 @@ namespace lfs::vis {
             const size_t gaussian_count = (*splat_data)->size();
             scene_.addNode(name, std::make_unique<lfs::core::SplatData>(std::move(**splat_data)));
 
-            // Create cropbox as child of this splat
-            if (const auto* splat_node = scene_.getNode(name)) {
-                [[maybe_unused]] const auto cropbox_id = scene_.getOrCreateCropBoxForSplat(splat_node->id);
-            }
-
             {
                 std::lock_guard<std::mutex> lock(state_mutex_);
                 splat_paths_[name] = path;
@@ -349,28 +358,7 @@ namespace lfs::vis {
                 .node_type = 0}
                 .emit();
 
-            // Emit PLYAdded for the cropbox
-            const auto* splat_for_cropbox = scene_.getNode(name);
-            if (splat_for_cropbox) {
-                const NodeId cropbox_id = scene_.getCropBoxForSplat(splat_for_cropbox->id);
-                if (cropbox_id != NULL_NODE) {
-                    const auto* cropbox_node = scene_.getNodeById(cropbox_id);
-                    if (cropbox_node) {
-                        state::PLYAdded{
-                            .name = cropbox_node->name,
-                            .node_gaussians = 0,
-                            .total_gaussians = scene_.getTotalGaussianCount(),
-                            .is_visible = true,
-                            .parent_name = name,
-                            .is_group = false,
-                            .node_type = 2}
-                            .emit();
-                    }
-                }
-            }
-
             emitSceneChanged();
-            updateCropBoxToFitScene(true);
             selectNode(name);
 
             LOG_INFO("Added '{}' ({} gaussians)", name, gaussian_count);
@@ -380,6 +368,10 @@ namespace lfs::vis {
             LOG_ERROR("Failed to add splat file: {} (path: {})", e.what(), lfs::core::path_to_utf8(path));
             throw;
         }
+    }
+
+    size_t SceneManager::consolidateNodeModels() {
+        return scene_.consolidateNodeModels();
     }
 
     void SceneManager::removePLY(const std::string& name, const bool keep_children) {
@@ -444,7 +436,12 @@ namespace lfs::vis {
     }
 
     void SceneManager::setPLYVisibility(const std::string& name, const bool visible) {
+        const auto* node = scene_.getNode(name);
         scene_.setNodeVisibility(name, visible);
+
+        if (visible)
+            syncCropToolRenderSettings(node);
+
         emitSceneChanged();
     }
 
@@ -458,6 +455,9 @@ namespace lfs::vis {
                 selected_nodes_.clear();
                 selected_nodes_.insert(name);
             }
+
+            syncCropToolRenderSettings(node);
+
             ui::NodeSelected{
                 .path = name,
                 .type = "PLY",
@@ -664,9 +664,10 @@ namespace lfs::vis {
         if (!node)
             return;
 
-        // For CROPBOX nodes, use parent SPLAT/POINTCLOUD
+        // For CROPBOX/ELLIPSOID nodes, use parent_id to find the associated splat
         NodeId target_id = node->id;
-        if (node->type == NodeType::CROPBOX && node->parent_id != NULL_NODE) {
+        if ((node->type == NodeType::CROPBOX || node->type == NodeType::ELLIPSOID) &&
+            node->parent_id != NULL_NODE) {
             target_id = node->parent_id;
         } else if (node->type == NodeType::GROUP) {
             // For groups, find first child SPLAT or POINTCLOUD
@@ -704,7 +705,7 @@ namespace lfs::vis {
             scene_.setCropBoxData(cropbox_id, data);
         }
 
-        // Emit PLYAdded for the new cropbox
+        // Emit PLYAdded for the new cropbox (child node)
         if (const auto* cropbox = scene_.getNodeById(cropbox_id)) {
             state::PLYAdded{
                 .name = cropbox->name,
@@ -717,7 +718,7 @@ namespace lfs::vis {
                 .emit();
         }
 
-        LOG_DEBUG("Created cropbox for node '{}'", target->name);
+        LOG_DEBUG("Created cropbox as child of '{}'", target->name);
     }
 
     void SceneManager::selectCropBoxForCurrentNode() {
@@ -1011,6 +1012,171 @@ namespace lfs::vis {
         }
     }
 
+    // ========== Ellipsoid Operations ==========
+
+    void SceneManager::ensureEllipsoidForSelectedNode() {
+        std::string node_name;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (selected_nodes_.empty()) {
+                for (const auto* node : scene_.getNodes()) {
+                    if (node->type == NodeType::POINTCLOUD) {
+                        node_name = node->name;
+                        break;
+                    }
+                }
+                if (node_name.empty())
+                    return;
+            } else {
+                node_name = *selected_nodes_.begin();
+            }
+        }
+        if (node_name.empty())
+            return;
+
+        const auto* node = scene_.getNode(node_name);
+        if (!node)
+            return;
+
+        // For ELLIPSOID/CROPBOX nodes, use parent_id to find the associated splat
+        NodeId target_id = node->id;
+        if ((node->type == NodeType::ELLIPSOID || node->type == NodeType::CROPBOX) &&
+            node->parent_id != NULL_NODE) {
+            target_id = node->parent_id;
+        } else if (node->type == NodeType::GROUP) {
+            for (const NodeId child_id : node->children) {
+                if (const auto* child = scene_.getNodeById(child_id)) {
+                    if (child->type == NodeType::SPLAT || child->type == NodeType::POINTCLOUD) {
+                        target_id = child_id;
+                        break;
+                    }
+                }
+            }
+        }
+
+        const auto* target = scene_.getNodeById(target_id);
+        if (!target || (target->type != NodeType::SPLAT && target->type != NodeType::POINTCLOUD))
+            return;
+
+        const NodeId existing = scene_.getEllipsoidForSplat(target_id);
+        if (existing != NULL_NODE)
+            return;
+
+        const NodeId ellipsoid_id = scene_.getOrCreateEllipsoidForSplat(target_id);
+        if (ellipsoid_id == NULL_NODE)
+            return;
+
+        glm::vec3 min_bounds, max_bounds;
+        if (scene_.getNodeBounds(target_id, min_bounds, max_bounds)) {
+            EllipsoidData data;
+            data.radii = (max_bounds - min_bounds) * 0.5f;
+            data.enabled = true;
+            scene_.setEllipsoidData(ellipsoid_id, data);
+        }
+
+        // Emit PLYAdded for the new ellipsoid (child node)
+        if (const auto* ellipsoid = scene_.getNodeById(ellipsoid_id)) {
+            state::PLYAdded{
+                .name = ellipsoid->name,
+                .node_gaussians = 0,
+                .total_gaussians = scene_.getTotalGaussianCount(),
+                .is_visible = ellipsoid->visible,
+                .parent_name = target->name,
+                .is_group = false,
+                .node_type = static_cast<int>(NodeType::ELLIPSOID)}
+                .emit();
+        }
+
+        LOG_DEBUG("Created ellipsoid as child of '{}'", target->name);
+    }
+
+    void SceneManager::selectEllipsoidForCurrentNode() {
+        NodeId target_id = NULL_NODE;
+
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (!selected_nodes_.empty()) {
+                const auto* node = scene_.getNode(*selected_nodes_.begin());
+                if (node) {
+                    if (node->type == NodeType::SPLAT || node->type == NodeType::POINTCLOUD) {
+                        target_id = node->id;
+                    } else if (node->type == NodeType::ELLIPSOID) {
+                        return;
+                    }
+                }
+            }
+        }
+
+        if (target_id == NULL_NODE) {
+            for (const auto* node : scene_.getNodes()) {
+                if (node->type == NodeType::POINTCLOUD) {
+                    target_id = node->id;
+                    break;
+                }
+            }
+        }
+
+        if (target_id == NULL_NODE)
+            return;
+
+        const NodeId ellipsoid_id = scene_.getEllipsoidForSplat(target_id);
+        if (ellipsoid_id == NULL_NODE)
+            return;
+
+        const auto* ellipsoid = scene_.getNodeById(ellipsoid_id);
+        if (!ellipsoid)
+            return;
+
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            selected_nodes_.clear();
+            selected_nodes_.insert(ellipsoid->name);
+        }
+
+        LOG_DEBUG("Auto-selected ellipsoid '{}'", ellipsoid->name);
+        emitSceneChanged();
+    }
+
+    NodeId SceneManager::getSelectedNodeEllipsoidId() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (selected_nodes_.empty())
+            return NULL_NODE;
+
+        const auto* node = scene_.getNode(*selected_nodes_.begin());
+        if (!node)
+            return NULL_NODE;
+
+        if (node->type == NodeType::ELLIPSOID) {
+            return node->id;
+        }
+
+        if (node->type == NodeType::SPLAT || node->type == NodeType::POINTCLOUD) {
+            return scene_.getEllipsoidForSplat(node->id);
+        }
+
+        return NULL_NODE;
+    }
+
+    EllipsoidData* SceneManager::getSelectedNodeEllipsoid() {
+        const NodeId ellipsoid_id = getSelectedNodeEllipsoidId();
+        if (ellipsoid_id == NULL_NODE)
+            return nullptr;
+        return scene_.getEllipsoidData(ellipsoid_id);
+    }
+
+    const EllipsoidData* SceneManager::getSelectedNodeEllipsoid() const {
+        const NodeId ellipsoid_id = getSelectedNodeEllipsoidId();
+        if (ellipsoid_id == NULL_NODE)
+            return nullptr;
+        return scene_.getEllipsoidData(ellipsoid_id);
+    }
+
+    void SceneManager::syncEllipsoidToRenderSettings() {
+        if (services().renderingOrNull()) {
+            services().renderingOrNull()->markDirty();
+        }
+    }
+
     std::expected<void, std::string> SceneManager::applyLoadedDataset(
         const std::filesystem::path& path,
         const lfs::core::param::TrainingParameters& params,
@@ -1030,11 +1196,6 @@ namespace lfs::vis {
             auto apply_result = lfs::training::applyLoadResultToScene(dataset_params, scene_, std::move(load_result));
             if (!apply_result) {
                 return std::unexpected(apply_result.error());
-            }
-
-            if (const auto* pc_node = scene_.getNode("PointCloud");
-                pc_node && pc_node->type == NodeType::POINTCLOUD) {
-                (void)scene_.getOrCreateCropBoxForSplat(pc_node->id);
             }
 
             auto trainer = std::make_unique<lfs::training::Trainer>(scene_);
@@ -1125,12 +1286,6 @@ namespace lfs::vis {
                     .num_points = 0}
                     .emit();
                 return;
-            }
-
-            // Create cropbox for PointCloud node if present
-            const auto* pointcloud_node = scene_.getNode("PointCloud");
-            if (pointcloud_node && pointcloud_node->type == NodeType::POINTCLOUD) {
-                [[maybe_unused]] auto cropbox_id = scene_.getOrCreateCropBoxForSplat(pointcloud_node->id);
             }
 
             // Create Trainer from Scene
@@ -1439,6 +1594,9 @@ namespace lfs::vis {
         state.transform_indices = scene_.getTransformIndices();
         state.visible_splat_count = state.model_transforms.size();
 
+        // Get node visibility mask (for consolidated models)
+        state.node_visibility_mask = scene_.getNodeVisibilityMask();
+
         // Get selection mask
         state.selection_mask = scene_.getSelectionMask();
         state.has_selection = scene_.hasSelection();
@@ -1526,6 +1684,23 @@ namespace lfs::vis {
 
     void SceneManager::emitSceneChanged() {
         state::SceneChanged{}.emit();
+    }
+
+    void SceneManager::syncCropToolRenderSettings(const SceneNode* node) {
+        if (!node)
+            return;
+        auto* rm = services().renderingOrNull();
+        if (!rm)
+            return;
+
+        auto settings = rm->getSettings();
+        if (node->type == NodeType::CROPBOX && !settings.show_crop_box) {
+            settings.show_crop_box = true;
+            rm->updateSettings(settings);
+        } else if (node->type == NodeType::ELLIPSOID && !settings.show_ellipsoid) {
+            settings.show_ellipsoid = true;
+            rm->updateSettings(settings);
+        }
     }
 
     void SceneManager::handleCropActivePly(const lfs::geometry::BoundingBox& crop_box, const bool inverse) {
@@ -1707,6 +1882,142 @@ namespace lfs::vis {
 
             } catch (const std::exception& e) {
                 LOG_ERROR("Failed to crop '{}': {}", node_name, e.what());
+            }
+        }
+
+        emitSceneChanged();
+    }
+
+    void SceneManager::handleCropByEllipsoid(const glm::mat4& world_transform, const glm::vec3& radii, const bool inverse) {
+        std::vector<std::string> splat_node_names;
+        std::vector<std::string> pointcloud_node_names;
+        bool had_selection = false;
+
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (!selected_nodes_.empty()) {
+                had_selection = true;
+                for (const auto& node_name : selected_nodes_) {
+                    const auto* selected = scene_.getNode(node_name);
+                    if (!selected)
+                        continue;
+
+                    if (selected->type == NodeType::SPLAT) {
+                        splat_node_names.push_back(node_name);
+                    } else if (selected->type == NodeType::POINTCLOUD) {
+                        pointcloud_node_names.push_back(node_name);
+                    } else if (selected->type == NodeType::ELLIPSOID) {
+                        const auto* parent = scene_.getNodeById(selected->parent_id);
+                        if (parent && parent->type == NodeType::SPLAT) {
+                            splat_node_names.push_back(parent->name);
+                        } else if (parent && parent->type == NodeType::POINTCLOUD) {
+                            pointcloud_node_names.push_back(parent->name);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (splat_node_names.empty() && pointcloud_node_names.empty() && !had_selection) {
+            for (const auto* node : scene_.getVisibleNodes()) {
+                if (node->type == NodeType::SPLAT) {
+                    splat_node_names.push_back(node->name);
+                } else if (node->type == NodeType::POINTCLOUD) {
+                    pointcloud_node_names.push_back(node->name);
+                }
+            }
+        }
+
+        const glm::mat4 inv_world = glm::inverse(world_transform);
+
+        // Crop point clouds
+        for (const auto& node_name : pointcloud_node_names) {
+            auto* node = scene_.getMutableNode(node_name);
+            if (!node || !node->point_cloud)
+                continue;
+
+            const auto& means = node->point_cloud->means;
+            const auto& colors = node->point_cloud->colors;
+            const size_t num_points = node->point_cloud->size();
+            const auto device = means.device();
+
+            // Transform to ellipsoid local space
+            const auto transform = lfs::core::Tensor::from_vector(
+                {inv_world[0][0], inv_world[1][0], inv_world[2][0], inv_world[3][0],
+                 inv_world[0][1], inv_world[1][1], inv_world[2][1], inv_world[3][1],
+                 inv_world[0][2], inv_world[1][2], inv_world[2][2], inv_world[3][2],
+                 inv_world[0][3], inv_world[1][3], inv_world[2][3], inv_world[3][3]},
+                {4, 4}, device);
+
+            const auto ones = lfs::core::Tensor::ones({num_points, 1}, device);
+            const auto local_pos = transform.mm(means.cat(ones, 1).t()).t();
+
+            const auto x = local_pos.slice(1, 0, 1).squeeze(1) / radii.x;
+            const auto y = local_pos.slice(1, 1, 2).squeeze(1) / radii.y;
+            const auto z = local_pos.slice(1, 2, 3).squeeze(1) / radii.z;
+
+            auto mask = (x * x + y * y + z * z) <= 1.0f;
+            if (inverse)
+                mask = mask.logical_not();
+
+            const auto indices = mask.nonzero().squeeze(1);
+            const size_t filtered_count = indices.size(0);
+
+            if (filtered_count > 0 && filtered_count < num_points) {
+                node->point_cloud = std::make_shared<lfs::core::PointCloud>(
+                    means.index_select(0, indices), colors.index_select(0, indices));
+                node->gaussian_count = filtered_count;
+                LOG_INFO("Ellipsoid cropped PointCloud '{}': {} -> {} points", node_name, num_points, filtered_count);
+            }
+        }
+
+        if (splat_node_names.empty()) {
+            if (!pointcloud_node_names.empty()) {
+                emitSceneChanged();
+                if (services().renderingOrNull()) {
+                    services().renderingOrNull()->markDirty();
+                }
+            }
+            return;
+        }
+
+        changeContentType(ContentType::SplatFiles);
+
+        for (const auto& node_name : splat_node_names) {
+            auto* node = scene_.getMutableNode(node_name);
+            if (!node || !node->model)
+                continue;
+
+            try {
+                const size_t original_visible = node->model->visible_count();
+
+                lfs::core::Tensor old_deleted_mask = node->model->has_deleted_mask()
+                                                         ? node->model->deleted().clone()
+                                                         : lfs::core::Tensor::zeros({node->model->size()}, lfs::core::Device::CUDA, lfs::core::DataType::Bool);
+
+                // Transform means to ellipsoid local space and apply mask
+                const glm::mat4 node_world_transform = scene_.getWorldTransform(node->id);
+                const glm::mat4 combined_transform = inv_world * node_world_transform;
+
+                const auto applied_mask = lfs::core::soft_crop_by_ellipsoid(*node->model, combined_transform, radii, inverse);
+                if (!applied_mask.is_valid())
+                    continue;
+
+                const size_t new_visible = node->model->visible_count();
+                if (new_visible == original_visible)
+                    continue;
+
+                LOG_INFO("Ellipsoid cropped '{}': {} -> {} visible", node_name, original_visible, new_visible);
+
+                if (services().commandsOrNull()) {
+                    lfs::core::Tensor new_deleted_mask = node->model->deleted().clone();
+                    auto cmd = std::make_unique<command::CropCommand>(
+                        node_name, std::move(old_deleted_mask), std::move(new_deleted_mask));
+                    services().commandsOrNull()->execute(std::move(cmd));
+                }
+
+            } catch (const std::exception& e) {
+                LOG_ERROR("Failed to ellipsoid crop '{}': {}", node_name, e.what());
             }
         }
 
@@ -1937,62 +2248,260 @@ namespace lfs::vis {
         LOG_INFO("Merged group '{}' -> '{}'", name, merged_name);
     }
 
+    void SceneManager::handleAddCropBox(const std::string& node_name) {
+        const auto* node = scene_.getNode(node_name);
+        if (!node)
+            return;
+
+        if (node->type != NodeType::SPLAT && node->type != NodeType::POINTCLOUD) {
+            LOG_WARN("Cannot add cropbox to node type: {}", static_cast<int>(node->type));
+            return;
+        }
+
+        // Check if cropbox already exists for this node
+        const NodeId existing = scene_.getCropBoxForSplat(node->id);
+        if (existing != NULL_NODE) {
+            LOG_DEBUG("Cropbox already exists for '{}'", node_name);
+            selectNode(scene_.getNodeById(existing)->name);
+            return;
+        }
+
+        const std::string cropbox_name = node_name + "_cropbox";
+        const NodeId cropbox_id = scene_.addCropBox(cropbox_name, node->id);
+        if (cropbox_id == NULL_NODE)
+            return;
+
+        // Fit cropbox to parent bounds
+        glm::vec3 min_bounds, max_bounds;
+        if (scene_.getNodeBounds(node->id, min_bounds, max_bounds)) {
+            CropBoxData data;
+            data.min = min_bounds;
+            data.max = max_bounds;
+            data.enabled = true;
+            scene_.setCropBoxData(cropbox_id, data);
+        }
+
+        // Emit PLYAdded event
+        if (const auto* cropbox = scene_.getNodeById(cropbox_id)) {
+            state::PLYAdded{
+                .name = cropbox->name,
+                .node_gaussians = 0,
+                .total_gaussians = scene_.getTotalGaussianCount(),
+                .is_visible = cropbox->visible,
+                .parent_name = node_name,
+                .is_group = false,
+                .node_type = static_cast<int>(NodeType::CROPBOX)}
+                .emit();
+        }
+
+        // Enable cropbox visibility in render settings
+        if (auto* rm = services().renderingOrNull()) {
+            auto settings = rm->getSettings();
+            settings.show_crop_box = true;
+            rm->updateSettings(settings);
+        }
+
+        selectNode(cropbox_name);
+        LOG_INFO("Added cropbox '{}' as child of '{}'", cropbox_name, node_name);
+    }
+
+    void SceneManager::handleAddCropEllipsoid(const std::string& node_name) {
+        const auto* node = scene_.getNode(node_name);
+        if (!node)
+            return;
+
+        if (node->type != NodeType::SPLAT && node->type != NodeType::POINTCLOUD) {
+            LOG_WARN("Cannot add ellipsoid to node type: {}", static_cast<int>(node->type));
+            return;
+        }
+
+        // Check if ellipsoid already exists for this node
+        const NodeId existing = scene_.getEllipsoidForSplat(node->id);
+        if (existing != NULL_NODE) {
+            LOG_DEBUG("Ellipsoid already exists for '{}'", node_name);
+            selectNode(scene_.getNodeById(existing)->name);
+            return;
+        }
+
+        const std::string ellipsoid_name = node_name + "_ellipsoid";
+        const NodeId ellipsoid_id = scene_.addEllipsoid(ellipsoid_name, node->id);
+        if (ellipsoid_id == NULL_NODE)
+            return;
+
+        // Fit ellipsoid to parent bounds
+        glm::vec3 min_bounds, max_bounds;
+        if (scene_.getNodeBounds(node->id, min_bounds, max_bounds)) {
+            constexpr float CIRCUMSCRIBE_FACTOR = 1.732050808f; // sqrt(3)
+            const glm::vec3 half_size = (max_bounds - min_bounds) * 0.5f;
+
+            EllipsoidData data;
+            data.radii = half_size * CIRCUMSCRIBE_FACTOR;
+            data.enabled = true;
+            scene_.setEllipsoidData(ellipsoid_id, data);
+
+            // Position ellipsoid at center of bounds
+            if (auto* ellipsoid_node = scene_.getMutableNode(ellipsoid_name)) {
+                const glm::vec3 center = (min_bounds + max_bounds) * 0.5f;
+                ellipsoid_node->local_transform = glm::translate(glm::mat4(1.0f), center);
+                ellipsoid_node->transform_dirty = true;
+            }
+        }
+
+        // Emit PLYAdded event
+        if (const auto* ellipsoid = scene_.getNodeById(ellipsoid_id)) {
+            state::PLYAdded{
+                .name = ellipsoid->name,
+                .node_gaussians = 0,
+                .total_gaussians = scene_.getTotalGaussianCount(),
+                .is_visible = ellipsoid->visible,
+                .parent_name = node_name,
+                .is_group = false,
+                .node_type = static_cast<int>(NodeType::ELLIPSOID)}
+                .emit();
+        }
+
+        // Enable ellipsoid visibility in render settings
+        if (auto* rm = services().renderingOrNull()) {
+            auto settings = rm->getSettings();
+            settings.show_ellipsoid = true;
+            rm->updateSettings(settings);
+        }
+
+        selectNode(ellipsoid_name);
+        LOG_INFO("Added ellipsoid '{}' as child of '{}'", ellipsoid_name, node_name);
+    }
+
+    void SceneManager::handleResetCropBox() {
+        const SceneNode* cropbox_node = nullptr;
+        for (const auto& name : selected_nodes_) {
+            const auto* node = scene_.getNode(name);
+            if (node && node->type == NodeType::CROPBOX && node->cropbox) {
+                cropbox_node = node;
+                break;
+            }
+        }
+
+        if (!cropbox_node) {
+            LOG_WARN("No cropbox selected for reset");
+            return;
+        }
+
+        auto* node = scene_.getMutableNode(cropbox_node->name);
+        if (!node || !node->cropbox)
+            return;
+
+        node->cropbox->min = glm::vec3(-1.0f);
+        node->cropbox->max = glm::vec3(1.0f);
+        node->cropbox->inverse = false;
+        node->local_transform = glm::mat4(1.0f);
+        node->transform_dirty = true;
+        scene_.invalidateCache();
+
+        if (auto* rm = services().renderingOrNull()) {
+            auto settings = rm->getSettings();
+            settings.use_crop_box = false;
+            rm->updateSettings(settings);
+            rm->markDirty();
+        }
+
+        LOG_INFO("Reset cropbox '{}'", cropbox_node->name);
+    }
+
+    void SceneManager::handleResetEllipsoid() {
+        const SceneNode* ellipsoid_node = nullptr;
+        for (const auto& name : selected_nodes_) {
+            const auto* node = scene_.getNode(name);
+            if (node && node->type == NodeType::ELLIPSOID && node->ellipsoid) {
+                ellipsoid_node = node;
+                break;
+            }
+        }
+
+        if (!ellipsoid_node) {
+            LOG_WARN("No ellipsoid selected for reset");
+            return;
+        }
+
+        auto* node = scene_.getMutableNode(ellipsoid_node->name);
+        if (!node || !node->ellipsoid)
+            return;
+
+        node->ellipsoid->radii = glm::vec3(1.0f);
+        node->ellipsoid->inverse = false;
+        node->local_transform = glm::mat4(1.0f);
+        node->transform_dirty = true;
+        scene_.invalidateCache();
+
+        if (auto* rm = services().renderingOrNull()) {
+            auto settings = rm->getSettings();
+            settings.use_ellipsoid = false;
+            rm->updateSettings(settings);
+            rm->markDirty();
+        }
+
+        LOG_INFO("Reset ellipsoid '{}'", ellipsoid_node->name);
+    }
+
     void SceneManager::updateCropBoxToFitScene(const bool use_percentile) {
         if (!services().renderingOrNull())
             return;
 
-        // Find selected cropbox or parent with cropbox child
-        const SceneNode* cropbox = nullptr;
-        const SceneNode* parent = nullptr;
+        // Find selected cropbox
+        const SceneNode* cropbox_node = nullptr;
+        const SceneNode* target_node = nullptr;
 
         for (const auto& name : selected_nodes_) {
             const auto* node = scene_.getNode(name);
             if (!node)
                 continue;
 
-            if (node->type == NodeType::CROPBOX) {
-                cropbox = node;
-                parent = scene_.getNodeById(node->parent_id);
-                break;
-            }
-
-            if (node->type == NodeType::SPLAT || node->type == NodeType::POINTCLOUD) {
-                for (const NodeId child_id : node->children) {
-                    if (const auto* child = scene_.getNodeById(child_id);
-                        child && child->type == NodeType::CROPBOX) {
-                        cropbox = child;
-                        parent = node;
-                        break;
-                    }
+            if (node->type == NodeType::CROPBOX && node->cropbox) {
+                cropbox_node = node;
+                if (node->parent_id != NULL_NODE) {
+                    target_node = scene_.getNodeById(node->parent_id);
                 }
-                if (cropbox)
-                    break;
+                break;
             }
         }
 
-        if (!cropbox || !parent) {
+        if (!cropbox_node) {
             LOG_WARN("No cropbox found in selection");
+            return;
+        }
+
+        // If no target splat set, try to find first SPLAT or POINTCLOUD
+        if (!target_node) {
+            for (const auto* node : scene_.getNodes()) {
+                if (node->type == NodeType::SPLAT || node->type == NodeType::POINTCLOUD) {
+                    target_node = node;
+                    break;
+                }
+            }
+        }
+
+        if (!target_node) {
+            LOG_WARN("No target splat found for cropbox '{}'", cropbox_node->name);
             return;
         }
 
         glm::vec3 min_bounds, max_bounds;
         bool bounds_valid = false;
 
-        if (parent->type == NodeType::SPLAT && parent->model && parent->model->size() > 0) {
-            bounds_valid = lfs::core::compute_bounds(*parent->model, min_bounds, max_bounds, 0.0f, use_percentile);
-        } else if (parent->type == NodeType::POINTCLOUD && parent->point_cloud && parent->point_cloud->size() > 0) {
-            bounds_valid = lfs::core::compute_bounds(*parent->point_cloud, min_bounds, max_bounds, 0.0f, use_percentile);
+        if (target_node->type == NodeType::SPLAT && target_node->model && target_node->model->size() > 0) {
+            bounds_valid = lfs::core::compute_bounds(*target_node->model, min_bounds, max_bounds, 0.0f, use_percentile);
+        } else if (target_node->type == NodeType::POINTCLOUD && target_node->point_cloud && target_node->point_cloud->size() > 0) {
+            bounds_valid = lfs::core::compute_bounds(*target_node->point_cloud, min_bounds, max_bounds, 0.0f, use_percentile);
         }
 
         if (!bounds_valid) {
-            LOG_WARN("Cannot compute bounds for '{}'", parent->name);
+            LOG_WARN("Cannot compute bounds for '{}'", target_node->name);
             return;
         }
 
         const glm::vec3 center = (min_bounds + max_bounds) * 0.5f;
         const glm::vec3 half_size = (max_bounds - min_bounds) * 0.5f;
 
-        if (auto* node = scene_.getMutableNode(cropbox->name); node && node->cropbox) {
+        if (auto* node = scene_.getMutableNode(cropbox_node->name); node && node->cropbox) {
             node->cropbox->min = -half_size;
             node->cropbox->max = half_size;
             node->local_transform = glm::translate(glm::mat4(1.0f), center);
@@ -2002,8 +2511,87 @@ namespace lfs::vis {
         services().renderingOrNull()->markDirty();
 
         LOG_INFO("Fit '{}' to '{}': center({:.2f},{:.2f},{:.2f}) size({:.2f},{:.2f},{:.2f})",
-                 cropbox->name, parent->name, center.x, center.y, center.z,
+                 cropbox_node->name, target_node->name, center.x, center.y, center.z,
                  half_size.x * 2, half_size.y * 2, half_size.z * 2);
+    }
+
+    void SceneManager::updateEllipsoidToFitScene(const bool use_percentile) {
+        if (!services().renderingOrNull())
+            return;
+
+        // Find selected ellipsoid
+        const SceneNode* ellipsoid_node = nullptr;
+        const SceneNode* target_node = nullptr;
+
+        for (const auto& name : selected_nodes_) {
+            const auto* node = scene_.getNode(name);
+            if (!node)
+                continue;
+
+            if (node->type == NodeType::ELLIPSOID && node->ellipsoid) {
+                ellipsoid_node = node;
+                if (node->parent_id != NULL_NODE) {
+                    target_node = scene_.getNodeById(node->parent_id);
+                }
+                break;
+            }
+        }
+
+        if (!ellipsoid_node) {
+            LOG_WARN("No ellipsoid found in selection");
+            return;
+        }
+
+        // If no target splat set, try to find first SPLAT or POINTCLOUD
+        if (!target_node) {
+            for (const auto* node : scene_.getNodes()) {
+                if (node->type == NodeType::SPLAT || node->type == NodeType::POINTCLOUD) {
+                    target_node = node;
+                    break;
+                }
+            }
+        }
+
+        if (!target_node) {
+            LOG_WARN("No target splat found for ellipsoid '{}'", ellipsoid_node->name);
+            return;
+        }
+
+        glm::vec3 min_bounds, max_bounds;
+        bool bounds_valid = false;
+
+        if (target_node->type == NodeType::SPLAT && target_node->model && target_node->model->size() > 0) {
+            bounds_valid = lfs::core::compute_bounds(*target_node->model, min_bounds, max_bounds, 0.0f, use_percentile);
+        } else if (target_node->type == NodeType::POINTCLOUD && target_node->point_cloud && target_node->point_cloud->size() > 0) {
+            bounds_valid = lfs::core::compute_bounds(*target_node->point_cloud, min_bounds, max_bounds, 0.0f, use_percentile);
+        }
+
+        if (!bounds_valid) {
+            LOG_WARN("Cannot compute bounds for '{}'", target_node->name);
+            return;
+        }
+
+        const glm::vec3 center = (min_bounds + max_bounds) * 0.5f;
+        const glm::vec3 half_size = (max_bounds - min_bounds) * 0.5f;
+
+        // Scale radii by sqrt(3) so ellipsoid circumscribes the bounding box
+        // (contains all corners, not just face centers)
+        constexpr float CIRCUMSCRIBE_FACTOR = 1.732050808f; // sqrt(3)
+        const glm::vec3 radii = half_size * CIRCUMSCRIBE_FACTOR;
+
+        if (auto* node = scene_.getMutableNode(ellipsoid_node->name); node && node->ellipsoid) {
+            node->ellipsoid->radii = radii;
+            node->local_transform = glm::translate(glm::mat4(1.0f), center);
+            node->transform_dirty = true;
+        }
+
+        if (auto* rm = services().renderingOrNull()) {
+            rm->markDirty();
+        }
+
+        LOG_INFO("Fit ellipsoid '{}' to '{}': center({:.2f},{:.2f},{:.2f}) radii({:.2f},{:.2f},{:.2f})",
+                 ellipsoid_node->name, target_node->name, center.x, center.y, center.z,
+                 radii.x, radii.y, radii.z);
     }
 
     SceneManager::ClipboardEntry::HierarchyNode SceneManager::copyNodeHierarchy(const SceneNode* node) {

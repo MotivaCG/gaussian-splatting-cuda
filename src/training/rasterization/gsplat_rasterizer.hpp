@@ -94,9 +94,13 @@ namespace lfs::training {
         int render_tile_y_offset = 0;
         int render_tile_width = 0;
         int render_tile_height = 0;
+
+        // Background image for per-pixel blending (optional, empty = use bg_color)
+        lfs::core::Tensor bg_image;
     };
 
     // Forward pass with optional tiling (tile_width/height=0 = full image)
+    // bg_image is optional - if provided, uses per-pixel background blending instead of solid color
     std::expected<std::pair<RenderOutput, GsplatRasterizeContext>, std::string> gsplat_rasterize_forward(
         lfs::core::Camera& viewpoint_camera,
         lfs::core::SplatData& gaussian_model,
@@ -108,7 +112,8 @@ namespace lfs::training {
         float scaling_modifier = 1.0f,
         bool antialiased = false,
         GsplatRenderMode render_mode = GsplatRenderMode::RGB,
-        bool use_gut = false);
+        bool use_gut = false,
+        const lfs::core::Tensor& bg_image = {});
 
     // Explicit backward pass - computes gradients and accumulates into optimizer
     void gsplat_rasterize_backward(

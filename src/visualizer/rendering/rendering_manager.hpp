@@ -6,6 +6,7 @@
 
 #include "framerate_controller.hpp"
 #include "internal/viewport.hpp"
+#include "io/nvcodec_image_loader.hpp"
 #include "rendering/rendering.hpp"
 #include <atomic>
 #include <chrono>
@@ -39,7 +40,11 @@ namespace lfs::vis {
         // Crop box (data stored in scene graph CropBoxData, these are UI toggles only)
         bool show_crop_box = false;
         bool use_crop_box = false;
+        // Ellipsoid (data stored in scene graph EllipsoidData, these are UI toggles only)
+        bool show_ellipsoid = false;
+        bool use_ellipsoid = false;
         bool desaturate_unselected = false; // Desaturate unselected PLYs when one is selected
+        bool desaturate_cropping = true;    // Desaturate outside crop box/ellipsoid instead of hiding
 
         // Background
         glm::vec3 background_color = glm::vec3(0.0f, 0.0f, 0.0f);
@@ -96,6 +101,9 @@ namespace lfs::vis {
         glm::vec3 depth_filter_min = glm::vec3(-50.0f, -10000.0f, 0.0f);
         glm::vec3 depth_filter_max = glm::vec3(50.0f, 10000.0f, 100.0f);
         lfs::geometry::EuclideanTransform depth_filter_transform;
+
+        // Crop filter for selection (use scene crop box/ellipsoid as selection filter)
+        bool crop_filter_for_selection = false;
     };
 
     struct SplitViewInfo {
@@ -127,10 +135,13 @@ namespace lfs::vis {
         };
 
         std::unordered_map<int, CacheEntry> texture_cache_;
+        std::unique_ptr<lfs::io::NvCodecImageLoader> nvcodec_loader_;
         static constexpr size_t MAX_CACHE_SIZE = 20;
+        static constexpr int MAX_TEXTURE_DIM = 2048;
 
         void evictOldest();
         unsigned int loadTexture(const std::filesystem::path& path);
+        unsigned int loadTextureGPU(const std::filesystem::path& path);
     };
 
     class RenderingManager {
@@ -251,6 +262,9 @@ namespace lfs::vis {
         // Brush selection on GPU - mouse_x/y in image coords (not window coords!)
         void brushSelect(float mouse_x, float mouse_y, float radius, lfs::core::Tensor& selection_out);
 
+        // Apply crop filter to selection - filters out selections outside crop box/ellipsoid
+        void applyCropFilter(lfs::core::Tensor& selection);
+
         void setBrushState(bool active, float x, float y, float radius, bool add_mode = true,
                            lfs::core::Tensor* selection_tensor = nullptr,
                            bool saturation_mode = false, float saturation_amount = 0.0f);
@@ -276,6 +290,27 @@ namespace lfs::vis {
 
         // Sync selection group colors to GPU constant memory
         void syncSelectionGroupColor(int group_id, const glm::vec3& color);
+
+        // Gizmo state for wireframe sync during manipulation
+        void setCropboxGizmoState(bool active, const glm::vec3& min, const glm::vec3& max,
+                                  const glm::mat4& world_transform) {
+            cropbox_gizmo_active_ = active;
+            if (active) {
+                pending_cropbox_min_ = min;
+                pending_cropbox_max_ = max;
+                pending_cropbox_transform_ = world_transform;
+            }
+        }
+        void setEllipsoidGizmoState(bool active, const glm::vec3& radii,
+                                    const glm::mat4& world_transform) {
+            ellipsoid_gizmo_active_ = active;
+            if (active) {
+                pending_ellipsoid_radii_ = radii;
+                pending_ellipsoid_transform_ = world_transform;
+            }
+        }
+        void setCropboxGizmoActive(bool active) { cropbox_gizmo_active_ = active; }
+        void setEllipsoidGizmoActive(bool active) { ellipsoid_gizmo_active_ = active; }
 
     private:
         void doFullRender(const RenderContext& context, SceneManager* scene_manager, const lfs::core::SplatData* model);
@@ -316,8 +351,8 @@ namespace lfs::vis {
         mutable std::mutex split_info_mutex_;
         SplitViewInfo current_split_info_;
 
-        // Current camera for GT comparison
         int current_camera_id_ = -1;
+        bool pre_gt_equirectangular_ = false;
 
         // Settings
         RenderSettings settings_;
@@ -369,6 +404,15 @@ namespace lfs::vis {
         // Viewport state
         glm::ivec2 last_viewport_size_{0, 0}; // Last requested viewport size
         glm::ivec2 cached_result_size_{0, 0}; // Size at which cached_result_ was actually rendered
+
+        // Gizmo state for wireframe sync
+        bool cropbox_gizmo_active_ = false;
+        bool ellipsoid_gizmo_active_ = false;
+        glm::vec3 pending_cropbox_min_{0.0f};
+        glm::vec3 pending_cropbox_max_{0.0f};
+        glm::mat4 pending_cropbox_transform_{1.0f};
+        glm::vec3 pending_ellipsoid_radii_{1.0f};
+        glm::mat4 pending_ellipsoid_transform_{1.0f};
     };
 
 } // namespace lfs::vis

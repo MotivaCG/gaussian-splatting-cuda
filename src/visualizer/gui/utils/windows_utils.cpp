@@ -259,6 +259,34 @@ namespace lfs::vis::gui {
 #endif
     }
 
+    std::filesystem::path OpenImageFileDialog(const std::filesystem::path& startDir) {
+#ifdef _WIN32
+        PWSTR filePath = nullptr;
+        COMDLG_FILTERSPEC rgSpec[] = {{L"Image Files", L"*.png;*.jpg;*.jpeg;*.bmp;*.tga;*.hdr;*.exr"}};
+
+        if (SUCCEEDED(utils::selectFileNative(filePath, rgSpec, 1, false))) {
+            std::filesystem::path result(filePath);
+            CoTaskMemFree(filePath);
+            return result;
+        }
+        return {};
+#else
+        const bool has_valid_start = !startDir.empty() && std::filesystem::exists(startDir);
+        const std::string start_path = has_valid_start
+                                           ? shell_escape(lfs::core::path_to_utf8(startDir))
+                                           : "'.'";
+        const std::string primary = "zenity --file-selection "
+                                    "--filename=" +
+                                    start_path + "/ "
+                                                 "--file-filter='Image files|*.png *.jpg *.jpeg *.bmp *.tga *.hdr *.exr' "
+                                                 "--title='Open Background Image' 2>/dev/null";
+        const std::string fallback = "kdialog --getopenfilename " + start_path + " 'Image files (*.png *.jpg *.jpeg *.bmp *.tga *.hdr *.exr)' 2>/dev/null";
+
+        const std::string result = runDialogCommand(primary, fallback);
+        return result.empty() ? std::filesystem::path{} : std::filesystem::path(result);
+#endif
+    }
+
     std::filesystem::path SavePlyFileDialog(const std::string& defaultName) {
 #ifdef _WIN32
         PWSTR filePath = nullptr;

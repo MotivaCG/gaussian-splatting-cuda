@@ -191,7 +191,8 @@ namespace lfs::training {
         int tile_y_offset,
         int tile_width,
         int tile_height,
-        bool mip_filter) {
+        bool mip_filter,
+        const core::Tensor& bg_image) {
         // Get camera parameters
         const int full_width = viewpoint_camera.image_width();
         const int full_height = viewpoint_camera.image_height();
@@ -330,18 +331,31 @@ namespace lfs::training {
 
         // Prepare render output
         RenderOutput render_output;
-        // output = image + (1 - alpha) * bg_color
+        // output = image + (1 - alpha) * bg_color (or bg_image)
         // (output_image is pre-allocated above)
 
-        kernels::launch_fused_background_blend(
-            image.ptr<float>(),
-            alpha.ptr<float>(),
-            bg_color.ptr<float>(),
-            output_image.ptr<float>(),
-            height,
-            width,
-            nullptr // default stream
-        );
+        // Use background image if provided, otherwise use solid color
+        if (bg_image.is_valid() && !bg_image.is_empty()) {
+            kernels::launch_fused_background_blend_with_image(
+                image.ptr<float>(),
+                alpha.ptr<float>(),
+                bg_image.ptr<float>(),
+                output_image.ptr<float>(),
+                height,
+                width,
+                nullptr // default stream
+            );
+        } else {
+            kernels::launch_fused_background_blend(
+                image.ptr<float>(),
+                alpha.ptr<float>(),
+                bg_color.ptr<float>(),
+                output_image.ptr<float>(),
+                height,
+                width,
+                nullptr // default stream
+            );
+        }
 
         render_output.image = output_image;
         render_output.alpha = alpha;
@@ -353,6 +367,7 @@ namespace lfs::training {
         ctx.image = image;
         ctx.alpha = alpha;
         ctx.bg_color = bg_color; // Save bg_color for alpha gradient
+        ctx.bg_image = bg_image; // Save bg_image for alpha gradient
 
         // Save parameters (avoid re-fetching in backward)
         ctx.means = means;
@@ -414,13 +429,23 @@ namespace lfs::training {
 
         auto grad_alpha = core::Tensor::empty({static_cast<size_t>(H), static_cast<size_t>(W)}, core::Device::CUDA);
 
-        kernels::launch_fused_grad_alpha(
-            grad_image.ptr<float>(),
-            ctx.bg_color.ptr<float>(),
-            grad_alpha.ptr<float>(),
-            H, W,
-            is_chw_layout,
-            nullptr);
+        // Use background image kernel if available, otherwise use solid color kernel
+        if (ctx.bg_image.is_valid() && !ctx.bg_image.is_empty() && is_chw_layout) {
+            kernels::launch_fused_grad_alpha_with_image(
+                grad_image.ptr<float>(),
+                ctx.bg_image.ptr<float>(),
+                grad_alpha.ptr<float>(),
+                H, W,
+                nullptr);
+        } else {
+            kernels::launch_fused_grad_alpha(
+                grad_image.ptr<float>(),
+                ctx.bg_color.ptr<float>(),
+                grad_alpha.ptr<float>(),
+                H, W,
+                is_chw_layout,
+                nullptr);
+        }
 
         if (grad_alpha_extra.is_valid() && grad_alpha_extra.numel() > 0) {
             grad_alpha = grad_alpha + grad_alpha_extra;

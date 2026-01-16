@@ -12,6 +12,7 @@ set(RENDERING_SOURCES
         point_cloud_renderer.cpp
         grid_renderer.cpp
         bbox_renderer.cpp
+        ellipsoid_renderer.cpp
         axes_renderer.cpp
         pivot_renderer.cpp
         text_renderer.cpp

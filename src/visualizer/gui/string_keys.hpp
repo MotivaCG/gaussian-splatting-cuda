@@ -57,6 +57,7 @@ namespace lichtfeld::Strings {
         inline constexpr const char* TITLE = "getting_started.title";
         inline constexpr const char* DESCRIPTION = "getting_started.description";
         inline constexpr const char* WIKI_SECTION = "getting_started.wiki_section";
+        inline constexpr const char* VIDEO_INTRO = "getting_started.video_intro";
         inline constexpr const char* VIDEO_LATEST = "getting_started.video_latest";
         inline constexpr const char* VIDEO_REALITY_SCAN = "getting_started.video_reality_scan";
         inline constexpr const char* VIDEO_COLMAP = "getting_started.video_colmap";
@@ -107,7 +108,6 @@ namespace lichtfeld::Strings {
             inline constexpr const char* REFINEMENT = "training.section.refinement";
             inline constexpr const char* BILATERAL_GRID = "training.section.bilateral_grid";
             inline constexpr const char* MASKING = "training.section.masking";
-            inline constexpr const char* EVALUATION = "training.section.evaluation";
             inline constexpr const char* LOSSES = "training.section.losses";
             inline constexpr const char* INITIALIZATION = "training.section.initialization";
             inline constexpr const char* THRESHOLDS = "training.section.thresholds";
@@ -125,7 +125,6 @@ namespace lichtfeld::Strings {
             inline constexpr const char* MAX_WIDTH = "training.dataset.max_width";
             inline constexpr const char* CPU_CACHE = "training.dataset.cpu_cache";
             inline constexpr const char* FS_CACHE = "training.dataset.fs_cache";
-            inline constexpr const char* TEST_EVERY = "training.dataset.test_every";
             inline constexpr const char* OUTPUT = "training.dataset.output";
         } // namespace Dataset
 
@@ -136,7 +135,6 @@ namespace lichtfeld::Strings {
             inline constexpr const char* SH_DEGREE = "training.opt.sh_degree";
             inline constexpr const char* USE_BILATERAL = "training.opt.use_bilateral";
             inline constexpr const char* MASK_MODE = "training.opt.mask_mode";
-            inline constexpr const char* ENABLE_EVAL = "training.opt.enable_eval";
             inline constexpr const char* SPARSITY = "training.opt.sparsity";
             inline constexpr const char* GUT = "training.opt.gut";
             inline constexpr const char* MIP_FILTER = "training.opt.mip_filter";
@@ -178,11 +176,6 @@ namespace lichtfeld::Strings {
             inline constexpr const char* PENALTY_WEIGHT = "training.masking.penalty_weight";
             inline constexpr const char* PENALTY_POWER = "training.masking.penalty_power";
         } // namespace Masking
-
-        namespace Eval {
-            inline constexpr const char* SAVE_IMAGES = "training.eval.save_images";
-            inline constexpr const char* EVALUATION_STEPS = "training.eval.evaluation_steps";
-        } // namespace Eval
 
         namespace Losses {
             inline constexpr const char* LAMBDA_DSSIM = "training.losses.lambda_dssim";
@@ -228,7 +221,6 @@ namespace lichtfeld::Strings {
             inline constexpr const char* SPARSITY = "training.tooltip.sparsity";
             inline constexpr const char* GUT = "training.tooltip.gut";
             inline constexpr const char* BG_MODULATION = "training.tooltip.bg_modulation";
-            inline constexpr const char* EVALUATION = "training.tooltip.evaluation";
             inline constexpr const char* GRADIENT_THR = "training.tooltip.gradient_thr";
             inline constexpr const char* OPACITY_REG = "training.tooltip.opacity_reg";
             inline constexpr const char* SCALE_REG = "training.tooltip.scale_reg";
@@ -248,7 +240,6 @@ namespace lichtfeld::Strings {
             inline constexpr const char* MAX_WIDTH = "training.tooltip.max_width";
             inline constexpr const char* CPU_CACHE = "training.tooltip.cpu_cache";
             inline constexpr const char* FS_CACHE = "training.tooltip.fs_cache";
-            inline constexpr const char* TEST_EVERY = "training.tooltip.test_every";
             inline constexpr const char* SAVE_STEPS = "training.tooltip.save_steps";
             inline constexpr const char* LR_POSITION = "training.tooltip.lr_position";
             inline constexpr const char* LR_SH_COEFF = "training.tooltip.lr_sh_coeff";
@@ -300,6 +291,9 @@ namespace lichtfeld::Strings {
         inline constexpr const char* GO_TO_CAM_VIEW = "scene.go_to_cam_view";
         inline constexpr const char* FIT_TO_SCENE = "scene.fit_to_scene";
         inline constexpr const char* FIT_TO_SCENE_TRIMMED = "scene.fit_to_scene_trimmed";
+        inline constexpr const char* ADD_CROP_BOX = "scene.add_crop_box";
+        inline constexpr const char* ADD_CROP_ELLIPSOID = "scene.add_crop_ellipsoid";
+        inline constexpr const char* RESET_CROP = "scene.reset_crop";
         inline constexpr const char* MERGE_TO_SINGLE_PLY = "scene.merge_to_single_ply";
         inline constexpr const char* MOVE_TO = "scene.move_to";
         inline constexpr const char* MOVE_TO_ROOT = "scene.move_to_root";
@@ -317,6 +311,7 @@ namespace lichtfeld::Strings {
         inline constexpr const char* NO_GROUPS_AVAILABLE = "scene.no_groups_available";
         inline constexpr const char* DELETE_NODE = "scene.delete_node";
         inline constexpr const char* CANNOT_DELETE_TRAINING = "scene.cannot_delete_training";
+        inline constexpr const char* BACKGROUND = "scene.background";
     } // namespace Scene
 
     namespace Export {
@@ -428,6 +423,7 @@ namespace lichtfeld::Strings {
         inline constexpr const char* CAMERA_FRUSTUMS = "main_panel.camera_frustums";
         inline constexpr const char* POINT_CLOUD_MODE = "main_panel.point_cloud_mode";
         inline constexpr const char* DESATURATE_UNSELECTED = "main_panel.desaturate_unselected";
+        inline constexpr const char* DESATURATE_CROPPING = "main_panel.desaturate_cropping";
         inline constexpr const char* FOV = "main_panel.fov";
         inline constexpr const char* SH_DEGREE = "main_panel.sh_degree";
         inline constexpr const char* EQUIRECTANGULAR = "main_panel.equirectangular";
@@ -453,6 +449,7 @@ namespace lichtfeld::Strings {
         inline constexpr const char* PAINTING = "toolbar.painting";
         inline constexpr const char* ALIGN_3POINT = "toolbar.align_3point";
         inline constexpr const char* CROP_BOX = "toolbar.crop_box";
+        inline constexpr const char* ELLIPSOID = "toolbar.ellipsoid";
         inline constexpr const char* BRUSH_SELECTION = "toolbar.brush_selection";
         inline constexpr const char* RECT_SELECTION = "toolbar.rect_selection";
         inline constexpr const char* POLYGON_SELECTION = "toolbar.polygon_selection";
@@ -460,6 +457,8 @@ namespace lichtfeld::Strings {
         inline constexpr const char* RING_SELECTION = "toolbar.ring_selection";
         inline constexpr const char* LOCAL_SPACE = "toolbar.local_space";
         inline constexpr const char* WORLD_SPACE = "toolbar.world_space";
+        inline constexpr const char* ORIGIN_PIVOT = "toolbar.origin_pivot";
+        inline constexpr const char* BOUNDS_CENTER_PIVOT = "toolbar.bounds_center_pivot";
         inline constexpr const char* RESIZE_BOUNDS = "toolbar.resize_bounds";
         inline constexpr const char* MIRROR_X = "toolbar.mirror_x";
         inline constexpr const char* MIRROR_Y = "toolbar.mirror_y";
@@ -505,6 +504,19 @@ namespace lichtfeld::Strings {
         inline constexpr const char* INSTRUCTIONS = "cropbox.instructions";
     } // namespace CropBox
 
+    namespace Ellipsoid {
+        inline constexpr const char* TITLE = "ellipsoid.title";
+        inline constexpr const char* NOT_VISIBLE = "ellipsoid.not_visible";
+        inline constexpr const char* NO_SELECTION = "ellipsoid.no_selection";
+        inline constexpr const char* INVALID = "ellipsoid.invalid";
+        inline constexpr const char* POSITION = "ellipsoid.position";
+        inline constexpr const char* ROTATION = "ellipsoid.rotation";
+        inline constexpr const char* RADII = "ellipsoid.radii";
+        inline constexpr const char* APPEARANCE = "ellipsoid.appearance";
+        inline constexpr const char* LINE_WIDTH = "ellipsoid.line_width";
+        inline constexpr const char* INSTRUCTIONS = "ellipsoid.instructions";
+    } // namespace Ellipsoid
+
     namespace FileBrowser {
         inline constexpr const char* TITLE = "file_browser.title";
         inline constexpr const char* QUICK_ACCESS = "file_browser.quick_access";
@@ -547,6 +559,7 @@ namespace lichtfeld::Strings {
         inline constexpr const char* RENDER_SCALE = "tooltip.render_scale";
         inline constexpr const char* POINT_CLOUD_FORCED = "tooltip.point_cloud_forced";
         inline constexpr const char* DESATURATE_UNSELECTED = "tooltip.desaturate_unselected";
+        inline constexpr const char* DESATURATE_CROPPING = "tooltip.desaturate_cropping";
         inline constexpr const char* LOCKED = "tooltip.locked";
         inline constexpr const char* UNLOCKED = "tooltip.unlocked";
         inline constexpr const char* POINT_SIZE = "tooltip.point_size";
@@ -695,8 +708,17 @@ namespace lichtfeld::Strings {
         inline constexpr const char* SPARSITY = "training_params.sparsity";
         inline constexpr const char* GUT = "training_params.gut";
         inline constexpr const char* MIP_FILTER = "training_params.mip_filter";
+        inline constexpr const char* BG_SETTINGS = "training_params.bg_settings";
+        inline constexpr const char* BG_MODE = "training_params.bg_mode";
+        inline constexpr const char* BG_MODE_COLOR = "training_params.bg_mode_color";
+        inline constexpr const char* BG_MODE_MODULATION = "training_params.bg_mode_modulation";
+        inline constexpr const char* BG_MODE_IMAGE = "training_params.bg_mode_image";
+        inline constexpr const char* BG_MODE_RANDOM = "training_params.bg_mode_random";
         inline constexpr const char* BG_MODULATION = "training_params.bg_modulation";
-        inline constexpr const char* EVALUATION = "training_params.evaluation";
+        inline constexpr const char* BG_COLOR = "training_params.bg_color";
+        inline constexpr const char* BG_IMAGE = "training_params.bg_image";
+        inline constexpr const char* BG_IMAGE_BROWSE = "training_params.bg_image_browse";
+        inline constexpr const char* BG_IMAGE_CLEAR = "training_params.bg_image_clear";
         inline constexpr const char* INIT_OPACITY = "training_params.init_opacity";
         inline constexpr const char* INIT_SCALING = "training_params.init_scaling";
         inline constexpr const char* RANDOM_INIT = "training_params.random_init";
@@ -710,7 +732,6 @@ namespace lichtfeld::Strings {
         inline constexpr const char* SPARSIFY_STEPS = "training_params.sparsify_steps";
         inline constexpr const char* INIT_RHO = "training_params.init_rho";
         inline constexpr const char* PRUNE_RATIO = "training_params.prune_ratio";
-        inline constexpr const char* NEW_EVAL_STEP = "training_params.new_eval_step";
         inline constexpr const char* DISABLED = "training_params.disabled";
     } // namespace TrainingParams
 

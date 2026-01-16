@@ -190,6 +190,18 @@ namespace lfs::vis {
                     LOG_ERROR("Failed to initialize model: {}", result.error());
                     last_error_ = result.error();
 
+                    std::string error_msg = result.error();
+                    if (auto pos = error_msg.find("CUDA out of memory"); pos != std::string::npos) {
+                        error_msg = error_msg.substr(pos);
+                    }
+                    state::TrainingCompleted{
+                        .iteration = 0,
+                        .final_loss = 0.0f,
+                        .elapsed_seconds = 0.0f,
+                        .success = false,
+                        .error = error_msg}
+                        .emit();
+
                     if (!state_machine_.transitionToFinished(FinishReason::Error)) {
                         LOG_WARN("Failed to transition to Finished(Error)");
                     }
@@ -200,6 +212,18 @@ namespace lfs::vis {
             if (auto result = trainer_->initialize(params); !result) {
                 LOG_ERROR("Failed to initialize trainer: {}", result.error());
                 last_error_ = result.error();
+
+                std::string error_msg = result.error();
+                if (auto pos = error_msg.find("CUDA out of memory"); pos != std::string::npos) {
+                    error_msg = error_msg.substr(pos);
+                }
+                state::TrainingCompleted{
+                    .iteration = 0,
+                    .final_loss = 0.0f,
+                    .elapsed_seconds = 0.0f,
+                    .success = false,
+                    .error = error_msg}
+                    .emit();
 
                 if (!state_machine_.transitionToFinished(FinishReason::Error)) {
                     LOG_WARN("Failed to transition to Finished(Error)");

@@ -242,6 +242,49 @@ namespace lfs::core {
         return splat_data.soft_delete(delete_mask);
     }
 
+    Tensor soft_crop_by_ellipsoid(SplatData& splat_data,
+                                  const glm::mat4& transform,
+                                  const glm::vec3& radii,
+                                  const bool inverse) {
+        LOG_TIMER("soft_crop_by_ellipsoid");
+
+        const auto& means = splat_data.means();
+        if (!means.is_valid() || means.size(0) == 0) {
+            return Tensor();
+        }
+
+        const size_t num_points = static_cast<size_t>(means.size(0));
+        const auto device = means.device();
+
+        // Build transformation tensor (GLM column-major to row-major)
+        const auto transform_tensor = Tensor::from_vector(
+            {transform[0][0], transform[1][0], transform[2][0], transform[3][0],
+             transform[0][1], transform[1][1], transform[2][1], transform[3][1],
+             transform[0][2], transform[1][2], transform[2][2], transform[3][2],
+             transform[0][3], transform[1][3], transform[2][3], transform[3][3]},
+            {4, 4}, device);
+
+        // Transform to ellipsoid local space
+        const auto ones = Tensor::ones({num_points, 1}, device);
+        const auto local_pos = transform_tensor.mm(means.cat(ones, 1).t()).t();
+
+        // Compute normalized distances: (x/rx)^2 + (y/ry)^2 + (z/rz)^2
+        const auto x = local_pos.slice(1, 0, 1).squeeze(1) / radii.x;
+        const auto y = local_pos.slice(1, 1, 2).squeeze(1) / radii.y;
+        const auto z = local_pos.slice(1, 2, 3).squeeze(1) / radii.z;
+
+        const auto dist_sq = x * x + y * y + z * z;
+        const auto inside_mask = dist_sq <= 1.0f;
+        const auto delete_mask = inverse ? inside_mask : inside_mask.logical_not();
+        const int points_to_delete = delete_mask.sum_scalar();
+
+        if (points_to_delete == 0) {
+            return Tensor();
+        }
+
+        return splat_data.soft_delete(delete_mask);
+    }
+
     void random_choose(SplatData& splat_data, int num_required_splat, int seed) {
         LOG_TIMER("random_choose");
 
@@ -319,7 +362,10 @@ namespace lfs::core {
         // Filter deleted gaussians (index_select preserves [N,3] shape)
         Tensor visible_means = means;
         if (splat_data.has_deleted_mask()) {
-            visible_means = means.index_select(0, splat_data.deleted().logical_not());
+            const auto visible_indices = splat_data.deleted().logical_not().nonzero().squeeze(1);
+            if (visible_indices.size(0) == 0)
+                return false;
+            visible_means = means.index_select(0, visible_indices);
         }
 
         if (visible_means.size(0) == 0) {

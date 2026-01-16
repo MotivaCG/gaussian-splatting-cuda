@@ -49,10 +49,14 @@ namespace lfs::training {
         int tile_y_offset = 0; // Vertical offset of this tile
         int tile_width = 0;    // Width of this tile (0 = full image)
         int tile_height = 0;   // Height of this tile (0 = full image)
+
+        // Background image for per-pixel blending (optional, empty = use bg_color)
+        lfs::core::Tensor bg_image;
     };
 
     // Explicit forward pass - returns render output and context for backward
     // Optional tile parameters for memory-efficient training (tile_width/height=0 means full image)
+    // bg_image is optional - if provided, uses per-pixel background blending instead of solid color
     std::expected<std::pair<RenderOutput, FastRasterizeContext>, std::string> fast_rasterize_forward(
         lfs::core::Camera& viewpoint_camera,
         lfs::core::SplatData& gaussian_model,
@@ -61,7 +65,8 @@ namespace lfs::training {
         int tile_y_offset = 0,
         int tile_width = 0,
         int tile_height = 0,
-        bool mip_filter = false);
+        bool mip_filter = false,
+        const lfs::core::Tensor& bg_image = {});
 
     // Backward pass with optional extra alpha gradient for masked training
     void fast_rasterize_backward(

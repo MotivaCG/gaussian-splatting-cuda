@@ -107,8 +107,10 @@ namespace lfs::core {
             if (result.device_ == Device::CUDA) {
                 void* ptr = CudaMemoryPool::instance().allocate(bytes, nullptr);
                 if (!ptr) {
-                    LOG_ERROR("Failed to allocate {} bytes from memory pool", bytes);
-                    return Tensor();
+                    throw std::runtime_error(std::format(
+                        "CUDA out of memory: failed to allocate {} bytes ({:.2f} GB). "
+                        "Try reducing max_cap, sh_degree, or image resolution.",
+                        bytes, bytes / (1024.0 * 1024.0 * 1024.0)));
                 }
                 result.data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
                     CudaMemoryPool::instance().deallocate(p, nullptr);
@@ -131,8 +133,9 @@ namespace lfs::core {
                     // Limited by OS (typically 2-4 GB total)
                     ptr = PinnedMemoryAllocator::instance().allocate(bytes);
                     if (!ptr) {
-                        LOG_ERROR("Failed to allocate {} bytes of pinned memory", bytes);
-                        return Tensor();
+                        throw std::runtime_error(std::format(
+                            "Out of memory: failed to allocate {} bytes ({:.2f} GB) of pinned memory.",
+                            bytes, bytes / (1024.0 * 1024.0 * 1024.0)));
                     }
                     cudaStream_t stream = result.stream_;
                     result.data_owner_ = std::shared_ptr<void>(ptr, [stream](void* p) {
@@ -143,8 +146,9 @@ namespace lfs::core {
                     // Use regular malloc for CPU memory
                     ptr = std::malloc(bytes);
                     if (!ptr) {
-                        LOG_ERROR("Failed to allocate {} bytes of regular CPU memory", bytes);
-                        return Tensor();
+                        throw std::runtime_error(std::format(
+                            "Out of memory: failed to allocate {} bytes ({:.2f} GB) of CPU memory.",
+                            bytes, bytes / (1024.0 * 1024.0 * 1024.0)));
                     }
                     result.data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
                         std::free(p);
@@ -259,8 +263,10 @@ namespace lfs::core {
             if (result.device_ == Device::CUDA) {
                 void* ptr = CudaMemoryPool::instance().allocate(bytes, nullptr);
                 if (!ptr) {
-                    LOG_ERROR("Failed to allocate {} bytes from memory pool", bytes);
-                    return Tensor();
+                    throw std::runtime_error(std::format(
+                        "CUDA out of memory: failed to allocate {} bytes ({:.2f} GB). "
+                        "Try reducing max_cap, sh_degree, or image resolution.",
+                        bytes, bytes / (1024.0 * 1024.0 * 1024.0)));
                 }
                 result.data_owner_ = std::shared_ptr<void>(ptr, [](void* p) {
                     CudaMemoryPool::instance().deallocate(p, nullptr);
@@ -291,8 +297,9 @@ namespace lfs::core {
                 // Use pinned memory for CPU tensors
                 void* ptr = PinnedMemoryAllocator::instance().allocate(bytes);
                 if (!ptr) {
-                    LOG_ERROR("Failed to allocate {} bytes on CPU (pinned memory)", bytes);
-                    return Tensor();
+                    throw std::runtime_error(std::format(
+                        "Out of memory: failed to allocate {} bytes ({:.2f} GB) of pinned memory.",
+                        bytes, bytes / (1024.0 * 1024.0 * 1024.0)));
                 }
                 cudaStream_t stream = result.stream_;
                 result.data_owner_ = std::shared_ptr<void>(ptr, [stream](void* p) {

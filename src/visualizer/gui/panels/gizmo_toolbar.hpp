@@ -20,13 +20,6 @@ namespace lfs::vis::gui::panels {
     // Re-export ToolType from EditorContext for convenience
     using ToolType = lfs::vis::ToolType;
 
-    enum class CropBoxOperation {
-        Bounds,
-        Translate,
-        Rotate,
-        Scale
-    };
-
     enum class SelectionSubMode {
         Centers,
         Rectangle,
@@ -40,6 +33,11 @@ namespace lfs::vis::gui::panels {
         World
     };
 
+    enum class PivotMode {
+        Origin,      // (0,0,0) in local space
+        BoundsCenter // Bounding box center
+    };
+
     enum class RenderVisualization {
         Splat,      // Normal gaussian splat rendering
         PointCloud, // Point cloud mode
@@ -49,10 +47,9 @@ namespace lfs::vis::gui::panels {
 
     struct GizmoToolbarState {
         ImGuizmo::OPERATION current_operation = ImGuizmo::TRANSLATE;
-        CropBoxOperation cropbox_operation = CropBoxOperation::Bounds;
-        bool reset_cropbox_requested = false;
         SelectionSubMode selection_mode = SelectionSubMode::Centers;
         TransformSpace transform_space = TransformSpace::Local;
+        PivotMode pivot_mode = PivotMode::Origin;
         bool initialized = false;
 
         // Icon textures
@@ -67,9 +64,6 @@ namespace lfs::vis::gui::panels {
         unsigned int brush_texture = 0;
         unsigned int painting_texture = 0;
         unsigned int align_texture = 0;
-        unsigned int cropbox_texture = 0;
-        unsigned int bounds_texture = 0;
-        unsigned int reset_texture = 0;
         unsigned int local_texture = 0;
         unsigned int world_texture = 0;
         unsigned int hide_ui_texture = 0;
@@ -92,6 +86,10 @@ namespace lfs::vis::gui::panels {
         unsigned int mirror_x_texture = 0;
         unsigned int mirror_y_texture = 0;
         unsigned int mirror_z_texture = 0;
+
+        // Pivot mode icons
+        unsigned int origin_pivot_texture = 0;
+        unsigned int bounds_center_pivot_texture = 0;
     };
 
     void InitGizmoToolbar(GizmoToolbarState& state);

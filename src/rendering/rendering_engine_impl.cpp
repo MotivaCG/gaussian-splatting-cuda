@@ -56,6 +56,13 @@ namespace lfs::rendering {
         }
         LOG_DEBUG("Bounding box renderer initialized");
 
+        if (auto result = ellipsoid_renderer_.init(); !result) {
+            LOG_ERROR("Failed to initialize ellipsoid renderer: {}", result.error());
+            shutdown();
+            return std::unexpected(result.error());
+        }
+        LOG_DEBUG("Ellipsoid renderer initialized");
+
         if (auto result = axes_renderer_.init(); !result) {
             LOG_ERROR("Failed to initialize axes renderer: {}", result.error());
             shutdown();
@@ -158,6 +165,7 @@ namespace lfs::rendering {
             .point_cloud_mode = request.point_cloud_mode,
             .voxel_size = request.voxel_size,
             .gut = request.gut,
+            .equirectangular = request.equirectangular,
             .show_rings = request.show_rings,
             .ring_width = request.ring_width,
             .show_center_markers = request.show_center_markers,
@@ -178,6 +186,7 @@ namespace lfs::rendering {
             .highlight_gaussian_id = request.highlight_gaussian_id,
             .far_plane = request.far_plane,
             .selected_node_mask = request.selected_node_mask,
+            .node_visibility_mask = request.node_visibility_mask,
             .desaturate_unselected = request.desaturate_unselected,
             .selection_flash_intensity = request.selection_flash_intensity,
             .orthographic = request.orthographic,
@@ -218,6 +227,30 @@ namespace lfs::rendering {
             pipeline_req.crop_box_max = &crop_box_max_tensor;
             pipeline_req.crop_inverse = request.crop_inverse;
             pipeline_req.crop_desaturate = request.crop_desaturate;
+            pipeline_req.crop_parent_node_index = request.crop_parent_node_index;
+        }
+
+        // Convert ellipsoid if present
+        Tensor ellipsoid_transform_tensor, ellipsoid_radii_tensor;
+        if (request.ellipsoid.has_value()) {
+            // Transform is world-to-ellipsoid-local
+            const glm::mat4& w2e = request.ellipsoid->transform;
+            std::vector<float> transform_data(16);
+            for (int row = 0; row < 4; ++row) {
+                for (int col = 0; col < 4; ++col) {
+                    transform_data[row * 4 + col] = w2e[col][row]; // Transpose to row-major
+                }
+            }
+            ellipsoid_transform_tensor = Tensor::from_vector(transform_data, {4, 4}, lfs::core::Device::CPU).cuda();
+
+            std::vector<float> radii_data = {request.ellipsoid->radii.x, request.ellipsoid->radii.y, request.ellipsoid->radii.z};
+            ellipsoid_radii_tensor = Tensor::from_vector(radii_data, {3}, lfs::core::Device::CPU).cuda();
+
+            pipeline_req.ellipsoid_transform = &ellipsoid_transform_tensor;
+            pipeline_req.ellipsoid_radii = &ellipsoid_radii_tensor;
+            pipeline_req.ellipsoid_inverse = request.ellipsoid_inverse;
+            pipeline_req.ellipsoid_desaturate = request.ellipsoid_desaturate;
+            pipeline_req.ellipsoid_parent_node_index = request.ellipsoid_parent_node_index;
         }
 
         // Convert depth filter if present (Selection tool - separate from crop box)
@@ -302,6 +335,7 @@ namespace lfs::rendering {
             .point_cloud_mode = true,
             .voxel_size = request.voxel_size,
             .gut = false,
+            .equirectangular = request.equirectangular,
             .show_rings = false,
             .ring_width = 0.0f,
             .show_center_markers = false,
@@ -448,10 +482,33 @@ namespace lfs::rendering {
         return bbox_renderer_.render(view, proj);
     }
 
+    Result<void> RenderingEngineImpl::renderEllipsoid(
+        const Ellipsoid& ellipsoid,
+        const ViewportData& viewport,
+        const glm::vec3& color,
+        float line_width) {
+
+        if (!isInitialized() || !ellipsoid_renderer_.isInitialized()) {
+            LOG_ERROR("Ellipsoid renderer not initialized");
+            return std::unexpected("Ellipsoid renderer not initialized");
+        }
+
+        ellipsoid_renderer_.setRadii(ellipsoid.radii);
+        ellipsoid_renderer_.setTransform(ellipsoid.transform);
+        ellipsoid_renderer_.setColor(color);
+        ellipsoid_renderer_.setLineWidth(line_width);
+
+        auto view = createViewMatrix(viewport);
+        auto proj = createProjectionMatrix(viewport);
+
+        return ellipsoid_renderer_.render(view, proj);
+    }
+
     Result<void> RenderingEngineImpl::renderCoordinateAxes(
         const ViewportData& viewport,
         float size,
-        const std::array<bool, 3>& visible) {
+        const std::array<bool, 3>& visible,
+        bool equirectangular) {
 
         if (!isInitialized() || !axes_renderer_.isInitialized()) {
             LOG_ERROR("Axes renderer not initialized");
@@ -466,7 +523,7 @@ namespace lfs::rendering {
         auto view = createViewMatrix(viewport);
         auto proj = createProjectionMatrix(viewport);
 
-        return axes_renderer_.render(view, proj);
+        return axes_renderer_.render(view, proj, equirectangular);
     }
 
     Result<void> RenderingEngineImpl::renderPivot(
@@ -541,7 +598,8 @@ namespace lfs::rendering {
         float scale,
         const glm::vec3& train_color,
         const glm::vec3& eval_color,
-        const glm::mat4& scene_transform) {
+        const glm::mat4& scene_transform,
+        bool equirectangular_view) {
 
         if (!camera_frustum_renderer_.isInitialized()) {
             return {}; // Silent fail if not initialized
@@ -550,7 +608,7 @@ namespace lfs::rendering {
         auto view = createViewMatrix(viewport);
         auto proj = createProjectionMatrix(viewport);
 
-        return camera_frustum_renderer_.render(cameras, view, proj, scale, train_color, eval_color, scene_transform);
+        return camera_frustum_renderer_.render(cameras, view, proj, scale, train_color, eval_color, scene_transform, equirectangular_view);
     }
 
     Result<void> RenderingEngineImpl::renderCameraFrustumsWithHighlight(
@@ -560,7 +618,8 @@ namespace lfs::rendering {
         const glm::vec3& train_color,
         const glm::vec3& eval_color,
         int highlight_index,
-        const glm::mat4& scene_transform) {
+        const glm::mat4& scene_transform,
+        bool equirectangular_view) {
 
         if (!camera_frustum_renderer_.isInitialized()) {
             return {}; // Silent fail if not initialized
@@ -572,7 +631,7 @@ namespace lfs::rendering {
         auto view = createViewMatrix(viewport);
         auto proj = createProjectionMatrix(viewport);
 
-        return camera_frustum_renderer_.render(cameras, view, proj, scale, train_color, eval_color, scene_transform);
+        return camera_frustum_renderer_.render(cameras, view, proj, scale, train_color, eval_color, scene_transform, equirectangular_view);
     }
 
     Result<int> RenderingEngineImpl::pickCameraFrustum(
@@ -619,6 +678,7 @@ namespace lfs::rendering {
             .point_cloud_mode = request.point_cloud_mode,
             .voxel_size = request.voxel_size,
             .gut = request.gut,
+            .equirectangular = request.equirectangular,
             .show_rings = request.show_rings,
             .ring_width = request.ring_width};
 

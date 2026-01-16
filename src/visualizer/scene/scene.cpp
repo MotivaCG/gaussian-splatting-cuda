@@ -41,7 +41,11 @@ namespace lfs::vis {
         });
         visible.setCallback([this] {
             if (scene_) {
-                scene_->invalidateCache();
+                if (scene_->isConsolidated()) {
+                    scene_->invalidateTransformCache();
+                } else {
+                    scene_->invalidateCache();
+                }
             }
         });
     }
@@ -77,6 +81,13 @@ namespace lfs::vis {
         if (name.empty()) {
             LOG_WARN("Cannot add node with empty name");
             return;
+        }
+
+        if (consolidated_) {
+            LOG_DEBUG("Adding node invalidates consolidation");
+            consolidated_ = false;
+            consolidated_node_ids_.clear();
+            cached_combined_.reset();
         }
 
         // Calculate gaussian count and centroid before moving
@@ -116,7 +127,7 @@ namespace lfs::vis {
         removeNodeInternal(name, keep_children, false);
     }
 
-    void Scene::removeNodeInternal(const std::string& name, const bool keep_children, const bool force) {
+    void Scene::removeNodeInternal(const std::string& name, const bool keep_children, [[maybe_unused]] const bool force) {
         if (name.empty())
             return;
 
@@ -124,12 +135,6 @@ namespace lfs::vis {
                                      [&name](const std::unique_ptr<Node>& node) { return node->name == name; });
         if (it == nodes_.end())
             return;
-
-        // Prevent direct deletion of CROPBOX nodes (but allow when deleting parent)
-        if (!force && (*it)->type == NodeType::CROPBOX) {
-            LOG_WARN("Cannot delete CROPBOX node '{}' - use recalculate instead", name);
-            return;
-        }
 
         const NodeId id = (*it)->id;
         const NodeId parent_id = (*it)->parent_id;
@@ -232,9 +237,8 @@ namespace lfs::vis {
     void Scene::setNodeTransform(const std::string& name, const glm::mat4& transform) {
         const auto it = std::find_if(nodes_.begin(), nodes_.end(),
                                      [&name](const std::unique_ptr<Node>& node) { return node->name == name; });
-
         if (it != nodes_.end()) {
-            (*it)->local_transform = transform; // Observable auto-invalidates cache and marks transform dirty
+            (*it)->local_transform = transform;
         }
     }
 
@@ -258,6 +262,8 @@ namespace lfs::vis {
         cached_transforms_.clear();
         model_cache_valid_ = false;
         transform_cache_valid_ = false;
+        consolidated_ = false;
+        consolidated_node_ids_.clear();
 
         selection_mask_.reset();
         has_selection_ = false;
@@ -312,7 +318,51 @@ namespace lfs::vis {
 
     const lfs::core::SplatData* Scene::getCombinedModel() const {
         rebuildCacheIfNeeded();
-        return cached_combined_.get();
+        return single_node_model_ ? single_node_model_ : cached_combined_.get();
+    }
+
+    size_t Scene::consolidateNodeModels() {
+        rebuildCacheIfNeeded();
+
+        if (single_node_model_ || !cached_combined_) {
+            return 0;
+        }
+
+        consolidated_node_ids_.clear();
+        size_t consolidated = 0;
+        for (auto& node : nodes_) {
+            if (node->model && isNodeEffectivelyVisible(node->id)) {
+                consolidated_node_ids_.push_back(node->id);
+                node->model.reset();
+                ++consolidated;
+            }
+        }
+
+        if (consolidated > 0) {
+            consolidated_ = true;
+            constexpr size_t BYTES_PER_GAUSSIAN = 3 * 4 + 1 * 3 * 4 + 3 * 4 + 4 * 4 + 1 * 4;
+            const size_t saved_mb = getTotalGaussianCount() * BYTES_PER_GAUSSIAN / (1024 * 1024);
+            LOG_INFO("Consolidated {} nodes, saved ~{} MB VRAM", consolidated, saved_mb);
+        }
+
+        return consolidated;
+    }
+
+    std::vector<bool> Scene::getNodeVisibilityMask() const {
+        if (!consolidated_ || consolidated_node_ids_.empty()) {
+            return {};
+        }
+
+        std::vector<bool> mask;
+        mask.reserve(consolidated_node_ids_.size());
+        for (const NodeId id : consolidated_node_ids_) {
+            if (const auto* node = getNodeById(id)) {
+                mask.push_back(node->visible.get());
+            } else {
+                mask.push_back(true);
+            }
+        }
+        return mask;
     }
 
     const lfs::core::PointCloud* Scene::getVisiblePointCloud() const {
@@ -384,9 +434,15 @@ namespace lfs::vis {
         if (model_cache_valid_)
             return;
 
-        LOG_DEBUG("rebuildModelCacheIfNeeded - rebuilding combined model");
+        if (consolidated_ && cached_combined_) {
+            model_cache_valid_ = true;
+            return;
+        }
 
-        // Collect visible nodes
+        LOG_DEBUG("Rebuilding combined model cache");
+
+        single_node_model_ = nullptr;
+
         std::vector<const Node*> visible_nodes;
         for (const auto& node : nodes_) {
             if (node->model && isNodeEffectivelyVisible(node->id)) {
@@ -402,7 +458,22 @@ namespace lfs::vis {
             return;
         }
 
-        // Cache model sizes upfront to avoid race condition with training thread
+        if (visible_nodes.size() == 1) {
+            const auto* node = visible_nodes[0];
+            single_node_model_ = node->model.get();
+            cached_combined_.reset();
+
+            const size_t n = node->model->size();
+            cached_transform_indices_ = std::make_shared<lfs::core::Tensor>(
+                lfs::core::Tensor::zeros({n}, lfs::core::Device::CUDA, lfs::core::DataType::Int32));
+
+            LOG_DEBUG("Single node: {} ({} gaussians)", node->name, n);
+            model_cache_valid_ = true;
+            transform_cache_valid_ = false;
+            return;
+        }
+
+        // Cache model sizes to avoid race with training thread
         struct ModelStats {
             size_t total_gaussians = 0;
             int max_sh_degree = 0;
@@ -531,7 +602,7 @@ namespace lfs::vis {
     }
 
     std::vector<glm::mat4> Scene::getVisibleNodeTransforms() const {
-        rebuildCacheIfNeeded();
+        rebuildTransformCacheIfNeeded();
         return cached_transforms_;
     }
 
@@ -543,12 +614,24 @@ namespace lfs::vis {
     int Scene::getVisibleNodeIndex(const std::string& name) const {
         int index = 0;
         for (const auto& node : nodes_) {
-            if (!node->visible || !node->model) {
+            if (!node->visible || !node->model)
                 continue;
-            }
-            if (node->name == name) {
+            if (node->name == name)
                 return index;
-            }
+            ++index;
+        }
+        return -1;
+    }
+
+    int Scene::getVisibleNodeIndex(const NodeId node_id) const {
+        if (node_id == NULL_NODE)
+            return -1;
+        int index = 0;
+        for (const auto& node : nodes_) {
+            if (!node->visible || !node->model)
+                continue;
+            if (node->id == node_id)
+                return index;
             ++index;
         }
         return -1;
@@ -918,6 +1001,13 @@ namespace lfs::vis {
     }
 
     NodeId Scene::addSplat(const std::string& name, std::unique_ptr<lfs::core::SplatData> model, const NodeId parent) {
+        if (consolidated_) {
+            LOG_DEBUG("Adding splat invalidates consolidation");
+            consolidated_ = false;
+            consolidated_node_ids_.clear();
+            cached_combined_.reset();
+        }
+
         const size_t gaussian_count = static_cast<size_t>(model->size());
         const glm::vec3 centroid = computeCentroid(model.get());
 
@@ -994,19 +1084,16 @@ namespace lfs::vis {
         return id;
     }
 
-    NodeId Scene::addCropBox(const std::string& name, const NodeId parent_node) {
-        // Verify parent is a SPLAT or POINTCLOUD node
-        const auto* parent = getNodeById(parent_node);
-        if (!parent || (parent->type != NodeType::SPLAT && parent->type != NodeType::POINTCLOUD)) {
-            LOG_WARN("Cannot add cropbox '{}': parent must be a SPLAT or POINTCLOUD node", name);
-            return NULL_NODE;
-        }
+    NodeId Scene::addCropBox(const std::string& name, const NodeId parent_id) {
+        assert(parent_id != NULL_NODE && "CropBox must have a parent splat node");
 
-        // Check if this node already has a cropbox
-        for (const NodeId child_id : parent->children) {
-            if (const auto* child = getNodeById(child_id)) {
-                if (child->type == NodeType::CROPBOX) {
-                    LOG_DEBUG("Node '{}' already has cropbox '{}'", parent->name, child->name);
+        // Check if parent already has a cropbox child
+        const auto* parent = getNodeById(parent_id);
+        if (parent) {
+            for (const NodeId child_id : parent->children) {
+                const auto* child = getNodeById(child_id);
+                if (child && child->type == NodeType::CROPBOX) {
+                    LOG_DEBUG("Parent {} already has cropbox child '{}'", parent_id, child->name);
                     return child_id;
                 }
             }
@@ -1015,28 +1102,73 @@ namespace lfs::vis {
         const NodeId id = next_node_id_++;
         auto node = std::make_unique<Node>();
         node->id = id;
-        node->parent_id = parent_node;
+        node->parent_id = parent_id;
         node->type = NodeType::CROPBOX;
         node->name = name;
         node->cropbox = std::make_unique<CropBoxData>();
 
-        // Initialize cropbox bounds from parent's bounding box
+        // Initialize cropbox bounds from parent splat
         glm::vec3 bounds_min, bounds_max;
-        if (getNodeBounds(parent_node, bounds_min, bounds_max)) {
+        if (getNodeBounds(parent_id, bounds_min, bounds_max)) {
             node->cropbox->min = bounds_min;
             node->cropbox->max = bounds_max;
-        }
-
-        // Add to parent's children (must re-get parent as vector may have changed)
-        if (auto* p = getNodeById(parent_node)) {
-            p->children.push_back(id);
         }
 
         id_to_index_[id] = nodes_.size();
         node->initObservables(this);
         nodes_.push_back(std::move(node));
 
-        LOG_DEBUG("Added cropbox node '{}' (id={}) as child of '{}'", name, id, parent->name);
+        // Add to parent's children list
+        if (auto* mutable_parent = getMutableNode(parent->name)) {
+            mutable_parent->children.push_back(id);
+        }
+
+        LOG_DEBUG("Added cropbox node '{}' (id={}) as child of node id={}", name, id, parent_id);
+        return id;
+    }
+
+    NodeId Scene::addEllipsoid(const std::string& name, const NodeId parent_id) {
+        assert(parent_id != NULL_NODE && "Ellipsoid must have a parent splat node");
+
+        // Check if parent already has an ellipsoid child
+        const auto* parent = getNodeById(parent_id);
+        if (parent) {
+            for (const NodeId child_id : parent->children) {
+                const auto* child = getNodeById(child_id);
+                if (child && child->type == NodeType::ELLIPSOID) {
+                    LOG_DEBUG("Parent {} already has ellipsoid child '{}'", parent_id, child->name);
+                    return child_id;
+                }
+            }
+        }
+
+        const NodeId id = next_node_id_++;
+        auto node = std::make_unique<Node>();
+        node->id = id;
+        node->parent_id = parent_id;
+        node->type = NodeType::ELLIPSOID;
+        node->name = name;
+        node->ellipsoid = std::make_unique<EllipsoidData>();
+
+        // Initialize radii from parent splat bounds
+        glm::vec3 bounds_min, bounds_max;
+        if (getNodeBounds(parent_id, bounds_min, bounds_max)) {
+            const glm::vec3 size = bounds_max - bounds_min;
+            node->ellipsoid->radii = size * 0.5f;
+            const glm::vec3 center = (bounds_min + bounds_max) * 0.5f;
+            node->local_transform = glm::translate(glm::mat4(1.0f), center);
+        }
+
+        id_to_index_[id] = nodes_.size();
+        node->initObservables(this);
+        nodes_.push_back(std::move(node));
+
+        // Add to parent's children list
+        if (auto* mutable_parent = getMutableNode(parent->name)) {
+            mutable_parent->children.push_back(id);
+        }
+
+        LOG_DEBUG("Added ellipsoid node '{}' (id={}) as child of node id={}", name, id, parent_id);
         return id;
     }
 
@@ -1259,17 +1391,34 @@ namespace lfs::vis {
         static const glm::mat4 IDENTITY{1.0f};
         if (splats.size() == 1 && splats[0].second == IDENTITY) {
             const auto* const src = splats[0].first;
-            auto result = std::make_unique<lfs::core::SplatData>(
-                src->get_max_sh_degree(),
-                src->means_raw().clone(),
-                src->sh0_raw().clone(),
-                src->shN_raw().is_valid() ? src->shN_raw().clone() : lfs::core::Tensor(),
-                src->scaling_raw().clone(),
-                src->rotation_raw().clone(),
-                src->opacity_raw().clone(),
-                src->get_scene_scale());
-            result->set_active_sh_degree(src->get_active_sh_degree());
-            return result;
+
+            // Filter out deleted splats if deletion mask exists
+            if (src->has_deleted_mask()) {
+                const auto keep_mask = src->deleted().logical_not();
+                auto result = std::make_unique<lfs::core::SplatData>(
+                    src->get_max_sh_degree(),
+                    src->means_raw().index_select(0, keep_mask),
+                    src->sh0_raw().index_select(0, keep_mask),
+                    src->shN_raw().is_valid() ? src->shN_raw().index_select(0, keep_mask) : lfs::core::Tensor(),
+                    src->scaling_raw().index_select(0, keep_mask),
+                    src->rotation_raw().index_select(0, keep_mask),
+                    src->opacity_raw().index_select(0, keep_mask),
+                    src->get_scene_scale());
+                result->set_active_sh_degree(src->get_active_sh_degree());
+                return result;
+            } else {
+                auto result = std::make_unique<lfs::core::SplatData>(
+                    src->get_max_sh_degree(),
+                    src->means_raw().clone(),
+                    src->sh0_raw().clone(),
+                    src->shN_raw().is_valid() ? src->shN_raw().clone() : lfs::core::Tensor(),
+                    src->scaling_raw().clone(),
+                    src->rotation_raw().clone(),
+                    src->opacity_raw().clone(),
+                    src->get_scene_scale());
+                result->set_active_sh_degree(src->get_active_sh_degree());
+                return result;
+            }
         }
 
         const int shN_coeffs = (max_sh > 0) ? ((max_sh + 1) * (max_sh + 1) - 1) : 0;
@@ -1285,14 +1434,33 @@ namespace lfs::vis {
         float total_scale = 0.0f;
 
         for (const auto& [model, world_transform] : splats) {
+            // Filter out deleted splats first
+            lfs::core::Tensor means, sh0, shN, scaling, rotation, opacity;
+            if (model->has_deleted_mask()) {
+                const auto keep_mask = model->deleted().logical_not();
+                means = model->means_raw().index_select(0, keep_mask);
+                sh0 = model->sh0_raw().index_select(0, keep_mask);
+                shN = model->shN_raw().is_valid() ? model->shN_raw().index_select(0, keep_mask) : lfs::core::Tensor();
+                scaling = model->scaling_raw().index_select(0, keep_mask);
+                rotation = model->rotation_raw().index_select(0, keep_mask);
+                opacity = model->opacity_raw().index_select(0, keep_mask);
+            } else {
+                means = model->means_raw().clone();
+                sh0 = model->sh0_raw().clone();
+                shN = model->shN_raw().is_valid() ? model->shN_raw().clone() : lfs::core::Tensor();
+                scaling = model->scaling_raw().clone();
+                rotation = model->rotation_raw().clone();
+                opacity = model->opacity_raw().clone();
+            }
+
             lfs::core::SplatData transformed(
                 model->get_max_sh_degree(),
-                model->means_raw().clone(),
-                model->sh0_raw().clone(),
-                model->shN_raw().is_valid() ? model->shN_raw().clone() : lfs::core::Tensor(),
-                model->scaling_raw().clone(),
-                model->rotation_raw().clone(),
-                model->opacity_raw().clone(),
+                std::move(means),
+                std::move(sh0),
+                std::move(shN),
+                std::move(scaling),
+                std::move(rotation),
+                std::move(opacity),
                 model->get_scene_scale());
 
             lfs::core::transform(transformed, world_transform);
@@ -1506,8 +1674,12 @@ namespace lfs::vis {
             expand_bounds(node->cropbox->min, node->cropbox->max);
         }
 
-        // Recursively include children bounds
+        // Recursively include children bounds (skip crop tools - they don't contribute to data bounds)
         for (const NodeId child_id : node->children) {
+            const auto* child_node = getNodeById(child_id);
+            if (child_node && (child_node->type == NodeType::CROPBOX || child_node->type == NodeType::ELLIPSOID))
+                continue;
+
             glm::vec3 child_min, child_max;
             if (getNodeBounds(child_id, child_min, child_max)) {
                 // Transform child bounds by child's local transform relative to this node
@@ -1550,17 +1722,20 @@ namespace lfs::vis {
     // ========== CropBox Operations ==========
 
     NodeId Scene::getCropBoxForSplat(const NodeId splat_id) const {
-        const auto* node = getNodeById(splat_id);
-        // Support both SPLAT and POINTCLOUD nodes
-        if (!node || (node->type != NodeType::SPLAT && node->type != NodeType::POINTCLOUD)) {
+        if (splat_id == NULL_NODE) {
             return NULL_NODE;
         }
 
-        for (const NodeId child_id : node->children) {
-            if (const auto* child = getNodeById(child_id)) {
-                if (child->type == NodeType::CROPBOX) {
-                    return child_id;
-                }
+        // Search children of splat for CROPBOX node
+        const auto* splat = getNodeById(splat_id);
+        if (!splat) {
+            return NULL_NODE;
+        }
+
+        for (const NodeId child_id : splat->children) {
+            const auto* child = getNodeById(child_id);
+            if (child && child->type == NodeType::CROPBOX) {
+                return child_id;
             }
         }
         return NULL_NODE;
@@ -1620,8 +1795,8 @@ namespace lfs::vis {
             if (!node->cropbox)
                 continue;
 
-            // Check if parent (splat or pointcloud) is effectively visible
-            if (!isNodeEffectivelyVisible(node->parent_id))
+            // Check if parent splat is visible
+            if (node->parent_id != NULL_NODE && !isNodeEffectivelyVisible(node->parent_id))
                 continue;
 
             RenderableCropBox rcb;
@@ -1631,6 +1806,94 @@ namespace lfs::vis {
             rcb.world_transform = getWorldTransform(node->id);
             rcb.local_transform = node->local_transform.get();
             result.push_back(rcb);
+        }
+
+        return result;
+    }
+
+    // ========== Ellipsoid Operations ==========
+
+    NodeId Scene::getEllipsoidForSplat(const NodeId splat_id) const {
+        if (splat_id == NULL_NODE) {
+            return NULL_NODE;
+        }
+
+        // Search children of splat for ELLIPSOID node
+        const auto* splat = getNodeById(splat_id);
+        if (!splat) {
+            return NULL_NODE;
+        }
+
+        for (const NodeId child_id : splat->children) {
+            const auto* child = getNodeById(child_id);
+            if (child && child->type == NodeType::ELLIPSOID) {
+                return child_id;
+            }
+        }
+        return NULL_NODE;
+    }
+
+    NodeId Scene::getOrCreateEllipsoidForSplat(const NodeId splat_id) {
+        NodeId existing = getEllipsoidForSplat(splat_id);
+        if (existing != NULL_NODE) {
+            return existing;
+        }
+
+        const auto* node = getNodeById(splat_id);
+        if (!node || (node->type != NodeType::SPLAT && node->type != NodeType::POINTCLOUD)) {
+            return NULL_NODE;
+        }
+
+        const std::string ellipsoid_name = node->name + "_ellipsoid";
+        return addEllipsoid(ellipsoid_name, splat_id);
+    }
+
+    EllipsoidData* Scene::getEllipsoidData(const NodeId ellipsoid_id) {
+        auto* node = getNodeById(ellipsoid_id);
+        if (!node || node->type != NodeType::ELLIPSOID) {
+            return nullptr;
+        }
+        return node->ellipsoid.get();
+    }
+
+    const EllipsoidData* Scene::getEllipsoidData(const NodeId ellipsoid_id) const {
+        const auto* node = getNodeById(ellipsoid_id);
+        if (!node || node->type != NodeType::ELLIPSOID) {
+            return nullptr;
+        }
+        return node->ellipsoid.get();
+    }
+
+    void Scene::setEllipsoidData(const NodeId ellipsoid_id, const EllipsoidData& data) {
+        auto* node = getNodeById(ellipsoid_id);
+        if (!node || node->type != NodeType::ELLIPSOID || !node->ellipsoid) {
+            return;
+        }
+        *node->ellipsoid = data;
+    }
+
+    std::vector<Scene::RenderableEllipsoid> Scene::getVisibleEllipsoids() const {
+        std::vector<RenderableEllipsoid> result;
+
+        for (const auto& node : nodes_) {
+            if (node->type != NodeType::ELLIPSOID)
+                continue;
+            if (!node->visible)
+                continue;
+            if (!node->ellipsoid)
+                continue;
+
+            // Check if parent splat is visible
+            if (node->parent_id != NULL_NODE && !isNodeEffectivelyVisible(node->parent_id))
+                continue;
+
+            RenderableEllipsoid rel;
+            rel.node_id = node->id;
+            rel.parent_splat_id = node->parent_id;
+            rel.data = node->ellipsoid.get();
+            rel.world_transform = getWorldTransform(node->id);
+            rel.local_transform = node->local_transform.get();
+            result.push_back(rel);
         }
 
         return result;
@@ -1680,8 +1943,16 @@ namespace lfs::vis {
     lfs::core::SplatData* Scene::getTrainingModel() {
         if (training_model_node_.empty())
             return nullptr;
-        auto* node = getMutableNode(training_model_node_);
-        if (!node || !isNodeEffectivelyVisible(node->id))
+        // Direct lookup without cache invalidation - training model access
+        // shouldn't trigger visualization cache rebuild
+        auto it = std::find_if(nodes_.begin(), nodes_.end(),
+                               [this](const std::unique_ptr<Node>& node) {
+                                   return node->name == training_model_node_;
+                               });
+        if (it == nodes_.end())
+            return nullptr;
+        Node* node = it->get();
+        if (!isNodeEffectivelyVisible(node->id))
             return nullptr;
         return node->model.get();
     }

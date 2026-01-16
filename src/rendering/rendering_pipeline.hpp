@@ -43,6 +43,7 @@ namespace lfs::rendering {
             bool point_cloud_mode = false;
             float voxel_size = 0.01f;
             bool gut = false;
+            bool equirectangular = false;
             bool show_rings = false;
             float ring_width = 0.01f;
             bool show_center_markers = false;
@@ -61,12 +62,19 @@ namespace lfs::rendering {
             bool brush_saturation_mode = false;
             float brush_saturation_amount = 0.0f;
             bool selection_mode_rings = false; // Ring mode hover detection
-            // Crop box filtering
+            // Crop box filtering (scoped to parent node if >= 0)
             const Tensor* crop_box_transform = nullptr;
             const Tensor* crop_box_min = nullptr;
             const Tensor* crop_box_max = nullptr;
             bool crop_inverse = false;
             bool crop_desaturate = false;
+            int crop_parent_node_index = -1;
+            // Ellipsoid filtering (scoped to parent node if >= 0)
+            const Tensor* ellipsoid_transform = nullptr;
+            const Tensor* ellipsoid_radii = nullptr;
+            bool ellipsoid_inverse = false;
+            bool ellipsoid_desaturate = false;
+            int ellipsoid_parent_node_index = -1;
             // Depth filter (Selection tool - separate from crop box, always desaturates outside)
             const Tensor* depth_filter_transform = nullptr;
             const Tensor* depth_filter_min = nullptr;
@@ -77,6 +85,7 @@ namespace lfs::rendering {
             int highlight_gaussian_id = -1;
             float far_plane = DEFAULT_FAR_PLANE;
             std::vector<bool> selected_node_mask;
+            std::vector<bool> node_visibility_mask; // Per-node visibility for culling (consolidated models)
             bool desaturate_unselected = false;
             float selection_flash_intensity = 0.0f;
             bool orthographic = false;

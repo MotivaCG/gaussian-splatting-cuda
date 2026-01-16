@@ -31,6 +31,12 @@ namespace lfs::vis::gui::panels {
         constexpr float ROTATION_STEP_FAST = 15.0f;
         constexpr float MIN_SIZE = 0.001f;
         constexpr float BASE_INPUT_WIDTH_PADDING = 40.0f;
+        constexpr float QUAT_EQUIV_EPSILON = 1e-4f;
+
+        bool sameRotation(const glm::quat& a, const glm::quat& b) {
+            const float dot = glm::dot(a, b);
+            return std::abs(std::abs(dot) - 1.0f) < QUAT_EQUIV_EPSILON;
+        }
 
         std::optional<command::CropBoxState> s_state_before_edit;
         std::string s_editing_cropbox_name;
@@ -120,7 +126,18 @@ namespace lfs::vis::gui::panels {
         glm::quat rotation;
         glm::vec4 perspective;
         glm::decompose(node->local_transform.get(), scale, rotation, translation, skew, perspective);
-        glm::vec3 euler = matrixToEulerDegrees(glm::mat3_cast(rotation));
+
+        // Only decompose euler on selection change or external modification to avoid gimbal lock
+        auto& panel_state = CropBoxState::getInstance();
+        const bool selection_changed = (cropbox_id != panel_state.euler_display_node);
+        const bool external_change = !sameRotation(rotation, panel_state.euler_display_rotation);
+
+        if (selection_changed || external_change) {
+            panel_state.euler_display = matrixToEulerDegrees(glm::mat3_cast(rotation));
+            panel_state.euler_display_node = cropbox_id;
+            panel_state.euler_display_rotation = rotation;
+        }
+        glm::vec3 euler = panel_state.euler_display;
 
         // Position (translation)
         if (ImGui::TreeNodeEx(LOC(CropBox::POSITION), ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -226,10 +243,13 @@ namespace lfs::vis::gui::panels {
         }
 
         if (changed) {
-            // Rebuild transform from edited values
             const glm::mat3 rot_mat = eulerDegreesToMatrix(euler);
             node->local_transform = glm::translate(glm::mat4(1.0f), translation) * glm::mat4(rot_mat);
             node->transform_dirty = true;
+
+            panel_state.euler_display = euler;
+            panel_state.euler_display_rotation = glm::quat_cast(rot_mat);
+
             sm->getScene().invalidateCache();
             rm->markDirty();
         }

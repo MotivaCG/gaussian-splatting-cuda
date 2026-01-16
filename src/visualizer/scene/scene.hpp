@@ -35,7 +35,8 @@ namespace lfs::vis {
         SPLAT,        // Contains gaussian splat data
         POINTCLOUD,   // Contains point cloud (pre-training, can be cropped)
         GROUP,        // Empty transform node for organization
-        CROPBOX,      // Crop box visualization (child of SPLAT or POINTCLOUD)
+        CROPBOX,      // Crop box visualization (child of SPLAT, POINTCLOUD, or DATASET)
+        ELLIPSOID,    // Ellipsoid selection (child of SPLAT, POINTCLOUD, or DATASET)
         DATASET,      // Root node for training dataset (contains cameras + model)
         CAMERA_GROUP, // Container for camera nodes (e.g., "Training", "Validation")
         CAMERA,       // Individual camera from dataset (may have mask_path)
@@ -43,12 +44,22 @@ namespace lfs::vis {
         IMAGE         // Individual image file reference (not loaded, just path)
     };
 
-    // Crop box data for CROPBOX nodes
+    // Crop box data for CROPBOX nodes (parent_id references associated splat)
     struct CropBoxData {
         glm::vec3 min{-1.0f, -1.0f, -1.0f};
         glm::vec3 max{1.0f, 1.0f, 1.0f};
         bool inverse = false; // Invert crop (keep outside instead of inside)
         bool enabled = false; // Whether to use for filtering gaussians
+        glm::vec3 color{1.0f, 1.0f, 0.0f};
+        float line_width = 2.0f;
+        float flash_intensity = 0.0f;
+    };
+
+    // Ellipsoid data for ELLIPSOID nodes (parent_id references associated splat)
+    struct EllipsoidData {
+        glm::vec3 radii{1.0f, 1.0f, 1.0f};
+        bool inverse = false;
+        bool enabled = false;
         glm::vec3 color{1.0f, 1.0f, 0.0f};
         float line_width = 2.0f;
         float flash_intensity = 0.0f;
@@ -86,6 +97,7 @@ namespace lfs::vis {
         std::unique_ptr<lfs::core::SplatData> model;        // For SPLAT nodes
         std::shared_ptr<lfs::core::PointCloud> point_cloud; // For POINTCLOUD nodes
         std::unique_ptr<CropBoxData> cropbox;
+        std::unique_ptr<EllipsoidData> ellipsoid;
         size_t gaussian_count = 0; // For SPLAT: num gaussians, for POINTCLOUD: num points
         glm::vec3 centroid{0.0f};
 
@@ -146,7 +158,8 @@ namespace lfs::vis {
         NodeId addGroup(const std::string& name, NodeId parent = NULL_NODE);
         NodeId addSplat(const std::string& name, std::unique_ptr<lfs::core::SplatData> model, NodeId parent = NULL_NODE);
         NodeId addPointCloud(const std::string& name, std::shared_ptr<lfs::core::PointCloud> point_cloud, NodeId parent = NULL_NODE);
-        NodeId addCropBox(const std::string& name, NodeId parent_node); // Parent can be SPLAT or POINTCLOUD
+        NodeId addCropBox(const std::string& name, NodeId parent_id);   // Child of splat node
+        NodeId addEllipsoid(const std::string& name, NodeId parent_id); // Child of splat node
         NodeId addDataset(const std::string& name);                     // Root node for training dataset
         NodeId addCameraGroup(const std::string& name, NodeId parent, size_t camera_count);
         NodeId addCamera(const std::string& name, NodeId parent, int camera_index, int camera_uid,
@@ -189,8 +202,30 @@ namespace lfs::vis {
         };
         [[nodiscard]] std::vector<RenderableCropBox> getVisibleCropBoxes() const;
 
+        // Ellipsoid operations
+        [[nodiscard]] NodeId getEllipsoidForSplat(NodeId splat_id) const;
+        [[nodiscard]] NodeId getOrCreateEllipsoidForSplat(NodeId splat_id);
+        [[nodiscard]] EllipsoidData* getEllipsoidData(NodeId ellipsoid_id);
+        [[nodiscard]] const EllipsoidData* getEllipsoidData(NodeId ellipsoid_id) const;
+        void setEllipsoidData(NodeId ellipsoid_id, const EllipsoidData& data);
+
+        // Renderable ellipsoid info for rendering
+        struct RenderableEllipsoid {
+            NodeId node_id = NULL_NODE;
+            NodeId parent_splat_id = NULL_NODE;
+            const EllipsoidData* data = nullptr;
+            glm::mat4 world_transform{1.0f};
+            glm::mat4 local_transform{1.0f};
+        };
+        [[nodiscard]] std::vector<RenderableEllipsoid> getVisibleEllipsoids() const;
+
         // Get combined model for rendering (transforms NOT baked, applied at render time)
         const lfs::core::SplatData* getCombinedModel() const;
+        size_t consolidateNodeModels();
+
+        // Consolidation state
+        [[nodiscard]] bool isConsolidated() const { return consolidated_; }
+        [[nodiscard]] std::vector<bool> getNodeVisibilityMask() const;
 
         // Create merged model with transforms baked in (for saving)
         [[nodiscard]] std::unique_ptr<lfs::core::SplatData> createMergedModelWithTransforms() const;
@@ -212,6 +247,7 @@ namespace lfs::vis {
 
         // Get node index in combined model (-1 if not found or not visible)
         [[nodiscard]] int getVisibleNodeIndex(const std::string& name) const;
+        [[nodiscard]] int getVisibleNodeIndex(NodeId node_id) const;
 
         // Get mask of selected visible SPLAT nodes for desaturation
         // When a group is selected, all descendant SPLAT nodes are marked as selected
@@ -320,10 +356,13 @@ namespace lfs::vis {
         mutable std::unique_ptr<lfs::core::SplatData> cached_combined_;
         mutable std::shared_ptr<lfs::core::Tensor> cached_transform_indices_;
         mutable bool model_cache_valid_ = false;
+        mutable const lfs::core::SplatData* single_node_model_ = nullptr;
 
         // Transform cache (rebuilt when transforms change, much cheaper)
         mutable std::vector<glm::mat4> cached_transforms_;
         mutable bool transform_cache_valid_ = false;
+        mutable bool consolidated_ = false;
+        mutable std::vector<NodeId> consolidated_node_ids_;
 
         // Selection mask: UInt8 [N], value = group ID (0=unselected, 1-255=group ID)
         mutable std::shared_ptr<lfs::core::Tensor> selection_mask_;

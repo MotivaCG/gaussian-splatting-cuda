@@ -20,6 +20,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <imgui.h>
+#include <ImGuizmo.h>
 
 namespace lfs::vis::tools {
 
@@ -124,6 +125,12 @@ namespace lfs::vis::tools {
         const bool add_mode = (current_op_ != SelectionOp::Remove);
         const bool replace_mode = (current_op_ == SelectionOp::Replace);
 
+        if (crop_filter_enabled_) {
+            if (auto* const rm = ctx.getRenderingManager()) {
+                rm->applyCropFilter(stroke_selection_);
+            }
+        }
+
         lfs::rendering::apply_selection_group_tensor_mask(
             stroke_selection_, existing_ref, output_mask, group_id, d_locked,
             add_mode, transform_indices.get(), node_mask, replace_mode);
@@ -151,6 +158,9 @@ namespace lfs::vis::tools {
     bool SelectionTool::handleMouseButton(const int button, const int action, const int mods,
                                           const double x, const double y, const ToolContext& ctx) {
         if (!isEnabled())
+            return false;
+
+        if (ImGuizmo::IsOver() || ImGuizmo::IsUsing())
             return false;
 
         const auto* const rm = ctx.getRenderingManager();
@@ -370,7 +380,7 @@ namespace lfs::vis::tools {
         const auto mode = rm ? rm->getSelectionMode() : lfs::rendering::SelectionMode::Centers;
 
         // Depth filter adjustment
-        if (depth_filter_enabled_ && mode != lfs::rendering::SelectionMode::Rings) {
+        if (depth_filter_enabled_) {
             if (input_bindings_) {
                 const auto action = input_bindings_->getActionForScroll(input::ToolMode::SELECTION, mods);
                 const float scale = (y_offset > 0) ? ADJUST_FACTOR : (1.0f / ADJUST_FACTOR);
@@ -425,7 +435,7 @@ namespace lfs::vis::tools {
         const auto sel_mode = rm ? rm->getSelectionMode() : lfs::rendering::SelectionMode::Centers;
 
         // Ctrl+F toggles depth filter
-        if (key == GLFW_KEY_F && (mods & GLFW_MOD_CONTROL) && sel_mode != lfs::rendering::SelectionMode::Rings) {
+        if (key == GLFW_KEY_F && (mods & GLFW_MOD_CONTROL) && !(mods & GLFW_MOD_SHIFT)) {
             if (depth_filter_enabled_) {
                 disableDepthFilter(ctx);
             } else {
@@ -436,7 +446,12 @@ namespace lfs::vis::tools {
             return true;
         }
 
-        // Escape disables depth filter
+        if (key == GLFW_KEY_F && (mods & GLFW_MOD_CONTROL) && (mods & GLFW_MOD_SHIFT)) {
+            setCropFilterEnabled(!crop_filter_enabled_);
+            ctx.requestRender();
+            return true;
+        }
+
         if (key == GLFW_KEY_ESCAPE && depth_filter_enabled_) {
             disableDepthFilter(ctx);
             ctx.requestRender();
@@ -484,10 +499,19 @@ namespace lfs::vis::tools {
         }
         depth_filter_enabled_ = false;
 
-        if (tool_context_) {
-            if (auto* const sm = tool_context_->getSceneManager()) {
-                sm->getScene().resetSelectionState();
+        if (crop_filter_enabled_ && tool_context_) {
+            if (auto* const rm = tool_context_->getRenderingManager()) {
+                auto settings = rm->getSettings();
+                settings.crop_filter_for_selection = enabled;
+                if (enabled) {
+                    settings.show_crop_box = true;
+                    settings.show_ellipsoid = true;
+                }
+                rm->updateSettings(settings);
             }
+        }
+
+        if (tool_context_) {
             if (auto* const rm = tool_context_->getRenderingManager()) {
                 rm->setOutputScreenPositions(enabled);
                 rm->clearBrushState();
@@ -533,10 +557,12 @@ namespace lfs::vis::tools {
                 if (transform_indices) {
                     lfs::rendering::filter_selection_by_node_mask(stroke_selection_, *transform_indices, node_mask);
                 }
+                if (crop_filter_enabled_) {
+                    rm->applyCropFilter(stroke_selection_);
+                }
             }
             rm->setBrushState(true, image_x, image_y, 0.0f, add_mode, nullptr, false, 0.0f);
         } else {
-            // Interpolate along stroke to avoid gaps with fast mouse movement
             constexpr float STEP_FACTOR = 0.5f;
             const glm::vec2 current_pos(static_cast<float>(x), static_cast<float>(y));
             const glm::vec2 delta = current_pos - last_stroke_pos_;
@@ -553,6 +579,9 @@ namespace lfs::vis::tools {
 
             if (transform_indices) {
                 lfs::rendering::filter_selection_by_node_mask(stroke_selection_, *transform_indices, node_mask);
+            }
+            if (crop_filter_enabled_) {
+                rm->applyCropFilter(stroke_selection_);
             }
 
             const float final_x = (current_pos.x - bounds.x) * scale_x;
@@ -738,6 +767,10 @@ namespace lfs::vis::tools {
             lfs::rendering::filter_selection_by_node_mask(preview_selection_, *indices, node_mask);
         }
 
+        if (crop_filter_enabled_) {
+            rm->applyCropFilter(preview_selection_);
+        }
+
         const bool add_mode = (current_op_ != SelectionOp::Remove);
         rm->setPreviewSelection(&preview_selection_, add_mode);
     }
@@ -789,6 +822,10 @@ namespace lfs::vis::tools {
             lfs::rendering::filter_selection_by_node_mask(preview_selection_, *indices, node_mask);
         }
 
+        if (crop_filter_enabled_) {
+            rm->applyCropFilter(preview_selection_);
+        }
+
         const bool add_mode = (current_op_ != SelectionOp::Remove);
         rm->setPreviewSelection(&preview_selection_, add_mode);
     }
@@ -830,6 +867,10 @@ namespace lfs::vis::tools {
         }
 
         lfs::rendering::polygon_select_tensor(*positions, poly_gpu, preview_selection_);
+
+        if (crop_filter_enabled_) {
+            rm->applyCropFilter(preview_selection_);
+        }
 
         const bool add_mode = (current_op_ != SelectionOp::Remove);
         rm->setPreviewSelection(&preview_selection_, add_mode);
@@ -944,6 +985,47 @@ namespace lfs::vis::tools {
             settings.depth_filter_enabled = false;
             rm->updateSettings(settings);
         }
+    }
+
+    void SelectionTool::setCropFilterEnabled(const bool enabled) {
+        crop_filter_enabled_ = enabled;
+
+        if (!tool_context_)
+            return;
+
+        auto* const rm = tool_context_->getRenderingManager();
+        auto* const sm = tool_context_->getSceneManager();
+        if (!rm)
+            return;
+
+        auto settings = rm->getSettings();
+        settings.crop_filter_for_selection = enabled;
+
+        if (enabled) {
+            settings.show_crop_box = true;
+            settings.show_ellipsoid = true;
+
+            if (sm) {
+                node_before_crop_filter_ = sm->getSelectedNodeName();
+                const auto& cropboxes = sm->getScene().getVisibleCropBoxes();
+                const auto& ellipsoids = sm->getScene().getVisibleEllipsoids();
+
+                if (!cropboxes.empty()) {
+                    if (const auto* node = sm->getScene().getNodeById(cropboxes[0].node_id)) {
+                        sm->selectNode(node->name);
+                    }
+                } else if (!ellipsoids.empty()) {
+                    if (const auto* node = sm->getScene().getNodeById(ellipsoids[0].node_id)) {
+                        sm->selectNode(node->name);
+                    }
+                }
+            }
+        } else if (sm && !node_before_crop_filter_.empty()) {
+            sm->selectNode(node_before_crop_filter_);
+            node_before_crop_filter_.clear();
+        }
+
+        rm->updateSettings(settings);
     }
 
     void SelectionTool::drawDepthFrustum(const ToolContext& ctx) const {
@@ -1121,6 +1203,25 @@ namespace lfs::vis::tools {
         // Draw depth filter
         if (depth_filter_enabled_ && tool_context_) {
             drawDepthFrustum(*tool_context_);
+        }
+
+        if (crop_filter_enabled_ && tool_context_) {
+            constexpr float MARGIN_X = 10.0f;
+            constexpr float MARGIN_SINGLE = 45.0f;
+            constexpr float MARGIN_STACKED = 70.0f;
+            constexpr float LINE_SPACING = 18.0f;
+            constexpr ImU32 CROP_FILTER_COLOR = IM_COL32(100, 200, 255, 255);
+
+            const auto& bounds = tool_context_->getViewportBounds();
+            const float text_x = bounds.x + MARGIN_X;
+            const float text_y = bounds.y + bounds.height - (depth_filter_enabled_ ? MARGIN_STACKED : MARGIN_SINGLE);
+
+            draw_list->AddText(ImGui::GetFont(), t.fonts.large_size, {text_x + 1.0f, text_y + 1.0f},
+                               t.overlay_shadow_u32(), "Crop Filter: ON");
+            draw_list->AddText(ImGui::GetFont(), t.fonts.large_size, {text_x, text_y}, CROP_FILTER_COLOR,
+                               "Crop Filter: ON");
+            draw_list->AddText(ImGui::GetFont(), t.fonts.small_size, {text_x, text_y + LINE_SPACING},
+                               t.overlay_hint_u32(), "Ctrl+Shift+F: off");
         }
     }
 

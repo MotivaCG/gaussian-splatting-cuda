@@ -60,6 +60,11 @@ namespace lfs::rendering {
         glm::mat4 transform{1.0f};
     };
 
+    struct Ellipsoid {
+        glm::vec3 radii{1.0f, 1.0f, 1.0f};
+        glm::mat4 transform{1.0f};
+    };
+
     struct RenderRequest {
         ViewportData viewport;
         float scaling_modifier = 1.0f;
@@ -71,6 +76,7 @@ namespace lfs::rendering {
         bool point_cloud_mode = false;
         float voxel_size = 0.01f;
         bool gut = false;
+        bool equirectangular = false;
         bool show_rings = false;
         float ring_width = 0.002f;
         bool show_center_markers = false;
@@ -93,10 +99,17 @@ namespace lfs::rendering {
         bool selection_mode_rings = false;
         bool crop_inverse = false;
         bool crop_desaturate = false;
+        int crop_parent_node_index = -1;
+        // Ellipsoid crop (data comes from scene graph EllipsoidData)
+        std::optional<Ellipsoid> ellipsoid;
+        bool ellipsoid_inverse = false;
+        bool ellipsoid_desaturate = false;
+        int ellipsoid_parent_node_index = -1;
         // Depth filter for selection tool (separate from crop box, always desaturates outside)
         std::optional<BoundingBox> depth_filter;
         // Per-node selection mask: true = selected. Empty = no selection effects.
         std::vector<bool> selected_node_mask;
+        std::vector<bool> node_visibility_mask; // Per-node visibility for culling (consolidated models)
         bool desaturate_unselected = false;
         float selection_flash_intensity = 0.0f;
         unsigned long long* hovered_depth_id = nullptr;
@@ -157,6 +170,7 @@ namespace lfs::rendering {
         bool point_cloud_mode = false;
         float voxel_size = 0.01f;
         bool gut = false;
+        bool equirectangular = false;
         bool show_rings = false;
         float ring_width = 0.002f;
 
@@ -232,6 +246,7 @@ namespace lfs::rendering {
         bool point_cloud_mode = false;
         float voxel_size = 0.01f;
         bool gut = false;
+        bool equirectangular = false;
         bool show_rings = false;
         float ring_width = 0.002f;
     };
@@ -319,10 +334,17 @@ namespace lfs::rendering {
             const glm::vec3& color = glm::vec3(1.0f, 1.0f, 0.0f),
             float line_width = 2.0f) = 0;
 
+        virtual Result<void> renderEllipsoid(
+            const Ellipsoid& ellipsoid,
+            const ViewportData& viewport,
+            const glm::vec3& color = glm::vec3(0.3f, 0.8f, 1.0f),
+            float line_width = 2.0f) = 0;
+
         virtual Result<void> renderCoordinateAxes(
             const ViewportData& viewport,
             float size = 2.0f,
-            const std::array<bool, 3>& visible = {true, true, true}) = 0;
+            const std::array<bool, 3>& visible = {true, true, true},
+            bool equirectangular = false) = 0;
 
         virtual Result<void> renderPivot(
             const ViewportData& viewport,
@@ -361,7 +383,8 @@ namespace lfs::rendering {
             float scale = 0.1f,
             const glm::vec3& train_color = glm::vec3(0.0f, 1.0f, 0.0f),
             const glm::vec3& eval_color = glm::vec3(1.0f, 0.0f, 0.0f),
-            const glm::mat4& scene_transform = glm::mat4(1.0f)) = 0;
+            const glm::mat4& scene_transform = glm::mat4(1.0f),
+            bool equirectangular_view = false) = 0;
 
         // Camera frustum rendering with highlighting
         virtual Result<void> renderCameraFrustumsWithHighlight(
@@ -371,7 +394,8 @@ namespace lfs::rendering {
             const glm::vec3& train_color = glm::vec3(0.0f, 1.0f, 0.0f),
             const glm::vec3& eval_color = glm::vec3(1.0f, 0.0f, 0.0f),
             int highlight_index = -1,
-            const glm::mat4& scene_transform = glm::mat4(1.0f)) = 0;
+            const glm::mat4& scene_transform = glm::mat4(1.0f),
+            bool equirectangular_view = false) = 0;
 
         // Camera frustum picking
         virtual Result<int> pickCameraFrustum(

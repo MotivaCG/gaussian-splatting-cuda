@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
+#include <thrust/iterator/transform_iterator.h>
 
 #include "Common.h"
 #include "Intersect.h"
@@ -226,6 +227,26 @@ namespace gsplat_lfs {
             cudaMemcpyAsync(flatten_ids_sorted, flatten_ids,
                             n_isects * sizeof(int32_t), cudaMemcpyDeviceToDevice, stream);
         }
+    }
+
+    void compute_cumsum_gpu(
+        const int32_t* input,
+        int64_t* output,
+        uint32_t n_elements,
+        cudaStream_t stream) {
+        if (n_elements == 0) {
+            return;
+        }
+
+        auto cast_op = [] __host__ __device__(int32_t x) { return static_cast<int64_t>(x); };
+        auto cast_iter = thrust::make_transform_iterator(input, cast_op);
+
+        CUB_WRAPPER_LFS(
+            cub::DeviceScan::InclusiveSum,
+            cast_iter,
+            output,
+            n_elements,
+            stream);
     }
 
 } // namespace gsplat_lfs

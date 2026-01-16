@@ -123,6 +123,7 @@ namespace lfs::core {
                 err = cudaMallocAsync(&ptr, bucket_size, stream);
                 if (err != cudaSuccess) {
                     LOG_ERROR("cudaMallocAsync failed for {} bytes: {}", bucket_size, cudaGetErrorString(err));
+                    cudaGetLastError(); // Clear sticky error state for clean recovery
                     return nullptr;
                 }
             }

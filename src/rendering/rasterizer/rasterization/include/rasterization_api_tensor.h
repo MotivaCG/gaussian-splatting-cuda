@@ -83,6 +83,12 @@ namespace lfs::rendering {
         const Tensor* crop_box_max = nullptr,
         bool crop_inverse = false,
         bool crop_desaturate = false,
+        int crop_parent_node_index = -1,
+        const Tensor* ellipsoid_transform = nullptr,
+        const Tensor* ellipsoid_radii = nullptr,
+        bool ellipsoid_inverse = false,
+        bool ellipsoid_desaturate = false,
+        int ellipsoid_parent_node_index = -1,
         const Tensor* depth_filter_transform = nullptr,
         const Tensor* depth_filter_min = nullptr,
         const Tensor* depth_filter_max = nullptr,
@@ -91,6 +97,7 @@ namespace lfs::rendering {
         int highlight_gaussian_id = -1,
         const std::vector<bool>& selected_node_mask = {},
         bool desaturate_unselected = false,
+        const std::vector<bool>& node_visibility_mask = {},
         float selection_flash_intensity = 0.0f,
         bool orthographic = false,
         float ortho_scale = 1.0f,
@@ -185,6 +192,19 @@ namespace lfs::rendering {
         const Tensor& transform_indices,
         const std::vector<bool>& valid_nodes);
 
+    // Filter selection by crop box and/or ellipsoid
+    // Only gaussians inside the crop region(s) remain selected
+    void filter_selection_by_crop(
+        Tensor& selection,
+        const Tensor& means,              // [N, 3] gaussian positions
+        const Tensor* crop_box_transform, // [4, 4] world-to-local, nullptr if not active
+        const Tensor* crop_box_min,       // [3] local min bounds
+        const Tensor* crop_box_max,       // [3] local max bounds
+        bool crop_inverse,
+        const Tensor* ellipsoid_transform, // [4, 4] world-to-local, nullptr if not active
+        const Tensor* ellipsoid_radii,     // [3] radii
+        bool ellipsoid_inverse);
+
     // GUT forward rasterization - returns (image [3,H,W], alpha [1,H,W], depth [1,H,W])
     std::tuple<Tensor, Tensor, Tensor>
     forward_gut_tensor(
@@ -202,6 +222,8 @@ namespace lfs::rendering {
         GutCameraModel camera_model = GutCameraModel::PINHOLE,
         const Tensor* radial_coeffs = nullptr,
         const Tensor* tangential_coeffs = nullptr,
-        const Tensor* background = nullptr);
+        const Tensor* background = nullptr,
+        const Tensor* transform_indices = nullptr,
+        const std::vector<bool>& node_visibility_mask = {});
 
 } // namespace lfs::rendering

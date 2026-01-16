@@ -14,11 +14,13 @@
 #include "rendering/rasterizer/rasterization/include/rasterization_api_tensor.h"
 #include "rendering/rasterizer/rasterization/include/rasterization_config.h"
 #include "rendering/rendering.hpp"
+#include "rendering/rendering_pipeline.hpp"
 #include "scene/scene_manager.hpp"
 #include "training/trainer.hpp"
 #include "training/training_manager.hpp"
 #include <cuda_runtime.h>
 #include <glad/glad.h>
+#include <glm/gtc/type_ptr.hpp>
 #include <shared_mutex>
 #include <stdexcept>
 
@@ -26,13 +28,17 @@ namespace lfs::vis {
 
     namespace {
         constexpr int GPU_ALIGNMENT = 16; // 16-pixel alignment for GPU texture efficiency
-    }
+    } // namespace
 
     using namespace lfs::core::events;
 
-    // GTTextureCache Implementation
     GTTextureCache::GTTextureCache() {
-        LOG_DEBUG("GTTextureCache created");
+        try {
+            constexpr lfs::io::NvCodecImageLoader::Options OPTS{.device_id = 0, .decoder_pool_size = 2};
+            nvcodec_loader_ = std::make_unique<lfs::io::NvCodecImageLoader>(OPTS);
+        } catch (...) {
+            nvcodec_loader_ = nullptr;
+        }
     }
 
     GTTextureCache::~GTTextureCache() {
@@ -55,14 +61,17 @@ namespace lfs::vis {
             return it->second.texture_id;
         }
 
-        const unsigned int texture_id = loadTexture(image_path);
-        if (texture_id == 0) {
-            return 0;
-        }
+        const auto ext = image_path.extension().string();
+        const bool is_jpeg = (ext == ".jpg" || ext == ".jpeg" || ext == ".JPG" || ext == ".JPEG");
 
-        if (texture_cache_.size() >= MAX_CACHE_SIZE) {
+        unsigned int texture_id = (nvcodec_loader_ && is_jpeg) ? loadTextureGPU(image_path) : 0;
+        if (texture_id == 0)
+            texture_id = loadTexture(image_path);
+        if (texture_id == 0)
+            return 0;
+
+        if (texture_cache_.size() >= MAX_CACHE_SIZE)
             evictOldest();
-        }
 
         texture_cache_[cam_id] = {texture_id, std::chrono::steady_clock::now()};
         return texture_id;
@@ -88,79 +97,105 @@ namespace lfs::vis {
     }
 
     unsigned int GTTextureCache::loadTexture(const std::filesystem::path& path) {
-        if (!std::filesystem::exists(path)) {
-            LOG_ERROR("GT image file does not exist: {}", lfs::core::path_to_utf8(path));
+        if (!std::filesystem::exists(path))
             return 0;
-        }
 
         try {
-            // Use image_io to load the image
             auto [data, width, height, channels] = lfs::core::load_image(path);
-
-            if (!data) {
-                LOG_ERROR("Failed to load image data: {}", lfs::core::path_to_utf8(path));
+            if (!data)
                 return 0;
+
+            int out_width = width;
+            int out_height = height;
+            int scale = 1;
+            while (out_width > MAX_TEXTURE_DIM || out_height > MAX_TEXTURE_DIM) {
+                out_width /= 2;
+                out_height /= 2;
+                scale *= 2;
             }
 
-            LOG_TRACE("Loaded GT image: {}x{} with {} channels", width, height, channels);
+            std::vector<unsigned char> final_data(out_width * out_height * channels);
+            const int scale_sq = scale * scale;
 
-            // FLIP vertically: OpenGL expects origin at bottom-left, images have origin at top-left
-            // This matches what the renderer produces
-            std::vector<unsigned char> flipped_data(width * height * channels);
-            size_t row_size = width * channels;
-            for (int y = 0; y < height; ++y) {
-                std::memcpy(
-                    flipped_data.data() + y * row_size,
-                    data + (height - 1 - y) * row_size,
-                    row_size);
+            if (scale > 1) {
+                for (int y = 0; y < out_height; ++y) {
+                    const int src_y = (out_height - 1 - y) * scale;
+                    for (int x = 0; x < out_width; ++x) {
+                        const int src_x = x * scale;
+                        for (int c = 0; c < channels; ++c) {
+                            int sum = 0;
+                            for (int sy = 0; sy < scale; ++sy)
+                                for (int sx = 0; sx < scale; ++sx)
+                                    sum += data[((src_y + sy) * width + src_x + sx) * channels + c];
+                            final_data[(y * out_width + x) * channels + c] =
+                                static_cast<unsigned char>(sum / scale_sq);
+                        }
+                    }
+                }
+            } else {
+                const size_t row_size = width * channels;
+                for (int y = 0; y < height; ++y)
+                    std::memcpy(final_data.data() + y * row_size,
+                                data + (height - 1 - y) * row_size, row_size);
             }
 
-            // Create OpenGL texture
+            lfs::core::free_image(data);
+
             unsigned int texture;
             glGenTextures(1, &texture);
             glBindTexture(GL_TEXTURE_2D, texture);
 
-            // Determine format based on channels
-            GLenum format = GL_RGB;
-            GLenum internal_format = GL_RGB8;
+            const GLenum format = (channels == 1) ? GL_RED : (channels == 4) ? GL_RGBA
+                                                                             : GL_RGB;
+            const GLenum internal = (channels == 1) ? GL_R8 : (channels == 4) ? GL_RGBA8
+                                                                              : GL_RGB8;
 
-            if (channels == 1) {
-                format = GL_RED;
-                internal_format = GL_R8;
-            } else if (channels == 2) {
-                format = GL_RG;
-                internal_format = GL_RG8;
-            } else if (channels == 3) {
-                format = GL_RGB;
-                internal_format = GL_RGB8;
-            } else if (channels == 4) {
-                format = GL_RGBA;
-                internal_format = GL_RGBA8;
-            }
-
-            // Upload flipped texture data
-            glTexImage2D(GL_TEXTURE_2D, 0, internal_format, width, height, 0,
-                         format, GL_UNSIGNED_BYTE, flipped_data.data());
-
-            // Set texture parameters
+            glTexImage2D(GL_TEXTURE_2D, 0, internal, out_width, out_height, 0,
+                         format, GL_UNSIGNED_BYTE, final_data.data());
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-            // Generate mipmaps for better quality when scaled
-            glGenerateMipmap(GL_TEXTURE_2D);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-
-            // Free image data
-            lfs::core::free_image(data);
-
-            LOG_DEBUG("Created GL texture {} for image: {} ({}x{})",
-                      texture, lfs::core::path_to_utf8(path.filename()), width, height);
             return texture;
+        } catch (...) {
+            return 0;
+        }
+    }
 
-        } catch (const std::exception& e) {
-            LOG_ERROR("Exception loading image {}: {}", lfs::core::path_to_utf8(path), e.what());
+    unsigned int GTTextureCache::loadTextureGPU(const std::filesystem::path& path) {
+        if (!nvcodec_loader_)
+            return 0;
+
+        try {
+            const auto tensor = nvcodec_loader_->load_image_gpu(path, 1, MAX_TEXTURE_DIM);
+            if (tensor.numel() == 0)
+                return 0;
+
+            const auto& shape = tensor.shape();
+            const int height = static_cast<int>(shape[1]);
+            const int width = static_cast<int>(shape[2]);
+
+            const auto hwc = tensor.permute({1, 2, 0}).contiguous();
+            const auto uint8_tensor = (hwc * 255.0f).clamp(0.0f, 255.0f).to(lfs::core::DataType::UInt8).cpu();
+
+            std::vector<unsigned char> flipped(width * height * 3);
+            const auto* src = uint8_tensor.ptr<unsigned char>();
+            const size_t row_size = width * 3;
+            for (int y = 0; y < height; ++y)
+                std::memcpy(flipped.data() + y * row_size, src + (height - 1 - y) * row_size, row_size);
+
+            unsigned int texture;
+            glGenTextures(1, &texture);
+            glBindTexture(GL_TEXTURE_2D, texture);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, flipped.data());
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+            return texture;
+        } catch (...) {
             return 0;
         }
     }
@@ -224,33 +259,32 @@ namespace lfs::vis {
             markDirty();
         });
 
-        // Listen for GT comparison toggle (G key - for camera/GT comparison)
         cmd::ToggleGTComparison::when([this](const auto&) {
-            std::lock_guard<std::mutex> lock(settings_mutex_);
+            bool is_now_enabled = false;
+            std::optional<bool> restore_equirectangular;
 
-            // G key toggles between Disabled and GTComparison only
-            if (settings_.split_view_mode == SplitViewMode::GTComparison) {
-                settings_.split_view_mode = SplitViewMode::Disabled;
-                LOG_INFO("GT comparison disabled");
-            } else {
-                // Check if we can actually do GT comparison
-                if (current_camera_id_ < 0) {
-                    LOG_WARN("Cannot enable GT comparison: no camera selected. Use arrow keys or click a camera to select one.");
-                    // Don't change the mode
-                    return;
+            {
+                std::lock_guard<std::mutex> lock(settings_mutex_);
+
+                if (settings_.split_view_mode == SplitViewMode::GTComparison) {
+                    settings_.split_view_mode = SplitViewMode::Disabled;
+                    settings_.equirectangular = pre_gt_equirectangular_;
+                    restore_equirectangular = pre_gt_equirectangular_;
+                } else {
+                    if (current_camera_id_ < 0)
+                        return;
+                    pre_gt_equirectangular_ = settings_.equirectangular;
+                    settings_.split_view_mode = SplitViewMode::GTComparison;
+                    is_now_enabled = true;
                 }
-
-                // From Disabled or PLYComparison, go to GTComparison
-                settings_.split_view_mode = SplitViewMode::GTComparison;
-                LOG_INFO("GT comparison enabled for camera {}", current_camera_id_);
+                markDirty();
             }
 
-            markDirty();
-
-            // Emit UI event
-            ui::GTComparisonModeChanged{
-                .enabled = (settings_.split_view_mode == SplitViewMode::GTComparison)}
-                .emit();
+            // Emit events outside the lock to avoid deadlock
+            if (restore_equirectangular) {
+                ui::RenderSettingsChanged{.equirectangular = *restore_equirectangular}.emit();
+            }
+            ui::GTComparisonModeChanged{.enabled = is_now_enabled}.emit();
         });
 
         // Listen for camera view changes
@@ -394,6 +428,13 @@ namespace lfs::vis {
         ui::CropBoxChanged::when([this](const auto& event) {
             std::lock_guard<std::mutex> lock(settings_mutex_);
             settings_.use_crop_box = event.enabled;
+            markDirty();
+        });
+
+        // Ellipsoid changes (scene graph is source of truth, this just handles enable flag)
+        ui::EllipsoidChanged::when([this](const auto& event) {
+            std::lock_guard<std::mutex> lock(settings_mutex_);
+            settings_.use_ellipsoid = event.enabled;
             markDirty();
         });
 
@@ -541,19 +582,20 @@ namespace lfs::vis {
                 static_cast<int>(context.viewport_region->height));
         }
 
-        // Apply render scale to reduce VRAM usage (clamped 0.25-1.0)
         const float scale = std::clamp(settings_.render_scale, 0.25f, 1.0f);
-        glm::ivec2 render_size = glm::ivec2(
+        glm::ivec2 render_size(
             static_cast<int>(viewport_size.x * scale),
             static_cast<int>(viewport_size.y * scale));
 
-        // GT comparison mode: use actual camera dimensions
         if (settings_.split_view_mode == SplitViewMode::GTComparison && current_camera_id_ >= 0) {
             if (auto* trainer_manager = scene_manager->getTrainerManager()) {
                 if (trainer_manager->hasTrainer()) {
-                    if (auto cam = trainer_manager->getCamById(current_camera_id_)) {
-                        render_size.x = cam->image_width();
-                        render_size.y = cam->image_height();
+                    if (const auto cam = trainer_manager->getCamById(current_camera_id_)) {
+                        const float aspect = static_cast<float>(cam->image_width()) / cam->image_height();
+                        const int max_dim = std::max(render_size.x, render_size.y);
+                        render_size = (aspect >= 1.0f)
+                                          ? glm::ivec2(max_dim, static_cast<int>(max_dim / aspect))
+                                          : glm::ivec2(static_cast<int>(max_dim * aspect), max_dim);
                     }
                 }
             }
@@ -633,6 +675,7 @@ namespace lfs::vis {
             .point_cloud_mode = settings_.point_cloud_mode,
             .voxel_size = settings_.voxel_size,
             .gut = settings_.gut,
+            .equirectangular = settings_.equirectangular,
             .show_rings = settings_.show_rings,
             .ring_width = settings_.ring_width,
             .show_center_markers = settings_.show_center_markers,
@@ -652,6 +695,7 @@ namespace lfs::vis {
             .selected_node_mask = (settings_.desaturate_unselected || getSelectionFlashIntensity() > 0.0f)
                                       ? std::move(scene_state.selected_node_mask)
                                       : std::vector<bool>{},
+            .node_visibility_mask = std::move(scene_state.node_visibility_mask),
             .desaturate_unselected = settings_.desaturate_unselected,
             .selection_flash_intensity = getSelectionFlashIntensity(),
             .hovered_depth_id = nullptr,
@@ -686,7 +730,28 @@ namespace lfs::vis {
                     .max = cb.data->max,
                     .transform = glm::inverse(cb.world_transform)};
                 request.crop_inverse = cb.data->inverse;
-                request.crop_desaturate = settings_.show_crop_box && !settings_.use_crop_box;
+                request.crop_desaturate = settings_.show_crop_box && !settings_.use_crop_box && settings_.desaturate_cropping;
+                request.crop_parent_node_index = scene_manager->getScene().getVisibleNodeIndex(cb.parent_splat_id);
+            }
+        }
+
+        // Ellipsoid from scene graph
+        if (settings_.use_ellipsoid || settings_.show_ellipsoid) {
+            const auto& scene = scene_manager->getScene();
+            const auto visible_ellipsoids = scene.getVisibleEllipsoids();
+            const NodeId selected_ellipsoid_id = scene_manager->getSelectedNodeEllipsoidId();
+            for (const auto& el : visible_ellipsoids) {
+                if (!el.data)
+                    continue;
+                if (selected_ellipsoid_id != NULL_NODE && el.node_id != selected_ellipsoid_id)
+                    continue;
+                request.ellipsoid = lfs::rendering::Ellipsoid{
+                    .radii = el.data->radii,
+                    .transform = glm::inverse(el.world_transform)};
+                request.ellipsoid_inverse = el.data->inverse;
+                request.ellipsoid_desaturate = settings_.show_ellipsoid && !settings_.use_ellipsoid && settings_.desaturate_cropping;
+                request.ellipsoid_parent_node_index = scene.getVisibleNodeIndex(el.parent_splat_id);
+                break;
             }
         }
 
@@ -978,7 +1043,7 @@ namespace lfs::vis {
 
                     const bool cache_valid = cached_filtered_point_cloud_ &&
                                              cached_source_point_cloud_ == scene_state.point_cloud &&
-                                             cached_cropbox_transform_ == cb.local_transform &&
+                                             cached_cropbox_transform_ == cb.world_transform &&
                                              cached_cropbox_min_ == cb.data->min &&
                                              cached_cropbox_max_ == cb.data->max &&
                                              cached_cropbox_inverse_ == cb.data->inverse;
@@ -987,7 +1052,7 @@ namespace lfs::vis {
                         const auto& means = scene_state.point_cloud->means;
                         const auto& colors = scene_state.point_cloud->colors;
                         const size_t num_points = scene_state.point_cloud->size();
-                        const glm::mat4 m = glm::inverse(cb.local_transform);
+                        const glm::mat4 m = glm::inverse(cb.world_transform);
                         const auto device = means.device();
 
                         // GLM column-major -> row-major for tensor matmul
@@ -1020,7 +1085,7 @@ namespace lfs::vis {
                         }
 
                         cached_source_point_cloud_ = scene_state.point_cloud;
-                        cached_cropbox_transform_ = cb.local_transform;
+                        cached_cropbox_transform_ = cb.world_transform;
                         cached_cropbox_min_ = cb.data->min;
                         cached_cropbox_max_ = cb.data->max;
                         cached_cropbox_inverse_ = cb.data->inverse;
@@ -1062,6 +1127,7 @@ namespace lfs::vis {
                     .point_cloud_mode = true,
                     .voxel_size = settings_.voxel_size,
                     .gut = false,
+                    .equirectangular = settings_.equirectangular,
                     .show_rings = false,
                     .ring_width = 0.0f,
                     .show_center_markers = false,
@@ -1157,9 +1223,8 @@ namespace lfs::vis {
         // Handle GT comparison mode
         if (settings_.split_view_mode == SplitViewMode::GTComparison) {
             if (current_camera_id_ < 0) {
-                // Log this only once per second to avoid spam
                 static auto last_log_time = std::chrono::steady_clock::now();
-                auto now = std::chrono::steady_clock::now();
+                const auto now = std::chrono::steady_clock::now();
                 if (now - last_log_time > std::chrono::seconds(1)) {
                     LOG_INFO("GT comparison enabled but no camera selected. Use arrow keys or click a camera to select one.");
                     last_log_time = now;
@@ -1167,66 +1232,56 @@ namespace lfs::vis {
                 return std::nullopt;
             }
 
-            // Get camera from trainer manager
-            auto* trainer_manager = scene_manager->getTrainerManager();
+            const auto* trainer_manager = scene_manager->getTrainerManager();
             if (!trainer_manager || !trainer_manager->hasTrainer()) {
                 LOG_WARN("GT comparison mode but no trainer available");
                 return std::nullopt;
             }
 
-            auto cam = trainer_manager->getCamById(current_camera_id_);
+            const auto cam = trainer_manager->getCamById(current_camera_id_);
             if (!cam) {
                 LOG_WARN("Camera {} not found", current_camera_id_);
-                current_camera_id_ = -1; // Reset invalid camera ID
+                current_camera_id_ = -1;
                 return std::nullopt;
             }
 
-            // Get GT texture
-            unsigned int gt_texture = gt_texture_cache_.getGTTexture(current_camera_id_, cam->image_path());
+            const GLuint gt_texture = gt_texture_cache_.getGTTexture(current_camera_id_, cam->image_path());
             if (gt_texture == 0) {
                 LOG_ERROR("Failed to get GT texture for camera {}", current_camera_id_);
                 return std::nullopt;
             }
 
-            // Make sure we have a valid render texture
             if (!render_texture_valid_) {
-                // Force a render to texture
-                const lfs::core::SplatData* model = scene_manager->getModelForRendering();
-                if (model) {
+                if (const auto* model = scene_manager->getModelForRendering())
                     renderToTexture(context, scene_manager, model);
-                }
             }
-
             if (!render_texture_valid_) {
                 LOG_ERROR("Failed to get cached render for GT comparison");
                 return std::nullopt;
             }
 
-            LOG_TRACE("Creating GT comparison split view for camera {}", current_camera_id_);
+            viewport_data.size = cached_result_size_;
 
-            // Compute texcoord scale for GPU-aligned texture
-            const glm::ivec2 cam_size(cam->image_width(), cam->image_height());
-            const glm::ivec2 aligned_size(
-                ((cam_size.x + GPU_ALIGNMENT - 1) / GPU_ALIGNMENT) * GPU_ALIGNMENT,
-                ((cam_size.y + GPU_ALIGNMENT - 1) / GPU_ALIGNMENT) * GPU_ALIGNMENT);
-            const glm::vec2 texcoord_scale(
-                static_cast<float>(cam_size.x) / static_cast<float>(aligned_size.x),
-                static_cast<float>(cam_size.y) / static_cast<float>(aligned_size.y));
+            // GT texture has no GPU alignment, render texture is GPU-aligned
+            constexpr glm::vec2 GT_TEXCOORD_SCALE(1.0f, 1.0f);
+            const glm::ivec2 render_alloc_size(
+                ((cached_result_size_.x + GPU_ALIGNMENT - 1) / GPU_ALIGNMENT) * GPU_ALIGNMENT,
+                ((cached_result_size_.y + GPU_ALIGNMENT - 1) / GPU_ALIGNMENT) * GPU_ALIGNMENT);
+            const glm::vec2 render_texcoord_scale(
+                static_cast<float>(cached_result_size_.x) / static_cast<float>(render_alloc_size.x),
+                static_cast<float>(cached_result_size_.y) / static_cast<float>(render_alloc_size.y));
 
             return lfs::rendering::SplitViewRequest{
-                .panels = {
-                    {.content_type = lfs::rendering::PanelContentType::Image2D,
-                     .model = nullptr,
-                     .texture_id = gt_texture,
-                     .label = "Ground Truth",
-                     .start_position = 0.0f,
-                     .end_position = settings_.split_position},
-                    {.content_type = lfs::rendering::PanelContentType::CachedRender,
-                     .model = nullptr,
-                     .texture_id = cached_render_texture_,
-                     .label = "Rendered",
-                     .start_position = settings_.split_position,
-                     .end_position = 1.0f}},
+                .panels = {{.content_type = lfs::rendering::PanelContentType::Image2D,
+                            .texture_id = gt_texture,
+                            .label = "Ground Truth",
+                            .start_position = 0.0f,
+                            .end_position = settings_.split_position},
+                           {.content_type = lfs::rendering::PanelContentType::CachedRender,
+                            .texture_id = cached_render_texture_,
+                            .label = "Rendered",
+                            .start_position = settings_.split_position,
+                            .end_position = 1.0f}},
                 .viewport = viewport_data,
                 .scaling_modifier = settings_.scaling_modifier,
                 .antialiasing = settings_.antialiasing,
@@ -1237,17 +1292,18 @@ namespace lfs::vis {
                 .point_cloud_mode = settings_.point_cloud_mode,
                 .voxel_size = settings_.voxel_size,
                 .gut = settings_.gut,
+                .equirectangular = settings_.equirectangular,
                 .show_rings = settings_.show_rings,
                 .ring_width = settings_.ring_width,
                 .show_dividers = true,
                 .divider_color = glm::vec4(1.0f, 0.85f, 0.0f, 1.0f),
                 .show_labels = true,
-                .right_texcoord_scale = texcoord_scale};
+                .left_texcoord_scale = GT_TEXCOORD_SCALE,
+                .right_texcoord_scale = render_texcoord_scale};
         }
 
-        // Handle PLY comparison mode
         if (settings_.split_view_mode == SplitViewMode::PLYComparison) {
-            auto visible_nodes = scene_manager->getScene().getVisibleNodes();
+            const auto visible_nodes = scene_manager->getScene().getVisibleNodes();
             if (visible_nodes.size() < 2) {
                 LOG_TRACE("PLY comparison needs at least 2 visible nodes, have {}", visible_nodes.size());
                 return std::nullopt;
@@ -1287,6 +1343,7 @@ namespace lfs::vis {
                 .point_cloud_mode = settings_.point_cloud_mode,
                 .voxel_size = settings_.voxel_size,
                 .gut = settings_.gut,
+                .equirectangular = settings_.equirectangular,
                 .show_rings = settings_.show_rings,
                 .ring_width = settings_.ring_width,
                 .show_dividers = true,
@@ -1328,15 +1385,22 @@ namespace lfs::vis {
                 if (!cb.data)
                     continue;
 
+                const bool is_selected = (cb.node_id == selected_cropbox_id);
+
+                // Use pending state for selected cropbox during gizmo manipulation
+                const bool use_pending = is_selected && cropbox_gizmo_active_;
+                const glm::vec3 box_min = use_pending ? pending_cropbox_min_ : cb.data->min;
+                const glm::vec3 box_max = use_pending ? pending_cropbox_max_ : cb.data->max;
+                const glm::mat4 box_transform = use_pending ? pending_cropbox_transform_ : cb.world_transform;
+
                 const lfs::rendering::BoundingBox box{
-                    .min = cb.data->min,
-                    .max = cb.data->max,
-                    .transform = glm::inverse(cb.world_transform)};
+                    .min = box_min,
+                    .max = box_max,
+                    .transform = glm::inverse(box_transform)};
 
                 const glm::vec3 base_color = cb.data->inverse
                                                  ? glm::vec3(1.0f, 0.2f, 0.2f)
                                                  : cb.data->color;
-                const bool is_selected = (cb.node_id == selected_cropbox_id);
                 const float flash = is_selected ? cb.data->flash_intensity : 0.0f;
                 constexpr float FLASH_LINE_BOOST = 4.0f;
                 const glm::vec3 color = glm::mix(base_color, glm::vec3(1.0f), flash);
@@ -1349,9 +1413,47 @@ namespace lfs::vis {
             }
         }
 
+        // Render ellipsoid wireframe overlays
+        if (settings_.show_ellipsoid && engine_ && context.scene_manager) {
+            const auto visible_ellipsoids = context.scene_manager->getScene().getVisibleEllipsoids();
+            const NodeId selected_ellipsoid_id = context.scene_manager->getSelectedNodeEllipsoidId();
+
+            for (const auto& el : visible_ellipsoids) {
+                if (!el.data)
+                    continue;
+
+                const bool is_selected = (el.node_id == selected_ellipsoid_id);
+
+                // Use pending state for selected ellipsoid during gizmo manipulation
+                const glm::vec3 radii = (is_selected && ellipsoid_gizmo_active_)
+                                            ? pending_ellipsoid_radii_
+                                            : el.data->radii;
+                const glm::mat4 transform = (is_selected && ellipsoid_gizmo_active_)
+                                                ? pending_ellipsoid_transform_
+                                                : el.world_transform;
+
+                const lfs::rendering::Ellipsoid ellipsoid{
+                    .radii = radii,
+                    .transform = transform};
+
+                const glm::vec3 base_color = el.data->inverse
+                                                 ? glm::vec3(1.0f, 0.2f, 0.2f)
+                                                 : el.data->color;
+                const float flash = is_selected ? el.data->flash_intensity : 0.0f;
+                constexpr float FLASH_LINE_BOOST = 4.0f;
+                const glm::vec3 color = glm::mix(base_color, glm::vec3(1.0f), flash);
+                const float line_width = el.data->line_width + flash * FLASH_LINE_BOOST;
+
+                auto ellipsoid_result = engine_->renderEllipsoid(ellipsoid, viewport, color, line_width);
+                if (!ellipsoid_result) {
+                    LOG_WARN("Failed to render ellipsoid: {}", ellipsoid_result.error());
+                }
+            }
+        }
+
         // Coordinate axes
         if (settings_.show_coord_axes && engine_) {
-            auto axes_result = engine_->renderCoordinateAxes(viewport, settings_.axes_size, settings_.axes_visibility);
+            auto axes_result = engine_->renderCoordinateAxes(viewport, settings_.axes_size, settings_.axes_visibility, settings_.equirectangular);
             if (!axes_result) {
                 LOG_WARN("Failed to render coordinate axes: {}", axes_result.error());
             }
@@ -1438,7 +1540,8 @@ namespace lfs::vis {
                         settings_.train_camera_color,
                         settings_.eval_camera_color,
                         highlight_index,
-                        scene_transform);
+                        scene_transform,
+                        settings_.equirectangular);
 
                     if (!frustum_result) {
                         LOG_ERROR("Failed to render camera frustums: {}", frustum_result.error());
@@ -1481,9 +1584,8 @@ namespace lfs::vis {
             }
         }
 
-        // Grid (render last for proper wireframe compositing)
-        // Don't render grid in split view mode as it would render over the split line
-        if (settings_.show_grid && engine_ && settings_.split_view_mode == SplitViewMode::Disabled) {
+        // Grid - disabled in split view and equirectangular modes
+        if (settings_.show_grid && engine_ && settings_.split_view_mode == SplitViewMode::Disabled && !settings_.equirectangular) {
             if (const auto result = engine_->renderGrid(
                     viewport,
                     static_cast<lfs::rendering::GridPlane>(settings_.grid_plane),
@@ -1560,6 +1662,66 @@ namespace lfs::vis {
             return;
         }
         lfs::rendering::brush_select_tensor(*cached_result_.screen_positions, mouse_x, mouse_y, radius, selection_out);
+    }
+
+    void RenderingManager::applyCropFilter(lfs::core::Tensor& selection) {
+        if (!selection.is_valid() || !settings_.crop_filter_for_selection)
+            return;
+
+        auto* const sm = services().sceneOrNull();
+        if (!sm)
+            return;
+
+        const auto* const model = sm->getModelForRendering();
+        if (!model || model->size() == 0)
+            return;
+
+        const auto& means = model->means();
+        if (!means.is_valid() || means.size(0) != selection.size(0))
+            return;
+
+        lfs::core::Tensor crop_t, crop_min, crop_max;
+        bool crop_inverse = false;
+
+        const auto& cropboxes = sm->buildRenderState().cropboxes;
+        if (!cropboxes.empty() && cropboxes[0].data) {
+            const auto& cb = cropboxes[0];
+            const glm::mat4 inv_transform = glm::inverse(cb.world_transform);
+            const float* const t_ptr = glm::value_ptr(inv_transform);
+            crop_t = lfs::core::Tensor::from_vector(std::vector<float>(t_ptr, t_ptr + 16), {4, 4}, lfs::core::Device::CPU).cuda();
+            crop_min = lfs::core::Tensor::from_vector(
+                           {cb.data->min.x, cb.data->min.y, cb.data->min.z}, {3}, lfs::core::Device::CPU)
+                           .cuda();
+            crop_max = lfs::core::Tensor::from_vector(
+                           {cb.data->max.x, cb.data->max.y, cb.data->max.z}, {3}, lfs::core::Device::CPU)
+                           .cuda();
+            crop_inverse = cb.data->inverse;
+        }
+
+        lfs::core::Tensor ellip_t, ellip_radii;
+        bool ellipsoid_inverse = false;
+
+        const auto& ellipsoids = sm->getScene().getVisibleEllipsoids();
+        if (!ellipsoids.empty() && ellipsoids[0].data) {
+            const auto& el = ellipsoids[0];
+            const glm::mat4 inv_transform = glm::inverse(el.world_transform);
+            const float* const t_ptr = glm::value_ptr(inv_transform);
+            ellip_t = lfs::core::Tensor::from_vector(std::vector<float>(t_ptr, t_ptr + 16), {4, 4}, lfs::core::Device::CPU).cuda();
+            ellip_radii = lfs::core::Tensor::from_vector(
+                              {el.data->radii.x, el.data->radii.y, el.data->radii.z}, {3}, lfs::core::Device::CPU)
+                              .cuda();
+            ellipsoid_inverse = el.data->inverse;
+        }
+
+        lfs::rendering::filter_selection_by_crop(
+            selection, means,
+            crop_t.is_valid() ? &crop_t : nullptr,
+            crop_min.is_valid() ? &crop_min : nullptr,
+            crop_max.is_valid() ? &crop_max : nullptr,
+            crop_inverse,
+            ellip_t.is_valid() ? &ellip_t : nullptr,
+            ellip_radii.is_valid() ? &ellip_radii : nullptr,
+            ellipsoid_inverse);
     }
 
     void RenderingManager::setBrushState(const bool active, const float x, const float y, const float radius,

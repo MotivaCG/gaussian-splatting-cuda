@@ -33,6 +33,7 @@ namespace lfs::vis::gui {
     std::filesystem::path OpenDatasetFolderDialogNative();
 
     // Cross-platform file save/open dialogs
+    std::filesystem::path OpenImageFileDialog(const std::filesystem::path& startDir = {});
     std::filesystem::path SavePlyFileDialog(const std::string& defaultName);
     std::filesystem::path SaveJsonFileDialog(const std::string& defaultName);
     std::filesystem::path OpenJsonFileDialog();

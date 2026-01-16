@@ -159,9 +159,6 @@ namespace lfs::vis::gui::panels {
         state.brush_texture = LoadIconTexture("brush.png");
         state.painting_texture = LoadIconTexture("painting.png");
         state.align_texture = LoadIconTexture("align.png");
-        state.cropbox_texture = LoadIconTexture("cropbox.png");
-        state.bounds_texture = LoadIconTexture("bounds.png");
-        state.reset_texture = LoadIconTexture("reset.png");
         state.local_texture = LoadIconTexture("local.png");
         state.world_texture = LoadIconTexture("world.png");
         state.hide_ui_texture = LoadIconTexture("layout-off.png");
@@ -178,6 +175,8 @@ namespace lfs::vis::gui::panels {
         state.mirror_x_texture = LoadIconTexture("mirror-x.png");
         state.mirror_y_texture = LoadIconTexture("mirror-y.png");
         state.mirror_z_texture = LoadIconTexture("mirror-z.png");
+        state.origin_pivot_texture = LoadIconTexture("circle-dot.png");
+        state.bounds_center_pivot_texture = LoadIconTexture("box.png");
         state.initialized = true;
     }
 
@@ -207,12 +206,6 @@ namespace lfs::vis::gui::panels {
             glDeleteTextures(1, &state.painting_texture);
         if (state.align_texture)
             glDeleteTextures(1, &state.align_texture);
-        if (state.cropbox_texture)
-            glDeleteTextures(1, &state.cropbox_texture);
-        if (state.bounds_texture)
-            glDeleteTextures(1, &state.bounds_texture);
-        if (state.reset_texture)
-            glDeleteTextures(1, &state.reset_texture);
         if (state.local_texture)
             glDeleteTextures(1, &state.local_texture);
         if (state.world_texture)
@@ -245,6 +238,10 @@ namespace lfs::vis::gui::panels {
             glDeleteTextures(1, &state.mirror_y_texture);
         if (state.mirror_z_texture)
             glDeleteTextures(1, &state.mirror_z_texture);
+        if (state.origin_pivot_texture)
+            glDeleteTextures(1, &state.origin_pivot_texture);
+        if (state.bounds_center_pivot_texture)
+            glDeleteTextures(1, &state.bounds_center_pivot_texture);
 
         state.selection_texture = 0;
         state.rectangle_texture = 0;
@@ -256,9 +253,6 @@ namespace lfs::vis::gui::panels {
         state.scaling_texture = 0;
         state.brush_texture = 0;
         state.align_texture = 0;
-        state.cropbox_texture = 0;
-        state.bounds_texture = 0;
-        state.reset_texture = 0;
         state.local_texture = 0;
         state.world_texture = 0;
         state.hide_ui_texture = 0;
@@ -268,6 +262,8 @@ namespace lfs::vis::gui::panels {
         state.mirror_x_texture = 0;
         state.mirror_y_texture = 0;
         state.mirror_z_texture = 0;
+        state.origin_pivot_texture = 0;
+        state.bounds_center_pivot_texture = 0;
         state.initialized = false;
     }
 
@@ -283,7 +279,7 @@ namespace lfs::vis::gui::panels {
 
         editor->validateActiveTool();
 
-        constexpr int NUM_MAIN_BUTTONS = 8;
+        constexpr int NUM_MAIN_BUTTONS = 7;
         const float scale = getDpiScale();
         const float TOOLBAR_MARGIN_Y = 5.0f * scale;
         const float SUBTOOLBAR_OFFSET_Y = BASE_SUBTOOLBAR_OFFSET_Y * scale;
@@ -346,8 +342,6 @@ namespace lfs::vis::gui::panels {
                 ToolButton("##brush", state.painting_texture, ToolType::Brush, ImGuizmo::TRANSLATE, "P", LOC(Toolbar::PAINTING));
                 ImGui::SameLine();
                 ToolButton("##align", state.align_texture, ToolType::Align, ImGuizmo::TRANSLATE, "A", LOC(Toolbar::ALIGN_3POINT));
-                ImGui::SameLine();
-                ToolButton("##cropbox", state.cropbox_texture, ToolType::CropBox, ImGuizmo::BOUNDS, "C", LOC(Toolbar::CROP_BOX));
             }
             ImGui::End();
         }
@@ -403,12 +397,12 @@ namespace lfs::vis::gui::panels {
             }
         }
 
-        // Transform space toolbar (Local/World toggle)
+        // Transform toolbar
         const bool is_transform_tool = (active_tool == ToolType::Translate ||
                                         active_tool == ToolType::Rotate ||
                                         active_tool == ToolType::Scale);
         if (is_transform_tool) {
-            constexpr int NUM_BUTTONS = 2;
+            constexpr int NUM_BUTTONS = 4;
             const ImVec2 sub_size = ComputeToolbarSize(NUM_BUTTONS);
             const float sub_x = viewport_pos.x + (viewport_size.x - sub_size.x) * 0.5f;
             const float sub_y = viewport_pos.y + toolbar_size.y + SUBTOOLBAR_OFFSET_Y;
@@ -434,55 +428,24 @@ namespace lfs::vis::gui::panels {
                         widgets::SetThemedTooltip("%s", tooltip);
                 };
 
-                SpaceButton("##local", state.local_texture, TransformSpace::Local, "L", LOC(Toolbar::LOCAL_SPACE));
-                ImGui::SameLine();
-                SpaceButton("##world", state.world_texture, TransformSpace::World, "W", LOC(Toolbar::WORLD_SPACE));
-            }
-            ImGui::End();
-        }
-
-        // Cropbox operations toolbar
-        if (active_tool == ToolType::CropBox) {
-            constexpr int NUM_CROP_BUTTONS = 5;
-            const ImVec2 sub_size = ComputeToolbarSize(NUM_CROP_BUTTONS);
-            const float sub_x = viewport_pos.x + (viewport_size.x - sub_size.x) * 0.5f;
-            const float sub_y = viewport_pos.y + toolbar_size.y + SUBTOOLBAR_OFFSET_Y;
-
-            widgets::DrawWindowShadow({sub_x, sub_y}, sub_size, theme().sizes.window_rounding);
-            ImGui::SetNextWindowPos(ImVec2(sub_x, sub_y), ImGuiCond_Always);
-            ImGui::SetNextWindowSize(sub_size, ImGuiCond_Always);
-
-            const SubToolbarStyle style;
-            if (ImGui::Begin("##CropBoxToolbar", nullptr, TOOLBAR_FLAGS)) {
-                const auto& t = theme();
-                const float btn_sz = t.sizes.toolbar_button_size * scale;
-                const ImVec2 btn_size(btn_sz, btn_sz);
-
-                const auto CropOpButton = [&](const char* id, unsigned int tex,
-                                              CropBoxOperation op, const char* fallback,
-                                              const char* tooltip) {
-                    const bool selected = (state.cropbox_operation == op);
+                const auto PivotButton = [&](const char* id, unsigned int tex,
+                                             PivotMode mode, const char* fallback,
+                                             const char* tooltip) {
+                    const bool selected = (state.pivot_mode == mode);
                     if (widgets::IconButton(id, tex, btn_size, selected, fallback)) {
-                        state.cropbox_operation = op;
+                        state.pivot_mode = mode;
                     }
                     if (ImGui::IsItemHovered())
                         widgets::SetThemedTooltip("%s", tooltip);
                 };
 
-                CropOpButton("##crop_bounds", state.bounds_texture, CropBoxOperation::Bounds, "B", LOC(Toolbar::RESIZE_BOUNDS));
+                SpaceButton("##local", state.local_texture, TransformSpace::Local, "L", LOC(Toolbar::LOCAL_SPACE));
                 ImGui::SameLine();
-                CropOpButton("##crop_translate", state.translation_texture, CropBoxOperation::Translate, "T", LOC(Toolbar::TRANSLATE));
+                SpaceButton("##world", state.world_texture, TransformSpace::World, "W", LOC(Toolbar::WORLD_SPACE));
                 ImGui::SameLine();
-                CropOpButton("##crop_rotate", state.rotation_texture, CropBoxOperation::Rotate, "R", LOC(Toolbar::ROTATE));
+                PivotButton("##origin", state.origin_pivot_texture, PivotMode::Origin, "O", LOC(Toolbar::ORIGIN_PIVOT));
                 ImGui::SameLine();
-                CropOpButton("##crop_scale", state.scaling_texture, CropBoxOperation::Scale, "S", LOC(Toolbar::SCALE));
-                ImGui::SameLine();
-
-                if (widgets::IconButton("##crop_reset", state.reset_texture, btn_size, false, "X")) {
-                    state.reset_cropbox_requested = true;
-                }
-                if (ImGui::IsItemHovered())
-                    widgets::SetThemedTooltip("%s", LOC(Toolbar::RESET_DEFAULT));
+                PivotButton("##bounds", state.bounds_center_pivot_texture, PivotMode::BoundsCenter, "B", LOC(Toolbar::BOUNDS_CENTER_PIVOT));
             }
             ImGui::End();
         }

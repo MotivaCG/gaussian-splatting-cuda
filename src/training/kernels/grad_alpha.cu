@@ -125,6 +125,44 @@ namespace lfs::training::kernels {
         }
     }
 
+    // ==================== Backward Pass: Grad Alpha with Background Image ====================
+    // Computes: grad_alpha[h,w] = -sum_c(grad_image[c,h,w] * bg_image[c,h,w])
+    // CHW layout: grad_image [3, H, W], bg_image [3, H, W], grad_alpha [H, W]
+    __global__ void fused_grad_alpha_with_image_kernel(
+        const float* __restrict__ grad_image,
+        const float* __restrict__ bg_image,
+        float* __restrict__ grad_alpha,
+        int H, int W) {
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        int total = H * W;
+
+        if (idx >= total)
+            return;
+
+        int HW = H * W;
+
+        // grad_alpha = -sum_c(grad_image[c,h,w] * bg_image[c,h,w])
+        float sum = 0.0f;
+        for (int c = 0; c < 3; ++c) {
+            sum += grad_image[c * HW + idx] * bg_image[c * HW + idx];
+        }
+        grad_alpha[idx] = -sum;
+    }
+
+    void launch_fused_grad_alpha_with_image(
+        const float* grad_image,
+        const float* bg_image,
+        float* grad_alpha,
+        int H, int W,
+        cudaStream_t stream) {
+        int total = H * W;
+        constexpr int threads = 256;
+        int blocks = (total + threads - 1) / threads;
+
+        fused_grad_alpha_with_image_kernel<<<blocks, threads, 0, stream>>>(
+            grad_image, bg_image, grad_alpha, H, W);
+    }
+
     // ==================== Forward Pass: Background Blending ====================
     // Fuses: output = image + (1 - alpha) * bg_color
     // CHW layout: image [3, H, W], alpha [1, H, W] or [H, W], output [3, H, W]
@@ -178,6 +216,56 @@ namespace lfs::training::kernels {
 
         fused_background_blend_kernel<<<blocks, threads, 0, stream>>>(
             image, alpha, bg_color, output, H, W);
+    }
+
+    // ==================== Forward Pass: Background Blending with Image ====================
+    // Fuses: output = image + (1 - alpha) * bg_image (per-pixel)
+    // CHW layout: image [3, H, W], alpha [1, H, W] or [H, W], bg_image [3, H, W], output [3, H, W]
+    __global__ void fused_background_blend_with_image_kernel(
+        const float* __restrict__ image,    // [3, H, W]
+        const float* __restrict__ alpha,    // [1, H, W] or [H, W]
+        const float* __restrict__ bg_image, // [3, H, W]
+        float* __restrict__ output,         // [3, H, W]
+        int H, int W) {
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        int total = H * W;
+
+        if (idx >= total)
+            return;
+
+        int h = idx / W;
+        int w = idx % W;
+        int HW = H * W;
+        int offset = h * W + w;
+
+        // Load alpha value once (alpha is [1, H, W] or [H, W])
+        float alpha_val = alpha[offset];
+        float alpha_complement = 1.0f - alpha_val;
+
+        // Compute for all 3 channels in a single thread
+        // output[c,h,w] = image[c,h,w] + (1 - alpha[h,w]) * bg_image[c,h,w]
+        float bg_contrib_r = alpha_complement * bg_image[0 * HW + offset];
+        float bg_contrib_g = alpha_complement * bg_image[1 * HW + offset];
+        float bg_contrib_b = alpha_complement * bg_image[2 * HW + offset];
+
+        output[0 * HW + offset] = image[0 * HW + offset] + bg_contrib_r;
+        output[1 * HW + offset] = image[1 * HW + offset] + bg_contrib_g;
+        output[2 * HW + offset] = image[2 * HW + offset] + bg_contrib_b;
+    }
+
+    void launch_fused_background_blend_with_image(
+        const float* image,
+        const float* alpha,
+        const float* bg_image,
+        float* output,
+        int H, int W,
+        cudaStream_t stream) {
+        int total = H * W;
+        constexpr int threads = 256;
+        int blocks = (total + threads - 1) / threads;
+
+        fused_background_blend_with_image_kernel<<<blocks, threads, 0, stream>>>(
+            image, alpha, bg_image, output, H, W);
     }
 
     // ==================== Sigmoid Backward ====================
@@ -472,6 +560,113 @@ namespace lfs::training::kernels {
         cudaStream_t stream) {
         // Memory layout is identical, just copy
         cudaMemcpyAsync(dst, src, H * W * sizeof(float), cudaMemcpyDeviceToDevice, stream);
+    }
+
+    // ==================== Bilinear Resize for CHW Tensors ====================
+    // Resizes [C, H, W] float32 tensors using bilinear interpolation
+    __global__ void bilinear_resize_chw_kernel(
+        const float* __restrict__ src, // [C, src_H, src_W]
+        float* __restrict__ dst,       // [C, dst_H, dst_W]
+        int C,
+        int src_H, int src_W,
+        int dst_H, int dst_W) {
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        int total = dst_H * dst_W;
+
+        if (idx >= total)
+            return;
+
+        int dst_y = idx / dst_W;
+        int dst_x = idx % dst_W;
+
+        // Compute source coordinates with half-pixel offset for proper alignment
+        float src_y = (dst_y + 0.5f) * (float(src_H) / float(dst_H)) - 0.5f;
+        float src_x = (dst_x + 0.5f) * (float(src_W) / float(dst_W)) - 0.5f;
+
+        // Clamp to valid range
+        src_y = fmaxf(0.0f, fminf(src_y, float(src_H - 1)));
+        src_x = fmaxf(0.0f, fminf(src_x, float(src_W - 1)));
+
+        // Get integer coordinates and interpolation weights
+        int y0 = int(src_y);
+        int x0 = int(src_x);
+        int y1 = min(y0 + 1, src_H - 1);
+        int x1 = min(x0 + 1, src_W - 1);
+
+        float wy = src_y - float(y0);
+        float wx = src_x - float(x0);
+
+        // Precompute weights
+        float w00 = (1.0f - wy) * (1.0f - wx);
+        float w01 = (1.0f - wy) * wx;
+        float w10 = wy * (1.0f - wx);
+        float w11 = wy * wx;
+
+        int src_HW = src_H * src_W;
+        int dst_HW = dst_H * dst_W;
+
+        // Bilinear interpolation for each channel
+        for (int c = 0; c < C; ++c) {
+            const float* src_c = src + c * src_HW;
+            float val = w00 * src_c[y0 * src_W + x0] +
+                        w01 * src_c[y0 * src_W + x1] +
+                        w10 * src_c[y1 * src_W + x0] +
+                        w11 * src_c[y1 * src_W + x1];
+            dst[c * dst_HW + idx] = val;
+        }
+    }
+
+    void launch_bilinear_resize_chw(
+        const float* src,
+        float* dst,
+        int C,
+        int src_H, int src_W,
+        int dst_H, int dst_W,
+        cudaStream_t stream) {
+        int total = dst_H * dst_W;
+        constexpr int threads = 256;
+        int blocks = (total + threads - 1) / threads;
+
+        bilinear_resize_chw_kernel<<<blocks, threads, 0, stream>>>(
+            src, dst, C, src_H, src_W, dst_H, dst_W);
+    }
+
+    __device__ __forceinline__ uint32_t pcg_hash(uint32_t v) {
+        uint32_t state = v * 747796405u + 2891336453u;
+        uint32_t word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+        return (word >> 22u) ^ word;
+    }
+
+    __device__ __forceinline__ float uint_to_float(uint32_t v) {
+        return static_cast<float>(v) * (1.0f / 4294967296.0f);
+    }
+
+    __global__ void random_background_kernel(
+        float* __restrict__ output,
+        const int HW,
+        const uint32_t seed) {
+        const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+        if (idx >= HW)
+            return;
+
+        const uint32_t base = seed ^ static_cast<uint32_t>(idx);
+        output[idx] = uint_to_float(pcg_hash(base));
+        output[HW + idx] = uint_to_float(pcg_hash(base + 0x9E3779B9u));
+        output[2 * HW + idx] = uint_to_float(pcg_hash(base + 0x6C8E9CF9u));
+    }
+
+    void launch_random_background(
+        float* output,
+        const int H, const int W,
+        const uint64_t seed,
+        cudaStream_t stream) {
+        const int HW = H * W;
+        constexpr int BLOCK_SIZE = 256;
+        const int blocks = (HW + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+        random_background_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
+            output, HW, static_cast<uint32_t>(seed));
     }
 
 } // namespace lfs::training::kernels

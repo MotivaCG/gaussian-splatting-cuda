@@ -134,13 +134,13 @@ namespace lfs::rendering {
 
                 RenderResult result;
 
-                if (request.gut) {
-                    // Use local forward-only GUT rasterizer (no training module dependency)
-                    LOG_TRACE("Using GUT rasterizer (sh_degree temporarily changed from {} to {})",
-                              original_sh_degree, request.sh_degree);
+                if (request.gut || request.equirectangular) {
+                    const auto camera_model = request.equirectangular
+                                                  ? GutCameraModel::EQUIRECTANGULAR
+                                                  : GutCameraModel::PINHOLE;
                     auto render_output = gut_rasterize_tensor(
                         cam, const_cast<lfs::core::SplatData&>(model), background_,
-                        request.scaling_modifier);
+                        request.scaling_modifier, camera_model, transform_indices_ptr, request.node_visibility_mask);
                     result.image = std::move(render_output.image);
                     result.depth = std::move(render_output.depth);
                 } else {
@@ -158,7 +158,9 @@ namespace lfs::rendering {
                                                            request.selection_mode_rings,
                                                            request.show_center_markers,
                                                            request.crop_box_transform, request.crop_box_min, request.crop_box_max,
-                                                           request.crop_inverse, request.crop_desaturate,
+                                                           request.crop_inverse, request.crop_desaturate, request.crop_parent_node_index,
+                                                           request.ellipsoid_transform, request.ellipsoid_radii,
+                                                           request.ellipsoid_inverse, request.ellipsoid_desaturate, request.ellipsoid_parent_node_index,
                                                            request.depth_filter_transform, request.depth_filter_min, request.depth_filter_max,
                                                            request.deleted_mask,
                                                            request.hovered_depth_id,
@@ -166,6 +168,7 @@ namespace lfs::rendering {
                                                            request.far_plane,
                                                            request.selected_node_mask,
                                                            request.desaturate_unselected,
+                                                           request.node_visibility_mask,
                                                            request.selection_flash_intensity,
                                                            request.orthographic,
                                                            request.ortho_scale,
@@ -191,23 +194,22 @@ namespace lfs::rendering {
             lfs::core::SplatData& mutable_model = const_cast<lfs::core::SplatData&>(model);
             RenderResult result;
 
-            if (request.gut) {
-                // Use local forward-only GUT rasterizer (no training module dependency)
-                LOG_TRACE("Using GUT rasterizer");
+            if (request.gut || request.equirectangular) {
+                const auto camera_model = request.equirectangular
+                                              ? GutCameraModel::EQUIRECTANGULAR
+                                              : GutCameraModel::PINHOLE;
                 auto render_output = gut_rasterize_tensor(
-                    cam, mutable_model, background_,
-                    request.scaling_modifier);
-                result.image = std::move(render_output.image);
-                result.depth = std::move(render_output.depth);
-                result.valid = true;
-                result.orthographic = request.orthographic;
-                result.far_plane = request.far_plane;
-                LOG_TRACE("Rasterization completed successfully");
-                return result;
+                    cam, mutable_model, background_, request.scaling_modifier, camera_model,
+                    transform_indices_ptr, request.node_visibility_mask);
+                return RenderResult{
+                    .image = std::move(render_output.image),
+                    .depth = std::move(render_output.depth),
+                    .valid = true,
+                    .far_plane = request.far_plane,
+                    .orthographic = request.orthographic};
             }
 
             // Use libtorch-free tensor-based rasterizer
-            LOG_TRACE("Using TENSOR_NATIVE backend (libtorch-free rasterizer)");
             Tensor screen_positions;
             auto [image, depth] = rasterize_tensor(cam, mutable_model, background_,
                                                    request.show_rings, request.ring_width,
@@ -220,7 +222,9 @@ namespace lfs::rendering {
                                                    request.selection_mode_rings,
                                                    request.show_center_markers,
                                                    request.crop_box_transform, request.crop_box_min, request.crop_box_max,
-                                                   request.crop_inverse, request.crop_desaturate,
+                                                   request.crop_inverse, request.crop_desaturate, request.crop_parent_node_index,
+                                                   request.ellipsoid_transform, request.ellipsoid_radii,
+                                                   request.ellipsoid_inverse, request.ellipsoid_desaturate, request.ellipsoid_parent_node_index,
                                                    request.depth_filter_transform, request.depth_filter_min, request.depth_filter_max,
                                                    request.deleted_mask,
                                                    request.hovered_depth_id,
@@ -228,6 +232,7 @@ namespace lfs::rendering {
                                                    request.far_plane,
                                                    request.selected_node_mask,
                                                    request.desaturate_unselected,
+                                                   request.node_visibility_mask,
                                                    request.selection_flash_intensity,
                                                    request.orthographic,
                                                    request.ortho_scale,
@@ -334,7 +339,8 @@ namespace lfs::rendering {
             LOG_TIMER_TRACE("point_cloud_renderer_->render");
             if (auto result = point_cloud_renderer_->render(model, view, projection,
                                                             request.voxel_size, request.background_color,
-                                                            request.model_transforms, request.transform_indices);
+                                                            request.model_transforms, request.transform_indices,
+                                                            request.equirectangular);
                 !result) {
                 LOG_ERROR("Point cloud rendering failed: {}", result.error());
                 return std::unexpected(std::format("Point cloud rendering failed: {}", result.error()));
@@ -352,8 +358,8 @@ namespace lfs::rendering {
             const bool fbo_changed = fbo_interop_last_width_ != persistent_fbo_width_ ||
                                      fbo_interop_last_height_ != persistent_fbo_height_;
             const bool dims_mismatch = fbo_interop_texture_ &&
-                                       (fbo_interop_texture_->getWidth() != width ||
-                                        fbo_interop_texture_->getHeight() != height);
+                                       (fbo_interop_texture_->getWidth() != persistent_fbo_width_ ||
+                                        fbo_interop_texture_->getHeight() != persistent_fbo_height_);
             const bool should_init = persistent_color_texture_ != 0 &&
                                      (!fbo_interop_texture_ || fbo_changed || dims_mismatch);
 
@@ -361,7 +367,7 @@ namespace lfs::rendering {
                 fbo_interop_texture_.reset();
                 fbo_interop_texture_.emplace();
                 if (auto init_result = fbo_interop_texture_->initForReading(
-                        persistent_color_texture_, width, height);
+                        persistent_color_texture_, persistent_fbo_width_, persistent_fbo_height_);
                     !init_result) {
                     LOG_TRACE("FBO interop init failed: {}", init_result.error());
                     fbo_interop_texture_.reset();
@@ -372,7 +378,7 @@ namespace lfs::rendering {
 
             if (use_fbo_interop_ && fbo_interop_texture_) {
                 Tensor image_hwc;
-                if (auto read_result = fbo_interop_texture_->readToTensor(image_hwc); read_result) {
+                if (auto read_result = fbo_interop_texture_->readToTensor(image_hwc, width, height); read_result) {
                     result.image = image_hwc.permute({2, 0, 1}).contiguous();
                     result.valid = true;
                     result.external_depth_texture = persistent_depth_texture_;
@@ -527,7 +533,8 @@ namespace lfs::rendering {
         {
             LOG_TIMER_TRACE("point_cloud_renderer_->render(PointCloud)");
             if (auto result = point_cloud_renderer_->render(point_cloud, view, projection,
-                                                            request.voxel_size, request.background_color);
+                                                            request.voxel_size, request.background_color,
+                                                            {}, nullptr, request.equirectangular);
                 !result) {
                 LOG_ERROR("Raw point cloud rendering failed: {}", result.error());
                 return std::unexpected(std::format("Raw point cloud rendering failed: {}", result.error()));
@@ -545,8 +552,8 @@ namespace lfs::rendering {
             const bool fbo_changed = fbo_interop_last_width_ != persistent_fbo_width_ ||
                                      fbo_interop_last_height_ != persistent_fbo_height_;
             const bool dims_mismatch = fbo_interop_texture_ &&
-                                       (fbo_interop_texture_->getWidth() != width ||
-                                        fbo_interop_texture_->getHeight() != height);
+                                       (fbo_interop_texture_->getWidth() != persistent_fbo_width_ ||
+                                        fbo_interop_texture_->getHeight() != persistent_fbo_height_);
             const bool should_init = persistent_color_texture_ != 0 &&
                                      (!fbo_interop_texture_ || fbo_changed || dims_mismatch);
 
@@ -554,7 +561,7 @@ namespace lfs::rendering {
                 fbo_interop_texture_.reset();
                 fbo_interop_texture_.emplace();
                 if (auto init_result = fbo_interop_texture_->initForReading(
-                        persistent_color_texture_, width, height);
+                        persistent_color_texture_, persistent_fbo_width_, persistent_fbo_height_);
                     !init_result) {
                     LOG_TRACE("FBO interop init failed: {}", init_result.error());
                     fbo_interop_texture_.reset();
@@ -565,7 +572,7 @@ namespace lfs::rendering {
 
             if (use_fbo_interop_ && fbo_interop_texture_) {
                 Tensor image_hwc;
-                if (auto read_result = fbo_interop_texture_->readToTensor(image_hwc); read_result) {
+                if (auto read_result = fbo_interop_texture_->readToTensor(image_hwc, width, height); read_result) {
                     result.image = image_hwc.permute({2, 0, 1}).contiguous();
                     result.valid = true;
                     result.external_depth_texture = persistent_depth_texture_;

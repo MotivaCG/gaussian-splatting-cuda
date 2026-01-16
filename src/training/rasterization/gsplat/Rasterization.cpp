@@ -23,6 +23,7 @@ namespace gsplat_lfs {
         const float* colors,
         const float* opacities,
         const float* backgrounds,
+        const float* bg_images,
         const bool* masks,
         uint32_t C,
         uint32_t N,
@@ -59,7 +60,7 @@ namespace gsplat_lfs {
     case CDIM:                                                       \
         launch_rasterize_to_pixels_from_world_3dgs_fwd_kernel<CDIM>( \
             means, quats, scales, colors, opacities,                 \
-            backgrounds, masks, C, N, n_isects,                      \
+            backgrounds, bg_images, masks, C, N, n_isects,           \
             image_width, image_height, tile_size,                    \
             viewmats0, viewmats1, Ks, camera_model,                  \
             ut_params, rs_type,                                      \
@@ -106,6 +107,7 @@ namespace gsplat_lfs {
         const float* colors,
         const float* opacities,
         const float* backgrounds,
+        const float* bg_images,
         const bool* masks,
         uint32_t C,
         uint32_t N,
@@ -155,7 +157,7 @@ namespace gsplat_lfs {
     case CDIM:                                                          \
         launch_rasterize_to_pixels_from_world_3dgs_bwd_kernel<CDIM>(    \
             means, quats, scales, colors, opacities,                    \
-            backgrounds, masks, C, N, n_isects,                         \
+            backgrounds, bg_images, masks, C, N, n_isects,              \
             image_width, image_height, tile_size,                       \
             viewmats0, viewmats1, Ks, camera_model,                     \
             ut_params, rs_type,                                         \
@@ -205,6 +207,7 @@ namespace gsplat_lfs {
         const float* sh_coeffs,
         uint32_t sh_degree,
         const float* backgrounds,
+        const float* bg_images,
         const bool* masks,
         uint32_t N,
         uint32_t C,
@@ -293,7 +296,7 @@ namespace gsplat_lfs {
         // Step 4: Rasterize to pixels
         rasterize_to_pixels_from_world_3dgs_fwd(
             means, quats, scaled_scales, result.colors, opacities,
-            backgrounds, masks,
+            backgrounds, bg_images, masks,
             C, N, result.n_isects, channels,
             image_width, image_height, tile_size,
             viewmats0, viewmats1, Ks, camera_model,
@@ -316,6 +319,7 @@ namespace gsplat_lfs {
         const float* sh_coeffs,
         uint32_t sh_degree,
         const float* backgrounds,
+        const float* bg_images,
         const bool* masks,
         uint32_t N,
         uint32_t C,
@@ -373,7 +377,7 @@ namespace gsplat_lfs {
         // Backward through rasterization
         rasterize_to_pixels_from_world_3dgs_bwd(
             means, quats, scales, colors, opacities,
-            backgrounds, masks,
+            backgrounds, bg_images, masks,
             C, N, n_isects, channels,
             image_width, image_height, tile_size,
             viewmats0, viewmats1, Ks, camera_model,

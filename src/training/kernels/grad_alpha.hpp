@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <cuda_runtime.h>
 
 namespace lfs::training::kernels {
@@ -37,6 +38,27 @@ namespace lfs::training::kernels {
         cudaStream_t stream = nullptr);
 
     /**
+     * @brief Fused kernel for computing grad_alpha with background image
+     *
+     * Computes: grad_alpha[h,w] = -sum_c(grad_image[c,h,w] * bg_image[c,h,w])
+     *
+     * This variant uses per-pixel background values instead of a solid color.
+     *
+     * @param grad_image Input gradient [3,H,W]
+     * @param bg_image Background image [3,H,W]
+     * @param grad_alpha Output gradient [H,W]
+     * @param H Height
+     * @param W Width
+     * @param stream CUDA stream
+     */
+    void launch_fused_grad_alpha_with_image(
+        const float* grad_image,
+        const float* bg_image,
+        float* grad_alpha,
+        int H, int W,
+        cudaStream_t stream = nullptr);
+
+    /**
      * @brief Fused kernel for background blending in rasterization forward pass
      *
      * Computes: output[c,h,w] = image[c,h,w] + (1 - alpha[h,w]) * bg_color[c]
@@ -61,6 +83,30 @@ namespace lfs::training::kernels {
         const float* image,
         const float* alpha,
         const float* bg_color,
+        float* output,
+        int H, int W,
+        cudaStream_t stream = nullptr);
+
+    /**
+     * @brief Fused kernel for background blending with full background image
+     *
+     * Computes: output[c,h,w] = image[c,h,w] + (1 - alpha[h,w]) * bg_image[c,h,w]
+     *
+     * This variant accepts a full background image [3, H, W] instead of a solid color [3].
+     * The background image must be pre-resized to match the render dimensions.
+     *
+     * @param image Raw rendered image [3,H,W]
+     * @param alpha Alpha channel [1,H,W]
+     * @param bg_image Background image [3,H,W]
+     * @param output Output image [3,H,W]
+     * @param H Height
+     * @param W Width
+     * @param stream CUDA stream
+     */
+    void launch_fused_background_blend_with_image(
+        const float* image,
+        const float* alpha,
+        const float* bg_image,
         float* output,
         int H, int W,
         cudaStream_t stream = nullptr);
@@ -230,6 +276,36 @@ namespace lfs::training::kernels {
         const float* src,
         float* dst,
         int H, int W,
+        cudaStream_t stream = nullptr);
+
+    /**
+     * @brief Bilinear resize for [C, H, W] float32 tensors
+     *
+     * High-quality bilinear interpolation for resizing images.
+     * Used for resizing background images to match camera dimensions.
+     *
+     * @param src Source tensor [C, src_H, src_W]
+     * @param dst Destination tensor [C, dst_H, dst_W]
+     * @param C Number of channels (typically 3)
+     * @param src_H Source height
+     * @param src_W Source width
+     * @param dst_H Destination height
+     * @param dst_W Destination width
+     * @param stream CUDA stream
+     */
+    void launch_bilinear_resize_chw(
+        const float* src,
+        float* dst,
+        int C,
+        int src_H, int src_W,
+        int dst_H, int dst_W,
+        cudaStream_t stream = nullptr);
+
+    // Generate random per-pixel RGB background [3, H, W] with values in [0, 1]
+    void launch_random_background(
+        float* output,
+        int H, int W,
+        uint64_t seed,
         cudaStream_t stream = nullptr);
 
 } // namespace lfs::training::kernels

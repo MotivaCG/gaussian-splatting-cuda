@@ -37,12 +37,19 @@ namespace lfs::vis::gui::panels {
             glm::vec3 scale;
         };
 
+        constexpr float QUAT_EQUIV_EPSILON = 1e-4f;
+
         DecomposedTransform decompose(const glm::mat4& m) {
             DecomposedTransform d;
             glm::vec3 skew;
             glm::vec4 perspective;
             glm::decompose(m, d.scale, d.rotation, d.translation, skew, perspective);
             return d;
+        }
+
+        bool sameRotation(const glm::quat& a, const glm::quat& b) {
+            const float dot = glm::dot(a, b);
+            return std::abs(std::abs(dot) - 1.0f) < QUAT_EQUIV_EPSILON;
         }
     } // namespace
 
@@ -76,26 +83,214 @@ namespace lfs::vis::gui::panels {
         if (!ImGui::CollapsingHeader(header_label, ImGuiTreeNodeFlags_DefaultOpen))
             return;
 
-        // Multi-selection: show info only, use gizmo to transform
+        // Multi-selection: same UI as single node, values represent selection center
         if (is_multi_selection) {
+            const bool ctrl_pressed = ImGui::GetIO().KeyCtrl;
+            const float translate_step = ctrl_pressed ? TRANSLATE_STEP_CTRL : TRANSLATE_STEP;
+            const float translate_step_fast = ctrl_pressed ? TRANSLATE_STEP_CTRL_FAST : TRANSLATE_STEP_FAST;
+            const float text_width = ImGui::CalcTextSize("-000.000").x +
+                                     ImGui::GetStyle().FramePadding.x * 2.0f + BASE_INPUT_WIDTH_PADDING * getDpiScale();
+
+            const glm::vec3 current_center = scene_manager->getSelectionWorldCenter();
+
+            if (!state.multi_editing_active) {
+                state.display_translation = current_center;
+                state.display_euler = glm::vec3(0.0f);
+                state.display_scale = glm::vec3(1.0f);
+            }
+
             ImGui::Text(LOC(Transform::NODES_SELECTED), selected_names.size());
-            ImGui::TextDisabled("%s", LOC(Transform::USE_GIZMO));
+            ImGui::Text(LOC(Transform::SPACE), LOC(Transform::WORLD));
+            ImGui::Separator();
+
+            bool changed = false;
+            bool any_active = false;
+
+            // Detect selection change during active edit -> commit and reset
+            const bool selection_changed = state.multi_editing_active &&
+                                           state.multi_capture.node_names != selected_names;
+            if (selection_changed) {
+                if (!state.multi_capture.empty()) {
+                    std::vector<glm::mat4> final_transforms;
+                    for (const auto& name : state.multi_capture.node_names) {
+                        final_transforms.push_back(scene_manager->getNodeTransform(name));
+                    }
+                    bool any_changed = false;
+                    for (size_t i = 0; i < state.multi_capture.size(); ++i) {
+                        if (state.multi_capture.local_transforms[i] != final_transforms[i]) {
+                            any_changed = true;
+                            break;
+                        }
+                    }
+                    if (any_changed) {
+                        auto cmd = std::make_unique<command::MultiTransformCommand>(
+                            state.multi_capture.node_names,
+                            state.multi_capture.local_transforms, std::move(final_transforms));
+                        services().commands().execute(std::move(cmd));
+                    }
+                }
+                state.resetMultiEdit();
+                state.display_translation = current_center;
+            }
+
+            if (current_tool == ToolType::Translate) {
+                ImGui::Text("%s", LOC(Transform::POSITION));
+                ImGui::Text("X:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(text_width);
+                changed |= ImGui::InputFloat("##MultiPosX", &state.display_translation.x, translate_step, translate_step_fast, "%.3f");
+                any_active |= ImGui::IsItemActive();
+
+                ImGui::Text("Y:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(text_width);
+                changed |= ImGui::InputFloat("##MultiPosY", &state.display_translation.y, translate_step, translate_step_fast, "%.3f");
+                any_active |= ImGui::IsItemActive();
+
+                ImGui::Text("Z:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(text_width);
+                changed |= ImGui::InputFloat("##MultiPosZ", &state.display_translation.z, translate_step, translate_step_fast, "%.3f");
+                any_active |= ImGui::IsItemActive();
+            }
+
+            if (current_tool == ToolType::Rotate) {
+                ImGui::Text("%s", LOC(Transform::ROTATION_DEGREES));
+
+                ImGui::Text("X:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(text_width);
+                changed |= ImGui::InputFloat("##MultiRotX", &state.display_euler.x, ROTATE_STEP, ROTATE_STEP_FAST, "%.1f");
+                any_active |= ImGui::IsItemActive();
+
+                ImGui::Text("Y:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(text_width);
+                changed |= ImGui::InputFloat("##MultiRotY", &state.display_euler.y, ROTATE_STEP, ROTATE_STEP_FAST, "%.1f");
+                any_active |= ImGui::IsItemActive();
+
+                ImGui::Text("Z:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(text_width);
+                changed |= ImGui::InputFloat("##MultiRotZ", &state.display_euler.z, ROTATE_STEP, ROTATE_STEP_FAST, "%.1f");
+                any_active |= ImGui::IsItemActive();
+            }
+
+            if (current_tool == ToolType::Scale) {
+                ImGui::Text("%s", LOC(Transform::SCALE));
+
+                float uniform = (state.display_scale.x + state.display_scale.y + state.display_scale.z) / 3.0f;
+                ImGui::Text("U:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(text_width);
+                if (ImGui::InputFloat("##MultiScaleU", &uniform, SCALE_STEP, SCALE_STEP_FAST, "%.3f")) {
+                    uniform = std::max(uniform, MIN_SCALE);
+                    state.display_scale = glm::vec3(uniform);
+                    changed = true;
+                }
+                any_active |= ImGui::IsItemActive();
+
+                ImGui::Separator();
+
+                ImGui::Text("X:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(text_width);
+                changed |= ImGui::InputFloat("##MultiScaleX", &state.display_scale.x, SCALE_STEP, SCALE_STEP_FAST, "%.3f");
+                any_active |= ImGui::IsItemActive();
+
+                ImGui::Text("Y:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(text_width);
+                changed |= ImGui::InputFloat("##MultiScaleY", &state.display_scale.y, SCALE_STEP, SCALE_STEP_FAST, "%.3f");
+                any_active |= ImGui::IsItemActive();
+
+                ImGui::Text("Z:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(text_width);
+                changed |= ImGui::InputFloat("##MultiScaleZ", &state.display_scale.z, SCALE_STEP, SCALE_STEP_FAST, "%.3f");
+                any_active |= ImGui::IsItemActive();
+
+                state.display_scale = glm::max(state.display_scale, glm::vec3(MIN_SCALE));
+            }
+
+            if ((any_active || changed) && !state.multi_editing_active) {
+                state.multi_editing_active = true;
+                state.multi_edit_tool = current_tool;
+                state.pivot_world = current_center;
+                state.multi_capture = gizmo_ops::captureNodes(
+                    scene_manager->getScene(), selected_names);
+            }
+
+            if (changed && state.multi_editing_active && !state.multi_capture.empty()) {
+                Scene& scene = scene_manager->getScene();
+                if (current_tool == ToolType::Translate) {
+                    const glm::vec3 delta = state.display_translation - state.pivot_world;
+                    gizmo_ops::applyMultiTranslation(state.multi_capture, scene, delta);
+                } else if (current_tool == ToolType::Rotate) {
+                    const glm::mat3 rotation = glm::mat3(glm::quat(glm::radians(state.display_euler)));
+                    gizmo_ops::applyMultiRotation(state.multi_capture, scene, rotation, state.pivot_world);
+                } else if (current_tool == ToolType::Scale) {
+                    gizmo_ops::applyMultiScale(state.multi_capture, scene, state.display_scale, state.pivot_world);
+                }
+            }
+
+            if (!any_active && state.multi_editing_active) {
+                if (!state.multi_capture.empty()) {
+                    std::vector<glm::mat4> final_transforms;
+                    for (const auto& name : state.multi_capture.node_names) {
+                        final_transforms.push_back(scene_manager->getNodeTransform(name));
+                    }
+                    bool any_changed = false;
+                    for (size_t i = 0; i < state.multi_capture.size(); ++i) {
+                        if (state.multi_capture.local_transforms[i] != final_transforms[i]) {
+                            any_changed = true;
+                            break;
+                        }
+                    }
+                    if (any_changed) {
+                        auto cmd = std::make_unique<command::MultiTransformCommand>(
+                            state.multi_capture.node_names,
+                            state.multi_capture.local_transforms, std::move(final_transforms));
+                        services().commands().execute(std::move(cmd));
+                    }
+                }
+                state.resetMultiEdit();
+            }
+
             ImGui::Separator();
             if (ImGui::Button(LOC(Transform::RESET_ALL))) {
-                static const glm::mat4 IDENTITY(1.0f);
-                const size_t count = selected_names.size();
-                std::vector<glm::mat4> old_transforms;
-                std::vector<glm::mat4> new_transforms;
-                old_transforms.reserve(count);
-                new_transforms.reserve(count);
-                for (const auto& name : selected_names) {
-                    old_transforms.push_back(scene_manager->getNodeTransform(name));
-                    new_transforms.push_back(IDENTITY);
-                    scene_manager->setNodeTransform(name, IDENTITY);
+                if (state.multi_editing_active && !state.multi_capture.empty()) {
+                    std::vector<glm::mat4> final_transforms;
+                    for (const auto& name : state.multi_capture.node_names) {
+                        final_transforms.push_back(scene_manager->getNodeTransform(name));
+                    }
+                    bool any_changed = false;
+                    for (size_t i = 0; i < state.multi_capture.size(); ++i) {
+                        if (state.multi_capture.local_transforms[i] != final_transforms[i]) {
+                            any_changed = true;
+                            break;
+                        }
+                    }
+                    if (any_changed) {
+                        auto cmd = std::make_unique<command::MultiTransformCommand>(
+                            state.multi_capture.node_names,
+                            state.multi_capture.local_transforms, std::move(final_transforms));
+                        services().commands().execute(std::move(cmd));
+                    }
+                    state.resetMultiEdit();
                 }
-                auto cmd = std::make_unique<command::MultiTransformCommand>(
-                    selected_names, std::move(old_transforms), std::move(new_transforms));
-                services().commands().execute(std::move(cmd));
+
+                static const glm::mat4 IDENTITY(1.0f);
+                const auto capture = gizmo_ops::captureNodes(scene_manager->getScene(), selected_names);
+                if (!capture.empty()) {
+                    std::vector<glm::mat4> new_transforms(capture.size(), IDENTITY);
+                    for (const auto& name : capture.node_names) {
+                        scene_manager->setNodeTransform(name, IDENTITY);
+                    }
+                    auto cmd = std::make_unique<command::MultiTransformCommand>(
+                        capture.node_names, capture.local_transforms, std::move(new_transforms));
+                    services().commands().execute(std::move(cmd));
+                }
             }
             return;
         }
@@ -105,9 +300,15 @@ namespace lfs::vis::gui::panels {
         const glm::mat4 current_transform = scene_manager->getSelectedNodeTransform();
         auto [translation, rotation, scale] = decompose(current_transform);
 
-        // For world space rotation: use tracked cumulative values
-        glm::vec3 euler = use_world_space ? state.world_euler
-                                          : glm::degrees(glm::eulerAngles(rotation));
+        // Only decompose euler on selection change or external modification to avoid gimbal lock
+        const bool selection_changed = (node_name != state.euler_display_node);
+        const bool external_change = !sameRotation(rotation, state.euler_display_rotation);
+        if (selection_changed || external_change) {
+            state.euler_display = glm::degrees(glm::eulerAngles(rotation));
+            state.euler_display_node = node_name;
+            state.euler_display_rotation = rotation;
+        }
+        glm::vec3 euler = state.euler_display;
 
         const bool ctrl_pressed = ImGui::GetIO().KeyCtrl;
         const float translate_step = ctrl_pressed ? TRANSLATE_STEP_CTRL : TRANSLATE_STEP;
@@ -145,6 +346,7 @@ namespace lfs::vis::gui::panels {
 
         if (current_tool == ToolType::Rotate) {
             ImGui::Text("%s", LOC(Transform::ROTATION_DEGREES));
+
             ImGui::Text("X:");
             ImGui::SameLine();
             ImGui::SetNextItemWidth(text_width);
@@ -205,12 +407,6 @@ namespace lfs::vis::gui::panels {
             scale = glm::max(scale, glm::vec3(MIN_SCALE));
         }
 
-        // Reset world euler tracking when node changes
-        if (state.editing_node_name != node_name) {
-            state.world_euler = glm::vec3(0.0f);
-            state.prev_world_euler = glm::vec3(0.0f);
-        }
-
         // Capture initial state before first change
         if ((any_active || changed) && !state.editing_active) {
             state.editing_active = true;
@@ -218,7 +414,10 @@ namespace lfs::vis::gui::panels {
             state.transform_before_edit = current_transform;
             state.initial_translation = translation;
             state.initial_scale = scale;
-            state.prev_world_euler = state.world_euler;
+        }
+
+        if (current_tool == ToolType::Rotate && changed) {
+            state.euler_display = euler;
         }
 
         if (changed) {
@@ -229,17 +428,10 @@ namespace lfs::vis::gui::panels {
                     new_transform = state.transform_before_edit;
                     new_transform[3] = glm::vec4(translation, 1.0f);
                 } else if (current_tool == ToolType::Rotate) {
-                    const glm::vec3 euler_delta = glm::radians(euler - state.prev_world_euler);
-                    const glm::quat rot_x = glm::angleAxis(euler_delta.x, glm::vec3(1, 0, 0));
-                    const glm::quat rot_y = glm::angleAxis(euler_delta.y, glm::vec3(0, 1, 0));
-                    const glm::quat rot_z = glm::angleAxis(euler_delta.z, glm::vec3(0, 0, 1));
-                    const glm::quat delta_rot = rot_x * rot_y * rot_z;
-                    const glm::quat new_rot = delta_rot * rotation;
+                    rotation = glm::quat(glm::radians(euler));
                     new_transform = glm::translate(glm::mat4(1.0f), translation) *
-                                    glm::mat4_cast(new_rot) *
+                                    glm::mat4_cast(rotation) *
                                     glm::scale(glm::mat4(1.0f), scale);
-                    state.prev_world_euler = euler;
-                    state.world_euler = euler;
                 } else {
                     const glm::mat3 initial_rs(state.transform_before_edit);
                     const glm::vec3 scale_ratio = scale / state.initial_scale;
@@ -253,6 +445,10 @@ namespace lfs::vis::gui::panels {
             }
 
             scene_manager->setSelectedNodeTransform(new_transform);
+
+            if (current_tool == ToolType::Rotate) {
+                state.euler_display_rotation = rotation;
+            }
         }
 
         // Commit undo command when editing ends
@@ -273,8 +469,8 @@ namespace lfs::vis::gui::panels {
                 node_name, current_transform, glm::mat4(1.0f));
             services().commands().execute(std::move(cmd));
             scene_manager->setSelectedNodeTransform(glm::mat4(1.0f));
-            state.world_euler = glm::vec3(0.0f);
-            state.prev_world_euler = glm::vec3(0.0f);
+            state.euler_display = glm::vec3(0.0f);
+            state.euler_display_rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
         }
     }
 
