@@ -1554,9 +1554,8 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
             // - Center-vote: splats whose center is outside mask in most views
             // - Leakage: splats whose footprint extends outside mask boundary
             // -----------------------------------------------------------------
-            if (false) {
-            /*if (params_.optimization.mask_mode == lfs::core::param::MaskMode::HardMatting ||
-                params_.optimization.mask_mode == lfs::core::param::MaskMode::SoftMatting) {*/
+            if (params_.optimization.mask_mode == lfs::core::param::MaskMode::HardMatting ||
+                params_.optimization.mask_mode == lfs::core::param::MaskMode::SoftMatting) {
 
                 mask_pruning::CenterVotePruningConfig center_cfg;
                 center_cfg.vote_ratio_threshold = 0.80f;
@@ -1573,31 +1572,31 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                 leak_cfg.dilate_px = 2;
                 leak_cfg.invert_masks = params_.optimization.invert_masks;
 
-                std::filesystem::path diag_dir = params_.dataset.output_path / "pruning_diagnostics";
+                #ifdef NeedsPruningDiagnostics
+                    std::filesystem::path diag_dir = params_.dataset.output_path / "pruning_diagnostics";
 
+                    LOG_INFO("===== MASK-BASED PRUNING WITH VISUALIZATION =====");
+                    bool viz_success = mask_pruning::visualizer::generate_pruning_diagnostics(
+                        *strategy_,
+                        *train_dataset_,
+                        center_cfg,
+                        diag_dir,
+                        25 // Max 25 cámaras
+                    );
 
-                LOG_INFO("===== MASK-BASED PRUNING WITH VISUALIZATION =====");
-                bool viz_success = mask_pruning::visualizer::generate_pruning_diagnostics(
-                    *strategy_,
-                    *train_dataset_,
-                    center_cfg,
-                    diag_dir,
-                    25 // Max 25 cámaras
-                );
-
-                if (viz_success) {
-                    LOG_INFO("✓ Diagnostic images saved to: {}", diag_dir.string());
-                    LOG_INFO("  Generated 6 layers per camera:");
-                    LOG_INFO("    01_mask.jpg          - Mask only");
-                    LOG_INFO("    02_centers_all.jpg   - All splat centers");
-                    LOG_INFO("    03_centers_classified.jpg - Green=inside, Red=outside");
-                    LOG_INFO("    04_footprints.jpg    - Splat ellipses");
-                    LOG_INFO("    05_problem_splats.jpg - Outside + large radius");
-                    LOG_INFO("    06_summary.jpg       - Summary overlay");
-                } else {
-                    LOG_WARN("Failed to generate diagnostic visualizations");
-                }
-
+                    if (viz_success) {
+                        LOG_INFO("✓ Diagnostic images saved to: {}", diag_dir.string());
+                        LOG_INFO("  Generated 6 layers per camera:");
+                        LOG_INFO("    01_mask.jpg          - Mask only");
+                        LOG_INFO("    02_centers_all.jpg   - All splat centers");
+                        LOG_INFO("    03_centers_classified.jpg - Green=inside, Red=outside");
+                        LOG_INFO("    04_footprints.jpg    - Splat ellipses");
+                        LOG_INFO("    05_problem_splats.jpg - Outside + large radius");
+                        LOG_INFO("    06_summary.jpg       - Summary overlay");
+                    } else {
+                        LOG_WARN("Failed to generate diagnostic visualizations");
+                    }
+                #endif
                 LOG_INFO("Running post-training mask-based pruning...");
 
 
