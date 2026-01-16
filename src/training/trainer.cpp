@@ -38,6 +38,94 @@
 
 namespace lfs::training {
 
+    // ---------------------------------------------------------------------------
+    // Darkness-boost helpers (ported from old trainer, kept isolated for easy merges)
+    // ---------------------------------------------------------------------------
+    namespace {
+        using lfs::core::DataType;
+        using lfs::core::Tensor;
+
+        inline bool is_rgb_chw(const Tensor& img) {
+            return (img.ndim() == 3) && (img.shape()[0] == 3);
+        }
+
+        inline Tensor channel_as_2d(const Tensor& img, const int c) {
+            // Supports CHW ([3,H,W]) and HWC ([H,W,3]) layouts.
+            if (is_rgb_chw(img)) {
+                return img.slice(0, c, c + 1).squeeze(0); // [H,W]
+            }
+            return img.slice(2, c, c + 1).squeeze(2); // [H,W]
+        }
+
+        inline Tensor make_darkness_weight_like_image(const Tensor& gt_image, const float boost) {
+            // Weight definition (old trainer):
+            //   luma = 0.299 R + 0.587 G + 0.114 B
+            //   darkness = 1 - luma
+            //   w = 1 + boost * darkness
+            //   w /= mean(w)
+            // Returned tensor has the same shape as gt_image (CHW or HWC) for easy broadcasting.
+            // Note: normalization uses a scalar tensor (stays on GPU; no CPU sync).
+
+            constexpr float kR = 0.299f;
+            constexpr float kG = 0.587f;
+            constexpr float kB = 0.114f;
+
+            const Tensor r = channel_as_2d(gt_image, 0);
+            const Tensor g = channel_as_2d(gt_image, 1);
+            const Tensor b = channel_as_2d(gt_image, 2);
+
+            Tensor luma = r * kR;
+            luma = luma + g * kG;
+            luma = luma + b * kB;
+
+            // darkness = 1 - luma
+            Tensor darkness = Tensor::full(luma.shape(), 1.0f, luma.device()) - luma;
+
+            // w = 1 + boost * darkness
+            Tensor w2d = darkness * boost;
+            w2d = w2d + 1.0f;
+
+            // Normalize by mean to keep global scale stable.
+            // Small eps avoids divide-by-zero without introducing CPU sync.
+            constexpr float kEps = 1e-4f;
+            const Tensor mean_w = w2d.mean();
+            w2d = w2d / (mean_w + kEps);
+
+            // Broadcast across channels.
+            if (is_rgb_chw(gt_image)) {
+                return w2d.unsqueeze(0).expand({static_cast<int>(gt_image.shape()[0]),
+                                                static_cast<int>(gt_image.shape()[1]),
+                                                static_cast<int>(gt_image.shape()[2])});
+            }
+            return w2d.unsqueeze(2).expand({static_cast<int>(gt_image.shape()[0]),
+                                            static_cast<int>(gt_image.shape()[1]),
+                                            static_cast<int>(gt_image.shape()[2])});
+        }
+
+        inline std::pair<Tensor, Tensor> weighted_l1_loss_and_grad(
+            const Tensor& rendered,
+            const Tensor& gt_image,
+            const Tensor& weights,
+            const float epsilon) {
+            // loss = sum(|r-g| * w) / (sum(w)+eps)
+            // grad = sign(r-g) * w / (sum(w)+eps)
+            const Tensor weight_sum = weights.sum() + epsilon;
+            const Tensor diff = rendered - gt_image;
+            const Tensor l1 = diff.abs();
+            const Tensor sign = diff.sign();
+            const Tensor loss = (l1 * weights).sum() / weight_sum;
+            const Tensor grad = sign * weights / weight_sum;
+            return {loss, grad};
+        }
+
+        inline Tensor squeeze_batch_if_needed(Tensor grad, const Tensor& reference_image) {
+            if (grad.ndim() == 4 && reference_image.ndim() == 3) {
+                grad = grad.squeeze(0);
+            }
+            return grad;
+        }
+    } // namespace
+
     // Tile configuration for memory-efficient training
     enum class TileMode {
         One = 1, // 1 tile  - 1x1 - Render full image (no tiling)
@@ -261,29 +349,56 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
             }
 
             // SINGLE photometric pass with weighted mask
-            if (opt_params.lambda_dssim > 0.0f) {
-                auto [loss_tensor, ctx] = lfs::training::kernels::masked_fused_l1_ssim_forward(
-                    rendered, gt_image, weight_map, opt_params.lambda_dssim, masked_fused_workspace_);
+            if (opt_params.darkness_boost > 0.0f) {
+                // Darkness boost (old behavior): only affects the L1 term, not SSIM.
+                // We keep it fully isolated here to minimize merge pain with upstream changes.
+                const Tensor darkness_w = make_darkness_weight_like_image(gt_image, opt_params.darkness_boost);
 
-                grad = lfs::training::kernels::masked_fused_l1_ssim_backward(ctx, masked_fused_workspace_);
-                loss = loss_tensor;
-
-                if (grad.ndim() == 4 && rendered.ndim() == 3) {
-                    grad = grad.squeeze(0);
-                }
-            } else {
-                // Pure L1 with weighted mask
+                // Expand weight map to image shape (CHW)
                 const Tensor weight_exp = weight_map.unsqueeze(0).expand({static_cast<int>(rendered.shape()[0]),
                                                                           static_cast<int>(mask_2d.shape()[0]),
                                                                           static_cast<int>(mask_2d.shape()[1])});
-                const Tensor weight_sum = weight_exp.sum() + EPSILON;
+                const Tensor l1_weights = weight_exp * darkness_w;
 
-                const Tensor diff = rendered - gt_image;
-                const Tensor l1 = diff.abs();
-                const Tensor sign = diff.sign();
+                if (opt_params.lambda_dssim > 0.0f) {
+                    // SSIM-only pass (lambda=1) using the original weight_map (no darkness weighting)
+                    auto [ssim_loss_tensor, ssim_ctx] = lfs::training::kernels::masked_fused_l1_ssim_forward(
+                        rendered, gt_image, weight_map, 1.0f, masked_fused_workspace_);
 
-                loss = (l1 * weight_exp).sum() / weight_sum;
-                grad = sign * weight_exp / weight_sum;
+                    Tensor grad_ssim = lfs::training::kernels::masked_fused_l1_ssim_backward(ssim_ctx, masked_fused_workspace_);
+                    grad_ssim = squeeze_batch_if_needed(std::move(grad_ssim), rendered);
+
+                    // Weighted L1 pass (with darkness)
+                    auto [l1_loss_tensor, grad_l1] = weighted_l1_loss_and_grad(rendered, gt_image, l1_weights, EPSILON);
+
+                    const float lambda = opt_params.lambda_dssim;
+                    loss = l1_loss_tensor * (1.0f - lambda) + ssim_loss_tensor * lambda;
+                    grad = grad_l1 * (1.0f - lambda) + grad_ssim * lambda;
+                } else {
+                    // Pure L1 (with darkness)
+                    auto [l1_loss_tensor, grad_l1] = weighted_l1_loss_and_grad(rendered, gt_image, l1_weights, EPSILON);
+                    loss = l1_loss_tensor;
+                    grad = grad_l1;
+                }
+            } else {
+                // Baseline behavior (no darkness boost): single pass with weighted mask
+                if (opt_params.lambda_dssim > 0.0f) {
+                    auto [loss_tensor, ctx] = lfs::training::kernels::masked_fused_l1_ssim_forward(
+                        rendered, gt_image, weight_map, opt_params.lambda_dssim, masked_fused_workspace_);
+
+                    grad = lfs::training::kernels::masked_fused_l1_ssim_backward(ctx, masked_fused_workspace_);
+                    loss = loss_tensor;
+
+                    grad = squeeze_batch_if_needed(std::move(grad), rendered);
+                } else {
+                    // Pure L1 with weighted mask
+                    const Tensor weight_exp = weight_map.unsqueeze(0).expand({static_cast<int>(rendered.shape()[0]),
+                                                                              static_cast<int>(mask_2d.shape()[0]),
+                                                                              static_cast<int>(mask_2d.shape()[1])});
+                    auto [l1_loss_tensor, grad_l1] = weighted_l1_loss_and_grad(rendered, gt_image, weight_exp, EPSILON);
+                    loss = l1_loss_tensor;
+                    grad = grad_l1;
+                }
             }
 
             // Simple alpha regularization (fast, like old trainer)
@@ -1597,6 +1712,7 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                         LOG_WARN("Failed to generate diagnostic visualizations");
                     }
                 #endif
+
                 LOG_INFO("Running post-training mask-based pruning...");
 
 

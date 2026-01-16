@@ -102,6 +102,9 @@ namespace {
             ::args::ValueFlag<int> sh_degree_interval(parser, "sh_degree_interval", "SH degree interval", {"sh-degree-interval"});
             ::args::ValueFlag<int> sh_degree(parser, "sh_degree", "Max SH degree [0-3]", {"sh-degree"});
             ::args::ValueFlag<float> min_opacity(parser, "min_opacity", "Minimum opacity threshold", {"min-opacity"});
+            ::args::ValueFlag<float> darkness_boost(parser, "darkness_boost",
+                                                    "Boost photometric L1 loss for dark pixels (0 disables)",
+                                                    {"darkness-boost"});
             ::args::ValueFlag<std::string> strategy(parser, "strategy", "Optimization strategy: mcmc, adc", {"strategy"});
             ::args::ValueFlag<int> init_num_pts(parser, "init_num_pts", "Number of random initialization points", {"init-num-pts"});
             ::args::ValueFlag<float> init_extent(parser, "init_extent", "Extent of random initialization", {"init-extent"});
@@ -149,6 +152,9 @@ namespace {
                                                                                    {"alpha_consistent", lfs::core::param::MaskMode::AlphaConsistent},
                                                                                    {"hardmatting", lfs::core::param::MaskMode::HardMatting},
                                                                                    {"softmatting", lfs::core::param::MaskMode::SoftMatting}});
+            ::args::Flag attention_masks(parser, "attention_masks",
+                                         "Shortcut: enable attention masks (sets --mask-mode softmatting and enables --bg-noise)",
+                                         {"attention-masks"});
             ::args::Flag invert_masks(parser, "invert_masks", "Invert mask values (swap object/background)", {"invert-masks"});
 
             ::args::MapFlag<std::string, int> resize_factor(parser, "resize_factor",
@@ -392,6 +398,7 @@ namespace {
                                         sh_degree_interval_val = sh_degree_interval ? std::optional<int>(::args::get(sh_degree_interval)) : std::optional<int>(),
                                         sh_degree_val = sh_degree ? std::optional<int>(::args::get(sh_degree)) : std::optional<int>(),
                                         min_opacity_val = min_opacity ? std::optional<float>(::args::get(min_opacity)) : std::optional<float>(),
+                                        darkness_boost_val = darkness_boost ? std::optional<float>(::args::get(darkness_boost)) : std::optional<float>(),
                                         init_num_pts_val = init_num_pts ? std::optional<int>(::args::get(init_num_pts)) : std::optional<int>(),
                                         init_extent_val = init_extent ? std::optional<float>(::args::get(init_extent)) : std::optional<float>(),
                                         strategy_val = strategy ? std::optional<std::string>(::args::get(strategy)) : std::optional<std::string>(),
@@ -416,6 +423,7 @@ namespace {
                                         enable_save_eval_images_flag = bool(enable_save_eval_images),
                                         bg_modulation_flag = bool(bg_modulation),
                                         bg_noise_flag = bool(bg_noise),
+                                        attention_masks_flag = bool(attention_masks),
                                         random_flag = bool(random),
                                         gut_flag = bool(gut),
                                         enable_sparsity_flag = bool(enable_sparsity),
@@ -448,6 +456,7 @@ namespace {
                 setVal(sh_degree_interval_val, opt.sh_degree_interval);
                 setVal(sh_degree_val, opt.sh_degree);
                 setVal(min_opacity_val, opt.min_opacity);
+                setVal(darkness_boost_val, opt.darkness_boost);
                 setVal(init_num_pts_val, opt.init_num_pts);
                 setVal(init_extent_val, opt.init_extent);
                 setVal(strategy_val, opt.strategy);
@@ -479,6 +488,13 @@ namespace {
                 // Mask parameters
                 setVal(mask_mode_val, opt.mask_mode);
                 setFlag(invert_masks_flag, opt.invert_masks);
+
+                // Legacy shortcut: attention masks imply soft matting + background noise
+                if (attention_masks_flag) {
+                    opt.mask_mode = lfs::core::param::MaskMode::SoftMatting;
+                    opt.bg_noise = true;
+                    opt.bg_modulation = false;
+                }
                 // Also propagate to dataset config for loading
                 ds.invert_masks = opt.invert_masks;
                 ds.mask_threshold = opt.mask_threshold;
