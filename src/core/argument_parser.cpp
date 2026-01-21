@@ -140,6 +140,7 @@ namespace {
             ::args::Flag gut(parser, "gut", "Enable GUT mode", {"gut"});
             ::args::Flag enable_sparsity(parser, "enable_sparsity", "Enable sparsity optimization", {"enable-sparsity"});
             ::args::Flag skip_intermediate(parser, "skip_intermediate", "Skip intermediate PLY/checkpoint saves (only save final)", {"skip-intermediate"});
+            ::args::ValueFlag<std::string> ngs_noise(parser, "path","Enable Noise Guided Splatting from PLY file", {"ngs-noise"});
 
             // Mask-related arguments
             ::args::MapFlag<std::string, lfs::core::param::MaskMode> mask_mode(parser, "mask_mode",
@@ -382,6 +383,13 @@ namespace {
                 }
             }
 
+            if (ngs_noise) {
+                const auto path = ::args::get(ngs_noise);
+                if (!std::filesystem::exists(lfs::core::utf8_to_path(path))) {
+                    return std::unexpected(std::format("NGS (Noise Guided Splatting) PLY not found: {}", path));
+                }
+            }
+
             // Create lambda to apply command line overrides after JSON loading
             auto apply_cmd_overrides = [&params,
                                         // Capture values, not references
@@ -428,7 +436,8 @@ namespace {
                                         gut_flag = bool(gut),
                                         enable_sparsity_flag = bool(enable_sparsity),
                                         skip_intermediate_flag = bool(skip_intermediate),
-                                        invert_masks_flag = bool(invert_masks)]() {
+                                        invert_masks_flag = bool(invert_masks),
+                                        ngs_noise_val = ngs_noise ? std::optional(::args::get(ngs_noise)) : std::nullopt]() {
                 auto& opt = params.optimization;
                 auto& ds = params.dataset;
 
@@ -498,6 +507,10 @@ namespace {
                 // Also propagate to dataset config for loading
                 ds.invert_masks = opt.invert_masks;
                 ds.mask_threshold = opt.mask_threshold;
+
+                if (ngs_noise_val) {
+                    opt.ngs_noise_path = lfs::core::utf8_to_path(*ngs_noise_val);
+                }
             };
 
             return std::make_tuple(ParseResult::Success, apply_cmd_overrides);

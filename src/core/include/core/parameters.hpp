@@ -81,6 +81,10 @@ namespace lfs::core {
             std::array<float, 3> bg_color = {0.0f, 0.0f, 0.0f};  // RGB background color [0-1]
             std::filesystem::path bg_image_path = {};            // Custom background image path
 
+            // Noise Guided Splatting (NGS) - fixes false transparency
+            // Set path to enable, leave empty to disable
+            std::filesystem::path ngs_noise_path = {};
+
             // Bilateral grid parameters
             bool use_bilateral_grid = false;
             int bilateral_grid_X = 16;

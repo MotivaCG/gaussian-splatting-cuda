@@ -10,6 +10,7 @@
 #include "core/camera.hpp"
 #include "core/parameters.hpp"
 #include "core/tensor.hpp"
+#include "smn/noise_guided_splatting.hpp"
 #include "dataset.hpp"
 #include "lfs/kernels/ssim.cuh"
 #include "metrics/metrics.hpp"
@@ -259,5 +260,17 @@ namespace lfs::training {
         std::function<void()> callback_;
         std::atomic<bool> callback_busy_{false};
         cudaStream_t callback_stream_ = nullptr;
+
+        // NGS state
+        std::unique_ptr<NoiseGaussians> ngs_noise_;
+        std::unique_ptr<NGSPhaseManager> ngs_phase_manager_;
+        NGSPhase ngs_current_phase_ = NGSPhase::StandardTraining;
+        size_t ngs_surface_count_ = 0; // Original surface Gaussian count (before noise injection)
+        size_t ngs_noise_count_ = 0;   // Current injected noise Gaussian count
+        bool ngs_enabled_ = false;
+        std::expected<void, std::string> initialize_ngs();
+        void handle_ngs_phase_transition(int iter);
+        void inject_noise_into_model();
+        void remove_noise_from_model();
     };
 } // namespace lfs::training

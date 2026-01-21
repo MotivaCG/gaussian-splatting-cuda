@@ -70,6 +70,14 @@ namespace lfs::training {
         void zero_grad(int iteration);
         bool has_gradients() const;
         lfs::core::Tensor& get_grad(ParamType type);
+        
+        // Convenience: zero gradient for a contiguous gaussian range [start, start+count)
+        // Used by NGS to freeze specific parameters for noise Gaussians.
+        void zero_grad_range(ParamType type, size_t start, size_t count);
+
+        // Remove a contiguous gaussian range [start, start+count) from the optimizer state tensors.
+        // Call AFTER removing the same range from SplatData.
+        void remove_range(size_t start, size_t count);
 
         // Learning rate
         void set_lr(float lr) { config_.lr = lr; }
@@ -110,6 +118,26 @@ namespace lfs::training {
         void serialize(std::ostream& os) const;
         void deserialize(std::istream& is);
         void reserve_capacity(size_t capacity);
+
+        /**
+         * @brief Extend optimizer state for newly added Gaussians NGS (Noise Guided Gaussians)
+         *
+         * Allocates zeroed state (exp_avg, exp_avg_sq) for new Gaussians.
+         * Call AFTER adding Gaussians to SplatData.
+         *
+         * @param count Number of new Gaussians added
+         */
+        void extend_for_new_gaussians(size_t count);
+
+        /**
+         * @brief Shrink optimizer state to match reduced model size NGS (Noise Guided Gaussians)
+         *
+         * Keeps only the first `new_size` entries in each state tensor.
+         * Call AFTER removing Gaussians from SplatData.
+         *
+         * @param new_size New number of Gaussians
+         */
+        void shrink_to_size(size_t new_size);
 
     private:
         AdamConfig config_;

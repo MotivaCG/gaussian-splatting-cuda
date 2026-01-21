@@ -20,6 +20,7 @@ set(LFS_TRAINING_KERNEL_SOURCES
     kernels/mcmc_kernels.cu
     kernels/densification_kernels.cu
     kernels/grad_alpha.cu
+    kernels/noise_guided_splatting_kernels.cu
     components/sparsity_optimizer_kernels.cu
 )
 
@@ -86,8 +87,9 @@ set(TRAINING_NEW_SOURCES
     checkpoint.cpp
     trainer.cpp
     training_setup.cpp
-    mask_pruning.cpp
-    mask_pruning_visualizer.cpp
+    smn/mask_pruning.cpp
+    smn/mask_pruning_visualizer.cpp
+    smn/noise_guided_splatting.cpp
 )
 
 # lfs_training - Training module with optimizer
@@ -107,6 +109,7 @@ target_include_directories(lfs_training
         ${CMAKE_CURRENT_SOURCE_DIR}/rasterization/fastgs/optimizer/include
         ${CMAKE_CURRENT_SOURCE_DIR}/rasterization/fastgs/utils
         ${CMAKE_CURRENT_SOURCE_DIR}/rasterization  # For gsplat headers
+        ${CMAKE_CURRENT_SOURCE_DIR}/smn  # For SMN headers
 )
 
 # Link dependencies
