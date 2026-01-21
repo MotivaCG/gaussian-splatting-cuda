@@ -1391,27 +1391,50 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                         mask_tile = tile_h.slice(1, tile_x_offset, tile_x_offset + tile_width);
                     }
  
+                    // === NUEVA LÓGICA: HYBRID SWITCH ===
+                    // Creamos una copia local de los parámetros para este paso
+                    lfs::core::param::OptimizationParameters step_params = params_.optimization;
+
+                    const float progress = static_cast<float>(iter) / static_cast<float>(params_.optimization.iterations);
+
+                    // ESTRATEGIA: "Cleaning Phase" (Último 20%)
+                    // Si estamos acabando y estamos en modo Matting, cambiamos temporalmente a AlphaConsistent
+                    // para limpiar los floaters.
+                    if (progress < 0.2f) {
+                        if (step_params.mask_mode == lfs::core::param::MaskMode::SoftMatting ||
+                            step_params.mask_mode == lfs::core::param::MaskMode::HardMatting) {
+
+                            // Forzamos el modo estricto para limpiar
+                            step_params.mask_mode = lfs::core::param::MaskMode::None;
+
+                            // Opcional: Aumentar lambda_dssim ligeramente en esta fase para preservar estructura
+                            // step_params.lambda_dssim = 0.2f;
+                        }
+                    }
+                    // ===================================
+                    
+
                     // Matting uses precomputed eroded "core" masks to avoid fighting uncertain boundaries.
                     // These cores are computed lazily and cached per Camera, so this is NOT a per-iteration cost.
                     lfs::core::Tensor fg_core;
                     lfs::core::Tensor bg_core;
                     bool use_matting_cores = false;
 
-                    if (params_.optimization.mask_mode == lfs::core::param::MaskMode::SoftMatting) {
+                    if (step_params.mask_mode == lfs::core::param::MaskMode::SoftMatting) {
                         constexpr int kMattingCoreErodeRadiusPx = 2;
 
                         fg_core = cam->load_and_get_mask_fg_core(
                             params_.dataset.resize_factor,
                             params_.dataset.max_width,
-                            params_.optimization.invert_masks,
-                            params_.optimization.mask_threshold,
+                            step_params.invert_masks,
+                            step_params.mask_threshold,
                             kMattingCoreErodeRadiusPx);
 
                         bg_core = cam->load_and_get_mask_bg_core(
                             params_.dataset.resize_factor,
                             params_.dataset.max_width,
-                            params_.optimization.invert_masks,
-                            params_.optimization.mask_threshold,
+                            step_params.invert_masks,
+                            step_params.mask_threshold,
                             kMattingCoreErodeRadiusPx);
 
                         if (!fg_core.is_valid() || !bg_core.is_valid()) {
@@ -1446,7 +1469,7 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
 
 
                     auto result = compute_photometric_loss_with_mask(
-                        corrected_image, gt_tile, mask_tile, output.alpha, params_.optimization,
+                        corrected_image, gt_tile, mask_tile, output.alpha, step_params,
                         fg_core_ptr, bg_core_ptr);
                     if (!result) {
                         nvtxRangePop();
@@ -1878,8 +1901,10 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
             // - Center-vote: splats whose center is outside mask in most views
             // - Leakage: splats whose footprint extends outside mask boundary
             // -----------------------------------------------------------------
-            if (params_.optimization.mask_mode == lfs::core::param::MaskMode::HardMatting ||
-                params_.optimization.mask_mode == lfs::core::param::MaskMode::SoftMatting) {
+            /* if (params_.optimization.mask_mode == lfs::core::param::MaskMode::HardMatting ||
+                params_.optimization.mask_mode == lfs::core::param::MaskMode::SoftMatting)*/ 
+            if (false)
+            {
 
                 mask_pruning::CenterVotePruningConfig center_cfg;
                 center_cfg.vote_ratio_threshold = 0.80f;
