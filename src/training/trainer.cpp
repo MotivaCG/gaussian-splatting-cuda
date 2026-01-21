@@ -34,9 +34,9 @@
 #include <memory>
 #include <nvtx3/nvToolsExt.h>
 
-#include "mask_penalty.hpp" //matting modes
-#include "mask_pruning.hpp"
-#include "mask_pruning_visualizer.hpp"
+#include "smn/mask_penalty.hpp" //matting modes
+#include "smn/mask_pruning.hpp"
+#include "smn/mask_pruning_visualizer.hpp"
 
 namespace lfs::training {
 
@@ -1929,9 +1929,9 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
             // - Center-vote: splats whose center is outside mask in most views
             // - Leakage: splats whose footprint extends outside mask boundary
             // -----------------------------------------------------------------
-            /* if (params_.optimization.mask_mode == lfs::core::param::MaskMode::HardMatting ||
-                params_.optimization.mask_mode == lfs::core::param::MaskMode::SoftMatting)*/ 
-            if (false)
+            if (params_.optimization.mask_mode == lfs::core::param::MaskMode::HardMatting ||
+                params_.optimization.mask_mode == lfs::core::param::MaskMode::SoftMatting)
+            //if (false)
             {
 
                 mask_pruning::CenterVotePruningConfig center_cfg;
