@@ -41,7 +41,6 @@ namespace lfs::core {
             float scaling_lr = 0.005f;
             float rotation_lr = 0.001f;
             float lambda_dssim = 0.2f;
-            float darkness_boost = 0.0f;
             float min_opacity = 0.005f;
             size_t refine_every = 100;
             size_t start_refine = 500;
