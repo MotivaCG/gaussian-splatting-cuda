@@ -70,6 +70,14 @@ namespace lfs::training {
         void zero_grad(int iteration);
         bool has_gradients() const;
         lfs::core::Tensor& get_grad(ParamType type);
+        
+        // Convenience: zero gradient for a contiguous gaussian range [start, start+count)
+        // Used by NGS to freeze specific parameters for noise Gaussians.
+        void zero_grad_range(ParamType type, size_t start, size_t count);
+
+        // Remove a contiguous gaussian range [start, start+count) from the optimizer state tensors.
+        // Call AFTER removing the same range from SplatData.
+        void remove_range(size_t start, size_t count);
 
         // Learning rate
         void set_lr(float lr) { config_.lr = lr; }

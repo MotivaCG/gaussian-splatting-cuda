@@ -22,6 +22,7 @@
 #include "core/tensor.hpp"
 #include "optimizer/adam_optimizer.hpp"
 #include <expected>
+#include <cstdint>
 #include <filesystem>
 #include <random>
 
@@ -124,6 +125,20 @@ namespace lfs::training {
         static LearningRateSnapshot capture(const AdamOptimizer& optimizer);
         void restore(AdamOptimizer& optimizer) const;
     };
+
+ 
+    /**
+     * @brief Randomize SH0 colors in-place for a contiguous gaussian range.
+     *
+     * Writes the first 3 SH0 coeffs (RGB) using a deterministic GPU hash from `seed`.
+     * This is intended for NGS noise Gaussians, and avoids any per-iteration allocations.
+     *
+     * @param sh0         SH0 tensor (CUDA, float32) with shape [N, ...]
+     * @param start       Start gaussian index in sh0
+     * @param count       Number of gaussians to randomize
+     * @param seed        Deterministic seed (e.g. iteration number)
+     */
+    void ngs_randomize_sh0_range_inplace(lfs::core::Tensor& sh0, size_t start, size_t count, uint32_t seed);
 
     // PLY loading utility
     std::expected<

@@ -7,6 +7,7 @@
 #include "core/path_utils.hpp"
 
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <format>
@@ -19,7 +20,7 @@ namespace lfs::training {
     using lfs::core::TensorShape;
 
     // Forward declaration of CUDA kernel launcher (defined in .cu file)
-    void launch_ngs_randomize_colors(float* sh0, const int* color_indices, int n);
+    void launch_ngs_randomize_colors_seed(float* sh0, int n, int stride_floats, uint32_t seed);
 
     // ============================================================================
     // NoiseGaussians Implementation
@@ -61,23 +62,39 @@ namespace lfs::training {
         if (!is_valid()) return;
 
         const int n = static_cast<int>(size());
+        
+        // Deterministic seed from RNG (no per-iteration allocations)
+        const uint32_t seed = static_cast<uint32_t>(rng_());
 
-        // Generate random indices on CPU
-        std::vector<int> indices(n);
-        std::uniform_int_distribution<int> dist(0, 5);
-        for (int i = 0; i < n; ++i) {
-            indices[i] = dist(rng_);
+        // SH0 is contiguous; stride = floats per gaussian
+        const int stride = static_cast<int>(sh0_.numel() / sh0_.shape()[0]);
+        if (stride < 3) return;
+
+        
+        launch_ngs_randomize_colors_seed(sh0_.ptr<float>(), n, stride, seed);
+    }
+
+    void ngs_randomize_sh0_range_inplace(lfs::core::Tensor& sh0, size_t start, size_t count, uint32_t seed) {
+        if (!sh0.is_valid() || sh0.numel() == 0 || count == 0) return;
+        if (sh0.device() != Device::CUDA || sh0.dtype() != DataType::Float32) {
+            LOG_WARN("NGS: sh0 randomization requires CUDA float32 tensor");
+            return;
+        }
+        const size_t N = sh0.shape()[0];
+        if (start >= N) return;
+        
+        const size_t end = std::min(N, start + count);
+        const size_t n = end - start;
+        if (n == 0) return;
+
+        const int stride = static_cast<int>(sh0.numel() / sh0.shape()[0]);
+        if (stride < 3) {
+            LOG_WARN("NGS: sh0 stride < 3, cannot randomize colors");
+            return;
         }
 
-        // Upload to GPU
-        int* d_indices = nullptr;
-        cudaMalloc(&d_indices, n * sizeof(int));
-        cudaMemcpy(d_indices, indices.data(), n * sizeof(int), cudaMemcpyHostToDevice);
-
-        // Launch kernel
-        launch_ngs_randomize_colors(sh0_.ptr<float>(), d_indices, n);
-
-        cudaFree(d_indices);
+        float* base = sh0.ptr<float>() + static_cast<size_t>(stride) * start;
+        launch_ngs_randomize_colors_seed(base, static_cast<int>(n), stride, seed);
     }
 
     // ============================================================================

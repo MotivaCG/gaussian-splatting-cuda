@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include <cuda_runtime.h>
+#include <stdint.h>
 
 namespace lfs::training {
 
@@ -17,23 +18,39 @@ namespace lfs::training {
         {1.7724539f, 1.7724539f, -1.7724539f}    // Yellow
     };
 
-    __global__ void ngs_randomize_colors_kernel(
-        float* sh0,               // [N, 1, 3] output
-        const int* color_indices, // [N] random 0-5
-        const int n) {
+
+    __device__ __forceinline__ uint32_t ngs_wang_hash(uint32_t x) {
+        // Thomas Wang 32-bit integer hash
+        x = (x ^ 61u) ^ (x >> 16);
+        x *= 9u;
+        x = x ^ (x >> 4);
+        x *= 0x27d4eb2du;
+        x = x ^ (x >> 15);
+        return x;
+    }
+
+    __global__ void ngs_randomize_colors_seed_kernel(
+        float* sh0,     // [N, ...] flattened, writes first 3 coeffs
+        const int n,
+        const int stride_floats, // floats per gaussian in SH0 tensor (>=3)
+        const uint32_t seed) {
 
         const int idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (idx >= n) return;
 
-        const int c = color_indices[idx] % 6;
-        sh0[idx * 3 + 0] = RGBCMY_SH0[c][0];
-        sh0[idx * 3 + 1] = RGBCMY_SH0[c][1];
-        sh0[idx * 3 + 2] = RGBCMY_SH0[c][2];
+        
+        const uint32_t h = ngs_wang_hash(seed ^ static_cast<uint32_t>(idx));
+        const int c = static_cast<int>(h % 6u);
+
+        float* out = sh0 + idx * stride_floats;
+        out[0] = RGBCMY_SH0[c][0];
+        out[1] = RGBCMY_SH0[c][1];
+        out[2] = RGBCMY_SH0[c][2];
     }
 
-    void launch_ngs_randomize_colors(float* sh0, const int* color_indices, int n) {
+    void launch_ngs_randomize_colors_seed(float* sh0, int n, int stride_floats, uint32_t seed) {
         constexpr int BLOCK = 256;
-        ngs_randomize_colors_kernel<<<(n + BLOCK - 1) / BLOCK, BLOCK>>>(sh0, color_indices, n);
+        ngs_randomize_colors_seed_kernel<<<(n + BLOCK - 1) / BLOCK, BLOCK>>>(sh0, n, stride_floats, seed);
     }
 
 } // namespace lfs::training

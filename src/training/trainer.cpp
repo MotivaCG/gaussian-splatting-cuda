@@ -28,6 +28,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <algorithm>
 #include <cuda_runtime.h>
 #include <expected>
 #include <memory>
@@ -1248,20 +1249,36 @@ namespace lfs::training {
                 {
                     std::unique_lock<std::shared_mutex> lock(render_mutex_);
 
-                    // Skip post_backward during sparsification phase
+                    // Skip topology-changing ops during sparsification OR NGS noise phase
                     const bool in_sparsification = params_.optimization.enable_sparsity &&
                                                    iter > (params_.optimization.iterations - params_.optimization.sparsify_steps);
-                    if (!in_sparsification) {
+                    const bool ngs_block_topology = (ngs_current_phase_ == NGSPhase::WithNoise);
+
+                    // Freeze noise gaussians: means/scaling/rotation/SH, keep opacity trainable
+                    if (ngs_block_topology && ngs_surface_count_ > 0 && ngs_noise_count_ > 0) {
+                        auto& opt = strategy_->get_optimizer();
+                        const size_t start = ngs_surface_count_;
+                        const size_t count = ngs_noise_count_;
+                        opt.zero_grad_range(ParamType::Means, start, count);
+                        opt.zero_grad_range(ParamType::Sh0, start, count);
+                        opt.zero_grad_range(ParamType::ShN, start, count);
+                        opt.zero_grad_range(ParamType::Scaling, start, count);
+                        opt.zero_grad_range(ParamType::Rotation, start, count);
+                    }
+                    if (!in_sparsification && !ngs_block_topology) {
                         strategy_->post_backward(iter, r_output);
                     }
                     strategy_->step(iter);
                 }
-
-                if (auto result = handle_sparsity_update(iter, strategy_->get_model()); !result) {
-                    LOG_ERROR("Sparsity update: {}", result.error());
-                }
-                if (auto result = apply_sparsity_pruning(iter, strategy_->get_model()); !result) {
-                    LOG_ERROR("Sparsity pruning: {}", result.error());
+                
+                // During NGS noise phase we keep ordering/size stable (no pruning/densification).
+                if (ngs_current_phase_ != NGSPhase::WithNoise) {
+                    if (auto result = handle_sparsity_update(iter, strategy_->get_model()); !result) {
+                        LOG_ERROR("Sparsity update: {}", result.error());
+                    }
+                    if (auto result = apply_sparsity_pruning(iter, strategy_->get_model()); !result) {
+                        LOG_ERROR("Sparsity pruning: {}", result.error());
+                    }
                 }
 
                 // Clean evaluation - let the evaluator handle everything
@@ -1638,6 +1655,7 @@ namespace lfs::training {
         ngs_enabled_ = true;
         ngs_current_phase_ = NGSPhase::StandardTraining;
         ngs_surface_count_ = 0;
+        ngs_noise_count_ = 0;
 
         const int start_iter = ngs_phase_manager_->noise_start();
         const int end_iter = ngs_phase_manager_->noise_end();
@@ -1656,25 +1674,26 @@ namespace lfs::training {
         if (!ngs_enabled_ || !ngs_phase_manager_) return;
 
         const NGSPhase new_phase = ngs_phase_manager_->get_phase(iter);
+        
+        // Phase transition
+        if (new_phase != ngs_current_phase_) {
+            const NGSPhase old_phase = ngs_current_phase_;
+            ngs_current_phase_ = new_phase;
 
-        // Handle per-iteration operations (color randomization during noise phase)
-        if (new_phase == NGSPhase::WithNoise && ngs_noise_) {
-            ngs_noise_->randomize_colors();
+            if (old_phase == NGSPhase::StandardTraining && new_phase == NGSPhase::WithNoise) {
+                LOG_INFO("NGS: Injecting {} noise Gaussians at iteration {}", ngs_noise_ ? ngs_noise_->size() : 0, iter);
+                inject_noise_into_model();
+            } else if (old_phase == NGSPhase::WithNoise && new_phase == NGSPhase::Cleanup) {
+                LOG_INFO("NGS: Removing noise Gaussians at iteration {}", iter);
+                remove_noise_from_model();
+            }
         }
-
-        // Check for phase transition
-        if (new_phase == ngs_current_phase_) return;
-
-        NGSPhase old_phase = ngs_current_phase_;
-        ngs_current_phase_ = new_phase;
-
-        if (old_phase == NGSPhase::StandardTraining && new_phase == NGSPhase::WithNoise) {
-            LOG_INFO("NGS: Injecting {} noise Gaussians at iteration {}", ngs_noise_->size(), iter);
-            inject_noise_into_model();
-        }
-        else if (old_phase == NGSPhase::WithNoise && new_phase == NGSPhase::Cleanup) {
-            LOG_INFO("NGS: Removing noise Gaussians at iteration {}", iter);
-            remove_noise_from_model();
+        
+        // Per-iteration operation during noise phase: randomize SH0 colors *in the model*
+        if (ngs_current_phase_ == NGSPhase::WithNoise && ngs_surface_count_ > 0 && ngs_noise_count_ > 0) {
+            auto& model = strategy_->get_model();
+            // Deterministic seed: iteration number
+            ngs_randomize_sh0_range_inplace(model.sh0(), ngs_surface_count_, ngs_noise_count_, static_cast<uint32_t>(iter));
         }
     }
 
@@ -1683,31 +1702,52 @@ namespace lfs::training {
     // ----------------------------------------------------------------------------
 
     void Trainer::inject_noise_into_model() {
+        if (!ngs_noise_) {
+            LOG_WARN("NGS: No noise loaded, cannot inject");
+            return;
+        }
+
         auto& model = strategy_->get_model();
         auto& optimizer = strategy_->get_optimizer();
 
         ngs_surface_count_ = model.size();
-        const size_t noise_count = ngs_noise_->size();
+        ngs_noise_count_ = ngs_noise_->size();
+        
+        const size_t noise_count = ngs_noise_count_;
+        if (noise_count == 0) {
+            LOG_WARN("NGS: Noise PLY contains 0 gaussians");
+            return;
+        }
 
         LOG_DEBUG("NGS inject: {} surface + {} noise", ngs_surface_count_, noise_count);
 
-        // Randomize colors before injection
-        ngs_noise_->randomize_colors();
-
-        // Concatenate all tensors
+        // Concatenate parameter tensors (noise provides means/scaling/rotation/opacity only)
         auto new_means = lfs::core::Tensor::cat({model.means(), ngs_noise_->means()}, 0);
-        auto new_sh0 = lfs::core::Tensor::cat({model.sh0(), ngs_noise_->sh0()}, 0);
         auto new_scaling = lfs::core::Tensor::cat({model.scaling_raw(), ngs_noise_->scaling_raw()}, 0);
         auto new_rotation = lfs::core::Tensor::cat({model.rotation_raw(), ngs_noise_->rotation_raw()}, 0);
         auto new_opacity = lfs::core::Tensor::cat({model.opacity_raw(), ngs_noise_->opacity_raw()}, 0);
+        
+        // SH0: allocate zeros for noise, then randomize in-place per-iteration (model-side)
+        lfs::core::Tensor new_sh0;
+        {
+            const auto& shape = model.sh0().shape();
+            std::vector<size_t> dims = {noise_count};
+            for (size_t i = 1; i < shape.rank(); ++i) dims.push_back(shape[i]);
+            lfs::core::TensorShape noise_shape(dims);
 
-        // Handle ShN (noise has no higher-order SH)
+            auto noise_sh0 = lfs::core::Tensor::zeros(noise_shape, model.sh0().device(), model.sh0().dtype());
+            new_sh0 = lfs::core::Tensor::cat({model.sh0(), noise_sh0}, 0);
+        }
+
+        // SHN: noise has no higher-order SH; append zeros if surface uses SHN
         lfs::core::Tensor new_shN;
         if (model.shN().is_valid() && model.shN().numel() > 0) {
             const auto& shape = model.shN().shape();
-            auto noise_shN = lfs::core::Tensor::zeros(
-                lfs::core::TensorShape{noise_count, shape[1], shape[2]}, 
-                model.shN().device(), model.shN().dtype());
+            std::vector<size_t> dims = {noise_count};
+            for (size_t i = 1; i < shape.rank(); ++i) dims.push_back(shape[i]);
+            lfs::core::TensorShape noise_shape(dims);
+
+            auto noise_shN = lfs::core::Tensor::zeros(noise_shape, model.shN().device(), model.shN().dtype());             
             new_shN = lfs::core::Tensor::cat({model.shN(), noise_shN}, 0);
         }
 
@@ -1725,48 +1765,79 @@ namespace lfs::training {
         optimizer.extend_for_new_gaussians(noise_count);
 
         LOG_INFO("NGS: Model now has {} Gaussians ({} surface + {} noise)",
-                model.size(), ngs_surface_count_, noise_count);
+                 model.size(), ngs_surface_count_, noise_count);
     }
 
     // ----------------------------------------------------------------------------
     // remove_noise_from_model() - Remove noise from SplatData and shrink optimizer
     // ----------------------------------------------------------------------------
 
+    // Helper: remove [s,e) along dim0 without ever calling slice on an empty range.
+    static lfs::core::Tensor remove_range_dim0_no_empty(const lfs::core::Tensor& src, int s, int e, int total) {
+        // Preconditions: 0 <= s < e <= total
+        const bool keep_prefix = (s > 0);
+        const bool keep_suffix = (e < total);
+
+        if (keep_prefix && keep_suffix) {
+            // Keep [0,s) + [e,total)
+            return lfs::core::Tensor::cat({src.slice(0, 0, s), src.slice(0, e, total)}, 0).contiguous();
+        } else if (keep_prefix) {
+            // Keep [0,s)
+            return src.slice(0, 0, s).contiguous();
+        } else if (keep_suffix) {
+            // Keep [e,total)
+            return src.slice(0, e, total).contiguous();
+        }
+
+        // Would remove everything -> shouldn't happen
+        LOG_ERROR("NGS: remove_range_dim0 would remove entire tensor (total={})", total);
+        return src;
+    }
+
     void Trainer::remove_noise_from_model() {
         auto& model = strategy_->get_model();
         auto& optimizer = strategy_->get_optimizer();
 
-        if (ngs_surface_count_ == 0 || ngs_surface_count_ >= model.size()) {
-            LOG_WARN("NGS: Cannot remove noise - invalid surface count");
+        if (ngs_surface_count_ == 0 || ngs_noise_count_ == 0) {
+            LOG_WARN("NGS: Cannot remove noise - nothing injected");
             return;
         }
 
-        const size_t total = model.size();
-        const size_t noise_removed = total - ngs_surface_count_;
-        const int end = static_cast<int>(ngs_surface_count_);
+        const size_t total_sz = model.size();
+        const size_t start_sz = ngs_surface_count_;
+        const size_t end_sz = std::min(total_sz, start_sz + ngs_noise_count_);
 
-        LOG_DEBUG("NGS remove: keeping first {} of {} Gaussians", ngs_surface_count_, total);
-
-        // Slice tensors to keep only surface Gaussians
-        model.set_means_internal(model.means().slice(0, 0, end).contiguous());
-        model.set_sh0_internal(model.sh0().slice(0, 0, end).contiguous());
-        model.set_scaling_internal(model.scaling_raw().slice(0, 0, end).contiguous());
-        model.set_rotation_internal(model.rotation_raw().slice(0, 0, end).contiguous());
-        model.set_opacity_internal(model.opacity_raw().slice(0, 0, end).contiguous());
-
-        if (model.shN().is_valid() && model.shN().numel() > 0) {
-            model.set_shN_internal(model.shN().slice(0, 0, end).contiguous());
+        if (start_sz >= total_sz || end_sz <= start_sz) {
+            LOG_WARN("NGS: Cannot remove noise - invalid range (start={}, end={}, total={})",
+                     start_sz, end_sz, total_sz);
+            return;
         }
 
-        // Shrink optimizer state
-        optimizer.shrink_to_size(ngs_surface_count_);
+        const int t = static_cast<int>(total_sz);
+        const int s = static_cast<int>(start_sz);
+        const int e = static_cast<int>(end_sz);
 
-        LOG_INFO("NGS: Removed {} noise Gaussians, {} surface remain",
-                noise_removed, model.size());
+        // IMPORTANT: do NOT call slice() with [t,t)
+        model.set_means_internal(remove_range_dim0_no_empty(model.means(), s, e, t));
+        model.set_sh0_internal(remove_range_dim0_no_empty(model.sh0(), s, e, t));
+        model.set_scaling_internal(remove_range_dim0_no_empty(model.scaling_raw(), s, e, t));
+        model.set_rotation_internal(remove_range_dim0_no_empty(model.rotation_raw(), s, e, t));
+        model.set_opacity_internal(remove_range_dim0_no_empty(model.opacity_raw(), s, e, t));
 
-        // Clear noise data
+        if (model.shN().is_valid() && model.shN().numel() > 0) {
+            model.set_shN_internal(remove_range_dim0_no_empty(model.shN(), s, e, t));
+        }
+
+        // Remove optimizer state for the same range (also must avoid empty slices inside it!)
+        optimizer.remove_range(start_sz, end_sz - start_sz);
+
+        LOG_INFO("NGS: Removed {} noise Gaussians, model now has {} Gaussians",
+                 (end_sz - start_sz), model.size());
+
         ngs_noise_.reset();
         ngs_surface_count_ = 0;
+        ngs_noise_count_ = 0;
     }
+
 
 } // namespace lfs::training

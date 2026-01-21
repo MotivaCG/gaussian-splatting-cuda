@@ -7,6 +7,7 @@
 #include "core/logger.hpp"
 #include "core/tensor/internal/tensor_serialization.hpp"
 #include <cmath>
+#include <algorithm>
 #include <cuda_runtime.h>
 #include <stdexcept>
 
@@ -747,6 +748,80 @@ namespace lfs::training {
         }
     }
 
+    void AdamOptimizer::zero_grad_range(ParamType type, size_t start, size_t count) {
+        if (count == 0) return;
+
+        const auto name = param_name(type);
+        const auto it = states_.find(name);
+        if (it == states_.end()) return;
+
+        auto& state = it->second;
+        if (!state.grad.is_valid() || state.grad.numel() == 0) return;
+
+        const size_t N = state.size;
+        if (start >= N) return;
+
+        const size_t end = std::min(N, start + count);
+        const size_t n = end - start;
+        if (n == 0) return;
+
+        const size_t elems_per = state.grad.numel() / state.grad.shape()[0];
+        const size_t bytes = n * elems_per * sizeof(float);
+        float* ptr = state.grad.ptr<float>() + start * elems_per;
+
+        CHECK_CUDA(cudaMemsetAsync(ptr, 0, bytes, nullptr));
+    }
+    
+    static lfs::core::Tensor remove_range_dim0_no_empty_opt(const lfs::core::Tensor& src, int s, int e, int total) {
+        const bool keep_prefix = (s > 0);
+        const bool keep_suffix = (e < total);
+
+        if (keep_prefix && keep_suffix) {
+            return lfs::core::Tensor::cat({src.slice(0, 0, s), src.slice(0, e, total)}, 0).contiguous();
+        }
+        if (keep_prefix) {
+            return src.slice(0, 0, s).contiguous(); // removing tail
+        }
+        if (keep_suffix) {
+            return src.slice(0, e, total).contiguous(); // removing head
+        }
+
+        LOG_ERROR("AdamOptimizer: remove_range would remove entire tensor (total={})", total);
+        return src;
+    }
+
+    void AdamOptimizer::remove_range(size_t start, size_t count) {
+        if (count == 0) return;
+
+        for (const auto type : all_param_types()) {
+            const auto name = param_name(type);
+            if (!states_.contains(name)) continue;
+
+            auto& state = states_[name];
+            if (!state.exp_avg.is_valid()) continue;
+
+            const size_t old_size = state.exp_avg.shape()[0];
+            if (start >= old_size) continue;
+
+            const size_t end = std::min(old_size, start + count);
+            const size_t n_remove = end - start;
+            if (n_remove == 0) continue;
+
+            const int s = static_cast<int>(start);
+            const int e = static_cast<int>(end);
+            const int os = static_cast<int>(old_size);
+           
+            // Remove [s,e) without ever calling slice(total,total)
+            state.exp_avg = remove_range_dim0_no_empty_opt(state.exp_avg, s, e, os);
+            state.exp_avg_sq = remove_range_dim0_no_empty_opt(state.exp_avg_sq, s, e, os);
+            if (state.grad.is_valid()) {
+                state.grad = remove_range_dim0_no_empty_opt(state.grad, s, e, os);
+            }
+
+            state.size = old_size - n_remove;
+        }
+    }
+    
     void AdamOptimizer::shrink_to_size(size_t new_size) {
         if (new_size == 0) return;
 
