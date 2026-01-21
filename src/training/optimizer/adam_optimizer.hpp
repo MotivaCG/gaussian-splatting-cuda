@@ -111,6 +111,26 @@ namespace lfs::training {
         void deserialize(std::istream& is);
         void reserve_capacity(size_t capacity);
 
+        /**
+         * @brief Extend optimizer state for newly added Gaussians NGS (Noise Guided Gaussians)
+         *
+         * Allocates zeroed state (exp_avg, exp_avg_sq) for new Gaussians.
+         * Call AFTER adding Gaussians to SplatData.
+         *
+         * @param count Number of new Gaussians added
+         */
+        void extend_for_new_gaussians(size_t count);
+
+        /**
+         * @brief Shrink optimizer state to match reduced model size NGS (Noise Guided Gaussians)
+         *
+         * Keeps only the first `new_size` entries in each state tensor.
+         * Call AFTER removing Gaussians from SplatData.
+         *
+         * @param new_size New number of Gaussians
+         */
+        void shrink_to_size(size_t new_size);
+
     private:
         AdamConfig config_;
         lfs::core::SplatData& splat_data_;

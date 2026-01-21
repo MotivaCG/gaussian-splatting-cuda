@@ -119,6 +119,18 @@ namespace lfs::core {
         void serialize(std::ostream& os) const;
         void deserialize(std::istream& is);
 
+        
+        // ========== NGS Internal Setters ==========
+        // Used by NGS to inject/remove noise Gaussians.
+        // These swap tensor references (no data copy).
+        void set_means_internal(const Tensor& t) { _means = t; }
+        void set_sh0_internal(const Tensor& t) { _sh0 = t; }
+        void set_shN_internal(const Tensor& t) { _shN = t; }
+        void set_scaling_internal(const Tensor& t) { _scaling = t; }
+        void set_rotation_internal(const Tensor& t) { _rotation = t; }
+        void set_opacity_internal(const Tensor& t) { _opacity = t; }
+
+
     public:
         // Holds the magnitude of the screen space gradient (used for densification)
         Tensor _densification_info;

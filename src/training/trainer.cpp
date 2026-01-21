@@ -75,6 +75,11 @@ namespace lfs::training {
         current_iteration_ = 0;
         current_loss_ = 0.0f;
 
+        // NGS
+        ngs_noise_.reset();
+        ngs_phase_manager_.reset();
+        ngs_enabled_ = false;
+
         LOG_DEBUG("Trainer cleanup complete");
     }
 
@@ -548,6 +553,9 @@ namespace lfs::training {
                     }
                 }
             }
+            if (auto result = initialize_ngs(); !result) {
+                return std::unexpected(result.error());
+            }
 
             // Print configuration
             LOG_INFO("Visualization: {}", params.optimization.headless ? "disabled" : "enabled");
@@ -846,6 +854,9 @@ namespace lfs::training {
         RenderMode render_mode,
         std::stop_token stop_token) {
         try {
+            //NGS Noise Guided Splatting transition
+            handle_ngs_phase_transition(iter);
+
             // GUT mode enables Gaussian Unscented Transform for lens distortion handling
             if (params_.optimization.gut) {
                 if (cam->camera_model_type() == core::CameraModelType::ORTHO) {
@@ -1594,6 +1605,168 @@ namespace lfs::training {
 
         LOG_INFO("Restored training state from checkpoint at iteration {}", *result);
         return result;
+    }
+        
+    
+    // ----------------------------------------------------------------------------
+    // initialize_ngs() - Call from Trainer::initialize() after strategy init
+    // ----------------------------------------------------------------------------
+
+    std::expected<void, std::string> Trainer::initialize_ngs() {
+        const auto& opt = params_.optimization;
+
+        if (opt.ngs_noise_path.empty()) {
+            ngs_enabled_ = false;
+            return {};
+        }
+
+        LOG_INFO("Initializing NGS");
+
+        // Create config with just the path
+        NGSConfig config;
+        config.noise_ply_path = opt.ngs_noise_path;
+
+        // Create phase manager
+        ngs_phase_manager_ = std::make_unique<NGSPhaseManager>(config, opt.iterations);
+
+        // Load noise (but don't inject yet)
+        ngs_noise_ = std::make_unique<NoiseGaussians>();
+        if (auto result = ngs_noise_->load(opt.ngs_noise_path); !result) {
+            return std::unexpected(result.error());
+        }
+
+        ngs_enabled_ = true;
+        ngs_current_phase_ = NGSPhase::StandardTraining;
+        ngs_surface_count_ = 0;
+
+        const int start_iter = ngs_phase_manager_->noise_start();
+        const int end_iter = ngs_phase_manager_->noise_end();
+
+        LOG_INFO("NGS ready: {} noise Gaussians, inject at iter {}, remove at iter {}",
+                ngs_noise_->size(), start_iter, end_iter);
+
+        return {};
+    }
+
+    // ----------------------------------------------------------------------------
+    // handle_ngs_phase_transition() - Call at START of train_step()
+    // ----------------------------------------------------------------------------
+
+    void Trainer::handle_ngs_phase_transition(int iter) {
+        if (!ngs_enabled_ || !ngs_phase_manager_) return;
+
+        const NGSPhase new_phase = ngs_phase_manager_->get_phase(iter);
+
+        // Handle per-iteration operations (color randomization during noise phase)
+        if (new_phase == NGSPhase::WithNoise && ngs_noise_) {
+            ngs_noise_->randomize_colors();
+        }
+
+        // Check for phase transition
+        if (new_phase == ngs_current_phase_) return;
+
+        NGSPhase old_phase = ngs_current_phase_;
+        ngs_current_phase_ = new_phase;
+
+        if (old_phase == NGSPhase::StandardTraining && new_phase == NGSPhase::WithNoise) {
+            LOG_INFO("NGS: Injecting {} noise Gaussians at iteration {}", ngs_noise_->size(), iter);
+            inject_noise_into_model();
+        }
+        else if (old_phase == NGSPhase::WithNoise && new_phase == NGSPhase::Cleanup) {
+            LOG_INFO("NGS: Removing noise Gaussians at iteration {}", iter);
+            remove_noise_from_model();
+        }
+    }
+
+    // ----------------------------------------------------------------------------
+    // inject_noise_into_model() - Add noise to SplatData and expand optimizer
+    // ----------------------------------------------------------------------------
+
+    void Trainer::inject_noise_into_model() {
+        auto& model = strategy_->get_model();
+        auto& optimizer = strategy_->get_optimizer();
+
+        ngs_surface_count_ = model.size();
+        const size_t noise_count = ngs_noise_->size();
+
+        LOG_DEBUG("NGS inject: {} surface + {} noise", ngs_surface_count_, noise_count);
+
+        // Randomize colors before injection
+        ngs_noise_->randomize_colors();
+
+        // Concatenate all tensors
+        auto new_means = lfs::core::Tensor::cat({model.means(), ngs_noise_->means()}, 0);
+        auto new_sh0 = lfs::core::Tensor::cat({model.sh0(), ngs_noise_->sh0()}, 0);
+        auto new_scaling = lfs::core::Tensor::cat({model.scaling_raw(), ngs_noise_->scaling_raw()}, 0);
+        auto new_rotation = lfs::core::Tensor::cat({model.rotation_raw(), ngs_noise_->rotation_raw()}, 0);
+        auto new_opacity = lfs::core::Tensor::cat({model.opacity_raw(), ngs_noise_->opacity_raw()}, 0);
+
+        // Handle ShN (noise has no higher-order SH)
+        lfs::core::Tensor new_shN;
+        if (model.shN().is_valid() && model.shN().numel() > 0) {
+            const auto& shape = model.shN().shape();
+            auto noise_shN = lfs::core::Tensor::zeros(
+                lfs::core::TensorShape{noise_count, shape[1], shape[2]}, 
+                model.shN().device(), model.shN().dtype());
+            new_shN = lfs::core::Tensor::cat({model.shN(), noise_shN}, 0);
+        }
+
+        // Update model tensors
+        model.set_means_internal(new_means);
+        model.set_sh0_internal(new_sh0);
+        model.set_scaling_internal(new_scaling);
+        model.set_rotation_internal(new_rotation);
+        model.set_opacity_internal(new_opacity);
+        if (new_shN.is_valid()) {
+            model.set_shN_internal(new_shN);
+        }
+
+        // Expand optimizer state for new Gaussians
+        optimizer.extend_for_new_gaussians(noise_count);
+
+        LOG_INFO("NGS: Model now has {} Gaussians ({} surface + {} noise)",
+                model.size(), ngs_surface_count_, noise_count);
+    }
+
+    // ----------------------------------------------------------------------------
+    // remove_noise_from_model() - Remove noise from SplatData and shrink optimizer
+    // ----------------------------------------------------------------------------
+
+    void Trainer::remove_noise_from_model() {
+        auto& model = strategy_->get_model();
+        auto& optimizer = strategy_->get_optimizer();
+
+        if (ngs_surface_count_ == 0 || ngs_surface_count_ >= model.size()) {
+            LOG_WARN("NGS: Cannot remove noise - invalid surface count");
+            return;
+        }
+
+        const size_t total = model.size();
+        const size_t noise_removed = total - ngs_surface_count_;
+        const int end = static_cast<int>(ngs_surface_count_);
+
+        LOG_DEBUG("NGS remove: keeping first {} of {} Gaussians", ngs_surface_count_, total);
+
+        // Slice tensors to keep only surface Gaussians
+        model.set_means_internal(model.means().slice(0, 0, end).contiguous());
+        model.set_sh0_internal(model.sh0().slice(0, 0, end).contiguous());
+        model.set_scaling_internal(model.scaling_raw().slice(0, 0, end).contiguous());
+        model.set_rotation_internal(model.rotation_raw().slice(0, 0, end).contiguous());
+        model.set_opacity_internal(model.opacity_raw().slice(0, 0, end).contiguous());
+
+        if (model.shN().is_valid() && model.shN().numel() > 0) {
+            model.set_shN_internal(model.shN().slice(0, 0, end).contiguous());
+        }
+
+        // Shrink optimizer state
+        optimizer.shrink_to_size(ngs_surface_count_);
+
+        LOG_INFO("NGS: Removed {} noise Gaussians, {} surface remain",
+                noise_removed, model.size());
+
+        // Clear noise data
+        ngs_noise_.reset();
+        ngs_surface_count_ = 0;
     }
 
 } // namespace lfs::training

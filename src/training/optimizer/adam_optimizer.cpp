@@ -709,5 +709,67 @@ namespace lfs::training {
             }
         }
     }
+    
+    void AdamOptimizer::extend_for_new_gaussians(size_t count) {
+        if (count == 0) return;
+
+        for (const auto type : all_param_types()) {
+            const auto name = param_name(type);
+            if (!states_.contains(name)) continue;
+
+            auto& state = states_[name];
+            if (!state.exp_avg.is_valid()) continue;
+
+            const auto& shape = state.exp_avg.shape();
+            const size_t old_size = shape[0];
+
+            // Build shape for new entries: [count, ...]
+            std::vector<size_t> new_dims = {count};
+            for (size_t i = 1; i < shape.rank(); ++i) {
+                new_dims.push_back(shape[i]);
+            }
+            lfs::core::TensorShape new_shape(new_dims);
+
+            // Create zeros and concatenate
+            auto zeros_avg = lfs::core::Tensor::zeros(new_shape, state.exp_avg.device(), state.exp_avg.dtype());
+            auto zeros_sq = lfs::core::Tensor::zeros(new_shape, state.exp_avg_sq.device(), state.exp_avg_sq.dtype());
+
+            state.exp_avg = lfs::core::Tensor::cat({state.exp_avg, zeros_avg}, 0);
+            state.exp_avg_sq = lfs::core::Tensor::cat({state.exp_avg_sq, zeros_sq}, 0);
+
+            // Also extend gradient buffer if present
+            if (state.grad.is_valid()) {
+                auto zeros_grad = lfs::core::Tensor::zeros(new_shape, state.grad.device(), state.grad.dtype());
+                state.grad = lfs::core::Tensor::cat({state.grad, zeros_grad}, 0);
+            }
+
+            state.size = old_size + count;
+        }
+    }
+
+    void AdamOptimizer::shrink_to_size(size_t new_size) {
+        if (new_size == 0) return;
+
+        for (const auto type : all_param_types()) {
+            const auto name = param_name(type);
+            if (!states_.contains(name)) continue;
+
+            auto& state = states_[name];
+            if (!state.exp_avg.is_valid()) continue;
+
+            const size_t old_size = state.exp_avg.shape()[0];
+            if (new_size >= old_size) continue;
+
+            // Slice to keep only first new_size entries
+            state.exp_avg = state.exp_avg.slice(0, 0, new_size).contiguous();
+            state.exp_avg_sq = state.exp_avg_sq.slice(0, 0, new_size).contiguous();
+
+            if (state.grad.is_valid()) {
+                state.grad = state.grad.slice(0, 0, new_size).contiguous();
+            }
+
+            state.size = new_size;
+        }
+    }
 
 } // namespace lfs::training
