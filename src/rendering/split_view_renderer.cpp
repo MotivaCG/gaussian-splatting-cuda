@@ -350,8 +350,8 @@ namespace lfs::rendering {
                      request.background_color.b, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        const bool flip_left = (request.panels[0].content_type == PanelContentType::Model3D);
-        const bool flip_right = (request.panels[1].content_type == PanelContentType::Model3D);
+        const bool flip_left = request.flip_left_y.value_or(request.panels[0].content_type == PanelContentType::Model3D);
+        const bool flip_right = request.flip_right_y.value_or(request.panels[1].content_type == PanelContentType::Model3D);
 
         if (auto result = compositeSplitView(
                 left_texture, right_texture,

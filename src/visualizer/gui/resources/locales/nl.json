@@ -569,7 +569,7 @@
     "import_failed": "Import mislukt: %s",
     "import_complete_title": "Import Voltooid",
     "import_failed_title": "Import Mislukt",
-    "num_splats": "aantal Splats: %d",
+    "num_splats": "aantal Splats: %s",
     "status_label": "Status: %s"
   },
 

@@ -5,6 +5,7 @@
 #pragma once
 
 #include "gui/ui_context.hpp"
+#include <cstdint>
 #include <glm/glm.hpp>
 #include <string>
 #include <imgui.h>
@@ -49,5 +50,11 @@ namespace lfs::vis::gui::widgets {
 
     // Tooltip with theme-aware text color (dark text on light themes)
     void SetThemedTooltip(const char* fmt, ...);
+
+    // Format number with thousand separators (e.g., 1500000 -> "1,500,000")
+    std::string formatNumber(int64_t num);
+
+    // InputInt with thousand separator display (shows formatted when not editing)
+    bool InputIntFormatted(const char* label, int* v, int step = 0, int step_fast = 0);
 
 } // namespace lfs::vis::gui::widgets

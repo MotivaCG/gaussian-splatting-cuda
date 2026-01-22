@@ -368,18 +368,16 @@ namespace lfs::vis::gui::panels {
                 ImGui::TableNextColumn();
                 ImGui::Text("%s", LOC(Training::Refinement::REFINE_EVERY));
                 ImGui::TableNextColumn();
+                ImGui::PushItemWidth(-1);
+                int refine_every = static_cast<int>(opt_params.refine_every);
                 if (can_edit) {
-                    ImGui::PushItemWidth(-1);
-                    int refine_every = static_cast<int>(opt_params.refine_every);
-                    if (ImGui::InputInt("##refine_every", &refine_every, 10, 100)) {
-                        if (refine_every > 0) {
-                            opt_params.refine_every = static_cast<size_t>(refine_every);
-                        }
+                    if (widgets::InputIntFormatted("##refine_every", &refine_every, 10, 100) && refine_every > 0) {
+                        opt_params.refine_every = static_cast<size_t>(refine_every);
                     }
-                    ImGui::PopItemWidth();
                 } else {
-                    ImGui::Text("%zu", opt_params.refine_every);
+                    ImGui::Text("%s", widgets::formatNumber(refine_every).c_str());
                 }
+                ImGui::PopItemWidth();
                 if (ImGui::IsItemHovered()) {
                     widgets::SetThemedTooltip("%s", LOC(Training::Tooltip::REFINE_EVERY));
                 }
@@ -389,18 +387,16 @@ namespace lfs::vis::gui::panels {
                 ImGui::TableNextColumn();
                 ImGui::Text("%s", LOC(Training::Refinement::START_REFINE));
                 ImGui::TableNextColumn();
+                ImGui::PushItemWidth(-1);
+                int start_refine = static_cast<int>(opt_params.start_refine);
                 if (can_edit) {
-                    ImGui::PushItemWidth(-1);
-                    int start_refine = static_cast<int>(opt_params.start_refine);
-                    if (ImGui::InputInt("##start_refine", &start_refine, 100, 500)) {
-                        if (start_refine >= 0) {
-                            opt_params.start_refine = static_cast<size_t>(start_refine);
-                        }
+                    if (widgets::InputIntFormatted("##start_refine", &start_refine, 100, 500) && start_refine >= 0) {
+                        opt_params.start_refine = static_cast<size_t>(start_refine);
                     }
-                    ImGui::PopItemWidth();
                 } else {
-                    ImGui::Text("%zu", opt_params.start_refine);
+                    ImGui::Text("%s", widgets::formatNumber(start_refine).c_str());
                 }
+                ImGui::PopItemWidth();
                 if (ImGui::IsItemHovered()) {
                     widgets::SetThemedTooltip("%s", LOC(Training::Tooltip::START_REFINE));
                 }
@@ -410,18 +406,16 @@ namespace lfs::vis::gui::panels {
                 ImGui::TableNextColumn();
                 ImGui::Text("%s", LOC(Training::Refinement::STOP_REFINE));
                 ImGui::TableNextColumn();
+                ImGui::PushItemWidth(-1);
+                int stop_refine = static_cast<int>(opt_params.stop_refine);
                 if (can_edit) {
-                    ImGui::PushItemWidth(-1);
-                    int stop_refine = static_cast<int>(opt_params.stop_refine);
-                    if (ImGui::InputInt("##stop_refine", &stop_refine, 1000, 5000)) {
-                        if (stop_refine >= 0) {
-                            opt_params.stop_refine = static_cast<size_t>(stop_refine);
-                        }
+                    if (widgets::InputIntFormatted("##stop_refine", &stop_refine, 1000, 5000) && stop_refine >= 0) {
+                        opt_params.stop_refine = static_cast<size_t>(stop_refine);
                     }
-                    ImGui::PopItemWidth();
                 } else {
-                    ImGui::Text("%zu", opt_params.stop_refine);
+                    ImGui::Text("%s", widgets::formatNumber(stop_refine).c_str());
                 }
+                ImGui::PopItemWidth();
                 if (ImGui::IsItemHovered()) {
                     widgets::SetThemedTooltip("%s", LOC(Training::Tooltip::STOP_REFINE));
                 }
@@ -447,20 +441,18 @@ namespace lfs::vis::gui::panels {
                 ImGui::TableNextColumn();
                 ImGui::Text("%s", LOC(Training::Refinement::RESET_EVERY));
                 ImGui::TableNextColumn();
+                ImGui::PushItemWidth(-1);
+                int reset_every = static_cast<int>(opt_params.reset_every);
                 if (can_edit) {
-                    ImGui::PushItemWidth(-1);
-                    int reset_every = static_cast<int>(opt_params.reset_every);
-                    if (ImGui::InputInt("##reset_every", &reset_every, 100, 1000)) {
-                        if (reset_every >= 0) {
-                            opt_params.reset_every = static_cast<size_t>(reset_every);
-                        }
+                    if (widgets::InputIntFormatted("##reset_every", &reset_every, 100, 1000) && reset_every >= 0) {
+                        opt_params.reset_every = static_cast<size_t>(reset_every);
                     }
-                    ImGui::PopItemWidth();
-                } else if (opt_params.reset_every > 0) {
-                    ImGui::Text("%zu", opt_params.reset_every);
+                } else if (reset_every > 0) {
+                    ImGui::Text("%s", widgets::formatNumber(reset_every).c_str());
                 } else {
                     ImGui::Text("%s", LOC(TrainingParams::DISABLED));
                 }
+                ImGui::PopItemWidth();
                 if (ImGui::IsItemHovered()) {
                     widgets::SetThemedTooltip("%s", LOC(Training::Tooltip::RESET_EVERY));
                 }
@@ -470,18 +462,16 @@ namespace lfs::vis::gui::panels {
                 ImGui::TableNextColumn();
                 ImGui::Text("%s", LOC(Training::Refinement::SH_UPGRADE_EVERY));
                 ImGui::TableNextColumn();
+                ImGui::PushItemWidth(-1);
+                int sh_deg_interval = static_cast<int>(opt_params.sh_degree_interval);
                 if (can_edit) {
-                    ImGui::PushItemWidth(-1);
-                    int sh_deg_interval = static_cast<int>(opt_params.sh_degree_interval);
-                    if (ImGui::InputInt("##sh_degree_interval", &sh_deg_interval, 100, 500)) {
-                        if (sh_deg_interval > 0) {
-                            opt_params.sh_degree_interval = static_cast<size_t>(sh_deg_interval);
-                        }
+                    if (widgets::InputIntFormatted("##sh_degree_interval", &sh_deg_interval, 100, 500) && sh_deg_interval > 0) {
+                        opt_params.sh_degree_interval = static_cast<size_t>(sh_deg_interval);
                     }
-                    ImGui::PopItemWidth();
                 } else {
-                    ImGui::Text("%zu", opt_params.sh_degree_interval);
+                    ImGui::Text("%s", widgets::formatNumber(sh_deg_interval).c_str());
                 }
+                ImGui::PopItemWidth();
                 if (ImGui::IsItemHovered()) {
                     widgets::SetThemedTooltip("%s", LOC(Training::Tooltip::SH_UPGRADE_EVERY));
                 }
@@ -809,15 +799,15 @@ namespace lfs::vis::gui::panels {
                     ImGui::TableNextColumn();
                     ImGui::Text("%s", LOC(TrainingParams::NUM_POINTS));
                     ImGui::TableNextColumn();
+                    ImGui::PushItemWidth(-1);
                     if (can_edit) {
-                        ImGui::PushItemWidth(-1);
-                        if (ImGui::InputInt("##init_num_pts", &opt_params.init_num_pts, 10000, 50000)) {
+                        if (widgets::InputIntFormatted("##init_num_pts", &opt_params.init_num_pts, 10000, 50000)) {
                             opt_params.init_num_pts = std::max(1, opt_params.init_num_pts);
                         }
-                        ImGui::PopItemWidth();
                     } else {
-                        ImGui::Text("%d", opt_params.init_num_pts);
+                        ImGui::Text("%s", widgets::formatNumber(opt_params.init_num_pts).c_str());
                     }
+                    ImGui::PopItemWidth();
                     if (ImGui::IsItemHovered()) {
                         widgets::SetThemedTooltip("%s", LOC(Training::Tooltip::NUM_POINTS));
                     }
@@ -927,16 +917,16 @@ namespace lfs::vis::gui::panels {
                 ImGui::TableNextColumn();
                 ImGui::Text("%s", LOC(TrainingParams::PAUSE_AFTER_RESET));
                 ImGui::TableNextColumn();
+                ImGui::PushItemWidth(-1);
+                int pause_refine = static_cast<int>(opt_params.pause_refine_after_reset);
                 if (can_edit) {
-                    ImGui::PushItemWidth(-1);
-                    int pause_refine = static_cast<int>(opt_params.pause_refine_after_reset);
-                    if (ImGui::InputInt("##pause_refine_after_reset", &pause_refine, 10, 100) && pause_refine >= 0) {
+                    if (widgets::InputIntFormatted("##pause_refine_after_reset", &pause_refine, 10, 100) && pause_refine >= 0) {
                         opt_params.pause_refine_after_reset = static_cast<size_t>(pause_refine);
                     }
-                    ImGui::PopItemWidth();
                 } else {
-                    ImGui::Text("%zu", opt_params.pause_refine_after_reset);
+                    ImGui::Text("%s", widgets::formatNumber(pause_refine).c_str());
                 }
+                ImGui::PopItemWidth();
 
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
@@ -965,13 +955,12 @@ namespace lfs::vis::gui::panels {
                 ImGui::TableNextColumn();
                 if (can_edit) {
                     ImGui::PushItemWidth(-1);
-                    const int prev = opt_params.sparsify_steps;
-                    if (ImGui::InputInt("##sparsify_steps", &opt_params.sparsify_steps, 1000, 5000)) {
+                    if (widgets::InputIntFormatted("##sparsify_steps", &opt_params.sparsify_steps, 1000, 5000)) {
                         opt_params.sparsify_steps = std::max(1, opt_params.sparsify_steps);
                     }
                     ImGui::PopItemWidth();
                 } else {
-                    ImGui::Text("%d", opt_params.sparsify_steps);
+                    ImGui::Text("%s", widgets::formatNumber(opt_params.sparsify_steps).c_str());
                 }
 
                 ImGui::TableNextRow();
@@ -1085,18 +1074,16 @@ namespace lfs::vis::gui::panels {
             ImGui::TableNextColumn();
             ImGui::Text("%s", LOC(TrainingParams::ITERATIONS));
             ImGui::TableNextColumn();
+            ImGui::PushItemWidth(-1);
+            int iterations = static_cast<int>(opt_params.iterations);
             if (can_edit) {
-                ImGui::PushItemWidth(-1);
-                int iterations = static_cast<int>(opt_params.iterations);
-                if (ImGui::InputInt("##iterations", &iterations, 1000, 5000)) {
-                    if (iterations > 0 && iterations <= 1000000) {
-                        opt_params.iterations = static_cast<size_t>(iterations);
-                    }
+                if (widgets::InputIntFormatted("##iterations", &iterations, 1000, 5000) && iterations > 0 && iterations <= 1000000) {
+                    opt_params.iterations = static_cast<size_t>(iterations);
                 }
-                ImGui::PopItemWidth();
             } else {
-                ImGui::Text("%zu", opt_params.iterations);
+                ImGui::Text("%s", widgets::formatNumber(iterations).c_str());
             }
+            ImGui::PopItemWidth();
             if (ImGui::IsItemHovered()) {
                 widgets::SetThemedTooltip("%s", LOC(Training::Tooltip::ITERATIONS));
             }
@@ -1106,15 +1093,15 @@ namespace lfs::vis::gui::panels {
             ImGui::TableNextColumn();
             ImGui::Text("%s", LOC(TrainingParams::MAX_GAUSSIANS));
             ImGui::TableNextColumn();
+            ImGui::PushItemWidth(-1);
             if (can_edit) {
-                ImGui::PushItemWidth(-1);
-                if (ImGui::InputInt("##max_cap", &opt_params.max_cap, 10000, 100000)) {
+                if (widgets::InputIntFormatted("##max_cap", &opt_params.max_cap, 10000, 100000)) {
                     opt_params.max_cap = std::max(1, opt_params.max_cap);
                 }
-                ImGui::PopItemWidth();
             } else {
-                ImGui::Text("%d", opt_params.max_cap);
+                ImGui::Text("%s", widgets::formatNumber(opt_params.max_cap).c_str());
             }
+            ImGui::PopItemWidth();
             if (ImGui::IsItemHovered()) {
                 widgets::SetThemedTooltip("%s", LOC(Training::Tooltip::MAX_GAUSSIANS));
             }
@@ -1495,10 +1482,10 @@ namespace lfs::vis::gui::panels {
         float iters_per_sec = g_iter_rate_tracker.getIterationsPerSecond();
         iters_per_sec = iters_per_sec > 0.0f ? iters_per_sec : 0.0f;
 
-        ImGui::Text("Iteration: %d (%.1f iters/sec)", current_iteration, iters_per_sec);
+        ImGui::Text("Iteration: %s (%.1f iters/sec)", widgets::formatNumber(current_iteration).c_str(), iters_per_sec);
 
         int num_splats = trainer_manager->getNumSplats();
-        ImGui::Text(LOC(Progress::NUM_SPLATS), num_splats);
+        ImGui::Text(LOC(Progress::NUM_SPLATS), widgets::formatNumber(num_splats).c_str());
     }
 
     void DrawTrainingControls(const UIContext& ctx) {

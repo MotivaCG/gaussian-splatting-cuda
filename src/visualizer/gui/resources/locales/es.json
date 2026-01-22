@@ -569,7 +569,7 @@
     "import_failed": "Importación fallida: %s",
     "import_complete_title": "Importación Completada",
     "import_failed_title": "Importación Fallida",
-    "num_splats": "núm. Splats: %d",
+    "num_splats": "núm. Splats: %s",
     "status_label": "Estado: %s"
   },
 

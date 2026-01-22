@@ -569,7 +569,7 @@
     "import_failed": "가져오기 실패: %s",
     "import_complete_title": "가져오기 완료",
     "import_failed_title": "가져오기 실패",
-    "num_splats": "스플랫 수: %d",
+    "num_splats": "스플랫 수: %s",
     "status_label": "상태: %s"
   },
 

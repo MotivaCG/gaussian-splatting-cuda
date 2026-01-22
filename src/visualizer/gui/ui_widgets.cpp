@@ -432,4 +432,70 @@ namespace lfs::vis::gui::widgets {
         ImGui::PopStyleColor(3);
     }
 
+    std::string formatNumber(const int64_t num) {
+        const bool negative = num < 0;
+        std::string result = std::to_string(negative ? -num : num);
+        for (int i = static_cast<int>(result.length()) - 3; i > 0; i -= 3) {
+            result.insert(i, ",");
+        }
+        return negative ? "-" + result : result;
+    }
+
+    bool InputIntFormatted(const char* label, int* v, const int step, const int step_fast) {
+        constexpr size_t BUF_SIZE = 32;
+        constexpr float BUTTON_COUNT = 2.0f;
+        constexpr float SPACING_COUNT = 3.0f;
+
+        ImGui::PushID(label);
+
+        char buf[BUF_SIZE];
+        const std::string formatted = formatNumber(*v);
+        std::copy(formatted.begin(), formatted.end(), buf);
+        buf[formatted.size()] = '\0';
+
+        const float btn_size = ImGui::GetFrameHeight();
+        const float spacing = ImGui::GetStyle().ItemInnerSpacing.x;
+        const float btns_width = step != 0 ? (btn_size * BUTTON_COUNT + spacing * SPACING_COUNT) : 0.0f;
+
+        ImGui::SetNextItemWidth(ImGui::CalcItemWidth() - btns_width);
+
+        bool changed = false;
+        constexpr auto FLAGS = ImGuiInputTextFlags_CharsDecimal | ImGuiInputTextFlags_AutoSelectAll;
+        if (ImGui::InputText("##input", buf, BUF_SIZE, FLAGS)) {
+            int parsed = 0;
+            bool has_digits = false;
+            bool negative = false;
+            for (const char* p = buf; *p; ++p) {
+                if (*p == '-' && p == buf) {
+                    negative = true;
+                } else if (*p >= '0' && *p <= '9') {
+                    parsed = parsed * 10 + (*p - '0');
+                    has_digits = true;
+                }
+            }
+            if (has_digits) {
+                *v = negative ? -parsed : parsed;
+                changed = true;
+            }
+        }
+
+        if (step != 0) {
+            const int delta = ImGui::GetIO().KeyCtrl ? step_fast : step;
+            const ImVec2 btn_sz{btn_size, btn_size};
+            ImGui::SameLine(0, spacing);
+            if (ImGui::Button("-", btn_sz)) {
+                *v -= delta;
+                changed = true;
+            }
+            ImGui::SameLine(0, spacing);
+            if (ImGui::Button("+", btn_sz)) {
+                *v += delta;
+                changed = true;
+            }
+        }
+
+        ImGui::PopID();
+        return changed;
+    }
+
 } // namespace lfs::vis::gui::widgets

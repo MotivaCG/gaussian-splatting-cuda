@@ -569,7 +569,7 @@
     "import_failed": "导入失败：%s",
     "import_complete_title": "导入完成",
     "import_failed_title": "导入失败",
-    "num_splats": "Splat数量：%d",
+    "num_splats": "Splat数量：%s",
     "status_label": "状态：%s"
   },
 

@@ -7,6 +7,7 @@
 #include "framerate_controller.hpp"
 #include "internal/viewport.hpp"
 #include "io/nvcodec_image_loader.hpp"
+#include "rendering/cuda_gl_interop.hpp"
 #include "rendering/rendering.hpp"
 #include <atomic>
 #include <chrono>
@@ -119,29 +120,50 @@ namespace lfs::vis {
     // GT Image Cache for efficient GPU-resident texture management
     class GTTextureCache {
     public:
+        static constexpr int MAX_TEXTURE_DIM = 2048;
+
+        struct TextureInfo {
+            unsigned int texture_id = 0;
+            int width = 0;
+            int height = 0;
+            bool needs_flip = false;
+            glm::vec2 texcoord_scale{1.0f};
+        };
+
         GTTextureCache();
         ~GTTextureCache();
 
-        // Get or load GT texture for a camera
-        unsigned int getGTTexture(int cam_id, const std::filesystem::path& image_path);
-
-        // Clear cache
+        TextureInfo getGTTexture(int cam_id, const std::filesystem::path& image_path);
         void clear();
 
     private:
         struct CacheEntry {
-            unsigned int texture_id;
+            std::unique_ptr<lfs::rendering::CudaGLInteropTexture> interop_texture;
+            unsigned int texture_id = 0;
+            int width = 0;
+            int height = 0;
+            bool needs_flip = false;
             std::chrono::steady_clock::time_point last_access;
         };
 
         std::unordered_map<int, CacheEntry> texture_cache_;
         std::unique_ptr<lfs::io::NvCodecImageLoader> nvcodec_loader_;
         static constexpr size_t MAX_CACHE_SIZE = 20;
-        static constexpr int MAX_TEXTURE_DIM = 2048;
 
         void evictOldest();
-        unsigned int loadTexture(const std::filesystem::path& path);
-        unsigned int loadTextureGPU(const std::filesystem::path& path);
+        TextureInfo loadTexture(const std::filesystem::path& path);
+        TextureInfo loadTextureGPU(const std::filesystem::path& path, CacheEntry& entry);
+    };
+
+    struct GTComparisonContext {
+        unsigned int gt_texture_id = 0;
+        glm::ivec2 dimensions{0, 0};
+        glm::ivec2 gpu_aligned_dims{0, 0};
+        glm::vec2 render_texcoord_scale{1.0f, 1.0f};
+        glm::vec2 gt_texcoord_scale{1.0f, 1.0f};
+        bool gt_needs_flip = false;
+
+        [[nodiscard]] bool valid() const { return gt_texture_id != 0 && dimensions.x > 0 && dimensions.y > 0; }
     };
 
     class RenderingManager {
@@ -404,6 +426,9 @@ namespace lfs::vis {
         // Viewport state
         glm::ivec2 last_viewport_size_{0, 0}; // Last requested viewport size
         glm::ivec2 cached_result_size_{0, 0}; // Size at which cached_result_ was actually rendered
+
+        std::optional<GTComparisonContext> gt_context_;
+        int gt_context_camera_id_ = -1;
 
         // Gizmo state for wireframe sync
         bool cropbox_gizmo_active_ = false;

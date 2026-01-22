@@ -182,6 +182,9 @@ namespace lfs::rendering {
         // Texcoord scale for over-allocated textures
         glm::vec2 left_texcoord_scale{1.0f, 1.0f};
         glm::vec2 right_texcoord_scale{1.0f, 1.0f};
+
+        std::optional<bool> flip_left_y;
+        std::optional<bool> flip_right_y;
     };
 
     enum class GridPlane {

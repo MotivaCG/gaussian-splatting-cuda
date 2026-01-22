@@ -569,7 +569,7 @@
     "import_failed": "インポート失敗: %s",
     "import_complete_title": "インポート完了",
     "import_failed_title": "インポート失敗",
-    "num_splats": "スプラット数: %d",
+    "num_splats": "スプラット数: %s",
     "status_label": "ステータス: %s"
   },
 
