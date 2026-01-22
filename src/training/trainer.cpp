@@ -825,7 +825,11 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
         }
     }
 
-    // ramp up -> short hold -> long decay -> small floor (avoid late halos).
+    // Calculate noise intensity based on training progress.
+    // Strategy:
+    // 1. Grace Period: No noise initially to allow structure to solidify from SfM/Random points.
+    // 2. Warmup: Ramp up noise to clear "floaters" and aggressively carve empty space.
+    // 3. Decay: Reduce noise towards the end to allow fine-tuning of semi-transparent details (hair, edges).
     inline float inv_weight_piecewise(int step, int max_steps, bool isNoise) {
         if (max_steps <= 0)
             return 0.0f;
@@ -834,26 +838,39 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
             static_cast<float>(step) / static_cast<float>(max_steps),
             0.0f, 1.0f);
 
-        constexpr float P_WARMUP_END = 0.10f;
-        constexpr float P_HOLD_END = 0.3f;
-        const float P_DECAY_END = isNoise ? 0.8f : 0.60f;
+        // Schedule configuration
+        constexpr float P_DELAY = 0.15f;      // First 10%: Grace period (Structural initialization)
+        constexpr float P_WARMUP_LEN = 0.10f; // Next 10%: Linear ramp-up
+        constexpr float P_RAMP_END = P_DELAY + P_WARMUP_LEN;
+        constexpr float P_HOLD_END = P_RAMP_END + P_WARMUP_LEN * 2; // Hold peak intensity until
+        const float P_DECAY_END = isNoise ? 0.8f : 0.60f; // Decay ends at 80%
 
-        const float MAX_INTENSITY = isNoise ? 0.85f : 0.6f; // peak intensity
-        constexpr float MIN_INTENSITY = 0.01f;             // floor near the end (prevents late halos)
+        // Intensities
+        const float MAX_INTENSITY = isNoise ? 0.85f : 0.6f;
+        constexpr float MIN_INTENSITY = 0.01f; // Small floor to prevent late-training artifacts (halos)
 
-        if (phase < P_WARMUP_END) {
-            // Linear warmup: 0 -> MAX_NOISE
-            const float t = phase / P_WARMUP_END;
+        // Phase 1: Grace Period
+        if (phase < P_DELAY) {
+            return 0.0f; // Silence: Let the model learn the base geometry first.
+        }
+        // Phase 2: Warmup (Linear Ramp)
+        else if (phase < P_RAMP_END) {
+            // Normalize 't' from 0.0 to 1.0 within the warmup window
+            const float t = (phase - P_DELAY) / P_WARMUP_LEN;
             return MAX_INTENSITY * t;
-        } else if (phase < P_HOLD_END) {
-            // Hold at peak
-            return MAX_INTENSITY;
-        } else if (phase < P_DECAY_END) {
-            // Linear decay: MAX_INTENSITY -> MIN_INTENSITY
+        }
+        // Phase 3: Hold (Peak Cleaning)
+        else if (phase < P_HOLD_END) {
+            return MAX_INTENSITY; // Aggressive floater removal.
+        }
+        // Phase 4: Decay (Fine-tuning)
+        else if (phase < P_DECAY_END) {
+            // Linear decay from MAX to MIN to recover fine details/transparency
             const float t = (phase - P_HOLD_END) / (P_DECAY_END - P_HOLD_END);
             return MAX_INTENSITY + (MIN_INTENSITY - MAX_INTENSITY) * t;
-        } else {
-            // Keep a small floor until the end
+        }
+        // Phase 5: Floor (Stability)
+        else {
             return MIN_INTENSITY;
         }
     }
