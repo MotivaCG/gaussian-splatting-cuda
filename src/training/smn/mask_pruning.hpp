@@ -53,6 +53,9 @@ namespace lfs::training {
             float far_plane = 10000.0f;
             float radius_clip = 0.0f;
             float scaling_modifier = 1.0f;
+            // Margin relative to image size (0.25 = 25%) to ignore splats just outside the frustum.
+            // Splats in this "grey zone" are neither penalized nor rewarded (ignored).
+            float border_safe_margin = 0.25f; // margin to avoid mark splats like out of the mask
 
             bool invert_masks = false;
 
