@@ -1677,7 +1677,7 @@ namespace lfs::vis {
     }
 
     void RenderingManager::applyCropFilter(lfs::core::Tensor& selection) {
-        if (!selection.is_valid() || !settings_.crop_filter_for_selection)
+        if (!selection.is_valid())
             return;
 
         auto* const sm = services().sceneOrNull();

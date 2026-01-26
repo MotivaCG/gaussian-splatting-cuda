@@ -468,24 +468,13 @@ namespace lfs::io {
         LOG_TIMER_TRACE("Read images.txt");
         auto lines = read_text_file(file_path);
 
-        if (lines.size() % 2 != 0) {
-            LOG_ERROR("images.txt should have an even number of lines");
-            throw std::runtime_error("images.txt should have an even number of lines");
-        }
-
-        uint64_t n_images = lines.size() / 2;
-        LOG_DEBUG("Reading {} images from text file", n_images);
         std::vector<ImageData> images;
-        images.reserve(n_images);
+        images.reserve(lines.size());
 
-        for (uint64_t i = 0; i < n_images; ++i) {
-            const auto& line = lines[i * 2];
+        for (const auto& line : lines) {
             const auto tokens = split_string(line, ' ');
-
-            if (tokens.size() != 10) {
-                LOG_ERROR("Invalid format in images.txt line {}", i * 2 + 1);
-                throw std::runtime_error("Invalid format in images.txt");
-            }
+            if (tokens.size() != 10)
+                continue;
 
             ImageData img;
             img.image_id = std::stoul(tokens[0]);
@@ -494,10 +483,15 @@ namespace lfs::io {
             img.tvec = {std::stof(tokens[5]), std::stof(tokens[6]), std::stof(tokens[7])};
             img.camera_id = std::stoul(tokens[8]);
             img.name = tokens[9];
-
             images.push_back(std::move(img));
         }
 
+        if (images.empty()) {
+            LOG_ERROR("No valid images found in {}", lfs::core::path_to_utf8(file_path));
+            throw std::runtime_error("No valid images in images.txt");
+        }
+
+        LOG_DEBUG("Read {} images from text file", images.size());
         return images;
     }
 

@@ -491,51 +491,56 @@ void lfs::rendering::forward(
     int n_instances;
     cudaMemcpy(&n_instances, per_primitive_buffers.n_instances, sizeof(uint), cudaMemcpyDeviceToHost);
 
-    cub::DeviceRadixSort::SortPairs(
-        per_primitive_buffers.cub_workspace,
-        per_primitive_buffers.cub_workspace_size,
-        per_primitive_buffers.depth_keys,
-        per_primitive_buffers.primitive_indices,
-        n_visible_primitives);
-    CHECK_CUDA(config::debug, "cub::DeviceRadixSort::SortPairs (Depth)")
+    const int alloc_instances = std::max(n_instances, 1);
+    char* per_instance_buffers_blob = per_instance_buffers_func(required<PerInstanceBuffers>(alloc_instances));
+    PerInstanceBuffers per_instance_buffers = PerInstanceBuffers::from_blob(per_instance_buffers_blob, alloc_instances);
 
-    kernels::forward::apply_depth_ordering_cu<<<div_round_up(n_visible_primitives, config::block_size_apply_depth_ordering), config::block_size_apply_depth_ordering>>>(
-        per_primitive_buffers.primitive_indices.Current(),
-        per_primitive_buffers.n_touched_tiles,
-        per_primitive_buffers.offset,
-        n_visible_primitives);
-    CHECK_CUDA(config::debug, "apply_depth_ordering")
+    if (n_visible_primitives > 0) {
+        cub::DeviceRadixSort::SortPairs(
+            per_primitive_buffers.cub_workspace,
+            per_primitive_buffers.cub_workspace_size,
+            per_primitive_buffers.depth_keys,
+            per_primitive_buffers.primitive_indices,
+            n_visible_primitives);
+        CHECK_CUDA(config::debug, "cub::DeviceRadixSort::SortPairs (Depth)")
 
-    cub::DeviceScan::ExclusiveSum(
-        per_primitive_buffers.cub_workspace,
-        per_primitive_buffers.cub_workspace_size,
-        per_primitive_buffers.offset,
-        per_primitive_buffers.offset,
-        n_visible_primitives);
-    CHECK_CUDA(config::debug, "cub::DeviceScan::ExclusiveSum (Primitive Offsets)")
+        kernels::forward::apply_depth_ordering_cu<<<div_round_up(n_visible_primitives, config::block_size_apply_depth_ordering), config::block_size_apply_depth_ordering>>>(
+            per_primitive_buffers.primitive_indices.Current(),
+            per_primitive_buffers.n_touched_tiles,
+            per_primitive_buffers.offset,
+            n_visible_primitives);
+        CHECK_CUDA(config::debug, "apply_depth_ordering")
 
-    char* per_instance_buffers_blob = per_instance_buffers_func(required<PerInstanceBuffers>(n_instances));
-    PerInstanceBuffers per_instance_buffers = PerInstanceBuffers::from_blob(per_instance_buffers_blob, n_instances);
+        cub::DeviceScan::ExclusiveSum(
+            per_primitive_buffers.cub_workspace,
+            per_primitive_buffers.cub_workspace_size,
+            per_primitive_buffers.offset,
+            per_primitive_buffers.offset,
+            n_visible_primitives);
+        CHECK_CUDA(config::debug, "cub::DeviceScan::ExclusiveSum (Primitive Offsets)")
 
-    kernels::forward::create_instances_cu<<<div_round_up(n_visible_primitives, config::block_size_create_instances), config::block_size_create_instances>>>(
-        per_primitive_buffers.primitive_indices.Current(),
-        per_primitive_buffers.offset,
-        per_primitive_buffers.screen_bounds,
-        per_primitive_buffers.mean2d,
-        per_primitive_buffers.conic_opacity,
-        per_instance_buffers.keys.Current(),
-        per_instance_buffers.primitive_indices.Current(),
-        grid.x,
-        n_visible_primitives);
-    CHECK_CUDA(config::debug, "create_instances")
+        kernels::forward::create_instances_cu<<<div_round_up(n_visible_primitives, config::block_size_create_instances), config::block_size_create_instances>>>(
+            per_primitive_buffers.primitive_indices.Current(),
+            per_primitive_buffers.offset,
+            per_primitive_buffers.screen_bounds,
+            per_primitive_buffers.mean2d,
+            per_primitive_buffers.conic_opacity,
+            per_instance_buffers.keys.Current(),
+            per_instance_buffers.primitive_indices.Current(),
+            grid.x,
+            n_visible_primitives);
+        CHECK_CUDA(config::debug, "create_instances")
 
-    cub::DeviceRadixSort::SortPairs(
-        per_instance_buffers.cub_workspace,
-        per_instance_buffers.cub_workspace_size,
-        per_instance_buffers.keys,
-        per_instance_buffers.primitive_indices,
-        n_instances);
-    CHECK_CUDA(config::debug, "cub::DeviceRadixSort::SortPairs (Tile)")
+        if (n_instances > 0) {
+            cub::DeviceRadixSort::SortPairs(
+                per_instance_buffers.cub_workspace,
+                per_instance_buffers.cub_workspace_size,
+                per_instance_buffers.keys,
+                per_instance_buffers.primitive_indices,
+                n_instances);
+            CHECK_CUDA(config::debug, "cub::DeviceRadixSort::SortPairs (Tile)")
+        }
+    }
 
     if constexpr (!config::debug)
         cudaStreamSynchronize(memset_stream);

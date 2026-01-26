@@ -52,6 +52,9 @@ void fast_lfs::rasterization::backward(
     const float cx,
     const float cy,
     bool mip_filter) {
+    if (n_visible_primitives == 0 || n_instances == 0 || n_buckets == 0)
+        return;
+
     const dim3 grid(div_round_up(width, config::tile_width), div_round_up(height, config::tile_height), 1);
     const int n_tiles = grid.x * grid.y;
 

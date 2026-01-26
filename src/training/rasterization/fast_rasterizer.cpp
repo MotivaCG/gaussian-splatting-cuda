@@ -231,6 +231,10 @@ namespace lfs::training {
                                             ? static_cast<int>(shN.shape()[1])
                                             : 0;
 
+        if (n_primitives == 0) {
+            return std::unexpected("n_primitives is 0 - model has no gaussians");
+        }
+
         // Pre-allocate output tensors (reused across iterations)
         thread_local core::Tensor image;
         thread_local core::Tensor alpha;

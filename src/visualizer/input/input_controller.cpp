@@ -1168,8 +1168,25 @@ namespace lfs::vis {
         glm::mat3 cam_to_world_R = glm::transpose(world_to_cam_R);
         glm::vec3 cam_to_world_T = -cam_to_world_R * world_to_cam_T;
 
-        viewport_.camera.R = cam_to_world_R;
-        viewport_.camera.t = cam_to_world_T;
+        // Apply scene transform (handles user rotation/translation of the scene)
+        glm::mat4 scene_transform(1.0f);
+        if (auto* scene_mgr = services().sceneOrNull()) {
+            auto visible_transforms = scene_mgr->getScene().getVisibleNodeTransforms();
+            if (!visible_transforms.empty()) {
+                scene_transform = visible_transforms[0];
+            }
+        }
+
+        // Extract rotation part of scene transform
+        glm::mat3 scene_R(scene_transform);
+        glm::vec3 scene_T(scene_transform[3]);
+
+        // Apply scene transform to camera pose
+        glm::mat3 final_R = scene_R * cam_to_world_R;
+        glm::vec3 final_T = scene_R * cam_to_world_T + scene_T;
+
+        viewport_.camera.R = final_R;
+        viewport_.camera.t = final_T;
 
         // Update pivot point to be in front of camera
         viewport_.camera.updatePivotFromCamera();
