@@ -14,6 +14,10 @@
 #include <string>
 #include <vector>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace lfs::training::mask_pruning {
 
     namespace {
@@ -275,200 +279,220 @@ namespace lfs::training::mask_pruning {
 
         LOG_INFO("[prune_by_center_vote] Starting: {} splats, {} cameras", N, n_cams);
 
-        for (int ci = 0; ci < n_cams; ++ci) {
-            const auto& cam_ptr = cams[static_cast<size_t>(ci)];
-            if (!cam_ptr) {
-                ++skipped_no_mask;
-                continue;
-            }
+        const int num_threads = std::min(n_cams, omp_get_max_threads());
+        LOG_INFO("[prune_by_center_vote] Using {} OpenMP threads for {} cameras", num_threads, n_cams);
 
-            auto& cam = *cam_ptr;
-            if (!cam.has_mask()) {
-                ++skipped_no_mask;
-                continue;
-            }
+#pragma omp parallel num_threads(num_threads)
+        {
+            // Thread-local counters (cada thread tiene su copia)
+            std::vector<int> local_tot(static_cast<size_t>(N), 0);
+            std::vector<int> local_pos(static_cast<size_t>(N), 0);
 
-            // Old code: attentionMask > 0.5 -> binary. Keep same threshold.
-            Tensor mask = cam.load_and_get_mask(sizing->resize_factor, sizing->max_width, config.invert_masks, 0.5f);
-            if (!mask.is_valid() || mask.numel() == 0) {
-                ++skipped_no_mask;
-                continue;
-            }
-            if (mask.ndim() == 3 && mask.shape()[0] == 1) {
-                mask = mask.squeeze(0);
-            }
-
-            const int H = static_cast<int>(cam.image_height());
-            const int W = static_cast<int>(cam.image_width());
-            if (mask.ndim() != 2 ||
-                static_cast<int>(mask.shape()[0]) != H ||
-                static_cast<int>(mask.shape()[1]) != W) {
-                ++skipped_size_mismatch;
-                continue;
-            }
-
-            // Project
-            auto proj = project_splats(cam, model, config);
-            if (!proj) {
-                ++skipped_proj_error;
-                continue;
-            }
-
-            // CPU views for robust indexing (same effect as old's CPU mask indexing + CUDA counts).
-            Tensor radii_cpu = proj->radii.cpu().contiguous();     // [N,2] int32
-            Tensor means2d_cpu = proj->means2d.cpu().contiguous(); // [N,2] float
-            Tensor mask_cpu = mask.cpu().contiguous();             // [H,W] float/bool
-
-            auto r_acc = radii_cpu.accessor<int32_t, 2>();
-            auto m_acc = means2d_cpu.accessor<float, 2>();
-            auto mask_acc = mask_cpu.accessor<float, 2>();
-
-            // Helper: "outside of frame" counts as "outside of mask"
-            auto center_inside_mask = [&](int i) -> bool {
-                const float mx = m_acc(i, 0);
-                const float my = m_acc(i, 1);
-                if (!std::isfinite(mx) || !std::isfinite(my))
-                    return false;
-
-                const int x = round_to_int(mx);
-                const int y = round_to_int(my);
-
-                // No clamp. If out-of-bounds => outside of mask.
-                if ((static_cast<unsigned>(x) >= static_cast<unsigned>(W)) ||
-                    (static_cast<unsigned>(y) >= static_cast<unsigned>(H)))
-                    return false;
-
-                return mask_acc(y, x) >= 0.5f;
-            };
-
-            // Pre-calculate safe margin in pixels
-            const int pad_w = static_cast<int>(W * config.border_safe_margin);
-            const int pad_h = static_cast<int>(H * config.border_safe_margin);
-
-            // Main voting loop
-            for (int i = 0; i < N; ++i) {
-                const int rx = static_cast<int>(r_acc(i, 0));
-                const int ry = static_cast<int>(r_acc(i, 1));
-
-                // Skip if radius is invalid (behind camera or too small)
-                if (!is_visible_radii_strict(rx, ry)) {
+#pragma omp for schedule(dynamic, 1)
+            for (int ci = 0; ci < n_cams; ++ci) {
+                const auto& cam_ptr = cams[static_cast<size_t>(ci)];
+                if (!cam_ptr) {
+                    ++skipped_no_mask;
                     continue;
                 }
 
-                // Get raw integer coordinates (no clamping)
-                int x = round_to_int(m_acc(i, 0));
-                int y = round_to_int(m_acc(i, 1));
-
-                // CASE 1: Strictly INSIDE the image frame
-                if (x >= 0 && x < W && y >= 0 && y < H) {
-                    tot[static_cast<size_t>(i)]++; // Valid view
-
-                    // Check the binary mask
-                    if (mask_acc(y, x) >= 0.5f) {
-                        pos[static_cast<size_t>(i)]++; // Vote: KEEP
-                    }
-                    // Else: pos doesn't increase -> Vote: REMOVE
-                }
-                // CASE 2: Outside but within the SAFE MARGIN ("Pardon Zone")
-                // We assume these splats might be valid parts of the object cut off by the frame.
-                // Action: Ignore this camera for this splat (do not update 'tot' or 'pos').
-                else if (x >= -pad_w && x < W + pad_w &&
-                         y >= -pad_h && y < H + pad_h) {
+                auto& cam = *cam_ptr;
+                if (!cam.has_mask()) {
+                    ++skipped_no_mask;
                     continue;
                 }
-                // CASE 3: FAR OUTSIDE the safe margin
-                // These are likely floaters or artifacts far from the object.
-                // Action: Count as a negative vote (increase 'tot', keep 'pos' same).
-                else {
-                    tot[static_cast<size_t>(i)]++;
-                    // pos doesn't increase -> Vote: REMOVE
+
+                // Old code: attentionMask > 0.5 -> binary. Keep same threshold.
+                Tensor mask = cam.load_and_get_mask(sizing->resize_factor, sizing->max_width, config.invert_masks, 0.5f);
+                if (!mask.is_valid() || mask.numel() == 0) {
+                    ++skipped_no_mask;
+                    continue;
                 }
-            }
+                if (mask.ndim() == 3 && mask.shape()[0] == 1) {
+                    mask = mask.squeeze(0);
+                }
 
-            // ===== DEPTH FILTERING =====
-            if (config.enable_depth_filtering) {
-                Tensor depths_cpu = proj->depths.cpu().contiguous(); // [N]
-                auto d_acc = depths_cpu.accessor<float, 1>();
+                const int H = static_cast<int>(cam.image_height());
+                const int W = static_cast<int>(cam.image_width());
+                if (mask.ndim() != 2 ||
+                    static_cast<int>(mask.shape()[0]) != H ||
+                    static_cast<int>(mask.shape()[1]) != W) {
+                    ++skipped_size_mismatch;
+                    continue;
+                }
 
-                // Collect {depth, index} for splats classified as "inside" in this view
-                std::vector<std::pair<float, int>> inside;
-                inside.reserve(static_cast<size_t>(N) / 10);
+                // Project
+                auto proj = project_splats(cam, model, config);
+                if (!proj) {
+                    ++skipped_proj_error;
+                    continue;
+                }
 
+                // CPU views for robust indexing (same effect as old's CPU mask indexing + CUDA counts).
+                Tensor radii_cpu = proj->radii.cpu().contiguous();     // [N,2] int32
+                Tensor means2d_cpu = proj->means2d.cpu().contiguous(); // [N,2] float
+                Tensor mask_cpu = mask.cpu().contiguous();             // [H,W] float/bool
+
+                auto r_acc = radii_cpu.accessor<int32_t, 2>();
+                auto m_acc = means2d_cpu.accessor<float, 2>();
+                auto mask_acc = mask_cpu.accessor<float, 2>();
+
+                // Helper: "outside of frame" counts as "outside of mask"
+                auto center_inside_mask = [&](int i) -> bool {
+                    const float mx = m_acc(i, 0);
+                    const float my = m_acc(i, 1);
+                    if (!std::isfinite(mx) || !std::isfinite(my))
+                        return false;
+
+                    const int x = round_to_int(mx);
+                    const int y = round_to_int(my);
+
+                    // No clamp. If out-of-bounds => outside of mask.
+                    if ((static_cast<unsigned>(x) >= static_cast<unsigned>(W)) ||
+                        (static_cast<unsigned>(y) >= static_cast<unsigned>(H)))
+                        return false;
+
+                    return mask_acc(y, x) >= 0.5f;
+                };
+
+                // Pre-calculate safe margin in pixels
+                const int pad_w = static_cast<int>(W * config.border_safe_margin);
+                const int pad_h = static_cast<int>(H * config.border_safe_margin);
+
+                // Main voting loop
                 for (int i = 0; i < N; ++i) {
                     const int rx = static_cast<int>(r_acc(i, 0));
                     const int ry = static_cast<int>(r_acc(i, 1));
-                    if (!is_visible_radii_strict(rx, ry))
-                        continue;
 
-                    if (!center_inside_mask(i))
+                    // Skip if radius is invalid (behind camera or too small)
+                    if (!is_visible_radii_strict(rx, ry)) {
                         continue;
+                    }
 
-                    const float depth = d_acc(i);
-                    if (depth > config.near_plane && depth < config.far_plane) {
-                        inside.emplace_back(depth, i);
+                    // Get raw integer coordinates (no clamping)
+                    int x = round_to_int(m_acc(i, 0));
+                    int y = round_to_int(m_acc(i, 1));
+
+                    // CASE 1: Strictly INSIDE the image frame
+                    if (x >= 0 && x < W && y >= 0 && y < H) {
+                        local_tot[static_cast<size_t>(i)]++; // Valid view
+
+                        // Check the binary mask
+                        if (mask_acc(y, x) >= 0.5f) {
+                            local_pos[static_cast<size_t>(i)]++; // Vote: KEEP
+                        }
+                        // Else: pos doesn't increase -> Vote: REMOVE
+                    }
+                    // CASE 2: Outside but within the SAFE MARGIN ("Pardon Zone")
+                    // We assume these splats might be valid parts of the object cut off by the frame.
+                    // Action: Ignore this camera for this splat (do not update 'tot' or 'pos').
+                    else if (x >= -pad_w && x < W + pad_w &&
+                             y >= -pad_h && y < H + pad_h) {
+                        continue;
+                    }
+                    // CASE 3: FAR OUTSIDE the safe margin
+                    // These are likely floaters or artifacts far from the object.
+                    // Action: Count as a negative vote (increase 'tot', keep 'pos' same).
+                    else {
+                        local_tot[static_cast<size_t>(i)]++;
+                        // pos doesn't increase -> Vote: REMOVE
                     }
                 }
 
-                if (inside.size() >= static_cast<size_t>(config.min_splats_for_depth_stats)) {
-                    // Median depth (robust)
-                    std::vector<float> depth_vals;
-                    depth_vals.reserve(inside.size());
-                    for (const auto& p : inside)
-                        depth_vals.push_back(p.first);
+                // ===== DEPTH FILTERING =====
+                if (config.enable_depth_filtering) {
+                    Tensor depths_cpu = proj->depths.cpu().contiguous(); // [N]
+                    auto d_acc = depths_cpu.accessor<float, 1>();
 
-                    const size_t mid = depth_vals.size() / 2;
-                    std::nth_element(depth_vals.begin(), depth_vals.begin() + mid, depth_vals.end());
-                    const float median_depth = depth_vals[mid];
+                    // Collect {depth, index} for splats classified as "inside" in this view
+                    std::vector<std::pair<float, int>> inside;
+                    inside.reserve(static_cast<size_t>(N) / 10);
 
-                    // MAD (median absolute deviation)
-                    std::vector<float> abs_devs;
-                    abs_devs.reserve(inside.size());
-                    for (float d : depth_vals)
-                        abs_devs.push_back(std::abs(d - median_depth));
+                    for (int i = 0; i < N; ++i) {
+                        const int rx = static_cast<int>(r_acc(i, 0));
+                        const int ry = static_cast<int>(r_acc(i, 1));
+                        if (!is_visible_radii_strict(rx, ry))
+                            continue;
 
-                    const size_t mid_dev = abs_devs.size() / 2;
-                    std::nth_element(abs_devs.begin(), abs_devs.begin() + mid_dev, abs_devs.end());
-                    const float mad = abs_devs[mid_dev];
+                        if (!center_inside_mask(i))
+                            continue;
 
-                    float robust_std = mad * 1.4826f;
-
-                    // Guard: if robust_std ~ 0, do not over-filter.
-                    if (robust_std > 1e-6f) {
-                        const float K = config.depth_filter_sigma_multiplier;
-                        const float min_acceptable_depth = median_depth - K * robust_std;
-                        const float max_acceptable_depth = median_depth + K * robust_std;
-
-                        if ((ci + 1) % 25 == 0 || ci < 3) {
-                            LOG_DEBUG("[prune_by_center_vote] Camera {} depth filter: "
-                                      "median={:.2f}m, MAD={:.3f}, std={:.3f}, range=[{:.2f}, {:.2f}]m (K={:.1f})",
-                                      ci, median_depth, mad, robust_std,
-                                      min_acceptable_depth, max_acceptable_depth, K);
+                        const float depth = d_acc(i);
+                        if (depth > config.near_plane && depth < config.far_plane) {
+                            inside.emplace_back(depth, i);
                         }
+                    }
 
-                        int filtered_by_depth = 0;
-                        for (const auto& [depth, idx] : inside) {
-                            if (depth < min_acceptable_depth || depth > max_acceptable_depth) {
-                                // Remove the "inside" vote that was already added for this view
-                                int& p = pos[static_cast<size_t>(idx)];
-                                if (p > 0)
-                                    p--;
-                                ++filtered_by_depth;
+                    if (inside.size() >= static_cast<size_t>(config.min_splats_for_depth_stats)) {
+                        // Median depth (robust)
+                        std::vector<float> depth_vals;
+                        depth_vals.reserve(inside.size());
+                        for (const auto& p : inside)
+                            depth_vals.push_back(p.first);
+
+                        const size_t mid = depth_vals.size() / 2;
+                        std::nth_element(depth_vals.begin(), depth_vals.begin() + mid, depth_vals.end());
+                        const float median_depth = depth_vals[mid];
+
+                        // MAD (median absolute deviation)
+                        std::vector<float> abs_devs;
+                        abs_devs.reserve(inside.size());
+                        for (float d : depth_vals)
+                            abs_devs.push_back(std::abs(d - median_depth));
+
+                        const size_t mid_dev = abs_devs.size() / 2;
+                        std::nth_element(abs_devs.begin(), abs_devs.begin() + mid_dev, abs_devs.end());
+                        const float mad = abs_devs[mid_dev];
+
+                        float robust_std = mad * 1.4826f;
+
+                        // Guard: if robust_std ~ 0, do not over-filter.
+                        if (robust_std > 1e-6f) {
+                            const float K = config.depth_filter_sigma_multiplier;
+                            const float min_acceptable_depth = median_depth - K * robust_std;
+                            const float max_acceptable_depth = median_depth + K * robust_std;
+
+                            if ((ci + 1) % 25 == 0 || ci < 3) {
+                                LOG_DEBUG("[prune_by_center_vote] Camera {} depth filter: "
+                                          "median={:.2f}m, MAD={:.3f}, std={:.3f}, range=[{:.2f}, {:.2f}]m (K={:.1f})",
+                                          ci, median_depth, mad, robust_std,
+                                          min_acceptable_depth, max_acceptable_depth, K);
+                            }
+
+                            int filtered_by_depth = 0;
+                            for (const auto& [depth, idx] : inside) {
+                                if (depth < min_acceptable_depth || depth > max_acceptable_depth) {
+                                    // Remove the "inside" vote that was already added for this view
+                                    int& p = local_pos[static_cast<size_t>(idx)];
+                                    if (p > 0)
+                                        p--;
+                                    ++filtered_by_depth;
+                                }
+                            }
+
+                            if (filtered_by_depth > 0 && ((ci + 1) % 25 == 0 || ci < 3)) {
+                                LOG_INFO("[prune_by_center_vote] Camera {} filtered {} splats by depth ({:.1f}% of inside)",
+                                         ci, filtered_by_depth, 100.0 * filtered_by_depth / inside.size());
                             }
                         }
-
-                        if (filtered_by_depth > 0 && ((ci + 1) % 25 == 0 || ci < 3)) {
-                            LOG_INFO("[prune_by_center_vote] Camera {} filtered {} splats by depth ({:.1f}% of inside)",
-                                     ci, filtered_by_depth, 100.0 * filtered_by_depth / inside.size());
-                        }
                     }
                 }
-            }
-            // ===== END DEPTH FILTERING =====
+                // ===== END DEPTH FILTERING =====
 
-            if ((ci + 1) % 25 == 0 || (ci + 1) == n_cams) {
-                LOG_INFO("[prune_by_center_vote] Processing camera {}/{}", (ci + 1), n_cams);
+                if ((ci + 1) % 25 == 0 || (ci + 1) == n_cams) {
+                    LOG_INFO("[prune_by_center_vote] Processing camera {}/{}", (ci + 1), n_cams);
+                }
             }
-        }
+
+// Merge thread-local results into global counters
+#pragma omp critical
+            {
+                for (int i = 0; i < N; ++i) {
+                    tot[static_cast<size_t>(i)] += local_tot[static_cast<size_t>(i)];
+                    pos[static_cast<size_t>(i)] += local_pos[static_cast<size_t>(i)];
+                }
+            }
+        } // fin del pragma omp parallel
 
         LOG_INFO("[prune_by_center_vote] Processed {} cameras, skipped: {} no mask, {} size mismatch, {} proj error",
                  n_cams, skipped_no_mask, skipped_size_mismatch, skipped_proj_error);
@@ -669,152 +693,181 @@ namespace lfs::training::mask_pruning {
         std::vector<uint8_t> mask01;
         IntegralImage sat;
 
-        for (int ci = 0; ci < n_cams; ++ci) {
-            const auto& cam_ptr = cams[static_cast<size_t>(ci)];
-            if (!cam_ptr) {
-                ++skipped_no_mask;
-                continue;
-            }
+        const int num_threads_leak = std::min(n_cams, omp_get_max_threads());
+        LOG_INFO("[prune_by_mask_leakage] Using {} OpenMP threads for {} cameras", num_threads_leak, n_cams);
 
-            auto& cam = *cam_ptr;
-            if (!cam.has_mask()) {
-                ++skipped_no_mask;
-                continue;
-            }
+#pragma omp parallel num_threads(num_threads_leak)
+        {
+            // Thread-local counters
+            std::vector<int> local_vis_counts(static_cast<size_t>(N), 0);
+            std::vector<int> local_leak_votes(static_cast<size_t>(N), 0);
 
-            // Old code: (attentionMask > 0.5).to(float). Mirror it with threshold.
-            Tensor mask = cam.load_and_get_mask(sizing->resize_factor, sizing->max_width, config.invert_masks, 0.5f);
-            if (!mask.is_valid() || mask.numel() == 0) {
-                ++skipped_no_mask;
-                continue;
-            }
-            if (mask.ndim() == 3 && mask.shape()[0] == 1) {
-                mask = mask.squeeze(0);
-            }
+            // Thread-local buffers for mask processing (reused per camera by this thread)
+            std::vector<uint8_t> local_mask01;
+            IntegralImage local_sat;
 
-            const int H = static_cast<int>(cam.image_height());
-            const int W = static_cast<int>(cam.image_width());
-            if (mask.ndim() != 2 ||
-                static_cast<int>(mask.shape()[0]) != H ||
-                static_cast<int>(mask.shape()[1]) != W) {
-                ++skipped_size_mismatch;
-                continue;
-            }
-
-            // Prepare CPU binary mask01
-            Tensor mask_cpu = mask.cpu().contiguous();
-            auto mask_acc = mask_cpu.accessor<float, 2>();
-
-            mask01.assign(static_cast<size_t>(H) * static_cast<size_t>(W), 0);
-            for (int y = 0; y < H; ++y) {
-                uint8_t* row = mask01.data() + static_cast<size_t>(y) * static_cast<size_t>(W);
-                for (int x = 0; x < W; ++x) {
-                    row[x] = (mask_acc(y, x) >= 0.5f) ? uint8_t(1) : uint8_t(0);
-                }
-            }
-
-            // Optional dilation tolerance (old uses max_pool2d over mask01).
-            // We emulate it via integral-image queries.
-            if (config.dilate_px > 0) {
-                sat.build(mask01.data(), H, W);
-            }
-
-            // Strict mask query: out-of-frame => false (counts as "outside mask")
-            auto mask_inside_strict = [&](int x, int y) -> bool {
-                if ((static_cast<unsigned>(x) >= static_cast<unsigned>(W)) ||
-                    (static_cast<unsigned>(y) >= static_cast<unsigned>(H))) {
-                    return false;
-                }
-
-                if (config.dilate_px <= 0) {
-                    return mask01[static_cast<size_t>(y) * static_cast<size_t>(W) + static_cast<size_t>(x)] != 0;
-                }
-
-                const int r = config.dilate_px;
-                const int x0 = std::max(0, x - r);
-                const int y0 = std::max(0, y - r);
-                const int x1 = std::min(W - 1, x + r);
-                const int y1 = std::min(H - 1, y + r);
-
-                const int sum = sat.sum_rect(x0, y0, x1, y1);
-                return sum > 0;
-            };
-
-            // Project with leakage projection params
-            CenterVotePruningConfig proj_cfg;
-            proj_cfg.eps2d = config.eps2d;
-            proj_cfg.near_plane = config.near_plane;
-            proj_cfg.far_plane = config.far_plane;
-            proj_cfg.radius_clip = config.radius_clip;
-            proj_cfg.scaling_modifier = config.scaling_modifier;
-            proj_cfg.invert_masks = config.invert_masks;
-
-            auto proj = project_splats(cam, model, proj_cfg);
-            if (!proj) {
-                ++skipped_proj_error;
-                continue;
-            }
-
-            Tensor radii_cpu = proj->radii.cpu().contiguous();
-            Tensor means2d_cpu = proj->means2d.cpu().contiguous();
-
-            auto r_acc = radii_cpu.accessor<int32_t, 2>();
-            auto m_acc = means2d_cpu.accessor<float, 2>();
-
-            for (int i = 0; i < N; ++i) {
-                const int rx = static_cast<int>(r_acc(i, 0));
-                const int ry = static_cast<int>(r_acc(i, 1));
-                if (!is_visible_radii_strict(rx, ry)) {
+#pragma omp for schedule(dynamic, 1)
+            for (int ci = 0; ci < n_cams; ++ci) {
+                const auto& cam_ptr = cams[static_cast<size_t>(ci)];
+                if (!cam_ptr) {
+#pragma omp atomic
+                    ++skipped_no_mask;
                     continue;
                 }
 
-                const float frx = static_cast<float>(std::abs(rx));
-                const float fry = static_cast<float>(std::abs(ry));
-                if (std::max(frx, fry) < config.min_pixel_radius) {
+                auto& cam = *cam_ptr;
+                if (!cam.has_mask()) {
+#pragma omp atomic
+                    ++skipped_no_mask;
                     continue;
                 }
 
-                const float mx = m_acc(i, 0);
-                const float my = m_acc(i, 1);
-                if (!std::isfinite(mx) || !std::isfinite(my)) {
+                // Old code: (attentionMask > 0.5).to(float). Mirror it with threshold.
+                Tensor mask = cam.load_and_get_mask(sizing->resize_factor, sizing->max_width, config.invert_masks, 0.5f);
+                if (!mask.is_valid() || mask.numel() == 0) {
+#pragma omp atomic
+                    ++skipped_no_mask;
+                    continue;
+                }
+                if (mask.ndim() == 3 && mask.shape()[0] == 1) {
+                    mask = mask.squeeze(0);
+                }
+
+                const int H = static_cast<int>(cam.image_height());
+                const int W = static_cast<int>(cam.image_width());
+                if (mask.ndim() != 2 ||
+                    static_cast<int>(mask.shape()[0]) != H ||
+                    static_cast<int>(mask.shape()[1]) != W) {
+#pragma omp atomic
+                    ++skipped_size_mismatch;
                     continue;
                 }
 
-                const int cx = round_to_int(mx);
-                const int cy = round_to_int(my);
+                // Prepare CPU binary mask01 - usando buffer local del thread
+                Tensor mask_cpu = mask.cpu().contiguous();
+                auto mask_acc = mask_cpu.accessor<float, 2>();
 
-                // Old semantics: only evaluate leakage if center is inside mask.
-                // Important change: out-of-frame center is NOT clamped; it's treated as outside mask.
-                if (!mask_inside_strict(cx, cy)) {
-                    continue;
-                }
-
-                vis_counts[static_cast<size_t>(i)]++;
-
-                int outside = 0;
-                const int P = static_cast<int>(dirs.size());
-
-                for (const auto& d : dirs) {
-                    const int dx = round_to_int(frx * d.dx);
-                    const int dy = round_to_int(fry * d.dy);
-
-                    const int sx = cx + dx;
-                    const int sy = cy + dy;
-
-                    // Important change: sample points out-of-frame count as outside (no clamp).
-                    if (!mask_inside_strict(sx, sy)) {
-                        outside++;
+                local_mask01.assign(static_cast<size_t>(H) * static_cast<size_t>(W), 0);
+                for (int y = 0; y < H; ++y) {
+                    uint8_t* row = local_mask01.data() + static_cast<size_t>(y) * static_cast<size_t>(W);
+                    for (int x = 0; x < W; ++x) {
+                        row[x] = (mask_acc(y, x) >= 0.5f) ? uint8_t(1) : uint8_t(0);
                     }
                 }
 
-                const float outside_ratio = (P > 0) ? (static_cast<float>(outside) / static_cast<float>(P)) : 0.0f;
-                if (outside_ratio > config.per_view_leak_fraction) {
-                    leak_votes[static_cast<size_t>(i)]++;
+                // Optional dilation tolerance (old uses max_pool2d over mask01).
+                // We emulate it via integral-image queries - usando SAT local del thread
+                if (config.dilate_px > 0) {
+                    local_sat.build(local_mask01.data(), H, W);
+                }
+
+                // Strict mask query: out-of-frame => false (counts as "outside mask")
+                auto mask_inside_strict = [&](int x, int y) -> bool {
+                    if ((static_cast<unsigned>(x) >= static_cast<unsigned>(W)) ||
+                        (static_cast<unsigned>(y) >= static_cast<unsigned>(H))) {
+                        return false;
+                    }
+
+                    if (config.dilate_px <= 0) {
+                        return local_mask01[static_cast<size_t>(y) * static_cast<size_t>(W) + static_cast<size_t>(x)] != 0;
+                    }
+
+                    const int r = config.dilate_px;
+                    const int x0 = std::max(0, x - r);
+                    const int y0 = std::max(0, y - r);
+                    const int x1 = std::min(W - 1, x + r);
+                    const int y1 = std::min(H - 1, y + r);
+
+                    const int sum = local_sat.sum_rect(x0, y0, x1, y1);
+                    return sum > 0;
+                };
+
+                // Project with leakage projection params
+                CenterVotePruningConfig proj_cfg;
+                proj_cfg.eps2d = config.eps2d;
+                proj_cfg.near_plane = config.near_plane;
+                proj_cfg.far_plane = config.far_plane;
+                proj_cfg.radius_clip = config.radius_clip;
+                proj_cfg.scaling_modifier = config.scaling_modifier;
+                proj_cfg.invert_masks = config.invert_masks;
+
+                auto proj = project_splats(cam, model, proj_cfg);
+                if (!proj) {
+#pragma omp atomic
+                    ++skipped_proj_error;
+                    continue;
+                }
+
+                Tensor radii_cpu = proj->radii.cpu().contiguous();
+                Tensor means2d_cpu = proj->means2d.cpu().contiguous();
+
+                auto r_acc = radii_cpu.accessor<int32_t, 2>();
+                auto m_acc = means2d_cpu.accessor<float, 2>();
+
+                for (int i = 0; i < N; ++i) {
+                    const int rx = static_cast<int>(r_acc(i, 0));
+                    const int ry = static_cast<int>(r_acc(i, 1));
+                    if (!is_visible_radii_strict(rx, ry)) {
+                        continue;
+                    }
+
+                    const float frx = static_cast<float>(std::abs(rx));
+                    const float fry = static_cast<float>(std::abs(ry));
+                    if (std::max(frx, fry) < config.min_pixel_radius) {
+                        continue;
+                    }
+
+                    const float mx = m_acc(i, 0);
+                    const float my = m_acc(i, 1);
+                    if (!std::isfinite(mx) || !std::isfinite(my)) {
+                        continue;
+                    }
+
+                    const int cx = round_to_int(mx);
+                    const int cy = round_to_int(my);
+
+                    // Old semantics: only evaluate leakage if center is inside mask.
+                    // Important change: out-of-frame center is NOT clamped; it's treated as outside mask.
+                    if (!mask_inside_strict(cx, cy)) {
+                        continue;
+                    }
+
+                    local_vis_counts[static_cast<size_t>(i)]++;
+
+                    int outside = 0;
+                    const int P = static_cast<int>(dirs.size());
+
+                    for (const auto& d : dirs) {
+                        const int dx = round_to_int(frx * d.dx);
+                        const int dy = round_to_int(fry * d.dy);
+
+                        const int sx = cx + dx;
+                        const int sy = cy + dy;
+
+                        // Important change: sample points out-of-frame count as outside (no clamp).
+                        if (!mask_inside_strict(sx, sy)) {
+                            outside++;
+                        }
+                    }
+
+                    const float outside_ratio = (P > 0) ? (static_cast<float>(outside) / static_cast<float>(P)) : 0.0f;
+                    if (outside_ratio > config.per_view_leak_fraction) {
+                        local_leak_votes[static_cast<size_t>(i)]++;
+                    }
+                }
+
+                if ((ci + 1) % 25 == 0 || (ci + 1) == n_cams) {
+                    LOG_INFO("[prune_by_mask_leakage] Processing camera {}/{}", (ci + 1), n_cams);
                 }
             }
 
-            if ((ci + 1) % 25 == 0 || (ci + 1) == n_cams) {
-                LOG_INFO("[prune_by_mask_leakage] Processing camera {}/{}", (ci + 1), n_cams);
+// Merge thread-local results into global counters
+#pragma omp critical
+            {
+                for (int i = 0; i < N; ++i) {
+                    vis_counts[static_cast<size_t>(i)] += local_vis_counts[static_cast<size_t>(i)];
+                    leak_votes[static_cast<size_t>(i)] += local_leak_votes[static_cast<size_t>(i)];
+                }
             }
         }
 
@@ -1151,7 +1204,7 @@ namespace lfs::training::mask_pruning {
         if (!leak) {
             return std::unexpected(leak.error());
         }
-        
+
         auto isolation = prune_by_isolation_distance(strategy, isolation_config);
         if (!isolation) {
             return std::unexpected(isolation.error());
