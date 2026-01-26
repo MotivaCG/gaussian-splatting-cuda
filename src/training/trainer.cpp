@@ -2045,10 +2045,11 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
     // ----------------------------------------------------------------------------
 
     void Trainer::handle_ngs_phase_transition(int iter) {
-        if (!ngs_enabled_ || !ngs_phase_manager_) return;
+        if (!ngs_enabled_ || !ngs_phase_manager_)
+            return;
 
         const NGSPhase new_phase = ngs_phase_manager_->get_phase(iter);
-        
+
         // Phase transition
         if (new_phase != ngs_current_phase_) {
             const NGSPhase old_phase = ngs_current_phase_;
@@ -2062,12 +2063,20 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                 remove_noise_from_model();
             }
         }
-        
-        // Per-iteration operation during noise phase: randomize SH0 colors *in the model*
+
+        // Per-iteration operations during noise phase
         if (ngs_current_phase_ == NGSPhase::WithNoise && ngs_surface_count_ > 0 && ngs_noise_count_ > 0) {
             auto& model = strategy_->get_model();
-            // Deterministic seed: iteration number
+            auto& optimizer = strategy_->get_optimizer();
+
+            // Randomize noise colors
             ngs_randomize_sh0_range_inplace(model.sh0(), ngs_surface_count_, ngs_noise_count_, static_cast<uint32_t>(iter));
+
+            // Freeze noise opacity UNTIL kNgsOpacityUnfreezePoint (then let it fade)
+            const int unfreeze_iter = static_cast<int>(kNgsOpacityUnfreezePoint * params_.optimization.iterations);
+            if (iter < unfreeze_iter) {
+                optimizer.zero_grad_range(ParamType::Opacity, ngs_surface_count_, ngs_noise_count_);
+            }
         }
     }
 

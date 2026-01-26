@@ -5,6 +5,7 @@
 #include "Common.h"     // CameraModelType, UnscentedTransformParameters, ShutterType
 #include "Projection.h" // launch_projection_ut_3dgs_fused_kernel
 #include "core/logger.hpp"
+#include "nanoflann.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -951,6 +952,179 @@ namespace lfs::training::mask_pruning {
                              .success = true};
     }
 
+    // -----------------------------------------------------------------------------
+    // Isolation pruning (3D nearest-neighbor outliers)
+    // -----------------------------------------------------------------------------
+
+    // Minimal nanoflann adaptor over a contiguous float array [N,3]
+    struct TensorPointCloud {
+        const float* pts = nullptr; // points as [x0,y0,z0, x1,y1,z1, ...]
+        size_t N = 0;
+
+        inline size_t kdtree_get_point_count() const { return N; }
+        inline float kdtree_get_pt(const size_t idx, int dim) const {
+            return pts[idx * 3 + static_cast<size_t>(dim)];
+        }
+        template <class BBOX>
+        bool kdtree_get_bbox(BBOX& /*bb*/) const { return false; }
+    };
+
+    static inline float median_inplace(std::vector<float>& v) {
+        if (v.empty())
+            return 0.0f;
+        const size_t mid = v.size() / 2;
+        std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(mid), v.end());
+        return v[mid];
+    }
+
+    std::expected<PruningResult, std::string> prune_by_isolation_distance(
+        IStrategy& strategy,
+        const IsolationPruningConfig& config) {
+
+        using namespace lfs::core;
+
+        if (!config.enabled) {
+            const int n = static_cast<int>(strategy.get_model().size());
+            return PruningResult{.splats_before = n, .splats_after = n, .splats_removed = 0, .success = true};
+        }
+
+        auto& model = strategy.get_model();
+        const int N = static_cast<int>(model.size());
+        if (N <= 0) {
+            return PruningResult{.splats_before = 0, .splats_after = 0, .splats_removed = 0, .success = true};
+        }
+
+        // kth neighbor excluding self (1-based)
+        const int kth = std::max(1, config.kth_neighbor);
+        if (N <= kth) {
+            LOG_WARN("[prune_by_isolation_distance] Not enough splats (N={}) for kth_neighbor={}; skipping.", N, kth);
+            return PruningResult{.splats_before = N, .splats_after = N, .splats_removed = 0, .success = true};
+        }
+
+        // Pull positions to CPU
+        Tensor means_cpu = model.get_means().cpu().contiguous(); // [N,3] float32
+        if (!means_cpu.is_valid() || means_cpu.numel() == 0 ||
+            means_cpu.ndim() != 2 ||
+            static_cast<int>(means_cpu.shape()[0]) != N ||
+            static_cast<int>(means_cpu.shape()[1]) != 3) {
+            return std::unexpected("prune_by_isolation_distance: model.get_means() is invalid or not shaped [N,3].");
+        }
+        const float* pts = means_cpu.ptr<float>();
+
+        // Build KD-tree
+        TensorPointCloud cloud;
+        cloud.pts = pts;
+        cloud.N = static_cast<size_t>(N);
+
+        using KDTree = nanoflann::KDTreeSingleIndexAdaptor<
+            nanoflann::L2_Simple_Adaptor<float, TensorPointCloud>,
+            TensorPointCloud, 3>;
+
+        KDTree tree(3, cloud, nanoflann::KDTreeSingleIndexAdaptorParams(10));
+        tree.buildIndex();
+
+        // Query count: max(k_neighbors, kth_neighbor) + 1 (self) to be safe.
+        const int kq = std::min(N, std::max(std::max(1, config.k_neighbors), kth) + 1);
+        if (kq <= kth) {
+            LOG_WARN("[prune_by_isolation_distance] Query k too small (kq={}, kth={}); skipping.", kq, kth);
+            return PruningResult{.splats_before = N, .splats_after = N, .splats_removed = 0, .success = true};
+        }
+
+        std::vector<size_t> indices(static_cast<size_t>(kq));
+        std::vector<float> dists_sq(static_cast<size_t>(kq));
+        nanoflann::KNNResultSet<float> resultSet(kq);
+
+        // Compute d_k for each splat: distance to kth neighbor EXCLUDING self
+        std::vector<float> dk(static_cast<size_t>(N), 0.0f);
+        std::vector<float> neigh_dists;
+        neigh_dists.reserve(static_cast<size_t>(kq));
+
+        for (int i = 0; i < N; ++i) {
+            resultSet.init(indices.data(), dists_sq.data());
+            tree.findNeighbors(resultSet, pts + static_cast<size_t>(i) * 3ULL, nanoflann::SearchParameters());
+
+            neigh_dists.clear();
+
+            // Collect neighbor distances excluding self (robust to whether self is returned at slot 0 or not)
+            for (int j = 0; j < kq; ++j) {
+                const size_t idx = indices[static_cast<size_t>(j)];
+                if (static_cast<int>(idx) == i) {
+                    continue; // skip self
+                }
+                const float dsq = dists_sq[static_cast<size_t>(j)];
+                neigh_dists.push_back(std::sqrt(std::max(0.0f, dsq)));
+            }
+
+            // We requested kq = max(k_neighbors,kth)+1 so neigh_dists should have at least kth entries.
+            // Still, guard in case of any unexpected behavior.
+            if (static_cast<int>(neigh_dists.size()) < kth) {
+                dk[static_cast<size_t>(i)] = std::numeric_limits<float>::infinity();
+                continue;
+            }
+
+            std::nth_element(
+                neigh_dists.begin(),
+                neigh_dists.begin() + static_cast<std::ptrdiff_t>(kth - 1),
+                neigh_dists.end());
+
+            dk[static_cast<size_t>(i)] = neigh_dists[static_cast<size_t>(kth - 1)];
+        }
+
+        // Global median over ALL splats
+        std::vector<float> pool = dk; // copy
+        const float med = median_inplace(pool);
+
+        if (!std::isfinite(med) || med <= 0.0f) {
+            LOG_WARN("[prune_by_isolation_distance] Invalid median d_k={}; skipping.", med);
+            return PruningResult{.splats_before = N, .splats_after = N, .splats_removed = 0, .success = true};
+        }
+
+        const float base_thr = config.threshold_multiplier * med;
+        const float abs_thr = (config.abs_distance_min > 0.0f) ? config.abs_distance_min : 0.0f;
+        const float thr = (abs_thr > base_thr) ? abs_thr : base_thr;
+
+        LOG_INFO("[prune_by_isolation_distance] d{} median={:.6f} m (N={}), thr={:.6f} m (x{:.2f}), abs_min={:.6f} m",
+                 kth, med, N, thr, config.threshold_multiplier, abs_thr);
+        // Build removal mask
+        Tensor remove_mask_cpu = Tensor::zeros({static_cast<size_t>(N)}, Device::CPU, DataType::Bool);
+        auto rm_acc = remove_mask_cpu.accessor<uint8_t, 1>();
+
+        int n_remove = 0;
+        int n_keep = 0;
+
+        for (int i = 0; i < N; ++i) {
+            const float d = dk[static_cast<size_t>(i)];
+            const bool remove = std::isfinite(d) && (d > thr);
+
+            rm_acc(i) = remove ? 1 : 0;
+            n_remove += remove ? 1 : 0;
+            n_keep += remove ? 0 : 1;
+        }
+
+        if (n_remove == 0) {
+            LOG_INFO("[prune_by_isolation_distance] Removed 0 splats (0.000%)");
+            return PruningResult{.splats_before = N, .splats_after = N, .splats_removed = 0, .success = true};
+        }
+        if (n_keep == 0) {
+            LOG_WARN("[prune_by_isolation_distance] Would remove all splats; skipping.");
+            return PruningResult{.splats_before = N, .splats_after = N, .splats_removed = 0, .success = true};
+        }
+
+        Tensor remove_mask = remove_mask_cpu.to(Device::CUDA).contiguous();
+        strategy.remove_gaussians(remove_mask);
+
+        const int after = static_cast<int>(strategy.get_model().size());
+        const int removed = N - after;
+        const double pct = (N > 0) ? (100.0 * static_cast<double>(removed) / static_cast<double>(N)) : 0.0;
+
+        LOG_INFO("[prune_by_isolation_distance] Removed {} splats ({:.2}%) | threshold={:.4f}m ({}x median)",
+                 removed, pct, thr, config.threshold_multiplier);
+
+        return PruningResult{.splats_before = N,
+                             .splats_after = after,
+                             .splats_removed = removed,
+                             .success = true};
+    }
 
     // -----------------------------------------------------------------------------
     // Orchestrator
@@ -960,7 +1134,8 @@ namespace lfs::training::mask_pruning {
         IStrategy& strategy,
         const CameraDataset& dataset,
         const CenterVotePruningConfig& center_config,
-        const LeakagePruningConfig& leakage_config) {
+        const LeakagePruningConfig& leakage_config,
+        const IsolationPruningConfig& isolation_config) {
 
         const int before = static_cast<int>(strategy.get_model().size());
         if (before == 0) {
@@ -975,6 +1150,11 @@ namespace lfs::training::mask_pruning {
         auto leak = prune_by_mask_leakage(strategy, dataset, leakage_config);
         if (!leak) {
             return std::unexpected(leak.error());
+        }
+        
+        auto isolation = prune_by_isolation_distance(strategy, isolation_config);
+        if (!isolation) {
+            return std::unexpected(isolation.error());
         }
 
         const int after = static_cast<int>(strategy.get_model().size());

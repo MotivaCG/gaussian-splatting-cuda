@@ -29,9 +29,10 @@
 namespace lfs::training {
 
     // ========== NGS Timing Constants ==========
-    constexpr float kNgsInjectionStart = 0.15f;   // Start noise injection at 15% of training
-    constexpr float kNgsRemovalPoint = 0.80f;     // Remove noise at 80% of training
-    constexpr float kNgsInitialOpacity = 0.9f;    // Initial opacity for noise (high to block light)
+    constexpr float kNgsInjectionStart = 0.15f;       // Start noise injection at 15%
+    constexpr float kNgsOpacityUnfreezePoint = 0.30f; // Unfreeze noise opacity at 30%
+    constexpr float kNgsRemovalPoint = 0.80f;         // Remove noise at 80%
+    constexpr float kNgsInitialOpacity = 0.9f;       // Initial opacity (high to block light)
 
     /**
      * @brief Configuration for Noise Guided Splatting

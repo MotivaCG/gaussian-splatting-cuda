@@ -42,7 +42,7 @@ namespace lfs::training {
          */
         struct CenterVotePruningConfig {
             /// Minimum ratio of views where center must be inside mask to keep splat
-            float vote_ratio_threshold = 0.80f;
+            float vote_ratio_threshold = 0.90f;
 
             /// Minimum number of views where splat must be visible to be considered
             int min_visibility_count = 3;
@@ -124,6 +124,87 @@ namespace lfs::training {
             }
         };
 
+        /**
+         * @brief Configuration for isolation pruning (3D nearest-neighbor outliers).
+         *
+         * Goal:
+         *   Remove splats that are spatially isolated in 3D (typical "flyers" / small outlier islands).
+         *
+         * Core idea:
+         *   For each splat i, compute d_k(i) = distance to its kth nearest neighbor (excluding self),
+         *   obtained from a k-NN query.
+         *
+         * Robust global threshold (applies to ALL splats):
+         *   Compute global_median = median( d_k(i) ) over ALL splats.
+         *   Then remove splat i if:
+         *
+         *     d_k(i) > max(abs_distance_min, threshold_multiplier * global_median)
+         *
+         * Notes:
+         * - This pass is independent from masks/frustum; it works purely in 3D space.
+         * - Designed to catch very small outlier groups (1-3 splats). Using kth_neighbor=4 makes those groups detectable.
+         */
+        struct IsolationPruningConfig {
+            /**
+             * @brief Enable/disable this pass.
+             */
+            bool enabled = true;
+
+            /**
+             * @brief Number of neighbors to query in the k-NN search (excluding self).
+             *
+             * Constraints:
+             * - Must be >= kth_neighbor.
+             * - Typical values: 8 or 16.
+             *
+             * Performance:
+             * - Larger values increase query cost, but can stabilize neighbor-distance selection.
+             */
+            int k_neighbors = 8;
+
+            /**
+             * @brief Which neighbor distance is used as the per-splat isolation metric (excluding self).
+             *
+             * Example:
+             * - kth_neighbor = 4 uses d4 = distance to the 4th nearest neighbor.
+             *
+             * Rationale:
+             * - d1 (nearest) can fail for small outlier clusters (2-3 flyers "protect" each other).
+             * - d4 is robust for clusters of size up to 3, because the 4th neighbor typically lies in the main body.
+             *
+             * Constraints:
+             * - 1 <= kth_neighbor <= k_neighbors
+             */
+            int kth_neighbor = 4;
+
+            /**
+             * @brief Global relative threshold multiplier (applies equally to all splats).
+             *
+             * Removal rule (per splat i):
+             *   d_k(i) > threshold_multiplier * global_median
+             *
+             * Typical stable ranges (people, meters):
+             * - 6.0  : more aggressive (removes more isolated points)
+             * - 8.0  : conservative / stable default
+             * - 16+  : very conservative
+             */
+            float threshold_multiplier = 16.0f;
+
+            /**
+             * @brief Optional absolute minimum distance threshold in meters.
+             *
+             * Removal uses:
+             *   d_k(i) > max(abs_distance_min, threshold_multiplier * global_median)
+             *
+             * This prevents edge cases where global_median becomes extremely small and the relative threshold
+             * becomes too strict.
+             *
+             * Set to 0 to disable. Typical values if enabled: 0.03-0.05 (3-5 cm).
+             */
+            float abs_distance_min = 0.0f;
+        };
+
+
         // =============================================================================
         // Internal operations (used by visualizer)
         // =============================================================================
@@ -156,6 +237,13 @@ namespace lfs::training {
             IStrategy& strategy,
             const CameraDataset& dataset,
             const LeakagePruningConfig& config);
+        
+        /**
+         * @brief Isolation pruning in 3D space as neighbor outliers
+         */
+        std::expected<PruningResult, std::string> prune_by_isolation_distance(
+            IStrategy& strategy,
+            const IsolationPruningConfig& config);
 
         /**
          * @brief Run both center-vote and leakage pruning (recommended workflow).
@@ -164,7 +252,8 @@ namespace lfs::training {
             IStrategy& strategy,
             const CameraDataset& dataset,
             const CenterVotePruningConfig& center_config = DEFAULT_CONFIG,
-            const LeakagePruningConfig& leakage_config = {});
+            const LeakagePruningConfig& leakage_config = {},
+            const IsolationPruningConfig& isolation_config = {});
 
     } // namespace mask_pruning
 } // namespace lfs::training
