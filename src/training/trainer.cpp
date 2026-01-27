@@ -1333,6 +1333,11 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                             // step_params.lambda_dssim = 0.2f;
                         }
                     }
+                    else if (progress > 0.8f)
+                    {
+                        step_params.mask_opacity_penalty_weight = 0.0f;
+                    }
+
                     // ===================================
                     
 

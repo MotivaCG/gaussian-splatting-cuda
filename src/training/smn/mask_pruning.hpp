@@ -184,11 +184,11 @@ namespace lfs::training {
              *   d_k(i) > threshold_multiplier * global_median
              *
              * Typical stable ranges (people, meters):
-             * - 6.0  : more aggressive (removes more isolated points)
-             * - 8.0  : conservative / stable default
-             * - 16+  : very conservative
+             * - 8.0  : more aggressive (removes more isolated points)
+             * - 16.0  : conservative / stable default
+             * - 32+  : very conservative
              */
-            float threshold_multiplier = 16.0f;
+            float threshold_multiplier = 32.0f;
 
             /**
              * @brief Optional absolute minimum distance threshold in meters.
