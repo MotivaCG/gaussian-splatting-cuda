@@ -15,7 +15,7 @@
 #include "core/logger.hpp"
 #include "loader/cache_image_loader.hpp"
 #include "rasterization/projection_fast.hpp"
-#include "nanoflann.hpp"
+#include "external/nanoflann.hpp"
 
 #include <algorithm>
 #include <array>
