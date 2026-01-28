@@ -5,6 +5,7 @@
 # Collect all training sources
 set(TRAINING_HOST_SOURCES
         trainer.cpp
+        smn/post_training_pruning.cpp
         training_setup.cpp
 
         # Rasterization
