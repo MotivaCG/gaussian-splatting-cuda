@@ -15,7 +15,7 @@
  * │   - iteration: int32                                           │
  * │   - num_gaussians: uint32                                      │
  * │   - sh_degree: int32                                           │
- * │   - flags: uint32 (HAS_BILATERAL_GRID = 1)                     │
+ * │   - flags: uint32 (HAS_BILATERAL_GRID=1, HAS_PPISP=2)           │
  * │   - params_json_offset: uint64                                 │
  * │   - params_json_size: uint64                                   │
  * ├─────────────────────────────────────────────────────────────────┤
@@ -42,6 +42,12 @@
  * │   - exp_avg tensor (Adam first moment)                         │
  * │   - exp_avg_sq tensor (Adam second moment)                     │
  * ├─────────────────────────────────────────────────────────────────┤
+ * │ [Optional] PPISP (if HAS_PPISP flag set)                       │
+ * │   - Magic: uint32 = 0x4C465050 ("LFPP")                        │
+ * │   - Version: uint32 = 1                                        │
+ * │   - num_cameras, num_frames, config, scheduler state           │
+ * │   - exposure, vignetting, color, crf params + Adam states      │
+ * ├─────────────────────────────────────────────────────────────────┤
  * │ Training Parameters JSON (at params_json_offset)               │
  * │   - optimization: OptimizationParameters                       │
  * │   - dataset: DatasetConfig                                     │
@@ -61,6 +67,8 @@ namespace lfs::training {
 
     class IStrategy;
     class BilateralGrid;
+    class PPISP;
+    class PPISPControllerPool;
 
     constexpr uint32_t CHECKPOINT_MAGIC = 0x4C464B50; // "LFKP"
     constexpr uint32_t CHECKPOINT_VERSION = 1;
@@ -68,6 +76,8 @@ namespace lfs::training {
     enum class CheckpointFlags : uint32_t {
         NONE = 0,
         HAS_BILATERAL_GRID = 1 << 0,
+        HAS_PPISP = 1 << 1,
+        HAS_PPISP_CONTROLLER = 1 << 2,
     };
 
     inline CheckpointFlags operator|(CheckpointFlags a, CheckpointFlags b) {
@@ -89,24 +99,28 @@ namespace lfs::training {
         uint64_t params_json_size = 0;
     };
 
-    /// Save complete training checkpoint (strategy + optional bilateral grid)
+    /// Save complete training checkpoint (strategy + optional appearance components)
     std::expected<void, std::string> save_checkpoint(
         const std::filesystem::path& path,
         int iteration,
         const IStrategy& strategy,
         const lfs::core::param::TrainingParameters& params,
-        const BilateralGrid* bilateral_grid = nullptr);
+        const BilateralGrid* bilateral_grid = nullptr,
+        const PPISP* ppisp = nullptr,
+        const PPISPControllerPool* ppisp_controller_pool = nullptr);
 
     /// Load checkpoint header only
     std::expected<CheckpointHeader, std::string> load_checkpoint_header(
         const std::filesystem::path& path);
 
-    /// Load complete training checkpoint (strategy + optional bilateral grid)
+    /// Load complete training checkpoint (strategy + optional appearance components)
     std::expected<int, std::string> load_checkpoint(
         const std::filesystem::path& path,
         IStrategy& strategy,
         lfs::core::param::TrainingParameters& params,
-        BilateralGrid* bilateral_grid = nullptr);
+        BilateralGrid* bilateral_grid = nullptr,
+        PPISP* ppisp = nullptr,
+        PPISPControllerPool* ppisp_controller_pool = nullptr);
 
     /// Load only SplatData from checkpoint
     std::expected<lfs::core::SplatData, std::string> load_checkpoint_splat_data(

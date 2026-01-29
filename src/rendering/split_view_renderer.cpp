@@ -162,7 +162,7 @@ namespace lfs::rendering {
                 .view_rotation = request.viewport.rotation,
                 .view_translation = request.viewport.translation,
                 .viewport_size = render_size,
-                .fov = request.viewport.fov,
+                .focal_length_mm = request.viewport.focal_length_mm,
                 .scaling_modifier = request.scaling_modifier,
                 .antialiasing = request.antialiasing,
                 .sh_degree = request.sh_degree,
@@ -350,6 +350,29 @@ namespace lfs::rendering {
                      request.background_color.b, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+        int composite_x = current_viewport[0];
+        int composite_y = current_viewport[1];
+        int composite_w = current_viewport[2];
+        int composite_h = current_viewport[3];
+
+        if (request.letterbox && request.content_size.x > 0 && request.content_size.y > 0) {
+            const float content_aspect = static_cast<float>(request.content_size.x) / request.content_size.y;
+            const float viewport_aspect = static_cast<float>(current_viewport[2]) / current_viewport[3];
+
+            if (content_aspect > viewport_aspect) {
+                composite_w = current_viewport[2];
+                composite_h = static_cast<int>(current_viewport[2] / content_aspect);
+                composite_x = current_viewport[0];
+                composite_y = current_viewport[1] + (current_viewport[3] - composite_h) / 2;
+            } else {
+                composite_h = current_viewport[3];
+                composite_w = static_cast<int>(current_viewport[3] * content_aspect);
+                composite_x = current_viewport[0] + (current_viewport[2] - composite_w) / 2;
+                composite_y = current_viewport[1];
+            }
+            glViewport(composite_x, composite_y, composite_w, composite_h);
+        }
+
         const bool flip_left = request.flip_left_y.value_or(request.panels[0].content_type == PanelContentType::Model3D);
         const bool flip_right = request.flip_right_y.value_or(request.panels[1].content_type == PanelContentType::Model3D);
 
@@ -357,7 +380,7 @@ namespace lfs::rendering {
                 left_texture, right_texture,
                 request.panels[0].end_position,
                 request.left_texcoord_scale, request.right_texcoord_scale,
-                request.divider_color, request.viewport.size.x,
+                request.divider_color, composite_w,
                 flip_left, flip_right);
             !result) {
             LOG_ERROR("Failed to composite split view: {}", result.error());

@@ -340,17 +340,29 @@ namespace lfs::vis::gui::panels {
 
         ImGui::Separator();
 
-        float fov = settings.fov;
-        if (widgets::SliderWithReset(LOC(MainPanel::FOV), &fov, 45.0f, 120.0f, 75.0f, LOC(Tooltip::FOV))) {
-            render_manager->setFov(fov);
+        float focal_mm = settings.focal_length_mm;
+        if (widgets::SliderWithReset(LOC(MainPanel::FOCAL_LENGTH), &focal_mm,
+                                     lfs::rendering::MIN_FOCAL_LENGTH_MM,
+                                     lfs::rendering::MAX_FOCAL_LENGTH_MM,
+                                     lfs::rendering::DEFAULT_FOCAL_LENGTH_MM,
+                                     LOC(Tooltip::FOCAL_LENGTH), "%.0f mm")) {
+            render_manager->setFocalLength(focal_mm);
 
             ui::RenderSettingsChanged{
-                .fov = fov,
+                .focal_length_mm = focal_mm,
                 .scaling_modifier = std::nullopt,
                 .antialiasing = std::nullopt,
                 .background_color = std::nullopt,
                 .equirectangular = std::nullopt}
                 .emit();
+        }
+        const glm::ivec2 render_size = render_manager->getRenderedSize();
+        if (render_size.x > 0 && render_size.y > 0) {
+            const float vfov = lfs::rendering::focalLengthToVFov(focal_mm);
+            const float aspect = static_cast<float>(render_size.x) / static_cast<float>(render_size.y);
+            const float hfov = glm::degrees(2.0f * std::atan(aspect * std::tan(glm::radians(vfov * 0.5f))));
+            ImGui::TextDisabled("%s: %.1f%s H / %.1f%s V",
+                                LOC(MainPanel::FOV_INFO), hfov, "\xC2\xB0", vfov, "\xC2\xB0");
         }
 
         // SH DEGREE selection
@@ -362,7 +374,7 @@ namespace lfs::vis::gui::panels {
 
             ui::RenderSettingsChanged{
                 .sh_degree = current_sh_degree,
-                .fov = std::nullopt,
+                .focal_length_mm = std::nullopt,
                 .scaling_modifier = std::nullopt,
                 .antialiasing = std::nullopt,
                 .background_color = std::nullopt,
@@ -378,7 +390,7 @@ namespace lfs::vis::gui::panels {
 
             ui::RenderSettingsChanged{
                 .sh_degree = std::nullopt,
-                .fov = std::nullopt,
+                .focal_length_mm = std::nullopt,
                 .scaling_modifier = std::nullopt,
                 .antialiasing = std::nullopt,
                 .background_color = std::nullopt,
@@ -407,7 +419,121 @@ namespace lfs::vis::gui::panels {
             widgets::SetThemedTooltip("%s", LOC(Tooltip::MIP_FILTER));
         }
 
-        // Render Scale (VRAM optimization)
+        if (ImGui::Checkbox(LOC(MainPanel::APPEARANCE_CORRECTION), &settings.apply_appearance_correction)) {
+            settings_changed = true;
+            render_manager->updateSettings(settings);
+        }
+        if (ImGui::IsItemHovered()) {
+            widgets::SetThemedTooltip("%s", LOC(Tooltip::APPEARANCE_CORRECTION));
+        }
+
+        // PPISP adjustment controls (only show when appearance correction enabled)
+        if (settings.apply_appearance_correction) {
+            ImGui::Indent();
+            auto& ov = settings.ppisp_overrides;
+
+            const char* mode_items[] = {LOC(MainPanel::PPISP_MODE_MANUAL), LOC(MainPanel::PPISP_MODE_AUTO)};
+            int mode_idx = static_cast<int>(settings.ppisp_mode);
+            ImGui::SetNextItemWidth(150.0f * getDpiScale());
+            if (ImGui::Combo(LOC(MainPanel::PPISP_MODE), &mode_idx, mode_items, 2)) {
+                settings.ppisp_mode = static_cast<RenderSettings::PPISPMode>(mode_idx);
+                settings_changed = true;
+                render_manager->updateSettings(settings);
+            }
+            if (ImGui::IsItemHovered()) {
+                widgets::SetThemedTooltip("%s", LOC(Tooltip::PPISP_MODE));
+            }
+
+            const bool is_auto = (settings.ppisp_mode == RenderSettings::PPISPMode::AUTO);
+            if (is_auto) {
+                ImGui::BeginDisabled();
+            }
+
+            // Exposure
+            if (widgets::SliderWithReset(LOC(MainPanel::PPISP_EXPOSURE), &ov.exposure_offset, -3.0f, 3.0f, 0.0f,
+                                         LOC(Tooltip::PPISP_EXPOSURE))) {
+                settings_changed = true;
+                render_manager->updateSettings(settings);
+            }
+
+            // Vignette toggle + strength
+            if (ImGui::Checkbox(LOC(MainPanel::PPISP_VIGNETTE), &ov.vignette_enabled)) {
+                settings_changed = true;
+                render_manager->updateSettings(settings);
+            }
+            if (ov.vignette_enabled) {
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(80.0f * getDpiScale());
+                float vig_pct = ov.vignette_strength * 100.0f;
+                if (ImGui::SliderFloat("##vig_str", &vig_pct, 0.0f, 500.0f, "%.0f%%")) {
+                    ov.vignette_strength = vig_pct / 100.0f;
+                    settings_changed = true;
+                    render_manager->updateSettings(settings);
+                }
+            }
+
+            // Unified chromaticity diagram with R, G, B, Neutral control points
+            if (widgets::ChromaticityDiagram(LOC(MainPanel::PPISP_COLOR_BALANCE), &ov.color_red_x, &ov.color_red_y,
+                                             &ov.color_green_x, &ov.color_green_y, &ov.color_blue_x, &ov.color_blue_y,
+                                             &ov.wb_temperature, &ov.wb_tint, 1.0f)) {
+                settings_changed = true;
+                render_manager->updateSettings(settings);
+            }
+
+            // Gamma
+            if (widgets::SliderWithReset(LOC(MainPanel::PPISP_GAMMA), &ov.gamma_multiplier, 0.5f, 2.5f, 1.0f,
+                                         LOC(Tooltip::PPISP_GAMMA))) {
+                settings_changed = true;
+                render_manager->updateSettings(settings);
+            }
+
+            // Advanced CRF (collapsible)
+            if (ImGui::TreeNode(LOC(MainPanel::PPISP_CRF_ADVANCED))) {
+                // Curve preview
+                widgets::CRFCurvePreview("##crf_curve", ov.gamma_multiplier, ov.crf_toe, ov.crf_shoulder,
+                                         ov.gamma_red, ov.gamma_green, ov.gamma_blue);
+
+                // Per-channel gamma
+                if (widgets::SliderWithReset(LOC(MainPanel::PPISP_GAMMA_RED), &ov.gamma_red, -0.5f, 0.5f, 0.0f,
+                                             LOC(Tooltip::PPISP_GAMMA_CHANNEL))) {
+                    settings_changed = true;
+                    render_manager->updateSettings(settings);
+                }
+                if (widgets::SliderWithReset(LOC(MainPanel::PPISP_GAMMA_GREEN), &ov.gamma_green, -0.5f, 0.5f, 0.0f,
+                                             LOC(Tooltip::PPISP_GAMMA_CHANNEL))) {
+                    settings_changed = true;
+                    render_manager->updateSettings(settings);
+                }
+                if (widgets::SliderWithReset(LOC(MainPanel::PPISP_GAMMA_BLUE), &ov.gamma_blue, -0.5f, 0.5f, 0.0f,
+                                             LOC(Tooltip::PPISP_GAMMA_CHANNEL))) {
+                    settings_changed = true;
+                    render_manager->updateSettings(settings);
+                }
+
+                // Toe (shadows)
+                if (widgets::SliderWithReset(LOC(MainPanel::PPISP_CRF_TOE), &ov.crf_toe, -1.0f, 1.0f, 0.0f,
+                                             LOC(Tooltip::PPISP_CRF_TOE))) {
+                    settings_changed = true;
+                    render_manager->updateSettings(settings);
+                }
+
+                // Shoulder (highlights)
+                if (widgets::SliderWithReset(LOC(MainPanel::PPISP_CRF_SHOULDER), &ov.crf_shoulder, -1.0f, 1.0f, 0.0f,
+                                             LOC(Tooltip::PPISP_CRF_SHOULDER))) {
+                    settings_changed = true;
+                    render_manager->updateSettings(settings);
+                }
+                ImGui::TreePop();
+            }
+
+            if (is_auto) {
+                ImGui::EndDisabled();
+            }
+
+            ImGui::Unindent();
+        }
+
+        // Render Scale
         ImGui::Separator();
         if (widgets::SliderWithReset(LOC(MainPanel::RENDER_SCALE), &settings.render_scale, 0.25f, 1.0f, 1.0f,
                                      LOC(Tooltip::RENDER_SCALE))) {

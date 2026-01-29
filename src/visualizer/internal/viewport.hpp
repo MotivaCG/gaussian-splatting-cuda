@@ -73,9 +73,9 @@ class Viewport {
             pivot = home_pivot;
         }
 
-        // Focus camera on bounding box
+        // Focus camera on bounding box (accepts focal length in mm)
         void focusOnBounds(const glm::vec3& bounds_min, const glm::vec3& bounds_max,
-                           float fov_degrees = lfs::rendering::DEFAULT_FOV,
+                           float focal_length_mm = lfs::rendering::DEFAULT_FOCAL_LENGTH_MM,
                            float padding = 1.2f) {
             static constexpr float MIN_BOUNDS_DIAGONAL = 0.001f;
 
@@ -84,7 +84,8 @@ class Viewport {
             if (diagonal < MIN_BOUNDS_DIAGONAL)
                 return;
 
-            const float half_fov = glm::radians(fov_degrees) * 0.5f;
+            const float vfov_rad = lfs::rendering::focalLengthToVFovRad(focal_length_mm);
+            const float half_fov = vfov_rad * 0.5f;
             const float distance = (diagonal * 0.5f * padding) / std::tan(half_fov);
 
             const glm::vec3 backward = -R[2];
@@ -329,17 +330,17 @@ public:
         return view;
     }
 
-    glm::mat4 getProjectionMatrix(float fov_degrees = lfs::rendering::DEFAULT_FOV,
+    glm::mat4 getProjectionMatrix(float focal_length_mm = lfs::rendering::DEFAULT_FOCAL_LENGTH_MM,
                                   float near_plane = lfs::rendering::DEFAULT_NEAR_PLANE,
                                   float far_plane = lfs::rendering::DEFAULT_FAR_PLANE) const {
         float aspect_ratio = static_cast<float>(windowSize.x) / static_cast<float>(windowSize.y);
-        float fov_radians = glm::radians(fov_degrees);
+        float fov_radians = lfs::rendering::focalLengthToVFovRad(focal_length_mm);
         return glm::perspective(fov_radians, aspect_ratio, near_plane, far_plane);
     }
 
     // Unproject screen pixel to world position (returns INVALID_WORLD_POS if invalid)
     [[nodiscard]] glm::vec3 unprojectPixel(float screen_x, float screen_y, float depth,
-                                           float fov_degrees = lfs::rendering::DEFAULT_FOV) const {
+                                           float focal_length_mm = lfs::rendering::DEFAULT_FOCAL_LENGTH_MM) const {
         constexpr float INVALID_WORLD_POS = -1e10f;
         constexpr float MAX_DEPTH = 1e9f;
 
@@ -349,7 +350,7 @@ public:
 
         const float width = static_cast<float>(windowSize.x);
         const float height = static_cast<float>(windowSize.y);
-        const float fov_y = glm::radians(fov_degrees);
+        const float fov_y = lfs::rendering::focalLengthToVFovRad(focal_length_mm);
         const float aspect = width / height;
         const float fov_x = 2.0f * std::atan(std::tan(fov_y * 0.5f) * aspect);
 

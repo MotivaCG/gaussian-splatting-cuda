@@ -1524,6 +1524,36 @@ namespace lfs::core {
         Tensor matmul(const Tensor& other) const;
         Tensor dot(const Tensor& other) const;
 
+        // Neural network operations
+        // Conv1x1: per-pixel linear transform [N,C_in,H,W] -> [N,C_out,H,W]
+        Tensor conv1x1(const Tensor& weight) const;
+        Tensor conv1x1(const Tensor& weight, const Tensor& bias) const;
+
+        // MaxPool2d: window-based max [N,C,H,W] -> [N,C,H/stride,W/stride]
+        Tensor max_pool2d(int kernel_size, int stride = -1, int padding = 0) const;
+
+        // AdaptiveAvgPool2d: pool to fixed output size [N,C,H,W] -> [N,C,out_h,out_w]
+        Tensor adaptive_avg_pool2d(int output_h, int output_w) const;
+
+        // Linear: fully connected layer [...,in] -> [...,out]
+        Tensor linear(const Tensor& weight) const;
+        Tensor linear(const Tensor& weight, const Tensor& bias) const;
+
+        // Fused operations for performance
+        // Conv1x1 + bias + ReLU in single pass (avoids intermediate allocations)
+        Tensor conv1x1_bias_relu(const Tensor& weight, const Tensor& bias) const;
+        // Linear + bias + ReLU in single pass
+        Tensor linear_bias_relu(const Tensor& weight, const Tensor& bias) const;
+
+        // _out variants that write into pre-allocated output tensors (zero allocation)
+        void conv1x1_bias_out(const Tensor& weight, const Tensor& bias, Tensor& output) const;
+        void conv1x1_bias_relu_out(const Tensor& weight, const Tensor& bias, Tensor& output) const;
+        void relu_out(Tensor& output) const;
+        void max_pool2d_out(int kernel_size, int stride, int padding, Tensor& output) const;
+        void adaptive_avg_pool2d_out(int output_h, int output_w, Tensor& output) const;
+        void linear_bias_relu_out(const Tensor& weight, const Tensor& bias, Tensor& output) const;
+        void linear_out(const Tensor& weight, const Tensor& bias, Tensor& output) const;
+
         // Masking operations
         Tensor masked_select(const Tensor& mask) const;
         Tensor& masked_fill_(const Tensor& mask, float value);

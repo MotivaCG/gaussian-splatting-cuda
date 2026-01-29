@@ -230,6 +230,14 @@ namespace lfs::core {
             opt_json["bilateral_grid_W"] = bilateral_grid_W;
             opt_json["bilateral_grid_lr"] = bilateral_grid_lr;
             opt_json["tv_loss_weight"] = tv_loss_weight;
+            opt_json["use_ppisp"] = use_ppisp;
+            opt_json["ppisp_lr"] = ppisp_lr;
+            opt_json["ppisp_reg_weight"] = ppisp_reg_weight;
+            opt_json["ppisp_warmup_steps"] = ppisp_warmup_steps;
+            opt_json["ppisp_use_controller"] = ppisp_use_controller;
+            opt_json["ppisp_freeze_gaussians_on_distill"] = ppisp_freeze_gaussians_on_distill;
+            opt_json["ppisp_controller_activation_step"] = ppisp_controller_activation_step;
+            opt_json["ppisp_controller_lr"] = ppisp_controller_lr;
             opt_json["prune_opacity"] = prune_opacity;
             opt_json["grow_scale3d"] = grow_scale3d;
             opt_json["grow_scale2d"] = grow_scale2d;
@@ -373,6 +381,30 @@ namespace lfs::core {
             }
             if (json.contains("tv_loss_weight")) {
                 params.tv_loss_weight = json["tv_loss_weight"];
+            }
+            if (json.contains("use_ppisp")) {
+                params.use_ppisp = json["use_ppisp"];
+            }
+            if (json.contains("ppisp_lr")) {
+                params.ppisp_lr = json["ppisp_lr"];
+            }
+            if (json.contains("ppisp_reg_weight")) {
+                params.ppisp_reg_weight = json["ppisp_reg_weight"];
+            }
+            if (json.contains("ppisp_warmup_steps")) {
+                params.ppisp_warmup_steps = json["ppisp_warmup_steps"];
+            }
+            if (json.contains("ppisp_use_controller")) {
+                params.ppisp_use_controller = json["ppisp_use_controller"];
+            }
+            if (json.contains("ppisp_freeze_gaussians_on_distill")) {
+                params.ppisp_freeze_gaussians_on_distill = json["ppisp_freeze_gaussians_on_distill"];
+            }
+            if (json.contains("ppisp_controller_activation_step")) {
+                params.ppisp_controller_activation_step = json["ppisp_controller_activation_step"];
+            }
+            if (json.contains("ppisp_controller_lr")) {
+                params.ppisp_controller_lr = json["ppisp_controller_lr"];
             }
             if (json.contains("prune_opacity")) {
                 params.prune_opacity = json["prune_opacity"];

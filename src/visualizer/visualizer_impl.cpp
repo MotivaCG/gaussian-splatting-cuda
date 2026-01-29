@@ -219,6 +219,16 @@ namespace lfs::vis {
             }
         });
 
+        ui::AppearanceModelLoaded::when([this](const auto& e) {
+            if (rendering_manager_) {
+                auto settings = rendering_manager_->getSettings();
+                settings.apply_appearance_correction = true;
+                settings.ppisp_mode =
+                    e.has_controller ? RenderSettings::PPISPMode::AUTO : RenderSettings::PPISPMode::MANUAL;
+                rendering_manager_->updateSettings(settings);
+            }
+        });
+
         // Trainer ready signal
         internal::TrainerReady::when([this](const auto&) {
             internal::TrainingReadyToStart{}.emit();

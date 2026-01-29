@@ -32,7 +32,7 @@ namespace lfs::rendering {
             glm::mat3 view_rotation;
             glm::vec3 view_translation;
             glm::ivec2 viewport_size;
-            float fov = 60.0f;
+            float focal_length_mm = DEFAULT_FOCAL_LENGTH_MM;
             float scaling_modifier = 1.0f;
             bool antialiasing = false;
             bool mip_filter = false;
@@ -90,10 +90,12 @@ namespace lfs::rendering {
             float selection_flash_intensity = 0.0f;
             bool orthographic = false;
             float ortho_scale = DEFAULT_ORTHO_SCALE;
+            PointCloudCropParams point_cloud_crop_params;
 
             [[nodiscard]] glm::mat4 getProjectionMatrix(const float near_plane = DEFAULT_NEAR_PLANE,
                                                         const float far_plane = DEFAULT_FAR_PLANE) const {
-                return createProjectionMatrix(viewport_size, fov, orthographic, ortho_scale, near_plane, far_plane);
+                const float vfov = focalLengthToVFov(focal_length_mm);
+                return createProjectionMatrix(viewport_size, vfov, orthographic, ortho_scale, near_plane, far_plane);
             }
         };
 
@@ -130,7 +132,7 @@ namespace lfs::rendering {
                                      ScreenQuadRenderer& renderer,
                                      const glm::ivec2& viewport_size);
         Result<lfs::core::Camera> createCamera(const RenderRequest& request);
-        glm::vec2 computeFov(float fov_degrees, int width, int height);
+        glm::vec2 computeFov(float vfov_rad, int width, int height);
         Result<RenderResult> renderPointCloud(const lfs::core::SplatData& model, const RenderRequest& request);
 
         // Ensure persistent FBO is sized correctly (avoids recreation every frame)

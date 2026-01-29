@@ -29,9 +29,46 @@ namespace lfs::vis {
         GTComparison
     };
 
+    struct PPISPOverrides {
+        // Exposure (Section 4.1)
+        float exposure_offset = 0.0f; // EV stops (-3 to +3)
+
+        // Vignetting (Section 4.2)
+        bool vignette_enabled = true;
+        float vignette_strength = 1.0f; // 0.0 to 2.0
+
+        // Color Correction (Section 4.3) - 4 chromaticity control points
+        // White point (neutral) - intuitive temperature/tint controls
+        float wb_temperature = 0.0f; // -1.0 to +1.0 (cool to warm)
+        float wb_tint = 0.0f;        // -1.0 to +1.0 (green to magenta)
+        // RGB primary offsets - direct chromaticity manipulation
+        float color_red_x = 0.0f;   // -0.5 to +0.5
+        float color_red_y = 0.0f;   // -0.5 to +0.5
+        float color_green_x = 0.0f; // -0.5 to +0.5
+        float color_green_y = 0.0f; // -0.5 to +0.5
+        float color_blue_x = 0.0f;  // -0.5 to +0.5
+        float color_blue_y = 0.0f;  // -0.5 to +0.5
+
+        // CRF (Section 4.4) - piecewise power curve per channel
+        float gamma_multiplier = 1.0f; // 0.5 to 2.5 (overall gamma)
+        float gamma_red = 0.0f;        // -0.5 to +0.5 (per-channel offset)
+        float gamma_green = 0.0f;      // -0.5 to +0.5
+        float gamma_blue = 0.0f;       // -0.5 to +0.5
+        float crf_toe = 0.0f;          // -1.0 to +1.0 (shadow compression)
+        float crf_shoulder = 0.0f;     // -1.0 to +1.0 (highlight roll-off)
+
+        [[nodiscard]] bool isIdentity() const {
+            return exposure_offset == 0.0f && vignette_enabled && vignette_strength == 1.0f &&
+                   wb_temperature == 0.0f && wb_tint == 0.0f && color_red_x == 0.0f && color_red_y == 0.0f &&
+                   color_green_x == 0.0f && color_green_y == 0.0f && color_blue_x == 0.0f && color_blue_y == 0.0f &&
+                   gamma_multiplier == 1.0f && gamma_red == 0.0f && gamma_green == 0.0f && gamma_blue == 0.0f &&
+                   crf_toe == 0.0f && crf_shoulder == 0.0f;
+        }
+    };
+
     struct RenderSettings {
         // Core rendering settings
-        float fov = 60.0f;
+        float focal_length_mm = lfs::rendering::DEFAULT_FOCAL_LENGTH_MM;
         float scaling_modifier = 1.0f;
         bool antialiasing = false;
         bool mip_filter = false;
@@ -46,6 +83,13 @@ namespace lfs::vis {
         bool use_ellipsoid = false;
         bool desaturate_unselected = false; // Desaturate unselected PLYs when one is selected
         bool desaturate_cropping = true;    // Desaturate outside crop box/ellipsoid instead of hiding
+
+        // Appearance correction (PPISP)
+        bool apply_appearance_correction = false;
+        enum class PPISPMode { MANUAL = 0,
+                               AUTO = 1 };
+        PPISPMode ppisp_mode = PPISPMode::AUTO;
+        PPISPOverrides ppisp_overrides;
 
         // Background
         glm::vec3 background_color = glm::vec3(0.0f, 0.0f, 0.0f);
@@ -240,15 +284,20 @@ namespace lfs::vis {
         // Toggle orthographic mode, calculating ortho_scale to preserve size at pivot
         void setOrthographic(bool enabled, float viewport_height, float distance_to_pivot);
 
-        // Direct accessors
         float getFovDegrees() const;
         float getScalingModifier() const;
-        void setFov(float f);
         void setScalingModifier(float s);
+        float getFocalLengthMm() const;
+        void setFocalLength(float focal_mm);
 
-        // Split view control
         void advanceSplitOffset();
         SplitViewInfo getSplitViewInfo() const;
+
+        struct ContentBounds {
+            float x, y, width, height;
+            bool letterboxed = false;
+        };
+        ContentBounds getContentBounds(const glm::ivec2& viewport_size) const;
 
         // Current camera tracking for GT comparison
         void setCurrentCameraId(int cam_id) {
@@ -272,6 +321,7 @@ namespace lfs::vis {
         // Depth buffer access for tools (returns camera-space depth at pixel, or -1 if invalid)
         float getDepthAtPixel(int x, int y) const;
         const lfs::rendering::RenderResult& getCachedResult() const { return cached_result_; }
+        glm::ivec2 getRenderedSize() const { return cached_result_size_; }
 
         // Screen positions output for brush tool
         void setOutputScreenPositions(bool enable) { output_screen_positions_ = enable; }

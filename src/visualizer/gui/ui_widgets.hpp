@@ -14,7 +14,7 @@ namespace lfs::vis::gui::widgets {
 
     // Reusable UI widgets
     bool SliderWithReset(const char* label, float* v, float min, float max, float reset_value,
-                         const char* tooltip = nullptr);
+                         const char* tooltip = nullptr, const char* format = "%.3f");
     bool DragFloat3WithReset(const char* label, float* v, float speed, float reset_value,
                              const char* tooltip = nullptr);
     void HelpMarker(const char* desc);
@@ -56,5 +56,21 @@ namespace lfs::vis::gui::widgets {
 
     // InputInt with thousand separator display (shows formatted when not editing)
     bool InputIntFormatted(const char* label, int* v, int step = 0, int step_fast = 0);
+
+    // 2D point picker for chromaticity offset (color grading)
+    // Returns true if value changed. Color tint shows which channel (red/green/blue).
+    bool ChromaticityPicker2D(const char* label, float* x, float* y, float range = 0.5f,
+                              const ImVec4& color_tint = ImVec4(1, 1, 1, 1));
+
+    // Unified chromaticity diagram with 4 draggable control points (R, G, B, Neutral)
+    // Shows rg chromaticity space with all color correction points in one widget.
+    // Returns true if any value changed.
+    bool ChromaticityDiagram(const char* label, float* red_x, float* red_y, float* green_x, float* green_y,
+                             float* blue_x, float* blue_y, float* neutral_x, float* neutral_y, float range = 0.5f);
+
+    // CRF tone curve preview (read-only visualization)
+    // Shows the effect of gamma, toe, and shoulder on the tone curve
+    void CRFCurvePreview(const char* label, float gamma, float toe, float shoulder,
+                         float gamma_r = 0.0f, float gamma_g = 0.0f, float gamma_b = 0.0f);
 
 } // namespace lfs::vis::gui::widgets

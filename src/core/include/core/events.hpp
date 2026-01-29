@@ -194,13 +194,14 @@ namespace lfs::core {
             EVENT(ZoomSpeedChanged, float zoom_speed; float max_zoom_speed;);
             EVENT(RenderSettingsChanged,
                   std::optional<int> sh_degree;
-                  std::optional<float> fov;
+                  std::optional<float> focal_length_mm;
                   std::optional<float> scaling_modifier;
                   std::optional<bool> antialiasing;
                   std::optional<glm::vec3> background_color;
                   std::optional<bool> equirectangular;);
             EVENT(RenderModeChanged, std::string old_mode; std::string new_mode;);
             EVENT(PointCloudModeChanged, bool enabled; float voxel_size;);
+            EVENT(AppearanceModelLoaded, bool has_controller;);
             EVENT(GridSettingsChanged,
                   bool enabled;
                   int plane;

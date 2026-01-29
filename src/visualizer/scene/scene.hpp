@@ -7,6 +7,8 @@
 #include "core/observable.hpp"
 #include "core/splat_data.hpp"
 #include "core/tensor.hpp"
+#include "training/components/ppisp.hpp"
+#include "training/components/ppisp_controller_pool.hpp"
 #include <glm/glm.hpp>
 #include <memory>
 #include <string>
@@ -18,7 +20,7 @@
 // Forward declarations for training data
 namespace lfs::training {
     class CameraDataset;
-}
+} // namespace lfs::training
 namespace lfs::core {
     struct PointCloud;
     class Camera;
@@ -302,6 +304,24 @@ namespace lfs::vis {
 
         [[nodiscard]] bool hasTrainingData() const { return train_cameras_ != nullptr; }
 
+        // ========== Appearance Model (PPISP) ==========
+        // For standalone viewing of trained models with appearance correction
+
+        void setAppearanceModel(std::unique_ptr<lfs::training::PPISP> ppisp,
+                                std::unique_ptr<lfs::training::PPISPControllerPool> controller_pool = nullptr);
+        void clearAppearanceModel();
+
+        [[nodiscard]] lfs::training::PPISP* getAppearancePPISP() { return appearance_ppisp_.get(); }
+        [[nodiscard]] const lfs::training::PPISP* getAppearancePPISP() const { return appearance_ppisp_.get(); }
+        [[nodiscard]] lfs::training::PPISPControllerPool* getAppearanceControllerPool() {
+            return appearance_controller_pool_.get();
+        }
+        [[nodiscard]] const lfs::training::PPISPControllerPool* getAppearanceControllerPool() const {
+            return appearance_controller_pool_.get();
+        }
+        [[nodiscard]] bool hasAppearanceController() const { return appearance_controller_pool_ != nullptr; }
+        [[nodiscard]] bool hasAppearanceModel() const { return appearance_ppisp_ != nullptr; }
+
         // Camera access helpers (delegates to CameraDataset)
         [[nodiscard]] std::shared_ptr<const lfs::core::Camera> getCameraByUid(int uid) const;
         [[nodiscard]] std::vector<std::shared_ptr<const lfs::core::Camera>> getAllCameras() const;
@@ -390,6 +410,10 @@ namespace lfs::vis {
         std::shared_ptr<lfs::core::PointCloud> initial_point_cloud_;
         lfs::core::Tensor scene_center_;  // Scene center (mean of camera positions)
         std::string training_model_node_; // Name of the node being trained
+
+        // Standalone appearance model (for viewing without training)
+        std::unique_ptr<lfs::training::PPISP> appearance_ppisp_;
+        std::unique_ptr<lfs::training::PPISPControllerPool> appearance_controller_pool_;
     };
 
 } // namespace lfs::vis

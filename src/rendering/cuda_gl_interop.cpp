@@ -553,6 +553,9 @@ namespace lfs::rendering {
     }
 
     void CudaGLInteropTextureImpl<true>::cleanup() {
+        if (is_registered_) {
+            cudaStreamSynchronize(0);
+        }
         cuda_resource_.reset();
         is_registered_ = false;
 

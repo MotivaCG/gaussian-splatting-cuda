@@ -19,6 +19,9 @@
 #include "io/loader.hpp"
 #include "rendering/rendering_manager.hpp"
 #include "training/checkpoint.hpp"
+#include "training/components/ppisp.hpp"
+#include "training/components/ppisp_controller.hpp"
+#include "training/components/ppisp_file.hpp"
 #include "training/trainer.hpp"
 #include "training/training_manager.hpp"
 #include "training/training_setup.hpp"
@@ -297,11 +300,72 @@ namespace lfs::vis {
             updateCropBoxToFitScene(true);
             selectNode(name);
 
+            // Check for companion PPISP file
+            auto ppisp_path = lfs::training::find_ppisp_companion(path);
+            if (!ppisp_path.empty()) {
+                LOG_INFO("Found PPISP companion file: {}", lfs::core::path_to_utf8(ppisp_path));
+                loadPPISPCompanion(ppisp_path);
+            }
+
             LOG_INFO("Loaded '{}' with {} gaussians", name, gaussian_count);
 
         } catch (const std::exception& e) {
             LOG_ERROR("Failed to load splat file: {} (path: {})", e.what(), lfs::core::path_to_utf8(path));
             throw;
+        }
+    }
+
+    void SceneManager::loadPPISPCompanion(const std::filesystem::path& ppisp_path) {
+        try {
+            // Read header to get dimensions
+            std::ifstream file;
+            if (!lfs::core::open_file_for_read(ppisp_path, std::ios::binary, file)) {
+                LOG_ERROR("Failed to open PPISP file: {}", lfs::core::path_to_utf8(ppisp_path));
+                return;
+            }
+
+            lfs::training::PPISPFileHeader header{};
+            file.read(reinterpret_cast<char*>(&header), sizeof(header));
+            file.close();
+
+            if (header.magic != lfs::training::PPISP_FILE_MAGIC) {
+                LOG_ERROR("Invalid PPISP file: wrong magic");
+                return;
+            }
+
+            // Create PPISP for inference (total_iterations=1 since we won't be training)
+            // deserialize_inference will set up internal maps from the file
+            auto ppisp = std::make_unique<lfs::training::PPISP>(1);
+
+            // Create controller pool if present in file
+            std::unique_ptr<lfs::training::PPISPControllerPool> controller_pool;
+            if (lfs::training::has_flag(header.flags, lfs::training::PPISPFileFlags::HAS_CONTROLLER)) {
+                controller_pool = std::make_unique<lfs::training::PPISPControllerPool>(
+                    static_cast<int>(header.num_cameras), 1);
+            }
+
+            // Load the actual data
+            auto result = lfs::training::load_ppisp_file(ppisp_path, *ppisp, controller_pool.get());
+            if (!result) {
+                LOG_ERROR("Failed to load PPISP file: {}", result.error());
+                return;
+            }
+
+            // Allocate CNN buffers for controller if present
+            if (controller_pool) {
+                // Use a reasonable default size for viewport rendering
+                // Buffers will be reallocated if larger images are needed
+                constexpr size_t DEFAULT_MAX_H = 1080;
+                constexpr size_t DEFAULT_MAX_W = 1920;
+                controller_pool->allocate_buffers(DEFAULT_MAX_H, DEFAULT_MAX_W);
+            }
+
+            const bool has_controller = (controller_pool != nullptr);
+            scene_.setAppearanceModel(std::move(ppisp), std::move(controller_pool));
+            ui::AppearanceModelLoaded{.has_controller = has_controller}.emit();
+
+        } catch (const std::exception& e) {
+            LOG_ERROR("Failed to load PPISP companion: {}", e.what());
         }
     }
 
@@ -360,6 +424,13 @@ namespace lfs::vis {
 
             emitSceneChanged();
             selectNode(name);
+
+            // Check for companion PPISP file
+            auto ppisp_path = lfs::training::find_ppisp_companion(path);
+            if (!ppisp_path.empty()) {
+                LOG_INFO("Found PPISP companion file: {}", lfs::core::path_to_utf8(ppisp_path));
+                loadPPISPCompanion(ppisp_path);
+            }
 
             LOG_INFO("Added '{}' ({} gaussians)", name, gaussian_count);
             return name;
@@ -1532,14 +1603,26 @@ namespace lfs::vis {
         auto splat_data = std::move(model_node->model);
         const size_t num_gaussians = splat_data->size();
 
-        if (services().trainerOrNull()) {
-            services().trainerOrNull()->clearTrainer();
+        // Extract PPISP models from trainer before clearing
+        std::unique_ptr<lfs::training::PPISP> ppisp;
+        std::unique_ptr<lfs::training::PPISPControllerPool> controller_pool;
+        if (auto* trainer_mgr = services().trainerOrNull()) {
+            if (auto* trainer = trainer_mgr->getTrainer(); trainer && trainer->hasPPISP()) {
+                ppisp = trainer->takePPISP();
+                controller_pool = trainer->takePPISPControllerPool();
+            }
+            trainer_mgr->clearTrainer();
         }
         scene_.clear();
 
         constexpr const char* MODEL_NAME = "Trained Model";
         scene_.addNode(MODEL_NAME, std::move(splat_data));
         selectNode(MODEL_NAME);
+
+        // Restore PPISP appearance model to scene
+        if (ppisp) {
+            scene_.setAppearanceModel(std::move(ppisp), std::move(controller_pool));
+        }
 
         {
             std::lock_guard lock(state_mutex_);
@@ -1885,6 +1968,7 @@ namespace lfs::vis {
             }
         }
 
+        scene_.invalidateCache();
         emitSceneChanged();
     }
 
@@ -2021,6 +2105,7 @@ namespace lfs::vis {
             }
         }
 
+        scene_.invalidateCache();
         emitSceneChanged();
     }
 
@@ -2271,15 +2356,15 @@ namespace lfs::vis {
         if (cropbox_id == NULL_NODE)
             return;
 
-        // Fit cropbox to parent bounds
+        // Fit cropbox to parent bounds and enable it
+        CropBoxData data;
         glm::vec3 min_bounds, max_bounds;
         if (scene_.getNodeBounds(node->id, min_bounds, max_bounds)) {
-            CropBoxData data;
             data.min = min_bounds;
             data.max = max_bounds;
-            data.enabled = true;
-            scene_.setCropBoxData(cropbox_id, data);
         }
+        data.enabled = true;
+        scene_.setCropBoxData(cropbox_id, data);
 
         // Emit PLYAdded event
         if (const auto* cropbox = scene_.getNodeById(cropbox_id)) {
@@ -2328,16 +2413,13 @@ namespace lfs::vis {
         if (ellipsoid_id == NULL_NODE)
             return;
 
-        // Fit ellipsoid to parent bounds
+        // Fit ellipsoid to parent bounds and enable it
+        EllipsoidData data;
         glm::vec3 min_bounds, max_bounds;
         if (scene_.getNodeBounds(node->id, min_bounds, max_bounds)) {
             constexpr float CIRCUMSCRIBE_FACTOR = 1.732050808f; // sqrt(3)
             const glm::vec3 half_size = (max_bounds - min_bounds) * 0.5f;
-
-            EllipsoidData data;
             data.radii = half_size * CIRCUMSCRIBE_FACTOR;
-            data.enabled = true;
-            scene_.setEllipsoidData(ellipsoid_id, data);
 
             // Position ellipsoid at center of bounds
             if (auto* ellipsoid_node = scene_.getMutableNode(ellipsoid_name)) {
@@ -2346,6 +2428,8 @@ namespace lfs::vis {
                 ellipsoid_node->transform_dirty = true;
             }
         }
+        data.enabled = true;
+        scene_.setEllipsoidData(ellipsoid_id, data);
 
         // Emit PLYAdded event
         if (const auto* ellipsoid = scene_.getNodeById(ellipsoid_id)) {

@@ -155,8 +155,10 @@ namespace lfs::core {
                    const std::filesystem::path& image_path,
                    const std::filesystem::path& mask_path,
                    int camera_width, int camera_height,
-                   int uid)
+                   int uid,
+                   int camera_id)
         : _uid(uid),
+          _camera_id(camera_id),
           _focal_x(focal_x),
           _focal_y(focal_y),
           _center_x(center_x),
@@ -230,6 +232,7 @@ namespace lfs::core {
         : _FoVx(other._FoVx),
           _FoVy(other._FoVy),
           _uid(other._uid),
+          _camera_id(other._camera_id),
           _focal_x(other._focal_x),
           _focal_y(other._focal_y),
           _center_x(other._center_x),
@@ -266,6 +269,7 @@ namespace lfs::core {
             _FoVx = other._FoVx;
             _FoVy = other._FoVy;
             _uid = other._uid;
+            _camera_id = other._camera_id;
             _focal_x = other._focal_x;
             _focal_y = other._focal_y;
             _center_x = other._center_x;
@@ -296,6 +300,7 @@ namespace lfs::core {
 
     Camera::Camera(const Camera& other, const Tensor& transform)
         : _uid(other._uid),
+          _camera_id(other._camera_id),
           _focal_x(other._focal_x),
           _focal_y(other._focal_y),
           _center_x(other._center_x),

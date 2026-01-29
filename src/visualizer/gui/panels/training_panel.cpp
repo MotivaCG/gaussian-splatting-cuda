@@ -615,6 +615,131 @@ namespace lfs::vis::gui::panels {
             ImGui::TreePop();
         }
 
+        // PPISP Settings
+        if (opt_params.use_ppisp && ImGui::TreeNode("PPISP Settings")) {
+            if (ImGui::BeginTable("PPISPTable", 2, ImGuiTableFlags_SizingStretchProp)) {
+                ImGui::TableSetupColumn("Property", ImGuiTableColumnFlags_WidthFixed, 140.0f);
+                ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
+
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("Learning Rate");
+                ImGui::TableNextColumn();
+                if (can_edit) {
+                    ImGui::PushItemWidth(-1);
+                    ImGui::InputFloat("##ppisp_lr", &opt_params.ppisp_lr, 0.0001f, 0.001f, "%.5f");
+                    ImGui::PopItemWidth();
+                } else {
+                    ImGui::Text("%.5f", opt_params.ppisp_lr);
+                }
+
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("Regularization");
+                ImGui::TableNextColumn();
+                if (can_edit) {
+                    ImGui::PushItemWidth(-1);
+                    ImGui::InputFloat("##ppisp_reg_weight", &opt_params.ppisp_reg_weight, 0.0001f, 0.001f, "%.5f");
+                    ImGui::PopItemWidth();
+                } else {
+                    ImGui::Text("%.5f", opt_params.ppisp_reg_weight);
+                }
+
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("Warmup Steps");
+                ImGui::TableNextColumn();
+                if (can_edit) {
+                    ImGui::PushItemWidth(-1);
+                    ImGui::InputInt("##ppisp_warmup", &opt_params.ppisp_warmup_steps, 100, 500);
+                    ImGui::PopItemWidth();
+                } else {
+                    ImGui::Text("%d", opt_params.ppisp_warmup_steps);
+                }
+
+                // Controller settings
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextColored(theme().palette.text_dim, "Controller");
+                ImGui::TableNextColumn();
+
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("Enable Controller");
+                ImGui::TableNextColumn();
+                if (can_edit) {
+                    ImGui::Checkbox("##ppisp_use_controller", &opt_params.ppisp_use_controller);
+                } else {
+                    ImGui::Text("%s", opt_params.ppisp_use_controller ? "Enabled" : "Disabled");
+                }
+                if (ImGui::IsItemHovered()) {
+                    widgets::SetThemedTooltip("Enable PPISP controller for novel view synthesis (Phase 2 distillation)");
+                }
+
+                if (opt_params.ppisp_use_controller) {
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::Text("Activation Step");
+                    ImGui::TableNextColumn();
+                    if (can_edit) {
+                        bool is_auto = opt_params.ppisp_controller_activation_step < 0;
+                        if (ImGui::Checkbox("Auto##ppisp_auto_step", &is_auto)) {
+                            opt_params.ppisp_controller_activation_step = is_auto ? -1 : static_cast<int>(opt_params.iterations) - 5000;
+                        }
+                        if (!is_auto) {
+                            ImGui::SameLine();
+                            ImGui::PushItemWidth(-1);
+                            if (widgets::InputIntFormatted("##ppisp_controller_step", &opt_params.ppisp_controller_activation_step, 1000, 5000)) {
+                                opt_params.ppisp_controller_activation_step = std::max(1, opt_params.ppisp_controller_activation_step);
+                            }
+                            ImGui::PopItemWidth();
+                        }
+                    } else {
+                        if (opt_params.ppisp_controller_activation_step < 0) {
+                            int auto_val = std::max(0, static_cast<int>(opt_params.iterations) - 5000);
+                            ImGui::Text("Auto (%s)", widgets::formatNumber(auto_val).c_str());
+                        } else {
+                            ImGui::Text("%s", widgets::formatNumber(opt_params.ppisp_controller_activation_step).c_str());
+                        }
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        widgets::SetThemedTooltip("Iteration to start Phase 2 controller distillation (-1 = auto: iterations - 5000)");
+                    }
+
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::Text("Controller LR");
+                    ImGui::TableNextColumn();
+                    if (can_edit) {
+                        ImGui::PushItemWidth(-1);
+                        ImGui::InputFloat("##ppisp_controller_lr", &opt_params.ppisp_controller_lr, 0.0001f, 0.001f, "%.5f");
+                        ImGui::PopItemWidth();
+                    } else {
+                        ImGui::Text("%.5f", opt_params.ppisp_controller_lr);
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        widgets::SetThemedTooltip("Learning rate for PPISP controller");
+                    }
+
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::Text("Freeze Gaussians");
+                    ImGui::TableNextColumn();
+                    if (can_edit) {
+                        ImGui::Checkbox("##ppisp_freeze_gaussians", &opt_params.ppisp_freeze_gaussians_on_distill);
+                    } else {
+                        ImGui::Text("%s", opt_params.ppisp_freeze_gaussians_on_distill ? "Yes" : "No");
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        widgets::SetThemedTooltip("Freeze Gaussian optimization during controller distillation phase");
+                    }
+                }
+
+                ImGui::EndTable();
+            }
+            ImGui::TreePop();
+        }
+
         // Mask Settings
         if (opt_params.mask_mode != lfs::core::param::MaskMode::None && ImGui::TreeNode(LOC(Training::Section::MASKING))) {
             if (ImGui::BeginTable("MaskTable", 2, ImGuiTableFlags_SizingStretchProp)) {
@@ -1183,6 +1308,36 @@ namespace lfs::vis::gui::panels {
             }
             if (ImGui::IsItemHovered()) {
                 widgets::SetThemedTooltip("%s", LOC(Training::Tooltip::BILATERAL_GRID));
+            }
+
+            // PPISP Enable
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::Text("PPISP");
+            ImGui::TableNextColumn();
+            if (can_edit) {
+                ImGui::Checkbox("##use_ppisp", &opt_params.use_ppisp);
+            } else {
+                ImGui::Text("%s", opt_params.use_ppisp ? "Enabled" : "Disabled");
+            }
+            if (ImGui::IsItemHovered()) {
+                widgets::SetThemedTooltip("Enable PPISP (Physically-Plausible ISP) for per-camera appearance modeling");
+            }
+
+            // PPISP Controller (shown when PPISP enabled)
+            if (opt_params.use_ppisp) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("  Controller");
+                ImGui::TableNextColumn();
+                if (can_edit) {
+                    ImGui::Checkbox("##ppisp_controller_main", &opt_params.ppisp_use_controller);
+                } else {
+                    ImGui::Text("%s", opt_params.ppisp_use_controller ? "Enabled" : "Disabled");
+                }
+                if (ImGui::IsItemHovered()) {
+                    widgets::SetThemedTooltip("Enable controller for novel view synthesis (trains in last 5k iterations)");
+                }
             }
 
             // Mask Mode

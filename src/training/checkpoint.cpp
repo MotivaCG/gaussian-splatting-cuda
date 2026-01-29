@@ -3,6 +3,8 @@
 
 #include "checkpoint.hpp"
 #include "components/bilateral_grid.hpp"
+#include "components/ppisp.hpp"
+#include "components/ppisp_controller_pool.hpp"
 #include "core/events.hpp"
 #include "core/logger.hpp"
 #include "core/path_utils.hpp"
@@ -18,7 +20,9 @@ namespace lfs::training {
         const int iteration,
         const IStrategy& strategy,
         const lfs::core::param::TrainingParameters& params,
-        const BilateralGrid* bilateral_grid) {
+        const BilateralGrid* bilateral_grid,
+        const PPISP* ppisp,
+        const PPISPControllerPool* ppisp_controller_pool) {
 
         try {
             // Validate input path
@@ -66,12 +70,24 @@ namespace lfs::training {
                 bilateral_grid_bytes = bilateral_grid->grids().bytes() * 3;
             }
 
+            // PPISP: estimate based on num_cameras and num_frames
+            size_t ppisp_bytes = 0;
+            if (ppisp) {
+                // exposure + vignetting + color + crf, each with params + 2x Adam state
+                const size_t exp_size = ppisp->num_frames() * sizeof(float) * 3;
+                const size_t vig_size = ppisp->num_cameras() * 3 * 5 * sizeof(float) * 3;
+                const size_t color_size = ppisp->num_frames() * 8 * sizeof(float) * 3;
+                const size_t crf_size = ppisp->num_cameras() * 3 * 4 * sizeof(float) * 3;
+                ppisp_bytes = exp_size + vig_size + color_size + crf_size;
+            }
+
             constexpr size_t OVERHEAD_BYTES = 64 * 1024;
 
             const size_t estimated_size = sizeof(CheckpointHeader) +
                                           model_bytes +
                                           optimizer_bytes +
                                           bilateral_grid_bytes +
+                                          ppisp_bytes +
                                           OVERHEAD_BYTES;
 
             if (auto space_check = lfs::io::check_disk_space(checkpoint_path, estimated_size, 1.1f);
@@ -100,7 +116,13 @@ namespace lfs::training {
             header.iteration = iteration;
             header.num_gaussians = static_cast<uint32_t>(model.size());
             header.sh_degree = model.get_max_sh_degree();
-            header.flags = bilateral_grid ? CheckpointFlags::HAS_BILATERAL_GRID : CheckpointFlags::NONE;
+            header.flags = CheckpointFlags::NONE;
+            if (bilateral_grid)
+                header.flags = header.flags | CheckpointFlags::HAS_BILATERAL_GRID;
+            if (ppisp)
+                header.flags = header.flags | CheckpointFlags::HAS_PPISP;
+            if (ppisp_controller_pool)
+                header.flags = header.flags | CheckpointFlags::HAS_PPISP_CONTROLLER;
 
             const auto header_pos = file.tellp();
             file.write(reinterpret_cast<const char*>(&header), sizeof(header));
@@ -122,6 +144,19 @@ namespace lfs::training {
                           bilateral_grid->get_step(), bilateral_grid->get_lr());
             }
 
+            // PPISP (if present)
+            if (ppisp) {
+                ppisp->serialize(file);
+                LOG_DEBUG("PPISP state saved (step={}, lr={:.2e})",
+                          ppisp->get_step(), ppisp->get_lr());
+            }
+
+            // PPISP controller pool (if present)
+            if (ppisp_controller_pool) {
+                ppisp_controller_pool->serialize(file);
+                LOG_DEBUG("PPISP controller pool saved: {} cameras", ppisp_controller_pool->num_cameras());
+            }
+
             // Training parameters as JSON
             const auto params_pos = file.tellp();
             nlohmann::json params_json;
@@ -137,9 +172,16 @@ namespace lfs::training {
             file.seekp(header_pos);
             file.write(reinterpret_cast<const char*>(&header), sizeof(header));
 
+            std::string extras;
+            if (bilateral_grid)
+                extras += ", +bilateral";
+            if (ppisp)
+                extras += ", +ppisp";
+            if (ppisp_controller_pool)
+                extras += ", +ppisp_ctrl(" + std::to_string(ppisp_controller_pool->num_cameras()) + ")";
             LOG_INFO("Checkpoint saved: {} ({} Gaussians, iter {}{})",
                      lfs::core::path_to_utf8(checkpoint_path), header.num_gaussians, iteration,
-                     bilateral_grid ? ", +bilateral" : "");
+                     extras);
             return {};
 
         } catch (const std::exception& e) {
@@ -176,7 +218,9 @@ namespace lfs::training {
         const std::filesystem::path& path,
         IStrategy& strategy,
         lfs::core::param::TrainingParameters& params,
-        BilateralGrid* bilateral_grid) {
+        BilateralGrid* bilateral_grid,
+        PPISP* ppisp,
+        PPISPControllerPool* ppisp_controller_pool) {
 
         try {
             std::ifstream file;
@@ -216,11 +260,55 @@ namespace lfs::training {
                     LOG_INFO("Bilateral grid restored (step={}, lr={:.2e})",
                              bilateral_grid->get_step(), bilateral_grid->get_lr());
                 } else {
-                    LOG_WARN("Checkpoint has bilateral grid but none provided - skipping");
-                    // Skip bilateral grid data by reading params offset
+                    LOG_WARN("Checkpoint has bilateral grid but none provided - skipping data");
+                    BilateralGrid temp(1, 1, 1, 1, 1);
+                    temp.deserialize(file);
                 }
             } else if (bilateral_grid) {
                 LOG_WARN("Bilateral grid requested but not in checkpoint - using fresh state");
+            }
+
+            // PPISP (if present in checkpoint)
+            if (has_flag(header.flags, CheckpointFlags::HAS_PPISP)) {
+                if (ppisp) {
+                    ppisp->deserialize(file);
+                    LOG_INFO("PPISP restored (step={}, lr={:.2e})", ppisp->get_step(), ppisp->get_lr());
+                } else {
+                    LOG_WARN("Checkpoint has PPISP but none provided - skipping data");
+                    PPISP temp(1);
+                    temp.deserialize(file);
+                }
+            } else if (ppisp) {
+                LOG_WARN("PPISP requested but not in checkpoint - using fresh state");
+            }
+
+            // PPISP controller pool (if present in checkpoint)
+            if (has_flag(header.flags, CheckpointFlags::HAS_PPISP_CONTROLLER)) {
+                if (ppisp_controller_pool) {
+                    ppisp_controller_pool->deserialize(file);
+                    LOG_INFO("PPISP controller pool restored: {} cameras (step={}, lr={:.2e})",
+                             ppisp_controller_pool->num_cameras(),
+                             0, // step not easily accessible from pool
+                             ppisp_controller_pool->get_learning_rate());
+                } else {
+                    LOG_WARN("Checkpoint has PPISP controller pool but none provided - skipping");
+                    // Skip the pool data by reading into a temporary
+                    // Pool format: magic + version + num_cameras + ... (variable size)
+                    // We need to read it to advance the file position
+                    uint32_t magic, version;
+                    int num_cameras, total_iter;
+                    file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+                    file.read(reinterpret_cast<char*>(&version), sizeof(version));
+                    file.read(reinterpret_cast<char*>(&num_cameras), sizeof(num_cameras));
+                    // Create a temporary pool to skip the data
+                    PPISPControllerPool temp(num_cameras, 1);
+                    // Rewind and deserialize properly to skip
+                    file.seekg(-static_cast<std::streamoff>(sizeof(magic) + sizeof(version) + sizeof(num_cameras)),
+                               std::ios::cur);
+                    temp.deserialize(file);
+                }
+            } else if (ppisp_controller_pool) {
+                LOG_WARN("PPISP controller pool requested but not in checkpoint - using fresh state");
             }
 
             // Reserve capacity for MCMC densification

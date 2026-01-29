@@ -258,6 +258,21 @@ namespace lfs::core::tensor_ops {
     void launch_diag(const float* diagonal, float* matrix, size_t n, cudaStream_t stream);
     void launch_extract_diag(const float* matrix, float* diagonal, size_t n, cudaStream_t stream);
 
+    // Matrix multiplication (tiled sgemm - no cuBLAS dependency)
+    // C[m,n] = A[m,k] @ B[k,n]
+    void launch_sgemm(const float* a, const float* b, float* c,
+                      size_t m, size_t n, size_t k, cudaStream_t stream);
+    // C[m,n] = A[m,k] @ B^T[k,n] where B is stored as [n,k]
+    void launch_sgemm_tn(const float* a, const float* b, float* c,
+                         size_t m, size_t n, size_t k, cudaStream_t stream);
+    void launch_sgemm_batched(const float* a, const float* b, float* c,
+                              size_t batch, size_t m, size_t n, size_t k,
+                              cudaStream_t stream);
+    // Fused sgemm + bias + relu for conv1x1
+    // C[m,n] = relu(A[m,k] @ B[k,n] + bias[m])
+    void launch_sgemm_bias_relu(const float* a, const float* b, const float* bias, float* c,
+                                size_t m, size_t n, size_t k, cudaStream_t stream);
+
     // ============= Masking Operations =============
     void launch_masked_select(const float* input, const unsigned char* mask,
                               float* output, size_t n, size_t output_size, cudaStream_t stream);

@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
@@ -471,18 +472,29 @@ namespace lfs::io {
         std::vector<ImageData> images;
         images.reserve(lines.size());
 
-        for (const auto& line : lines) {
-            const auto tokens = split_string(line, ' ');
-            if (tokens.size() != 10)
-                continue;
+        for (size_t line_idx = 0; line_idx < lines.size(); ++line_idx) {
+            const auto& line = lines[line_idx];
+            std::istringstream iss(line);
 
             ImageData img;
-            img.image_id = std::stoul(tokens[0]);
-            img.qvec = {std::stof(tokens[1]), std::stof(tokens[2]),
-                        std::stof(tokens[3]), std::stof(tokens[4])};
-            img.tvec = {std::stof(tokens[5]), std::stof(tokens[6]), std::stof(tokens[7])};
-            img.camera_id = std::stoul(tokens[8]);
-            img.name = tokens[9];
+            if (!(iss >> img.image_id >> img.qvec[0] >> img.qvec[1] >> img.qvec[2] >> img.qvec[3] >> img.tvec[0] >> img.tvec[1] >> img.tvec[2] >> img.camera_id)) {
+                continue;
+            }
+
+            iss >> std::ws;
+            if (!std::getline(iss, img.name) || img.name.empty()) {
+                continue;
+            }
+
+            auto dot_pos = img.name.rfind('.');
+            if (dot_pos == std::string::npos || dot_pos == img.name.size() - 1) {
+                continue;
+            }
+            bool has_extension = std::isalpha(static_cast<unsigned char>(img.name[dot_pos + 1]));
+            if (!has_extension) {
+                continue;
+            }
+
             images.push_back(std::move(img));
         }
 
@@ -841,7 +853,8 @@ namespace lfs::io {
                 mask_path,
                 cam_data.width,
                 cam_data.height,
-                static_cast<int>(i));
+                static_cast<int>(i),
+                static_cast<int>(img.camera_id));
 
             cameras.push_back(std::move(camera));
         }

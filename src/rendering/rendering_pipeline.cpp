@@ -340,7 +340,7 @@ namespace lfs::rendering {
             if (auto result = point_cloud_renderer_->render(model, view, projection,
                                                             request.voxel_size, request.background_color,
                                                             request.model_transforms, request.transform_indices,
-                                                            request.equirectangular);
+                                                            request.equirectangular, request.point_cloud_crop_params);
                 !result) {
                 LOG_ERROR("Point cloud rendering failed: {}", result.error());
                 return std::unexpected(std::format("Point cloud rendering failed: {}", result.error()));
@@ -534,7 +534,7 @@ namespace lfs::rendering {
             LOG_TIMER_TRACE("point_cloud_renderer_->render(PointCloud)");
             if (auto result = point_cloud_renderer_->render(point_cloud, view, projection,
                                                             request.voxel_size, request.background_color,
-                                                            {}, nullptr, request.equirectangular);
+                                                            {}, nullptr, request.equirectangular, request.point_cloud_crop_params);
                 !result) {
                 LOG_ERROR("Raw point cloud rendering failed: {}", result.error());
                 return std::unexpected(std::format("Raw point cloud rendering failed: {}", result.error()));
@@ -734,8 +734,9 @@ namespace lfs::rendering {
         R_tensor = R_tensor.transpose(0, 1);
         t_tensor = (-R_tensor.mm(t_tensor)).squeeze();
 
-        // Compute field of view
-        glm::vec2 fov = computeFov(request.fov,
+        // Compute field of view from focal length (single conversion point)
+        const float vfov_rad = focalLengthToVFovRad(request.focal_length_mm);
+        glm::vec2 fov = computeFov(vfov_rad,
                                    request.viewport_size.x,
                                    request.viewport_size.y);
 
@@ -762,13 +763,11 @@ namespace lfs::rendering {
         }
     }
 
-    glm::vec2 RenderingPipeline::computeFov(float fov_degrees, int width, int height) {
-        float fov_rad = glm::radians(fov_degrees);
+    glm::vec2 RenderingPipeline::computeFov(float vfov_rad, int width, int height) {
         float aspect = static_cast<float>(width) / height;
-
         return glm::vec2(
-            atan(tan(fov_rad / 2.0f) * aspect) * 2.0f,
-            fov_rad);
+            std::atan(std::tan(vfov_rad * 0.5f) * aspect) * 2.0f,
+            vfov_rad);
     }
 
     void RenderingPipeline::ensureFBOSize(int width, int height) {

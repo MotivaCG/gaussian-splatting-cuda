@@ -44,13 +44,14 @@ namespace lfs::rendering {
         glm::mat3 rotation;
         glm::vec3 translation;
         glm::ivec2 size;
-        float fov = DEFAULT_FOV;
+        float focal_length_mm = DEFAULT_FOCAL_LENGTH_MM;
         bool orthographic = false;
         float ortho_scale = DEFAULT_ORTHO_SCALE;
 
         [[nodiscard]] glm::mat4 getProjectionMatrix(const float near_plane = DEFAULT_NEAR_PLANE,
                                                     const float far_plane = DEFAULT_FAR_PLANE) const {
-            return createProjectionMatrix(size, fov, orthographic, ortho_scale, near_plane, far_plane);
+            const float vfov = focalLengthToVFov(focal_length_mm);
+            return createProjectionMatrix(size, vfov, orthographic, ortho_scale, near_plane, far_plane);
         }
     };
 
@@ -185,6 +186,9 @@ namespace lfs::rendering {
 
         std::optional<bool> flip_left_y;
         std::optional<bool> flip_right_y;
+
+        bool letterbox = false;
+        glm::ivec2 content_size{0, 0};
     };
 
     enum class GridPlane {
@@ -240,7 +244,7 @@ namespace lfs::rendering {
         glm::mat3 view_rotation;
         glm::vec3 view_translation;
         glm::ivec2 viewport_size;
-        float fov = 60.0f;
+        float focal_length_mm = DEFAULT_FOCAL_LENGTH_MM;
         float scaling_modifier = 1.0f;
         bool antialiasing = false;
         RenderMode render_mode = RenderMode::RGB;

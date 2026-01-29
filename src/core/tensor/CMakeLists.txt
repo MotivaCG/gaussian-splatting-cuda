@@ -31,6 +31,7 @@ set(LFS_TENSOR_SOURCES
     tensor_masking_ops.cpp     # Masking and indexing operations
     tensor_advanced_ops.cpp    # Advanced operations
     tensor_row_proxy.cpp       # TensorRowProxy implementations (moved from header)
+    tensor_nn_ops.cpp          # Neural network operations (conv1x1, pooling, linear)
     pinned_memory_allocator.cpp # Pinned memory allocator for fast CPU-GPU transfers (used by tensor)
     offset_allocator.cpp       # OffsetAllocator for O(1) GPU memory sub-allocation
 )
@@ -45,6 +46,7 @@ set(LFS_TENSOR_CUDA_SOURCES
     tensor_random_ops.cu    # CUDA kernels for random ops
     tensor_strided_ops.cu   # CUDA kernels for strided tensor operations
     tensor_dot_optimized.cu # Optimized dot product and scalar reduction kernels
+    tensor_nn_ops.cu        # CUDA kernels for neural network ops (pooling)
 )
 
 # Create CUDA library for tensor operations (C++20)

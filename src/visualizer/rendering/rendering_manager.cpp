@@ -16,6 +16,8 @@
 #include "rendering/rendering.hpp"
 #include "rendering/rendering_pipeline.hpp"
 #include "scene/scene_manager.hpp"
+#include "training/components/ppisp.hpp"
+#include "training/components/ppisp_controller.hpp"
 #include "training/trainer.hpp"
 #include "training/training_manager.hpp"
 #include <cuda_runtime.h>
@@ -28,6 +30,66 @@ namespace lfs::vis {
 
     namespace {
         constexpr int GPU_ALIGNMENT = 16; // 16-pixel alignment for GPU texture efficiency
+
+        lfs::training::PPISPRenderOverrides toRenderOverrides(const PPISPOverrides& ov) {
+            lfs::training::PPISPRenderOverrides r;
+            r.exposure_offset = ov.exposure_offset;
+            r.vignette_enabled = ov.vignette_enabled;
+            r.vignette_strength = ov.vignette_strength;
+            r.wb_temperature = ov.wb_temperature;
+            r.wb_tint = ov.wb_tint;
+            r.color_red_x = ov.color_red_x;
+            r.color_red_y = ov.color_red_y;
+            r.color_green_x = ov.color_green_x;
+            r.color_green_y = ov.color_green_y;
+            r.color_blue_x = ov.color_blue_x;
+            r.color_blue_y = ov.color_blue_y;
+            r.gamma_multiplier = ov.gamma_multiplier;
+            r.gamma_red = ov.gamma_red;
+            r.gamma_green = ov.gamma_green;
+            r.gamma_blue = ov.gamma_blue;
+            r.crf_toe = ov.crf_toe;
+            r.crf_shoulder = ov.crf_shoulder;
+            return r;
+        }
+
+        lfs::core::Tensor applyStandaloneAppearance(const lfs::core::Tensor& rgb, Scene& scene,
+                                                    const int camera_uid, const PPISPOverrides& overrides,
+                                                    const bool use_controller = true) {
+            auto* ppisp = scene.getAppearancePPISP();
+            if (!ppisp) {
+                return rgb;
+            }
+
+            const bool was_hwc = (rgb.ndim() == 3 && rgb.shape()[2] == 3);
+            const auto input = was_hwc ? rgb.permute({2, 0, 1}).contiguous() : rgb;
+            const bool is_training_camera = (camera_uid >= 0 && camera_uid < ppisp->num_frames());
+            const bool has_controller = use_controller && scene.hasAppearanceController();
+
+            lfs::core::Tensor result;
+
+            if (has_controller) {
+                auto* pool = scene.getAppearanceControllerPool();
+                const int controller_idx = camera_uid >= 0 ? camera_uid % pool->num_cameras() : 0;
+                const auto params = pool->predict(controller_idx, input.unsqueeze(0), 1.0f);
+                result = overrides.isIdentity()
+                             ? ppisp->apply_with_controller_params(input, params, 0)
+                             : ppisp->apply_with_controller_params_and_overrides(input, params, 0,
+                                                                                 toRenderOverrides(overrides));
+            } else if (is_training_camera) {
+                result = overrides.isIdentity() ? ppisp->apply(input, camera_uid, camera_uid)
+                                                : ppisp->apply_with_overrides(input, camera_uid, camera_uid,
+                                                                              toRenderOverrides(overrides));
+            } else {
+                const int fallback_camera = ppisp->any_camera_id();
+                const int fallback_frame = ppisp->any_frame_uid();
+                result = overrides.isIdentity() ? ppisp->apply(input, fallback_camera, fallback_frame)
+                                                : ppisp->apply_with_overrides(input, fallback_camera, fallback_frame,
+                                                                              toRenderOverrides(overrides));
+            }
+
+            return (was_hwc && result.is_valid()) ? result.permute({1, 2, 0}).contiguous() : result;
+        }
     } // namespace
 
     using namespace lfs::core::events;
@@ -343,9 +405,9 @@ namespace lfs::vis {
                 settings_.sh_degree = *event.sh_degree;
                 LOG_TRACE("SH_DEGREE changed to: {}", settings_.sh_degree);
             }
-            if (event.fov) {
-                settings_.fov = *event.fov;
-                LOG_TRACE("FOV changed to: {}", settings_.fov);
+            if (event.focal_length_mm) {
+                settings_.focal_length_mm = *event.focal_length_mm;
+                LOG_TRACE("Focal length changed to: {} mm", settings_.focal_length_mm);
             }
             if (event.scaling_modifier) {
                 settings_.scaling_modifier = *event.scaling_modifier;
@@ -406,6 +468,8 @@ namespace lfs::vis {
         });
 
         state::SceneChanged::when([this](const auto&) {
+            cached_filtered_point_cloud_.reset();
+            cached_source_point_cloud_ = nullptr;
             markDirty();
         });
 
@@ -523,7 +587,8 @@ namespace lfs::vis {
                 LOG_WARN("setOrthographic: invalid viewport_height={} or distance={}", viewport_height, distance_to_pivot);
                 settings_.ortho_scale = DEFAULT_SCALE;
             } else {
-                const float half_tan_fov = std::tan(glm::radians(settings_.fov) * 0.5f);
+                const float vfov = lfs::rendering::focalLengthToVFov(settings_.focal_length_mm);
+                const float half_tan_fov = std::tan(glm::radians(vfov) * 0.5f);
                 settings_.ortho_scale = std::clamp(
                     viewport_height / (2.0f * distance_to_pivot * half_tan_fov),
                     MIN_SCALE, MAX_SCALE);
@@ -536,7 +601,20 @@ namespace lfs::vis {
 
     float RenderingManager::getFovDegrees() const {
         std::lock_guard<std::mutex> lock(settings_mutex_);
-        return settings_.fov;
+        return lfs::rendering::focalLengthToVFov(settings_.focal_length_mm);
+    }
+
+    float RenderingManager::getFocalLengthMm() const {
+        std::lock_guard<std::mutex> lock(settings_mutex_);
+        return settings_.focal_length_mm;
+    }
+
+    void RenderingManager::setFocalLength(const float focal_mm) {
+        std::lock_guard<std::mutex> lock(settings_mutex_);
+        settings_.focal_length_mm = std::clamp(focal_mm,
+                                               lfs::rendering::MIN_FOCAL_LENGTH_MM,
+                                               lfs::rendering::MAX_FOCAL_LENGTH_MM);
+        markDirty();
     }
 
     float RenderingManager::getScalingModifier() const {
@@ -544,13 +622,7 @@ namespace lfs::vis {
         return settings_.scaling_modifier;
     }
 
-    void RenderingManager::setFov(float f) {
-        std::lock_guard<std::mutex> lock(settings_mutex_);
-        settings_.fov = f;
-        markDirty();
-    }
-
-    void RenderingManager::setScalingModifier(float s) {
+    void RenderingManager::setScalingModifier(const float s) {
         std::lock_guard<std::mutex> lock(settings_mutex_);
         settings_.scaling_modifier = s;
         markDirty();
@@ -570,6 +642,29 @@ namespace lfs::vis {
     SplitViewInfo RenderingManager::getSplitViewInfo() const {
         std::lock_guard<std::mutex> lock(split_info_mutex_);
         return current_split_info_;
+    }
+
+    RenderingManager::ContentBounds RenderingManager::getContentBounds(const glm::ivec2& viewport_size) const {
+        ContentBounds bounds{0.0f, 0.0f, static_cast<float>(viewport_size.x), static_cast<float>(viewport_size.y), false};
+
+        if (settings_.split_view_mode == SplitViewMode::GTComparison && gt_context_ && gt_context_->valid()) {
+            const float content_aspect = static_cast<float>(gt_context_->dimensions.x) / gt_context_->dimensions.y;
+            const float viewport_aspect = static_cast<float>(viewport_size.x) / viewport_size.y;
+
+            if (content_aspect > viewport_aspect) {
+                bounds.width = static_cast<float>(viewport_size.x);
+                bounds.height = viewport_size.x / content_aspect;
+                bounds.x = 0.0f;
+                bounds.y = (viewport_size.y - bounds.height) / 2.0f;
+            } else {
+                bounds.height = static_cast<float>(viewport_size.y);
+                bounds.width = viewport_size.y * content_aspect;
+                bounds.x = (viewport_size.x - bounds.width) / 2.0f;
+                bounds.y = 0.0f;
+            }
+            bounds.letterboxed = true;
+        }
+        return bounds;
     }
 
     lfs::rendering::RenderingEngine* RenderingManager::getRenderingEngine() {
@@ -616,7 +711,7 @@ namespace lfs::vis {
             static_cast<int>(viewport_size.x * scale),
             static_cast<int>(viewport_size.y * scale));
 
-        if (settings_.split_view_mode == SplitViewMode::GTComparison && gt_context_) {
+        if (settings_.split_view_mode == SplitViewMode::GTComparison && gt_context_ && gt_context_->valid()) {
             render_size = gt_context_->dimensions;
         }
 
@@ -668,12 +763,11 @@ namespace lfs::vis {
         glClearColor(settings_.background_color.r, settings_.background_color.g, settings_.background_color.b, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        // Create viewport data
         lfs::rendering::ViewportData viewport_data{
             .rotation = context.viewport.getRotationMatrix(),
             .translation = context.viewport.getTranslation(),
             .size = render_size,
-            .fov = settings_.fov,
+            .focal_length_mm = settings_.focal_length_mm,
             .orthographic = settings_.orthographic,
             .ortho_scale = settings_.ortho_scale};
 
@@ -791,7 +885,47 @@ namespace lfs::vis {
             }
         }
 
-        const auto render_result = engine_->renderGaussians(*model, request);
+        auto render_result = engine_->renderGaussians(*model, request);
+
+        // Apply PPISP correction if enabled via checkbox
+        if (render_result && render_result->image && settings_.apply_appearance_correction) {
+            bool applied = false;
+
+            // Try trainer's PPISP first (has per-frame params and knows training cameras)
+            if (const auto* tm = scene_manager ? scene_manager->getTrainerManager() : nullptr) {
+                if (const auto* trainer = tm->getTrainer(); trainer && trainer->hasPPISP()) {
+                    lfs::training::PPISPViewportOverrides trainer_overrides{};
+                    if (settings_.ppisp_mode == RenderSettings::PPISPMode::MANUAL) {
+                        trainer_overrides.exposure_offset = settings_.ppisp_overrides.exposure_offset;
+                        trainer_overrides.vignette_enabled = settings_.ppisp_overrides.vignette_enabled;
+                        trainer_overrides.vignette_strength = settings_.ppisp_overrides.vignette_strength;
+                        trainer_overrides.wb_temperature = settings_.ppisp_overrides.wb_temperature;
+                        trainer_overrides.wb_tint = settings_.ppisp_overrides.wb_tint;
+                        trainer_overrides.gamma_multiplier = settings_.ppisp_overrides.gamma_multiplier;
+                    }
+                    const bool use_controller = (settings_.ppisp_mode == RenderSettings::PPISPMode::AUTO);
+                    auto corrected = trainer->applyPPISPForViewport(
+                        *render_result->image, current_camera_id_, trainer_overrides, use_controller);
+                    render_result->image = std::make_shared<lfs::core::Tensor>(std::move(corrected));
+                    applied = true;
+                }
+            }
+
+            if (!applied && scene_manager) {
+                auto& scene = scene_manager->getScene();
+                if (scene.hasAppearanceModel()) {
+                    const auto& overrides = (settings_.ppisp_mode == RenderSettings::PPISPMode::MANUAL)
+                                                ? settings_.ppisp_overrides
+                                                : PPISPOverrides{};
+                    const bool use_controller = (settings_.ppisp_mode == RenderSettings::PPISPMode::AUTO);
+                    auto corrected = applyStandaloneAppearance(
+                        *render_result->image, scene, current_camera_id_, overrides, use_controller);
+                    if (corrected.is_valid()) {
+                        render_result->image = std::make_shared<lfs::core::Tensor>(std::move(corrected));
+                    }
+                }
+            }
+        }
 
         render_lock.reset();
 
@@ -1089,72 +1223,7 @@ namespace lfs::vis {
             }
 
             if (scene_state.point_cloud && scene_state.point_cloud->size() > 0) {
-                const lfs::core::PointCloud* point_cloud_to_render = scene_state.point_cloud;
-
-                // Apply cropbox filter (GPU-accelerated, cached)
-                for (const auto& cb : scene_state.cropboxes) {
-                    if (!cb.data || (!cb.data->enabled && !settings_.show_crop_box))
-                        continue;
-
-                    const bool cache_valid = cached_filtered_point_cloud_ &&
-                                             cached_source_point_cloud_ == scene_state.point_cloud &&
-                                             cached_cropbox_transform_ == cb.world_transform &&
-                                             cached_cropbox_min_ == cb.data->min &&
-                                             cached_cropbox_max_ == cb.data->max &&
-                                             cached_cropbox_inverse_ == cb.data->inverse;
-
-                    if (!cache_valid) {
-                        const auto& means = scene_state.point_cloud->means;
-                        const auto& colors = scene_state.point_cloud->colors;
-                        const size_t num_points = scene_state.point_cloud->size();
-                        const glm::mat4 m = glm::inverse(cb.world_transform);
-                        const auto device = means.device();
-
-                        // GLM column-major -> row-major for tensor matmul
-                        const auto transform = lfs::core::Tensor::from_vector({m[0][0], m[1][0], m[2][0], m[3][0],
-                                                                               m[0][1], m[1][1], m[2][1], m[3][1],
-                                                                               m[0][2], m[1][2], m[2][2], m[3][2],
-                                                                               m[0][3], m[1][3], m[2][3], m[3][3]},
-                                                                              {4, 4}, device);
-
-                        // Transform and filter on GPU
-                        const auto ones = lfs::core::Tensor::ones({num_points, 1}, device);
-                        const auto local_pos = transform.mm(means.cat(ones, 1).t()).t();
-
-                        const auto x = local_pos.slice(1, 0, 1).squeeze(1);
-                        const auto y = local_pos.slice(1, 1, 2).squeeze(1);
-                        const auto z = local_pos.slice(1, 2, 3).squeeze(1);
-
-                        auto mask = (x >= cb.data->min.x) && (x <= cb.data->max.x) &&
-                                    (y >= cb.data->min.y) && (y <= cb.data->max.y) &&
-                                    (z >= cb.data->min.z) && (z <= cb.data->max.z);
-                        if (cb.data->inverse)
-                            mask = mask.logical_not();
-
-                        const auto indices = mask.nonzero().squeeze(1);
-                        if (indices.size(0) > 0) {
-                            cached_filtered_point_cloud_ = std::make_unique<lfs::core::PointCloud>(
-                                means.index_select(0, indices), colors.index_select(0, indices));
-                        } else {
-                            cached_filtered_point_cloud_.reset();
-                        }
-
-                        cached_source_point_cloud_ = scene_state.point_cloud;
-                        cached_cropbox_transform_ = cb.world_transform;
-                        cached_cropbox_min_ = cb.data->min;
-                        cached_cropbox_max_ = cb.data->max;
-                        cached_cropbox_inverse_ = cb.data->inverse;
-                    }
-
-                    if (cached_filtered_point_cloud_) {
-                        point_cloud_to_render = cached_filtered_point_cloud_.get();
-                    } else {
-                        return;
-                    }
-                    break;
-                }
-
-                LOG_TRACE("Rendering point cloud with {} points", point_cloud_to_render->size());
+                LOG_TRACE("Rendering point cloud with {} points", scene_state.point_cloud->size());
 
                 // Get point cloud transform from scene state
                 glm::mat4 point_cloud_transform(1.0f);
@@ -1162,14 +1231,30 @@ namespace lfs::vis {
                     point_cloud_transform = scene_state.model_transforms[0];
                 }
 
-                // Create viewport data
                 lfs::rendering::ViewportData viewport_data{
                     .rotation = context.viewport.getRotationMatrix(),
                     .translation = context.viewport.getTranslation(),
                     .size = render_size,
-                    .fov = settings_.fov,
+                    .focal_length_mm = settings_.focal_length_mm,
                     .orthographic = settings_.orthographic,
                     .ortho_scale = settings_.ortho_scale};
+
+                // Build crop box from scene state for GPU-based desaturation
+                std::optional<lfs::rendering::BoundingBox> crop_box;
+                bool crop_inverse = false;
+                bool crop_desaturate = false;
+                for (const auto& cb : scene_state.cropboxes) {
+                    if (!cb.data || (!cb.data->enabled && !settings_.show_crop_box))
+                        continue;
+
+                    crop_box = lfs::rendering::BoundingBox{
+                        .min = cb.data->min,
+                        .max = cb.data->max,
+                        .transform = glm::inverse(cb.world_transform)};
+                    crop_inverse = cb.data->inverse;
+                    crop_desaturate = settings_.show_crop_box && settings_.desaturate_cropping;
+                    break;
+                }
 
                 lfs::rendering::RenderRequest pc_request{
                     .viewport = viewport_data,
@@ -1178,7 +1263,7 @@ namespace lfs::vis {
                     .mip_filter = settings_.mip_filter,
                     .sh_degree = 0,
                     .background_color = settings_.background_color,
-                    .crop_box = std::nullopt,
+                    .crop_box = crop_box,
                     .point_cloud_mode = true,
                     .voxel_size = settings_.voxel_size,
                     .gut = false,
@@ -1199,12 +1284,14 @@ namespace lfs::vis {
                     .brush_saturation_mode = false,
                     .brush_saturation_amount = 0.0f,
                     .selection_mode_rings = false,
+                    .crop_inverse = crop_inverse,
+                    .crop_desaturate = crop_desaturate,
                     .selected_node_mask = {},
                     .hovered_depth_id = nullptr,
                     .highlight_gaussian_id = -1,
                     .far_plane = lfs::rendering::DEFAULT_FAR_PLANE};
 
-                auto render_result = engine_->renderPointCloud(*point_cloud_to_render, pc_request);
+                auto render_result = engine_->renderPointCloud(*scene_state.point_cloud, pc_request);
                 if (render_result) {
                     cached_result_ = *render_result;
 
@@ -1253,12 +1340,11 @@ namespace lfs::vis {
                 static_cast<int>(context.viewport_region->height));
         }
 
-        // Create viewport data
         lfs::rendering::ViewportData viewport_data{
             .rotation = context.viewport.getRotationMatrix(),
             .translation = context.viewport.getTranslation(),
             .size = render_size,
-            .fov = settings_.fov,
+            .focal_length_mm = settings_.focal_length_mm,
             .orthographic = settings_.orthographic,
             .ortho_scale = settings_.ortho_scale};
 
@@ -1280,7 +1366,8 @@ namespace lfs::vis {
                 return std::nullopt;
             }
 
-            viewport_data.size = gt_context_->dimensions;
+            auto letterbox_viewport = viewport_data;
+            letterbox_viewport.size = render_size;
 
             return lfs::rendering::SplitViewRequest{
                 .panels = {{.content_type = lfs::rendering::PanelContentType::Image2D,
@@ -1293,7 +1380,7 @@ namespace lfs::vis {
                             .label = "Rendered",
                             .start_position = settings_.split_position,
                             .end_position = 1.0f}},
-                .viewport = viewport_data,
+                .viewport = letterbox_viewport,
                 .scaling_modifier = settings_.scaling_modifier,
                 .antialiasing = settings_.antialiasing,
                 .mip_filter = settings_.mip_filter,
@@ -1311,7 +1398,9 @@ namespace lfs::vis {
                 .show_labels = true,
                 .left_texcoord_scale = gt_context_->gt_texcoord_scale,
                 .right_texcoord_scale = gt_context_->render_texcoord_scale,
-                .flip_left_y = gt_context_->gt_needs_flip};
+                .flip_left_y = gt_context_->gt_needs_flip,
+                .letterbox = true,
+                .content_size = gt_context_->dimensions};
         }
 
         if (settings_.split_view_mode == SplitViewMode::PLYComparison) {
@@ -1384,7 +1473,7 @@ namespace lfs::vis {
             .rotation = context.viewport.getRotationMatrix(),
             .translation = context.viewport.getTranslation(),
             .size = render_size,
-            .fov = settings_.fov,
+            .focal_length_mm = settings_.focal_length_mm,
             .orthographic = settings_.orthographic,
             .ortho_scale = settings_.ortho_scale};
 

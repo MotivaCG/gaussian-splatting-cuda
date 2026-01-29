@@ -8,6 +8,8 @@
 #include "core/splat_data_transform.hpp"
 #include "core/tensor/internal/memory_pool.hpp"
 #include "io/cache_image_loader.hpp"
+#include "training/components/ppisp.hpp"
+#include "training/components/ppisp_controller.hpp"
 #include "training/dataset.hpp"
 
 #include <algorithm>
@@ -1988,6 +1990,21 @@ namespace lfs::vis {
             }
         }
         return result;
+    }
+
+    void Scene::setAppearanceModel(std::unique_ptr<lfs::training::PPISP> ppisp,
+                                   std::unique_ptr<lfs::training::PPISPControllerPool> controller_pool) {
+        appearance_ppisp_ = std::move(ppisp);
+        appearance_controller_pool_ = std::move(controller_pool);
+        LOG_INFO("Scene: appearance model set (PPISP: {}, Controllers: {})",
+                 appearance_ppisp_ ? "yes" : "no",
+                 appearance_controller_pool_ ? appearance_controller_pool_->num_cameras() : 0);
+    }
+
+    void Scene::clearAppearanceModel() {
+        appearance_ppisp_.reset();
+        appearance_controller_pool_.reset();
+        LOG_DEBUG("Scene: appearance model cleared");
     }
 
 } // namespace lfs::vis

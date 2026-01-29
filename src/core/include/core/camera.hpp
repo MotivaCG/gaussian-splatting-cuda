@@ -28,7 +28,8 @@ namespace lfs::core {
                const std::filesystem::path& image_path,
                const std::filesystem::path& mask_path,
                int camera_width, int camera_height,
-               int uid);
+               int uid,
+               int camera_id = 0);
         Camera(const Camera&, const Tensor& transform);
 
         // Destructor to clean up CUDA stream
@@ -110,6 +111,7 @@ namespace lfs::core {
         const std::filesystem::path& mask_path() const noexcept { return _mask_path; }
         bool has_mask() const noexcept { return !_mask_path.empty() && std::filesystem::exists(_mask_path); }
         int uid() const noexcept { return _uid; }
+        int camera_id() const noexcept { return _camera_id; }
 
         float FoVx() const noexcept { return _FoVx; }
         float FoVy() const noexcept { return _FoVy; }
@@ -119,6 +121,7 @@ namespace lfs::core {
         float _FoVx = 0.f;
         float _FoVy = 0.f;
         int _uid = -1;
+        int _camera_id = 0;
         float _focal_x = 0.f;
         float _focal_y = 0.f;
         float _center_x = 0.f;

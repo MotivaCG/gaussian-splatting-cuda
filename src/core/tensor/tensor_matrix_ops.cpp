@@ -5,6 +5,7 @@
 #include "core/tensor_trace.hpp"
 #include "internal/tensor_impl.hpp"
 #include "internal/tensor_ops.hpp"
+#include <cassert>
 
 namespace lfs::core {
 
@@ -53,13 +54,16 @@ namespace lfs::core {
         const size_t k = shape_[1];
         const size_t n = other.shape_[1];
 
-        // GPU: transfer to CPU, compute, transfer back
-        if (device_ == Device::CUDA) {
-            return cpu().contiguous().mm(other.cpu().contiguous()).cuda();
-        }
-
         const Tensor& a = is_contiguous() ? *this : contiguous();
         const Tensor& b = other.is_contiguous() ? other : other.contiguous();
+
+        // GPU: use tiled CUDA sgemm kernel
+        if (device_ == Device::CUDA) {
+            auto result = empty({m, n}, Device::CUDA, dtype_);
+            tensor_ops::launch_sgemm(a.ptr<float>(), b.ptr<float>(), result.ptr<float>(),
+                                     m, n, k, nullptr);
+            return result;
+        }
 
         auto result = empty({m, n}, Device::CPU, dtype_);
         cpu_matmul(a.ptr<float>(), b.ptr<float>(), result.ptr<float>(), m, k, n);
@@ -98,13 +102,16 @@ namespace lfs::core {
         const size_t k = shape_[2];
         const size_t n = other.shape_[2];
 
-        // GPU: transfer to CPU, compute, transfer back
-        if (device_ == Device::CUDA) {
-            return cpu().contiguous().bmm(other.cpu().contiguous()).cuda();
-        }
-
         const Tensor& a = is_contiguous() ? *this : contiguous();
         const Tensor& b = other.is_contiguous() ? other : other.contiguous();
+
+        // GPU: use tiled CUDA batched sgemm kernel
+        if (device_ == Device::CUDA) {
+            auto result = empty({batch_size, m, n}, Device::CUDA, dtype_);
+            tensor_ops::launch_sgemm_batched(a.ptr<float>(), b.ptr<float>(), result.ptr<float>(),
+                                             batch_size, m, n, k, nullptr);
+            return result;
+        }
 
         auto result = empty({batch_size, m, n}, Device::CPU, dtype_);
 
