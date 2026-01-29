@@ -2154,13 +2154,13 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
             if (!ckpt_result) {
                 LOG_WARN("Failed to save checkpoint: {}", ckpt_result.error());
             }
-        }
 
-        if (ppisp_) {
-            const auto ppisp_path = get_ppisp_companion_path(ply_options.output_path);
-            const auto ppisp_result = save_ppisp_file(ppisp_path, *ppisp_, controller_to_save);
-            if (!ppisp_result) {
-                LOG_WARN("Failed to save PPISP file: {}", ppisp_result.error());
+            if (ppisp_) {
+                const auto ppisp_path = get_ppisp_companion_path(ply_options.output_path);
+                const auto ppisp_result = save_ppisp_file(ppisp_path, *ppisp_, controller_to_save);
+                if (!ppisp_result) {
+                    LOG_WARN("Failed to save PPISP file: {}", ppisp_result.error());
+                }
             }
         }
 
