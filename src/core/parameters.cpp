@@ -68,6 +68,9 @@ namespace lfs::core {
                 const std::vector<ParamInfo> expected_params = {
                     {"iterations", defaults.iterations, "Total number of training iterations"},
                     {"means_lr", defaults.means_lr, "Initial learning rate for position updates"},
+                    {"means_lr_mul_start", defaults.means_lr_mul_start, "Start multiplier for means_lr (additional schedule)"},
+                    {"means_lr_mul_end", defaults.means_lr_mul_end, "End multiplier for means_lr (additional schedule)"},
+                    {"means_lr_mul_power", defaults.means_lr_mul_power, "Power for means_lr multiplier curve (p)"}, 
                     {"shs_lr", defaults.shs_lr, "Learning rate for spherical harmonics updates"},
                     {"opacity_lr", defaults.opacity_lr, "Learning rate for opacity updates"},
                     {"scaling_lr", defaults.scaling_lr, "Learning rate for scaling updates"},
@@ -202,6 +205,9 @@ namespace lfs::core {
             nlohmann::json opt_json;
             opt_json["iterations"] = iterations;
             opt_json["means_lr"] = means_lr;
+            opt_json["means_lr_mul_start"] = means_lr_mul_start;
+            opt_json["means_lr_mul_end"] = means_lr_mul_end;
+            opt_json["means_lr_mul_power"] = means_lr_mul_power;
             opt_json["shs_lr"] = shs_lr;
             opt_json["opacity_lr"] = opacity_lr;
             opt_json["scaling_lr"] = scaling_lr;
@@ -304,6 +310,15 @@ namespace lfs::core {
             OptimizationParameters params;
             params.iterations = json["iterations"];
             params.means_lr = json["means_lr"];
+            if (json.contains("means_lr_mul_start")) {
+                params.means_lr_mul_start = json["means_lr_mul_start"];
+            }
+            if (json.contains("means_lr_mul_end")) {
+                params.means_lr_mul_end = json["means_lr_mul_end"];
+            }
+            if (json.contains("means_lr_mul_power")) {
+                params.means_lr_mul_power = json["means_lr_mul_power"];
+            }
             params.shs_lr = json["shs_lr"];
             params.opacity_lr = json["opacity_lr"];
             params.scaling_lr = json["scaling_lr"];

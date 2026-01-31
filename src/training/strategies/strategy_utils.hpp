@@ -40,5 +40,20 @@ namespace lfs::training {
         std::unique_ptr<AdamOptimizer>& optimizer,
         lfs::core::SplatData& splat_data,
         std::vector<size_t> param_idxs = {0, 1, 2, 3, 4, 5});
+    
+    // -------------------------------------------------------------------------
+    // Means LR multiplier schedule (optional)
+    // -------------------------------------------------------------------------
+    bool means_lr_multiplier_enabled(const lfs::core::param::OptimizationParameters& params);
+
+    // Applies the effective means learning rate for a given iteration, combining:
+    // - The standard exponential decay (gamma = 0.01^(1/iterations))
+    // - The optional multiplicative curve M(t) defined by means_lr_mul_* parameters
+    // This function also mirrors the value to the global LR for consistency.
+    void apply_means_lr_schedule(
+        AdamOptimizer& optimizer,
+        const lfs::core::param::OptimizationParameters& params,
+        const lfs::core::SplatData& splat_data,
+        int iter);
 
 } // namespace lfs::training

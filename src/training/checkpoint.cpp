@@ -328,6 +328,10 @@ namespace lfs::training {
                 const auto cli_data_path = params.dataset.data_path;
                 const auto cli_output_path = params.dataset.output_path;
                 const auto cli_iterations = params.optimization.iterations;
+                const auto cli_means_lr_mul_override = params.optimization.means_lr_mul_cli_override;
+                const auto cli_means_lr_mul_start = params.optimization.means_lr_mul_start;
+                const auto cli_means_lr_mul_end = params.optimization.means_lr_mul_end;
+                const auto cli_means_lr_mul_power = params.optimization.means_lr_mul_power;
 
                 const auto params_json = nlohmann::json::parse(params_str);
                 if (params_json.contains("optimization")) {
@@ -345,6 +349,13 @@ namespace lfs::training {
                     params.dataset.output_path = cli_output_path;
                 if (cli_iterations > 0)
                     params.optimization.iterations = cli_iterations;
+
+                if (cli_means_lr_mul_override) {
+                    params.optimization.means_lr_mul_start = cli_means_lr_mul_start;
+                    params.optimization.means_lr_mul_end = cli_means_lr_mul_end;
+                    params.optimization.means_lr_mul_power = cli_means_lr_mul_power;
+                    params.optimization.means_lr_mul_cli_override = true;
+                }
             }
 
             LOG_INFO("Checkpoint loaded: {} ({} Gaussians, iter {})",

@@ -36,6 +36,18 @@ namespace lfs::core {
             size_t iterations = 30'000;
             size_t sh_degree_interval = 1'000;
             float means_lr = 0.000016f;
+            // Optional schedule: additional multiplicative factor applied on top of exponential decay
+            // Effective means LR per iteration:
+            //   lr_means(iter) = (means_lr * scene_scale) * gamma^iter * M(iter)
+            // where:
+            //   gamma = 0.01^(1/iterations)  (same as create_scheduler)
+            //   M(iter) = means_lr_mul_end + (means_lr_mul_start - means_lr_mul_end) * (1 - t)^means_lr_mul_power
+            //   t = iter / (iterations - 1)
+            float means_lr_mul_start = 1.0f; // M0 (start multiplier)
+            float means_lr_mul_end = 1.0f;   // M1 (end multiplier)
+            float means_lr_mul_power = 2.0f; // curve power (p), 2 = quadratic
+            bool means_lr_mul_cli_override = false; // runtime-only: true if CLI set any of the above
+             
             float shs_lr = 0.0025f;
             float opacity_lr = 0.05f;
             float scaling_lr = 0.005f;

@@ -574,10 +574,14 @@ namespace lfs::training {
     }
 
     void ADC::step(int iter) {
-        if (iter < _params->iterations) {
+        if (iter < _params->iterations) {            
+            const bool use_means_lr_schedule = means_lr_multiplier_enabled(*_params);
+            if (use_means_lr_schedule)
+                apply_means_lr_schedule(*_optimizer, *_params, *_splat_data, iter);
             _optimizer->step(iter);
             _optimizer->zero_grad(iter);
-            _scheduler->step();
+            if (!use_means_lr_schedule)
+                _scheduler->step();
         }
     }
 

@@ -508,6 +508,11 @@ namespace lfs::training {
     void MCMC::step(int iter) {
         LOG_TIMER("MCMC::step");
         if (iter < _params->iterations) {
+            
+            const bool use_means_lr_schedule = means_lr_multiplier_enabled(*_params);
+            if (use_means_lr_schedule) {
+                apply_means_lr_schedule(*_optimizer, *_params, *_splat_data, iter);
+            }
             {
                 LOG_TIMER("step_optimizer_step");
                 _optimizer->step(iter);
@@ -518,7 +523,8 @@ namespace lfs::training {
             }
             {
                 LOG_TIMER("step_scheduler");
-                _scheduler->step();
+                if (!use_means_lr_schedule)
+                    _scheduler->step();
             }
         }
     }

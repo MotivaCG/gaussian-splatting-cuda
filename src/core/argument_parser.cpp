@@ -99,6 +99,9 @@ namespace {
             ::args::ValueFlag<std::string> images_folder(parser, "images", "Images folder name", {"images"});
             ::args::ValueFlag<int> test_every(parser, "test_every", "Use every Nth image as test", {"test-every"});
             ::args::ValueFlag<float> steps_scaler(parser, "steps_scaler", "Scale training steps by factor", {"steps-scaler"});
+            ::args::ValueFlag<float> means_lr_mul_start(parser, "mul_start", "Multiply means_lr by this factor at the start (curved schedule over time)", {"means-lr-mul-start"});
+            ::args::ValueFlag<float> means_lr_mul_end(parser, "mul_end", "Multiply means_lr by this factor at the end (curved schedule over time)", {"means-lr-mul-end"});
+            ::args::ValueFlag<float> means_lr_mul_power(parser, "power", "Power (p) for the means_lr multiplier curve: M(t)=end+(start-end)*(1-t)^p", {"means-lr-mul-power"});
             ::args::ValueFlag<int> sh_degree_interval(parser, "sh_degree_interval", "SH degree interval", {"sh-degree-interval"});
             ::args::ValueFlag<int> sh_degree(parser, "sh_degree", "Max SH degree [0-3]", {"sh-degree"});
             ::args::ValueFlag<float> min_opacity(parser, "min_opacity", "Minimum opacity threshold", {"min-opacity"});
@@ -384,6 +387,25 @@ namespace {
                     return std::unexpected(std::format("NGS (Noise Guided Splatting) PLY not found: {}", path));
                 }
             }
+            
+            if (means_lr_mul_start) {
+                const float v = ::args::get(means_lr_mul_start);
+                if (!(v > 0.0f)) {
+                    return std::unexpected("ERROR: --means-lr-mul-start must be > 0");
+                }
+            }
+            if (means_lr_mul_end) {
+                const float v = ::args::get(means_lr_mul_end);
+                if (!(v > 0.0f)) {
+                    return std::unexpected("ERROR: --means-lr-mul-end must be > 0");
+                }
+            }
+            if (means_lr_mul_power) {
+                const float v = ::args::get(means_lr_mul_power);
+                if (!(v > 0.0f)) {
+                    return std::unexpected("ERROR: --means-lr-mul-power must be > 0");
+                }
+            }
 
             // Create lambda to apply command line overrides after JSON loading
             auto apply_cmd_overrides = [&params,
@@ -398,6 +420,9 @@ namespace {
                                         images_folder_val = images_folder ? std::optional<std::string>(::args::get(images_folder)) : std::optional<std::string>(),
                                         test_every_val = test_every ? std::optional<int>(::args::get(test_every)) : std::optional<int>(),
                                         steps_scaler_val = steps_scaler ? std::optional<float>(::args::get(steps_scaler)) : std::optional<float>(),
+                                        means_lr_mul_start_val = means_lr_mul_start ? std::optional<float>(::args::get(means_lr_mul_start)) : std::optional<float>(),
+                                        means_lr_mul_end_val = means_lr_mul_end ? std::optional<float>(::args::get(means_lr_mul_end)) : std::optional<float>(),
+                                        means_lr_mul_power_val = means_lr_mul_power ? std::optional<float>(::args::get(means_lr_mul_power)) : std::optional<float>(),
                                         sh_degree_interval_val = sh_degree_interval ? std::optional<int>(::args::get(sh_degree_interval)) : std::optional<int>(),
                                         sh_degree_val = sh_degree ? std::optional<int>(::args::get(sh_degree)) : std::optional<int>(),
                                         min_opacity_val = min_opacity ? std::optional<float>(::args::get(min_opacity)) : std::optional<float>(),
@@ -456,6 +481,12 @@ namespace {
                 setVal(images_folder_val, ds.images);
                 setVal(test_every_val, ds.test_every);
                 setVal(steps_scaler_val, opt.steps_scaler);
+                setVal(means_lr_mul_start_val, opt.means_lr_mul_start);
+                setVal(means_lr_mul_end_val, opt.means_lr_mul_end);
+                setVal(means_lr_mul_power_val, opt.means_lr_mul_power);
+                if (means_lr_mul_start_val || means_lr_mul_end_val || means_lr_mul_power_val) {
+                    opt.means_lr_mul_cli_override = true;
+                }
                 setVal(sh_degree_interval_val, opt.sh_degree_interval);
                 setVal(sh_degree_val, opt.sh_degree);
                 setVal(min_opacity_val, opt.min_opacity);
