@@ -173,6 +173,7 @@ namespace lfs::io {
         try {
             std::vector<std::shared_ptr<Camera>> cameras;
             Tensor scene_center;
+            float scene_scale = 0.f;
 
             if (has_cameras && has_images) {
                 LOG_DEBUG("Reading binary COLMAP data");
@@ -180,14 +181,14 @@ namespace lfs::io {
                 if (!result) {
                     return std::unexpected(result.error());
                 }
-                std::tie(cameras, scene_center) = std::move(*result);
+                std::tie(cameras, scene_center, scene_scale) = std::move(*result);
             } else if (has_cameras_text && has_images_text) {
                 LOG_DEBUG("Reading text COLMAP data");
                 auto result = read_colmap_cameras_and_images_text(path, actual_images_folder);
                 if (!result) {
                     return std::unexpected(result.error());
                 }
-                std::tie(cameras, scene_center) = std::move(*result);
+                std::tie(cameras, scene_center, scene_scale) = std::move(*result);
             } else {
                 return make_error(ErrorCode::MISSING_REQUIRED_FILES,
                                   "No valid COLMAP camera and image data found", path);
@@ -248,6 +249,7 @@ namespace lfs::io {
                     .cameras = std::move(dataset),
                     .point_cloud = std::move(point_cloud)},
                 .scene_center = scene_center,
+                .scene_scale = scene_scale,
                 .loader_used = name(),
                 .load_time = load_time,
                 .warnings = (has_points || has_points_text) ? std::vector<std::string>{} : std::vector<std::string>{"No sparse point cloud found - using random initialization"}};

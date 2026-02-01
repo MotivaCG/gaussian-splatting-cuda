@@ -108,11 +108,12 @@ namespace lfs::vis {
     }
 
     void GTTextureCache::clear() {
-        for (auto& [id, entry] : texture_cache_) {
+        for (const auto& [id, entry] : texture_cache_) {
             if (!entry.interop_texture && entry.texture_id > 0) {
                 glDeleteTextures(1, &entry.texture_id);
             }
         }
+        glFinish();
         texture_cache_.clear();
     }
 
@@ -161,20 +162,16 @@ namespace lfs::vis {
     }
 
     void GTTextureCache::evictOldest() {
-        if (texture_cache_.empty())
+        if (texture_cache_.empty()) {
             return;
-
-        auto oldest = texture_cache_.begin();
-        auto oldest_time = oldest->second.last_access;
-
-        for (auto it = texture_cache_.begin(); it != texture_cache_.end(); ++it) {
-            if (it->second.last_access < oldest_time) {
-                oldest = it;
-                oldest_time = it->second.last_access;
-            }
         }
 
-        if (!oldest->second.interop_texture && oldest->second.texture_id != 0) {
+        const auto oldest = std::min_element(texture_cache_.begin(), texture_cache_.end(),
+                                             [](const auto& a, const auto& b) { return a.second.last_access < b.second.last_access; });
+
+        if (oldest->second.interop_texture) {
+            glFinish();
+        } else if (oldest->second.texture_id != 0) {
             glDeleteTextures(1, &oldest->second.texture_id);
         }
         texture_cache_.erase(oldest);
@@ -383,9 +380,7 @@ namespace lfs::vis {
             setCurrentCameraId(event.cam_id);
             LOG_DEBUG("Current camera ID set to: {}", event.cam_id);
 
-            // If GT comparison was waiting for a camera, re-enable rendering
             if (settings_.split_view_mode == SplitViewMode::GTComparison && event.cam_id >= 0) {
-                LOG_INFO("Camera {} selected, GT comparison now active", event.cam_id);
                 markDirty();
             }
         });

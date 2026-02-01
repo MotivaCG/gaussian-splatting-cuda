@@ -366,9 +366,6 @@ namespace lfs::vis::tools {
             return true;
         }
 
-        // Brush preview (not dragging)
-        updateBrushPreview(x, y, ctx);
-        ctx.requestRender();
         return false;
     }
 

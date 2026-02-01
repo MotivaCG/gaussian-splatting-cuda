@@ -49,13 +49,8 @@ namespace lfs::io {
         CameraData& operator=(CameraData&&) = default;
     };
 
-    /**
-     * @brief Read COLMAP cameras and images
-     * @param base Base directory containing COLMAP data
-     * @param images_folder Folder containing images (default: "images")
-     * @return Result containing tuple of (vector of Camera, scene_center tensor [3])
-     */
-    Result<std::tuple<std::vector<std::shared_ptr<Camera>>, Tensor>>
+    /// Returns (cameras, scene_center [3], scene_scale).
+    Result<std::tuple<std::vector<std::shared_ptr<Camera>>, Tensor, float>>
     read_colmap_cameras_and_images(
         const std::filesystem::path& base,
         const std::string& images_folder = "images");
@@ -67,13 +62,8 @@ namespace lfs::io {
      */
     PointCloud read_colmap_point_cloud(const std::filesystem::path& filepath);
 
-    /**
-     * @brief Read COLMAP cameras and images from text files
-     * @param base Base directory containing COLMAP data
-     * @param images_folder Folder containing images (default: "images")
-     * @return Result containing tuple of (vector of Camera, scene_center tensor [3])
-     */
-    Result<std::tuple<std::vector<std::shared_ptr<Camera>>, Tensor>>
+    /// Text-format variant of read_colmap_cameras_and_images.
+    Result<std::tuple<std::vector<std::shared_ptr<Camera>>, Tensor, float>>
     read_colmap_cameras_and_images_text(
         const std::filesystem::path& base,
         const std::string& images_folder = "images");

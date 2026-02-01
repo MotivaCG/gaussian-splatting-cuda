@@ -35,7 +35,7 @@ namespace lfs::core {
         struct OptimizationParameters {
             size_t iterations = 30'000;
             size_t sh_degree_interval = 1'000;
-            float means_lr = 0.000016f;
+            float means_lr = 0.00016f;
             // Optional schedule: additional multiplicative factor applied on top of exponential decay
             // Effective means LR per iteration:
             //   lr_means(iter) = (means_lr * scene_scale) * gamma^iter * M(iter)
@@ -105,7 +105,7 @@ namespace lfs::core {
             float tv_loss_weight = 10.f;
 
             // PPISP (Physically-Plausible ISP) parameters
-            bool use_ppisp = true;
+            bool use_ppisp = false;
             float ppisp_lr = 2e-3f;
             float ppisp_reg_weight = 0.001f;
             int ppisp_warmup_steps = 500;

@@ -133,13 +133,14 @@ namespace lfs::rendering {
 
     Result<void> CudaGLInteropTextureImpl<true>::init(int width, int height) {
         LOG_TIMER("CudaGLInteropTextureImpl<true>::init");
-        LOG_INFO("Initializing CUDA-GL interop texture: {}x{}", width, height);
 
         // Clean up any existing resources
         cleanup();
 
         width_ = width;
         height_ = height;
+        allocated_width_ = ((width + GPU_ALIGNMENT - 1) / GPU_ALIGNMENT) * GPU_ALIGNMENT;
+        allocated_height_ = ((height + GPU_ALIGNMENT - 1) / GPU_ALIGNMENT) * GPU_ALIGNMENT;
         external_texture_ = false;
 
         glGenTextures(1, &texture_id_);
@@ -184,8 +185,6 @@ namespace lfs::rendering {
 
         cuda_resource_.reset(raw_resource);
         is_registered_ = true;
-
-        LOG_INFO("CUDA-GL interop texture initialized successfully");
         return {};
     }
 
