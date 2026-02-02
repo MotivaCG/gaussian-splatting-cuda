@@ -334,6 +334,7 @@ namespace lfs::training {
         NGSPhase ngs_current_phase_ = NGSPhase::StandardTraining;
         size_t ngs_surface_count_ = 0; // Original surface Gaussian count (before noise injection)
         size_t ngs_noise_count_ = 0;   // Current injected noise Gaussian count
+        int ngs_finetune_end_iter_ = 0; // End of NGS "noise opacity only" warmup window
         bool ngs_enabled_ = false;
         std::expected<void, std::string> initialize_ngs();
         void handle_ngs_phase_transition(int iter);

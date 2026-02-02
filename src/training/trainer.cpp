@@ -1733,15 +1733,40 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                     const bool ngs_block_topology = (ngs_current_phase_ == NGSPhase::WithNoise);
 
                     // Freeze noise gaussians: means/scaling/rotation/SH, keep opacity trainable
+                    // NGS quality-first freezing schedule (applied AFTER backward, BEFORE any optimizer step):
+                    // - FineTune [start, finetune_end): surface fully frozen, train ONLY noise opacity
+                    // - Guided  [finetune_end, end): noise fully frozen, freeze surface SH (avoid color/light drift)
                     if (ngs_block_topology && ngs_surface_count_ > 0 && ngs_noise_count_ > 0) {
                         auto& opt = strategy_->get_optimizer();
-                        const size_t start = ngs_surface_count_;
-                        const size_t count = ngs_noise_count_;
-                        opt.zero_grad_range(ParamType::Means, start, count);
-                        opt.zero_grad_range(ParamType::Sh0, start, count);
-                        opt.zero_grad_range(ParamType::ShN, start, count);
-                        opt.zero_grad_range(ParamType::Scaling, start, count);
-                        opt.zero_grad_range(ParamType::Rotation, start, count);
+                        const size_t noise_start = ngs_surface_count_;
+                        const size_t noise_count = ngs_noise_count_;
+                        const size_t surface_count = ngs_surface_count_;
+                    
+                        const int end_iter = ngs_phase_manager_ ? ngs_phase_manager_->noise_end() : params_.optimization.iterations;
+                        const bool in_finetune = (iter < ngs_finetune_end_iter_);
+                    
+                        // Always freeze noise geometry + SH (noise exists only to block / guide, never to move).
+                        opt.zero_grad_range(ParamType::Means, noise_start, noise_count);
+                        opt.zero_grad_range(ParamType::Sh0, noise_start, noise_count);
+                        opt.zero_grad_range(ParamType::ShN, noise_start, noise_count);
+                        opt.zero_grad_range(ParamType::Scaling, noise_start, noise_count);
+                        opt.zero_grad_range(ParamType::Rotation, noise_start, noise_count);
+                    
+                        if (in_finetune) {
+                            // FineTune: surface is completely frozen; ONLY noise opacity can change.
+                            opt.zero_grad_range(ParamType::Means, 0, surface_count);
+                            opt.zero_grad_range(ParamType::Sh0, 0, surface_count);
+                            opt.zero_grad_range(ParamType::ShN, 0, surface_count);
+                            opt.zero_grad_range(ParamType::Scaling, 0, surface_count);
+                            opt.zero_grad_range(ParamType::Rotation, 0, surface_count);
+                            opt.zero_grad_range(ParamType::Opacity, 0, surface_count);
+                            // NOTE: do NOT zero noise opacity here (we want it trainable).
+                        } else if (iter < end_iter) {
+                            // GuidedSurface: freeze noise opacity too, and freeze surface SH to avoid texture drift under random noise colors.
+                            opt.zero_grad_range(ParamType::Opacity, noise_start, noise_count);
+                            opt.zero_grad_range(ParamType::Sh0, 0, surface_count);
+                            opt.zero_grad_range(ParamType::ShN, 0, surface_count);
+                        }
                     }
                     if (!in_sparsification && !ngs_block_topology) {
                         strategy_->post_backward(iter, r_output);
@@ -2297,8 +2322,15 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
         const int start_iter = ngs_phase_manager_->noise_start();
         const int end_iter = ngs_phase_manager_->noise_end();
 
-        LOG_INFO("NGS ready: {} noise Gaussians, inject at iter {}, remove at iter {}",
-                ngs_noise_->size(), start_iter, end_iter);
+         // Conservative NGS schedule:
+         // - [start_iter, ngs_finetune_end_iter_) : train ONLY noise opacity (surface fully frozen)
+         // - [ngs_finetune_end_iter_, end_iter)   : train surface (noise fully frozen) and freeze surface SH to avoid color/light drift
+         // This is intentionally quality-first and avoids NGS-induced texture degradation.
+         const int finetune_len = std::max(1, static_cast<int>(0.03f * opt.iterations)); // ~3% of total iters
+         ngs_finetune_end_iter_ = std::min(end_iter, start_iter + finetune_len);
+
+        LOG_INFO("NGS ready: {} noise Gaussians, inject at iter {}, finetune_end {}, remove at iter {}",
+                ngs_noise_->size(), start_iter, ngs_finetune_end_iter_, end_iter);
 
         return {};
     }
@@ -2332,14 +2364,13 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
             auto& model = strategy_->get_model();
             auto& optimizer = strategy_->get_optimizer();
 
-            // Randomize noise colors
-            ngs_randomize_sh0_range_inplace(model.sh0(), ngs_surface_count_, ngs_noise_count_, static_cast<uint32_t>(iter));
+                        // Randomize noise colors (reduced frequency to stabilize optimization)
+                        constexpr int kColorRandomizePeriod = 8; // quality-first: less jitter
+                        if ((iter % kColorRandomizePeriod) == 0 || (ngs_phase_manager_ && iter == ngs_phase_manager_->noise_start())) {
+                            ngs_randomize_sh0_range_inplace(model.sh0(), ngs_surface_count_, ngs_noise_count_, static_cast<uint32_t>(iter));
+                        }
 
-            // Freeze noise opacity UNTIL kNgsOpacityUnfreezePoint (then let it fade)
-            const int unfreeze_iter = static_cast<int>(kNgsOpacityUnfreezePoint * params_.optimization.iterations);
-            if (iter < unfreeze_iter) {
-                optimizer.zero_grad_range(ParamType::Opacity, ngs_surface_count_, ngs_noise_count_);
-            }
+                        // NOTE: actual freezing logic is applied after backward (see train_step).
         }
     }
 
