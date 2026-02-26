@@ -330,12 +330,22 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                 loss = loss + alpha_loss;
                 grad_alpha = (alpha_2d - mask_2d).sign() * (ALPHA_CONSISTENCY_WEIGHT / static_cast<float>(alpha_2d.numel()));
             }
-
         } else if (mode == param::MaskMode::HardMatting || mode == param::MaskMode::SoftMatting) {
             // =====================================================================
-            // OPTIMIZED SOFTMATTING - SINGLE PASS APPROACH (like old attention-mask)
+            // QUALITY-FIRST MATTING (robust to imperfect binary masks)
+            //
+            // Motivation:
+            // - With imperfect binary masks, "outside == background" is often wrong in some views.
+            // - If we enforce BG too hard, we punch holes / kill details.
+            // - If we ignore BG entirely, floaters grow.
+            //
+            // Strategy:
+            // - Use a conservative trimap when cores are available:
+            //     FG core: strong supervision (alpha->1 + photometric)
+            //     BG core: light supervision (alpha->0 gated + photometric)
+            //     Uncertain band: weak photometric (avoid detail collapse) and no alpha forcing.
+            // - Avoid scaling the whole photometric loss/grad by the alpha penalty (stability).
             // =====================================================================
-            // Key optimization: ONE photometric pass with weighted mask instead of TWO separate passes
 
             const bool use_cores = (mode == param::MaskMode::SoftMatting);
 
@@ -346,27 +356,54 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                 }
             }
 
-            // Build weight map: full weight inside mask + reduced weight outside
-            // This mimics the old attention-mask behavior where background gets some supervision
-            constexpr float kBgPhotometricRatio = 0.05f;
+            // Conservative defaults
+            constexpr float kHardBgPhotometricRatio = 0.10f;
+            constexpr float kSoftBgPhotometricRatio = 0.10f;
+            constexpr float kSoftUncertainFgRatio = 0.10f; // weak weight on FG band outside FG core
+            constexpr float kGlobalAnchor = 0.02f;
 
-            Tensor weight_map;
-            {
-                // weight_map = mask + (1 - mask) * kBgPhotometricRatio
-                // This gives 1.0 inside mask, ~0.05 outside mask
-                static thread_local Tensor bg_mask_2d;
-                if (bg_mask_2d.is_empty() || bg_mask_2d.shape() != mask_2d.shape() || bg_mask_2d.device() != mask_2d.device()) {
-                    bg_mask_2d = Tensor::empty(mask_2d.shape(), mask_2d.device(), DataType::Float32);
-                }
-                bg_mask_2d.copy_(mask_2d);
-                bg_mask_2d.mul_(-1.0f);
-                bg_mask_2d.add_(1.0f);
+            // Alpha penalty weights (quality-first)
+            constexpr float kIn = 1.00f;  // FG: penalize transparency (1-alpha)
+            constexpr float kOut = 0.25f; // BG: penalize opacity (alpha), weaker than FG
 
-                weight_map = mask_2d + bg_mask_2d * kBgPhotometricRatio;
+            // BG gating thresholds in alpha space
+            constexpr float kBgGateLo = 0.20f; // alpha <= lo -> full BG penalty
+            constexpr float kBgGateHi = 0.60f; // alpha >= hi -> zero BG penalty
+
+            // Strict binary mask {0,1}
+            const Tensor mask_bin = mask_2d.gt(0.5f).to(DataType::Float32);
+
+            // Cached ones tensor (same shape/device as mask)
+            static thread_local Tensor ones_2d;
+            if (ones_2d.is_empty() || ones_2d.shape() != mask_2d.shape() || ones_2d.device() != mask_2d.device()) {
+                ones_2d = Tensor::full(mask_2d.shape(), 1.0f, mask_2d.device());
             }
 
-            // SINGLE photometric pass with weighted mask
-            if (opt_params.lambda_dssim > 0.0f) {
+            Tensor weight_map;
+
+            if (use_cores) {
+                // Use conservative cores computed in Camera (erode-cross)
+                const Tensor fg_core = fg_core_2d->gt(0.5f).to(DataType::Float32);
+                const Tensor bg_core = bg_core_2d->gt(0.5f).to(DataType::Float32);
+
+                // Uncertain FG band: mask_bin - fg_core, clamped to >= 0 using gt(0)
+                Tensor fg_band = (mask_bin - fg_core);
+                fg_band = fg_band * fg_band.gt(0.0f).to(DataType::Float32);
+
+                // Photometric weight: FG core strong, FG band weak, BG core light, + tiny global anchor
+                weight_map = fg_core + fg_band * kSoftUncertainFgRatio +
+                                bg_core * kSoftBgPhotometricRatio + ones_2d * kGlobalAnchor;
+            } else {
+                // HardMatting: dense FG with light BG + tiny global anchor
+                const Tensor bg_mask = ones_2d - mask_bin;
+                weight_map = mask_bin + bg_mask * kHardBgPhotometricRatio + ones_2d * kGlobalAnchor;
+            }
+
+            // Photometric loss
+            // For SoftMatting, prefer L1-only (SSIM windows can mix across mask boundaries and create artifacts).
+            const bool allow_ssim = (!use_cores) && (opt_params.lambda_dssim > 0.0f);
+
+            if (allow_ssim) {
                 auto [loss_tensor, ctx] = lfs::training::kernels::masked_fused_l1_ssim_forward(
                     rendered, gt_image, weight_map, opt_params.lambda_dssim, masked_fused_workspace_);
 
@@ -379,8 +416,8 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
             } else {
                 // Pure L1 with weighted mask
                 const Tensor weight_exp = weight_map.unsqueeze(0).expand({static_cast<int>(rendered.shape()[0]),
-                                                                          static_cast<int>(mask_2d.shape()[0]),
-                                                                          static_cast<int>(mask_2d.shape()[1])});
+                                                                            static_cast<int>(mask_2d.shape()[0]),
+                                                                            static_cast<int>(mask_2d.shape()[1])});
                 const Tensor weight_sum = weight_exp.sum() + EPSILON;
 
                 const Tensor diff = rendered - gt_image;
@@ -391,42 +428,63 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                 grad = sign * weight_exp / weight_sum;
             }
 
-            // Simple alpha regularization (fast, like old trainer)
+            // Alpha regularization (additive; do NOT scale photometric loss/grad)
             if (alpha.is_valid()) {
-                const Tensor alpha_2d = (alpha.ndim() == 3) ? alpha.squeeze(0) : alpha;
+                Tensor alpha_2d = (alpha.ndim() == 3) ? alpha.squeeze(0) : alpha;
 
-                // Use pixelBasedOpacityPenalty approach from old trainer
-                // This is much faster than the complex multi-term approach
                 const float penalty_weight = opt_params.mask_opacity_penalty_weight;
-
                 if (penalty_weight > 0.0f) {
-                    constexpr float kIn = 0.667f;  // Weight for penalizing transparency inside mask
-                    constexpr float kOut = 0.333f; // Weight for penalizing opacity outside mask
 
-                    // Binary mask for inside/outside
-                    const Tensor fg_mask = mask_2d.gt(0.5f).to(DataType::Float32);
-                    const Tensor bg_mask = Tensor::full(mask_2d.shape(), 1.0f, mask_2d.device()) - fg_mask;
+                    // If cores exist, use them for alpha penalty even in HardMatting (more robust).
+                    Tensor fg_alpha_w;
+                    Tensor bg_alpha_w;
 
-                    // Penalty computation
-                    const float num_pixels = static_cast<float>(alpha_2d.numel());
-                    const Tensor inside_penalty_map = (Tensor::full(alpha_2d.shape(), 1.0f, alpha_2d.device()) - alpha_2d) * fg_mask;
-                    const Tensor outside_penalty_map = alpha_2d * bg_mask;
+                    if (use_cores) {
+                        fg_alpha_w = fg_core_2d->gt(0.5f).to(DataType::Float32);
+                        bg_alpha_w = bg_core_2d->gt(0.5f).to(DataType::Float32);
+                    } else if (fg_core_2d && bg_core_2d && fg_core_2d->is_valid() && bg_core_2d->is_valid()) {
+                        fg_alpha_w = fg_core_2d->gt(0.5f).to(DataType::Float32);
+                        bg_alpha_w = bg_core_2d->gt(0.5f).to(DataType::Float32);
+                    } else {
+                        fg_alpha_w = mask_bin;
+                        bg_alpha_w = ones_2d - mask_bin;
+                    }
 
-                    const Tensor total_penalty = (inside_penalty_map.sum() * kIn + outside_penalty_map.sum() * kOut) / num_pixels;
-                    const float penalty_scalar = total_penalty.item<float>() * penalty_weight;
+                    const Tensor ones_alpha = Tensor::full(alpha_2d.shape(), 1.0f, alpha_2d.device());
 
-                    // Add penalty to loss (multiplicative + small additive component)
-                    loss = loss * (1.0f + penalty_scalar) + total_penalty * 0.01f * penalty_weight;
+                    // Normalize per-region
+                    const Tensor fg_norm = fg_alpha_w.sum() + EPSILON;
+                    const Tensor bg_norm = bg_alpha_w.sum() + EPSILON;
 
-                    // Gradient w.r.t. alpha
-                    const float grad_scale = penalty_weight / num_pixels;
-                    grad_alpha = bg_mask * (kOut * grad_scale) - fg_mask * (kIn * grad_scale);
+                    // FG: (1 - alpha)
+                    const Tensor inside_penalty = ((ones_alpha - alpha_2d) * fg_alpha_w).sum() / fg_norm;
 
-                    // Scale image gradient by penalty factor for consistency
-                    grad = grad * (1.0f + penalty_scalar);
+                    // BG gating: bg_gate in [0,1] using only gt() (no clamp dependency)
+                    Tensor gate = (alpha_2d - kBgGateLo) / (kBgGateHi - kBgGateLo);
+
+                    // clamp to >= 0
+                    gate = gate * gate.gt(0.0f).to(DataType::Float32);
+                    // clamp to <= 1
+                    const Tensor over = gate.gt(1.0f).to(DataType::Float32);
+                    gate = gate - (gate - 1.0f) * over;
+
+                    const Tensor bg_gate = ones_alpha - gate;
+
+                    // BG: alpha, but gated
+                    const Tensor outside_penalty = ((alpha_2d * bg_gate) * bg_alpha_w).sum() / bg_norm;
+
+                    const Tensor total_penalty = inside_penalty * kIn + outside_penalty * kOut;
+
+                    const float scale = penalty_weight * ALPHA_CONSISTENCY_WEIGHT;
+
+                    loss = loss + total_penalty * scale;
+
+                    // Gradient w.r.t alpha (ignore d(bg_gate)/d(alpha) for stability)
+                    grad_alpha =
+                        ((bg_alpha_w * bg_gate) * (kOut * scale) / bg_norm) -
+                        (fg_alpha_w * (kIn * scale) / fg_norm);
                 }
             }
-
         } else {
             auto fallback = compute_photometric_loss_with_gradient(rendered, gt_image, opt_params);
             if (!fallback) {
