@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include "command/command_history.hpp"
 #include "core/editor_context.hpp"
 #include "core/main_loop.hpp"
 #include "core/parameter_manager.hpp"
@@ -12,6 +11,8 @@
 #include "gui/gui_manager.hpp"
 #include "input/input_controller.hpp"
 #include "internal/viewport.hpp"
+#include "ipc/selection_server.hpp"
+#include "ipc/view_context.hpp"
 #include "rendering/rendering.hpp"
 #include "rendering/rendering_manager.hpp"
 #include "scene/scene_manager.hpp"
@@ -19,11 +20,13 @@
 #include "training/training_manager.hpp"
 #include "visualizer/visualizer.hpp"
 #include "window/window_manager.hpp"
+#include <condition_variable>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 
-// Forward declaration for GLFW
-struct GLFWwindow;
+struct SDL_Window;
 
 namespace lfs::vis {
     class SceneManager;
@@ -58,7 +61,7 @@ namespace lfs::vis {
         // Component access
         TrainerManager* getTrainerManager() { return trainer_manager_.get(); }
         SceneManager* getSceneManager() { return scene_manager_.get(); }
-        ::GLFWwindow* getWindow() const { return window_manager_->getWindow(); }
+        SDL_Window* getWindow() const { return window_manager_->getWindow(); }
         WindowManager* getWindowManager() { return window_manager_.get(); }
         RenderingManager* getRenderingManager() { return rendering_manager_.get(); }
         gui::GuiManager* getGuiManager() { return gui_manager_.get(); }
@@ -115,17 +118,8 @@ namespace lfs::vis {
         const EditorContext& getEditorContext() const { return editor_context_; }
 
         // Undo/Redo
-        command::CommandHistory& getCommandHistory() { return command_history_; }
         void undo();
         void redo();
-
-        // Selection operations
-        void deleteSelectedGaussians();
-        void invertSelection();
-        void deselectAll();
-        void selectAll();
-        void copySelection();
-        void pasteSelection();
 
         // GUI manager
         std::unique_ptr<gui::GuiManager> gui_manager_;
@@ -149,9 +143,13 @@ namespace lfs::vis {
         void handleLoadFileCommand(const lfs::core::events::cmd::LoadFile& cmd);
         void handleLoadConfigFile(const std::filesystem::path& path);
         void handleSwitchToLatestCheckpoint();
+        void performReset();
 
         // Tool initialization
         void initializeTools();
+
+        // Plugin capability invocation (runs on main thread with scene context)
+        [[nodiscard]] CapabilityInvokeResult processCapabilityRequest(const std::string& name, const std::string& args);
 
         // Options
         ViewerOptions options_;
@@ -173,17 +171,33 @@ namespace lfs::vis {
         std::shared_ptr<tools::SelectionTool> selection_tool_;
         std::unique_ptr<ToolContext> tool_context_;
 
-        // Undo/Redo history
-        command::CommandHistory command_history_;
-
         // Centralized editor state
         EditorContext editor_context_;
+
+        // IPC for MCP selection commands
+        std::unique_ptr<SelectionServer> selection_server_;
+
+        // Capability request synchronization (IPC thread waits for main thread to process)
+        struct CapabilityRequest {
+            std::string name;
+            std::string args;
+            CapabilityInvokeResult* result = nullptr;
+            std::mutex* mtx = nullptr;
+            std::condition_variable* cv = nullptr;
+            bool* done = nullptr;
+        };
+        std::optional<CapabilityRequest> pending_capability_request_;
+        std::mutex capability_request_mutex_;
 
         // State tracking
         bool window_initialized_ = false;
         bool gui_initialized_ = false;
         bool tools_initialized_ = false;
         bool pending_auto_train_ = false;
+        bool pending_reset_ = false;
+        bool gui_frame_rendered_ = false;
+        std::vector<std::filesystem::path> pending_view_paths_;
+        std::filesystem::path pending_dataset_path_;
     };
 
 } // namespace lfs::vis

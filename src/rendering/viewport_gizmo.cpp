@@ -9,7 +9,7 @@
 #include "rendering/render_constants.hpp"
 #include "shader_paths.hpp"
 #include "text_renderer.hpp"
-#include <GLFW/glfw3.h>
+#include <SDL3/SDL.h>
 #include <algorithm>
 #include <format>
 #include <numbers>
@@ -45,9 +45,8 @@ namespace lfs::rendering {
 
         // Initialize text renderer using actual window size (will be updated in render)
         int width = 1280, height = 720;
-        GLFWwindow* window = glfwGetCurrentContext();
-        if (window) {
-            glfwGetFramebufferSize(window, &width, &height);
+        if (SDL_Window* window = SDL_GL_GetCurrentWindow()) {
+            SDL_GetWindowSizeInPixels(window, &width, &height);
         }
         text_renderer_ = std::make_unique<TextRenderer>(width, height);
 
@@ -246,14 +245,14 @@ namespace lfs::rendering {
 
         // Get framebuffer size for ImGui-to-GL coordinate conversion
         int fb_height = 0;
-        if (GLFWwindow* const window = glfwGetCurrentContext()) {
+        if (SDL_Window* const window = SDL_GL_GetCurrentWindow()) {
             int fb_width = 0;
-            glfwGetFramebufferSize(window, &fb_width, &fb_height);
+            SDL_GetWindowSizeInPixels(window, &fb_width, &fb_height);
         }
 
-        // Position gizmo at lower-right of viewport (convert ImGui Y to GL Y)
+        // Position gizmo at upper-right of viewport (convert ImGui Y to GL Y)
         const int gizmo_x = static_cast<int>(viewport_pos.x + viewport_size.x - size_ - margin_x_);
-        const int gizmo_y = fb_height - static_cast<int>(viewport_pos.y + viewport_size.y) + margin_y_;
+        const int gizmo_y = fb_height - static_cast<int>(viewport_pos.y) - margin_y_ - size_;
 
         // Set gizmo viewport
         glViewport(gizmo_x, gizmo_y, size_, size_);
@@ -569,9 +568,9 @@ namespace lfs::rendering {
         if (!initialized_)
             return std::nullopt;
 
-        // Gizmo bounds (lower-right corner in ImGui coords)
+        // Gizmo bounds (upper-right corner in ImGui coords)
         const float gizmo_x = viewport_pos.x + viewport_size.x - size_ - margin_x_;
-        const float gizmo_y = viewport_pos.y + viewport_size.y - size_ - margin_y_;
+        const float gizmo_y = viewport_pos.y + margin_y_;
 
         // Early out if outside gizmo bounds
         if (click_pos.x < gizmo_x || click_pos.x > gizmo_x + size_ ||

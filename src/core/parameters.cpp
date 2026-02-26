@@ -6,12 +6,15 @@
 #include "core/logger.hpp"
 #include "core/path_utils.hpp"
 #include <chrono>
+#include <cmath>
+
 #include <expected>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <iomanip>
 #include <nlohmann/json.hpp>
+#include <set>
 #include <sstream>
 
 namespace lfs::core {
@@ -200,6 +203,40 @@ namespace lfs::core {
             }
         } // namespace
 
+        void OptimizationParameters::scale_steps(const float ratio) {
+            const auto apply = [ratio](const size_t v) {
+                return static_cast<size_t>(std::lround(static_cast<float>(v) * ratio));
+            };
+            iterations = apply(iterations);
+            start_refine = apply(start_refine);
+            stop_refine = apply(stop_refine);
+            reset_every = apply(reset_every);
+            refine_every = apply(refine_every);
+            sh_degree_interval = apply(sh_degree_interval);
+
+            for (auto* steps : {&eval_steps, &save_steps}) {
+                std::set<size_t> unique;
+                for (const auto s : *steps) {
+                    if (const size_t scaled = apply(s); scaled > 0)
+                        unique.insert(scaled);
+                }
+                steps->assign(unique.begin(), unique.end());
+            }
+        }
+
+        void OptimizationParameters::apply_step_scaling() {
+            if (steps_scaler <= 0.f || steps_scaler == 1.f)
+                return;
+            LOG_INFO("Scaling training steps by factor: {}", steps_scaler);
+            scale_steps(steps_scaler);
+        }
+
+        void OptimizationParameters::remove_step_scaling() {
+            if (steps_scaler <= 0.f || steps_scaler == 1.f)
+                return;
+            scale_steps(1.0f / steps_scaler);
+        }
+
         nlohmann::json OptimizationParameters::to_json() const {
 
             nlohmann::json opt_json;
@@ -253,6 +290,7 @@ namespace lfs::core {
             opt_json["pause_refine_after_reset"] = pause_refine_after_reset;
             opt_json["revised_opacity"] = revised_opacity;
             opt_json["gut"] = gut;
+            opt_json["undistort"] = undistort;
             opt_json["steps_scaler"] = steps_scaler;
             opt_json["sh_degree_interval"] = sh_degree_interval;
             opt_json["random"] = random;
@@ -284,8 +322,15 @@ namespace lfs::core {
             opt_json["mask_opacity_penalty_weight"] = mask_opacity_penalty_weight;
             opt_json["mask_opacity_penalty_power"] = mask_opacity_penalty_power;
             opt_json["mask_threshold"] = mask_threshold;
+            opt_json["use_alpha_as_mask"] = use_alpha_as_mask;
 
             return opt_json;
+        }
+
+        std::string OptimizationParameters::validate() const {
+            if (gut && strategy == "adc")
+                return "GUT and ADC strategy cannot be used together";
+            return {};
         }
 
         OptimizationParameters OptimizationParameters::mcmc_defaults() {
@@ -487,6 +532,9 @@ namespace lfs::core {
             if (json.contains("gut")) {
                 params.gut = json["gut"];
             }
+            if (json.contains("undistort")) {
+                params.undistort = json["undistort"];
+            }
 
             if (json.contains("bg_mode")) {
                 const std::string mode = json["bg_mode"];
@@ -539,6 +587,9 @@ namespace lfs::core {
             if (json.contains("mask_threshold")) {
                 params.mask_threshold = json["mask_threshold"];
             }
+            if (json.contains("use_alpha_as_mask")) {
+                params.use_alpha_as_mask = json["use_alpha_as_mask"];
+            }
 
             return params;
         }
@@ -564,9 +615,12 @@ namespace lfs::core {
             const TrainingParameters& params,
             const std::filesystem::path& output_path) {
             try {
+                auto opt_copy = params.optimization;
+                opt_copy.remove_step_scaling();
+
                 nlohmann::json json;
                 json["dataset"] = params.dataset.to_json();
-                json["optimization"] = params.optimization.to_json();
+                json["optimization"] = opt_copy.to_json();
 
                 const auto now = std::chrono::system_clock::now();
                 const auto time_t = std::chrono::system_clock::to_time_t(now);

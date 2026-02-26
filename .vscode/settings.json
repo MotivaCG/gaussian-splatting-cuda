@@ -1,0 +1,11 @@
+{
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}/build/src/python",
+        "${workspaceFolder}/build/src/python/typings"
+    ],
+    "python.autoComplete.extraPaths": [
+        "${workspaceFolder}/build/src/python",
+        "${workspaceFolder}/build/src/python/typings"
+    ],
+    "python.analysis.stubPath": "${workspaceFolder}/build/src/python/typings"
+}

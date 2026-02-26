@@ -93,11 +93,13 @@ namespace gsplat_lfs {
         const float* v_render_colors, // [C, image_height, image_width, CDIM]
         const float* v_render_alphas, // [C, image_height, image_width, 1]
         // gradient outputs (pre-allocated, atomic accumulation)
-        float* v_means,     // [N, 3]
-        float* v_quats,     // [N, 4]
-        float* v_scales,    // [N, 3]
-        float* v_colors,    // [C, N, CDIM]
-        float* v_opacities, // [C, N]
+        float* v_means,                       // [N, 3]
+        float* v_quats,                       // [N, 4]
+        float* v_scales,                      // [N, 3]
+        float* v_colors,                      // [C, N, CDIM]
+        float* v_opacities,                   // [C, N]
+        float* densification_info,            // [2, N] flattened or nullptr
+        const float* densification_error_map, // [H, W] or nullptr
         cudaStream_t stream = nullptr);
 
     /////////////////////////////////////////////////

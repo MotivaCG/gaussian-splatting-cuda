@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "core/export.hpp"
 #include "core/tensor.hpp"
 #include "io/cache_image_loader.hpp"
 
@@ -66,6 +67,9 @@ namespace lfs::io {
         // Optional mask to load alongside the image
         std::optional<std::filesystem::path> mask_path;
         MaskParams mask_params;
+        bool extract_alpha_as_mask = false;
+        MaskParams alpha_mask_params;
+        const lfs::core::UndistortParams* undistort = nullptr;
     };
 
     struct ReadyImage {
@@ -75,7 +79,7 @@ namespace lfs::io {
         cudaStream_t stream = nullptr;
     };
 
-    class PipelinedImageLoader {
+    class LFS_IO_API PipelinedImageLoader {
     public:
         struct CacheStats {
             size_t jpeg_cache_entries = 0;
@@ -137,6 +141,9 @@ namespace lfs::io {
             // Mask-specific fields
             bool is_mask = false;   // True if this item is a mask (not an image)
             MaskParams mask_params; // Invert/threshold params (only used if is_mask)
+            bool alpha_as_mask = false;
+            MaskParams alpha_mask_params;
+            const lfs::core::UndistortParams* undistort = nullptr;
         };
 
         // Pairing buffer: wait for both image and mask before output
@@ -233,8 +240,7 @@ namespace lfs::io {
         // Mask-specific helpers
         std::string make_mask_cache_key(
             const std::filesystem::path& path,
-            const LoadParams& params,
-            const MaskParams& mask_params) const;
+            const LoadParams& params) const;
         void try_complete_pair(
             size_t sequence_id,
             std::optional<lfs::core::Tensor> image,

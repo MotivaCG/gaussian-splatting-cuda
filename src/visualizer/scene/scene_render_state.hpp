@@ -4,9 +4,10 @@
 
 #pragma once
 
+#include "core/mesh_data.hpp"
 #include "core/point_cloud.hpp"
+#include "core/scene.hpp"
 #include "core/tensor.hpp"
-#include "scene.hpp"
 #include <glm/glm.hpp>
 #include <memory>
 #include <string>
@@ -18,13 +19,14 @@ namespace lfs::vis {
     struct SceneRenderState {
         const lfs::core::SplatData* combined_model = nullptr;
         const lfs::core::PointCloud* point_cloud = nullptr; // For pre-training point cloud rendering
+        std::vector<core::Scene::VisibleMesh> meshes;       // Visible mesh nodes with transforms
         std::vector<glm::mat4> model_transforms;
         std::shared_ptr<lfs::core::Tensor> transform_indices; // Per-Gaussian index into model_transforms
         std::shared_ptr<lfs::core::Tensor> selection_mask;    // Per-Gaussian selection group ID
         std::vector<bool> selected_node_mask;                 // Per-node: true = selected, false = desaturate
         std::vector<bool> node_visibility_mask;               // Per-node: true = visible, false = culled (for consolidated models)
         std::string selected_node_name;
-        std::vector<Scene::RenderableCropBox> cropboxes;
+        std::vector<core::Scene::RenderableCropBox> cropboxes;
         int selected_cropbox_index = -1;
         bool has_selection = false;
         size_t visible_splat_count = 0;

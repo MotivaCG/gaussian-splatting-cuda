@@ -8,6 +8,7 @@
 #include "Common.h"
 #include "SphericalHarmonics.h"
 #include "Utils.cuh"
+#include "rasterizer_constants.cuh"
 
 namespace gsplat_fwd {
 
@@ -521,12 +522,19 @@ namespace gsplat_fwd {
                 compute_v_dirs ? v_dirs : nullptr);
     }
 
-    // Compute viewing directions: dir = mean - camera_position
+    using lfs::rendering::extract_rotation_row_major;
+    using lfs::rendering::has_non_identity_transform;
+
+    // Compute viewing directions for SH. When model transforms are provided,
+    // directions are mapped to local space to keep SH object-locked.
     __global__ void compute_view_dirs_kernel(
         const float* __restrict__ means,
         const float* __restrict__ viewmats,
         const uint32_t C,
-        const uint32_t M,                        // Visible gaussians to process
+        const uint32_t M,                           // Visible gaussians to process
+        const float* __restrict__ model_transforms, // [num_transforms, 4, 4] row-major optional
+        const int* __restrict__ transform_indices,  // [N_total] optional
+        const int num_transforms,
         const int* __restrict__ visible_indices, // [M] maps output idx → global gaussian idx
         float* __restrict__ dirs) {
         const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -558,11 +566,45 @@ namespace gsplat_fwd {
         const float my = means[global_n * 3 + 1];
         const float mz = means[global_n * 3 + 2];
 
+        float dir_world_x = mx - campos_x;
+        float dir_world_y = my - campos_y;
+        float dir_world_z = mz - campos_z;
+        float dir_x = dir_world_x;
+        float dir_y = dir_world_y;
+        float dir_z = dir_world_z;
+
+        if (model_transforms != nullptr && num_transforms > 0) {
+            const int transform_idx = transform_indices != nullptr
+                                          ? min(max(transform_indices[global_n], 0), num_transforms - 1)
+                                          : 0;
+            const float* const m = model_transforms + transform_idx * 16;
+            if (has_non_identity_transform(m)) {
+                const float mean_world_x = m[0] * mx + m[1] * my + m[2] * mz + m[3];
+                const float mean_world_y = m[4] * mx + m[5] * my + m[6] * mz + m[7];
+                const float mean_world_z = m[8] * mx + m[9] * my + m[10] * mz + m[11];
+                dir_world_x = mean_world_x - campos_x;
+                dir_world_y = mean_world_y - campos_y;
+                dir_world_z = mean_world_z - campos_z;
+
+                float rot[9];
+                if (extract_rotation_row_major(m, rot)) {
+                    // SH is object-locked by rotation only (matches export transform behavior).
+                    dir_x = rot[0] * dir_world_x + rot[3] * dir_world_y + rot[6] * dir_world_z;
+                    dir_y = rot[1] * dir_world_x + rot[4] * dir_world_y + rot[7] * dir_world_z;
+                    dir_z = rot[2] * dir_world_x + rot[5] * dir_world_y + rot[8] * dir_world_z;
+                } else {
+                    dir_x = dir_world_x;
+                    dir_y = dir_world_y;
+                    dir_z = dir_world_z;
+                }
+            }
+        }
+
         // Write to compacted output
         const uint32_t out_idx = (c * M + out_n) * 3;
-        dirs[out_idx + 0] = mx - campos_x;
-        dirs[out_idx + 1] = my - campos_y;
-        dirs[out_idx + 2] = mz - campos_z;
+        dirs[out_idx + 0] = dir_x;
+        dirs[out_idx + 1] = dir_y;
+        dirs[out_idx + 2] = dir_z;
     }
 
     void compute_view_dirs(
@@ -571,6 +613,9 @@ namespace gsplat_fwd {
         const uint32_t C,
         const uint32_t N_total,
         const uint32_t M,
+        const float* model_transforms,
+        const int* transform_indices,
+        const int num_transforms,
         const int* visible_indices,
         float* dirs,
         cudaStream_t stream) {
@@ -581,7 +626,9 @@ namespace gsplat_fwd {
         const uint32_t num_blocks = (C * M + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
         compute_view_dirs_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            means, viewmats, C, M, visible_indices, dirs);
+            means, viewmats, C, M,
+            model_transforms, transform_indices, num_transforms,
+            visible_indices, dirs);
     }
 
 } // namespace gsplat_fwd

@@ -3,17 +3,28 @@
   "dependencies": [
     "args",
     "boost-preprocessor",
+    "boost-regex",
+    {
+      "name": "ffmpeg",
+      "features": [
+        "avcodec",
+        "avformat",
+        "swscale",
+        "nvcodec",
+        "x264"
+      ]
+    },
     "freetype",
     "glad",
-    "glfw3",
+    "sdl3",
     "glm",
     "gtest",
     {
       "name": "imgui",
       "features": [
         "docking-experimental",
-        "glfw-binding",
-        "opengl3-binding"
+        "opengl3-binding",
+        "sdl3-binding"
       ]
     },
     "implot",
@@ -27,6 +38,14 @@
       ]
     },
     "spdlog",
-    "tbb"
+    "tbb",
+    {
+      "name": "python3",
+      "features": [
+        "extensions"
+      ]
+    },
+    "nanobind",
+    "assimp"
   ]
 }

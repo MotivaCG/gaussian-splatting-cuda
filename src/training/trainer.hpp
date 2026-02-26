@@ -15,20 +15,21 @@
 #include "smn/noise_guided_splatting.hpp"
 #include "dataset.hpp"
 #include "lfs/kernels/ssim.cuh"
+#include "losses/photometric_loss.hpp"
 #include "metrics/metrics.hpp"
 #include "optimizer/scheduler.hpp"
 #include "progress.hpp"
 #include "strategies/istrategy.hpp"
 #include <atomic>
 #include <expected>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <stop_token>
 #include <unordered_map>
 
-// Forward declaration for Scene
-namespace lfs::vis {
+namespace lfs::core {
     class Scene;
 }
 
@@ -78,15 +79,13 @@ namespace lfs::training {
                 std::optional<std::tuple<std::vector<std::string>, std::vector<std::string>>> provided_splits);
 
         /**
-         * @brief New constructor - takes Scene reference (Scene owns all data)
+         * @brief Constructor - takes Scene reference (Scene owns all data)
          *
          * Scene provides:
          * - Training model via getTrainingModel() (SplatData)
-         * - Train/val cameras via getTrainCameras()/getValCameras()
-         *
-         * Strategy type ("mcmc" or "default") is determined by params during initialize()
+         * - Cameras via getAllCameras() (from CAMERA nodes)
          */
-        Trainer(lfs::vis::Scene& scene);
+        Trainer(lfs::core::Scene& scene);
 
         // Delete copy operations
         Trainer(const Trainer&) = delete;
@@ -120,6 +119,11 @@ namespace lfs::training {
         bool is_training_complete() const { return training_complete_.load(); }
         bool has_stopped() const { return stop_requested_.load(); }
 
+        // Set Python script paths to execute once before training; scripts register per-iteration callbacks.
+        void set_python_scripts(std::vector<std::filesystem::path> scripts) {
+            python_scripts_ = std::move(scripts);
+        }
+
         // Get current training state
         int get_current_iteration() const { return current_iteration_.load(); }
         float get_current_loss() const { return current_loss_.load(); }
@@ -127,11 +131,18 @@ namespace lfs::training {
         // just for viewer to get model
         const IStrategy& get_strategy() const { return *strategy_; }
 
+        // Mutable access for controlled callbacks (e.g., Python control layer)
+        IStrategy& get_strategy_mutable() { return *strategy_; }
+
         // Allow viewer to lock for rendering
         std::shared_mutex& getRenderMutex() const { return render_mutex_; }
 
         const lfs::core::param::TrainingParameters& getParams() const { return params_; }
         void setParams(const lfs::core::param::TrainingParameters& params);
+
+        void setOnIterationStart(std::function<void()> cb) { on_iteration_start_ = std::move(cb); }
+
+        lfs::core::Scene* getScene() const { return scene_; }
 
         /// Apply PPISP correction to a rendered image for viewport display
         /// @param rgb rendered image [C,H,W] or [H,W,C]
@@ -153,6 +164,7 @@ namespace lfs::training {
         std::unique_ptr<PPISP> takePPISP() { return std::move(ppisp_); }
         std::unique_ptr<PPISPControllerPool> takePPISPControllerPool() { return std::move(ppisp_controller_pool_); }
 
+        // Checkpoint methods
         std::expected<void, std::string> save_checkpoint(int iteration);
         std::expected<int, std::string> load_checkpoint(const std::filesystem::path& checkpoint_path);
         void save_final_ply_and_checkpoint(int iteration);
@@ -263,9 +275,8 @@ namespace lfs::training {
 
         void save_ply(const std::filesystem::path& save_path, int iter_num, bool join_threads = true);
 
-        // Member variables
-        lfs::vis::Scene* scene_ = nullptr;            // Non-owning pointer to Scene (new mode)
-        std::shared_ptr<CameraDataset> base_dataset_; // Legacy mode only - source cameras
+        lfs::core::Scene* scene_ = nullptr;
+        std::shared_ptr<CameraDataset> base_dataset_;
         std::shared_ptr<CameraDataset> train_dataset_;
         std::shared_ptr<CameraDataset> val_dataset_;
         std::unique_ptr<IStrategy> strategy_;
@@ -296,6 +307,14 @@ namespace lfs::training {
 
         std::unique_ptr<ISparsityOptimizer> sparsity_optimizer_;
 
+        // Persistent photometric loss (workspace reuse across iterations)
+        lfs::training::losses::PhotometricLoss photometric_loss_;
+
+        // Cached GPU scalar to avoid per-iteration allocation
+        core::Tensor loss_accumulator_;
+
+        // Pre-allocated SSIM workspace for densification error maps, eliminates repeated allocations
+        lfs::training::kernels::SSIMWorkspace densification_ssim_workspace_;
         lfs::training::kernels::MaskedFusedL1SSIMWorkspace masked_fused_workspace_;
         lfs::training::kernels::MaskedFusedL1SSIMWorkspace masked_fused_workspace_bg_; // For matting modes (BG pass)
 
@@ -340,5 +359,9 @@ namespace lfs::training {
         void handle_ngs_phase_transition(int iter);
         void inject_noise_into_model();
         void remove_noise_from_model();
+        // Python control scripts (file paths) to execute before training starts
+        std::vector<std::filesystem::path> python_scripts_;
+
+        std::function<void()> on_iteration_start_;
     };
 } // namespace lfs::training

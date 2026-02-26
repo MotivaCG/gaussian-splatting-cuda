@@ -8,7 +8,7 @@
 #include "core/path_utils.hpp"
 #include "io/filesystem_utils.hpp"
 #include <algorithm>
-#include <cassert>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <exception>
@@ -604,11 +604,9 @@ namespace lfs::io {
     // -----------------------------------------------------------------------------
     namespace {
         constexpr std::array MASK_FOLDERS = {"masks", "mask", "segmentation"};
-        constexpr std::array MASK_EXTENSIONS = {".png", ".jpg", ".jpeg", ".PNG", ".JPG", ".JPEG", ".mask.png"};
+        constexpr std::array MASK_EXTENSIONS = {".png", ".jpg", ".jpeg", ".mask.png"};
     } // namespace
 
-    // Searches for mask file matching image_name in mask folders.
-    // Priority: exact match, stem+ext (e.g., img.png), full+ext (e.g., img.jpg.png)
     static std::filesystem::path find_mask_path(const std::filesystem::path& base_path,
                                                 const std::string& image_name) {
         const std::filesystem::path img_path = lfs::core::utf8_to_path(image_name);
@@ -616,30 +614,33 @@ namespace lfs::io {
 
         for (const auto& folder : MASK_FOLDERS) {
             const std::filesystem::path mask_dir = base_path / folder;
-            if (!std::filesystem::exists(mask_dir))
+            if (!safe_exists(mask_dir))
                 continue;
 
-            if (const auto exact = mask_dir / img_path; std::filesystem::exists(exact))
+            if (const auto exact = mask_dir / img_path; safe_exists(exact))
                 return exact;
 
+            if (auto found = find_path_ci(mask_dir, img_path); !found.empty())
+                return found;
+
             for (const auto& ext : MASK_EXTENSIONS) {
-                auto path = mask_dir / stem_path;
-                path += ext;
-                if (std::filesystem::exists(path))
-                    return path;
+                std::filesystem::path target_path = stem_path;
+                target_path += ext;
+                if (auto found = find_path_ci(mask_dir, target_path); !found.empty())
+                    return found;
             }
 
             for (const auto& ext : MASK_EXTENSIONS) {
-                auto path = mask_dir / img_path;
-                path += ext;
-                if (std::filesystem::exists(path))
-                    return path;
+                std::filesystem::path target_path = img_path;
+                target_path += ext;
+                if (auto found = find_path_ci(mask_dir, target_path); !found.empty())
+                    return found;
             }
         }
         return {};
     }
 
-    Result<std::tuple<std::vector<std::shared_ptr<Camera>>, Tensor, float>>
+    Result<std::tuple<std::vector<std::shared_ptr<Camera>>, Tensor>>
     assemble_colmap_cameras(const std::filesystem::path& base_path,
                             const std::unordered_map<uint32_t, CameraDataIntermediate>& cam_map,
                             const std::vector<ImageData>& images,
@@ -738,9 +739,7 @@ namespace lfs::io {
                 focal_x = focal_y = params[0];
                 center_x = params[1];
                 center_y = params[2];
-                // k1 should be zero for COLMAP's SIMPLE_RADIAL to match a pinhole model
                 if (params[3] != 0.0f) {
-                    LOG_WARN("Camera uses SIMPLE_RADIAL model with non-zero k1 distortion ({})", params[3]);
                     radial_dist = Tensor::from_vector({params[3]}, {1}, Device::CPU);
                 } else {
                     radial_dist = Tensor::empty({0}, Device::CPU);
@@ -857,17 +856,18 @@ namespace lfs::io {
                 static_cast<int>(i),
                 static_cast<int>(img.camera_id));
 
+            camera->precompute_undistortion();
+
             cameras.push_back(std::move(camera));
         }
 
-        const Tensor cam_pos_tensor = Tensor::from_vector(camera_positions, {images.size(), 3}, Device::CPU);
-        const Tensor scene_center = cam_pos_tensor.mean({0}, false);
-        const float scene_scale = cam_pos_tensor.sub(scene_center).norm(2.0f, {1}, false).max().item();
-        assert(scene_scale > 0.f);
+        // Compute scene center as mean of camera positions
+        Tensor scene_center_tensor = Tensor::from_vector(camera_positions, {images.size(), 3}, Device::CPU);
+        Tensor scene_center = scene_center_tensor.mean({0}, false);
 
-        LOG_INFO("Loaded {} cameras, scene_scale={:.4f}", cameras.size(), scene_scale);
+        LOG_INFO("Training with {} images", cameras.size());
 
-        return std::make_tuple(std::move(cameras), scene_center, scene_scale);
+        return std::make_tuple(std::move(cameras), scene_center);
     }
 
     // -----------------------------------------------------------------------------
@@ -894,7 +894,7 @@ namespace lfs::io {
         return read_point3D_binary(points3d_file);
     }
 
-    Result<std::tuple<std::vector<std::shared_ptr<Camera>>, Tensor, float>>
+    Result<std::tuple<std::vector<std::shared_ptr<Camera>>, Tensor>>
     read_colmap_cameras_and_images(const std::filesystem::path& base,
                                    const std::string& images_folder) {
 
@@ -919,7 +919,7 @@ namespace lfs::io {
         return read_point3D_text(points3d_file);
     }
 
-    Result<std::tuple<std::vector<std::shared_ptr<Camera>>, Tensor, float>>
+    Result<std::tuple<std::vector<std::shared_ptr<Camera>>, Tensor>>
     read_colmap_cameras_and_images_text(const std::filesystem::path& base,
                                         const std::string& images_folder) {
 
@@ -936,6 +936,219 @@ namespace lfs::io {
         LOG_INFO("Read {} cameras and {} images from COLMAP text files", cam_map.size(), images.size());
 
         return assemble_colmap_cameras(base, cam_map, images, images_folder);
+    }
+
+    Result<std::tuple<std::vector<std::shared_ptr<Camera>>, Tensor>>
+    read_colmap_cameras_only(const std::filesystem::path& sparse_path, float scale_factor) {
+        LOG_TIMER_TRACE("Read COLMAP cameras only");
+
+        std::unordered_map<uint32_t, CameraDataIntermediate> cam_map;
+        std::vector<ImageData> images;
+
+        const bool has_binary = fs::exists(sparse_path / "cameras.bin") && fs::exists(sparse_path / "images.bin");
+        const bool has_text = fs::exists(sparse_path / "cameras.txt") && fs::exists(sparse_path / "images.txt");
+
+        if (!has_binary && !has_text) {
+            return make_error(ErrorCode::PATH_NOT_FOUND,
+                              "Missing cameras.bin/images.bin or cameras.txt/images.txt",
+                              sparse_path);
+        }
+
+        if (has_binary) {
+            cam_map = read_cameras_binary(sparse_path / "cameras.bin", scale_factor);
+            images = read_images_binary(sparse_path / "images.bin");
+        } else {
+            cam_map = read_cameras_text(sparse_path / "cameras.txt", scale_factor);
+            images = read_images_text(sparse_path / "images.txt");
+        }
+
+        LOG_INFO("Read {} cameras and {} images from COLMAP", cam_map.size(), images.size());
+
+        std::vector<std::shared_ptr<Camera>> cameras;
+        cameras.reserve(images.size());
+
+        std::vector<float> camera_positions;
+        camera_positions.reserve(images.size() * 3);
+
+        for (size_t i = 0; i < images.size(); ++i) {
+            const ImageData& img = images[i];
+
+            auto it = cam_map.find(img.camera_id);
+            if (it == cam_map.end()) {
+                return make_error(ErrorCode::CORRUPTED_DATA,
+                                  std::format("Camera ID {} not found for image '{}'", img.camera_id, img.name),
+                                  sparse_path);
+            }
+
+            const auto& cam_data = it->second;
+
+            Tensor R = qvec2rotmat(img.qvec);
+            Tensor T = Tensor::from_vector(img.tvec, {3}, Device::CPU);
+
+            auto R_cpu = R.cpu();
+            auto T_cpu = T.cpu();
+
+            float RT[9];
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    RT[r * 3 + c] = R_cpu.ptr<float>()[c * 3 + r];
+                }
+            }
+
+            float cam_pos[3] = {0, 0, 0};
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    cam_pos[r] -= RT[r * 3 + c] * T_cpu.ptr<float>()[c];
+                }
+            }
+
+            camera_positions.push_back(cam_pos[0]);
+            camera_positions.push_back(cam_pos[1]);
+            camera_positions.push_back(cam_pos[2]);
+
+            auto model_it = camera_model_ids.find(cam_data.model_id);
+            if (model_it == camera_model_ids.end()) {
+                return make_error(ErrorCode::UNSUPPORTED_FORMAT,
+                                  std::format("Invalid camera model ID {} for image '{}'", cam_data.model_id, img.name),
+                                  sparse_path);
+            }
+
+            CAMERA_MODEL model = model_it->second.first;
+            const auto& params = cam_data.params;
+
+            float focal_x = 0, focal_y = 0, center_x = 0, center_y = 0;
+            Tensor radial_dist, tangential_dist;
+            lfs::core::CameraModelType camera_model_type = lfs::core::CameraModelType::PINHOLE;
+
+            switch (model) {
+            case CAMERA_MODEL::SIMPLE_PINHOLE:
+                focal_x = focal_y = params[0];
+                center_x = params[1];
+                center_y = params[2];
+                radial_dist = Tensor::empty({0}, Device::CPU);
+                tangential_dist = Tensor::empty({0}, Device::CPU);
+                break;
+
+            case CAMERA_MODEL::PINHOLE:
+                focal_x = params[0];
+                focal_y = params[1];
+                center_x = params[2];
+                center_y = params[3];
+                radial_dist = Tensor::empty({0}, Device::CPU);
+                tangential_dist = Tensor::empty({0}, Device::CPU);
+                break;
+
+            case CAMERA_MODEL::SIMPLE_RADIAL:
+                focal_x = focal_y = params[0];
+                center_x = params[1];
+                center_y = params[2];
+                if (params[3] != 0.0f) {
+                    radial_dist = Tensor::from_vector({params[3]}, {1}, Device::CPU);
+                } else {
+                    radial_dist = Tensor::empty({0}, Device::CPU);
+                }
+                tangential_dist = Tensor::empty({0}, Device::CPU);
+                break;
+
+            case CAMERA_MODEL::RADIAL:
+                focal_x = focal_y = params[0];
+                center_x = params[1];
+                center_y = params[2];
+                radial_dist = Tensor::from_vector({params[3], params[4]}, {2}, Device::CPU);
+                tangential_dist = Tensor::empty({0}, Device::CPU);
+                break;
+
+            case CAMERA_MODEL::OPENCV:
+                focal_x = params[0];
+                focal_y = params[1];
+                center_x = params[2];
+                center_y = params[3];
+                radial_dist = Tensor::from_vector({params[4], params[5]}, {2}, Device::CPU);
+                tangential_dist = Tensor::from_vector({params[6], params[7]}, {2}, Device::CPU);
+                break;
+
+            case CAMERA_MODEL::FULL_OPENCV:
+                focal_x = params[0];
+                focal_y = params[1];
+                center_x = params[2];
+                center_y = params[3];
+                radial_dist = Tensor::from_vector({params[4], params[5], params[8], params[9], params[10], params[11]}, {6}, Device::CPU);
+                tangential_dist = Tensor::from_vector({params[6], params[7]}, {2}, Device::CPU);
+                break;
+
+            case CAMERA_MODEL::OPENCV_FISHEYE:
+                focal_x = params[0];
+                focal_y = params[1];
+                center_x = params[2];
+                center_y = params[3];
+                radial_dist = Tensor::from_vector({params[4], params[5], params[6], params[7]}, {4}, Device::CPU);
+                tangential_dist = Tensor::empty({0}, Device::CPU);
+                camera_model_type = lfs::core::CameraModelType::FISHEYE;
+                break;
+
+            case CAMERA_MODEL::RADIAL_FISHEYE:
+                focal_x = focal_y = params[0];
+                center_x = params[1];
+                center_y = params[2];
+                radial_dist = Tensor::from_vector({params[3], params[4]}, {2}, Device::CPU);
+                tangential_dist = Tensor::empty({0}, Device::CPU);
+                camera_model_type = lfs::core::CameraModelType::FISHEYE;
+                break;
+
+            case CAMERA_MODEL::SIMPLE_RADIAL_FISHEYE:
+                focal_x = focal_y = params[0];
+                center_x = params[1];
+                center_y = params[2];
+                radial_dist = Tensor::from_vector({params[3]}, {1}, Device::CPU);
+                tangential_dist = Tensor::empty({0}, Device::CPU);
+                camera_model_type = lfs::core::CameraModelType::FISHEYE;
+                break;
+
+            case CAMERA_MODEL::THIN_PRISM_FISHEYE:
+                focal_x = params[0];
+                focal_y = params[1];
+                center_x = params[2];
+                center_y = params[3];
+                radial_dist = Tensor::from_vector({params[4], params[5], params[8], params[9]}, {4}, Device::CPU);
+                tangential_dist = Tensor::from_vector({params[6], params[7], params[10], params[11]}, {4}, Device::CPU);
+                camera_model_type = lfs::core::CameraModelType::THIN_PRISM_FISHEYE;
+                break;
+
+            case CAMERA_MODEL::FOV:
+                return make_error(ErrorCode::UNSUPPORTED_FORMAT,
+                                  std::format("FOV camera model not supported for image '{}'", img.name),
+                                  sparse_path);
+
+            default:
+                return make_error(ErrorCode::UNSUPPORTED_FORMAT,
+                                  std::format("Unsupported camera model for image '{}'", img.name),
+                                  sparse_path);
+            }
+
+            auto camera = std::make_shared<Camera>(
+                R,
+                T,
+                focal_x, focal_y,
+                center_x, center_y,
+                radial_dist,
+                tangential_dist,
+                camera_model_type,
+                img.name,
+                fs::path{}, // Empty image path
+                fs::path{}, // Empty mask path
+                cam_data.width,
+                cam_data.height,
+                static_cast<int>(i));
+
+            cameras.push_back(std::move(camera));
+        }
+
+        Tensor scene_center_tensor = Tensor::from_vector(camera_positions, {images.size(), 3}, Device::CPU);
+        Tensor scene_center = scene_center_tensor.mean({0}, false);
+
+        LOG_INFO("Loaded {} cameras (no images required)", cameras.size());
+
+        return std::make_tuple(std::move(cameras), scene_center);
     }
 
 } // namespace lfs::io

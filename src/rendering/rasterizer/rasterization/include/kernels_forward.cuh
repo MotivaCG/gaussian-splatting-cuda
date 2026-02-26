@@ -8,6 +8,7 @@
 #include "helper_math.h"
 #include "kernel_utils.cuh"
 #include "rasterization_config.h"
+#include "rasterizer_constants.cuh"
 #include "utils.h"
 #include <cooperative_groups.h>
 
@@ -129,18 +130,26 @@ namespace lfs::rendering::kernels::forward {
 
         // Apply model transform
         mat3x3 model_rot = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        mat3x3 model_rot_sh = {1, 0, 0, 0, 1, 0, 0, 0, 1};
         bool has_transform = false;
+        bool has_valid_sh_rotation = false;
         if (model_transforms != nullptr && num_transforms > 0) {
             const int transform_idx = transform_indices != nullptr
                                           ? min(max(transform_indices[global_idx], 0), num_transforms - 1)
                                           : 0;
             const float* const m = model_transforms + transform_idx * 16;
-            has_transform = m[0] != 1.0f || m[5] != 1.0f || m[10] != 1.0f ||
-                            m[1] != 0.0f || m[2] != 0.0f || m[3] != 0.0f ||
-                            m[4] != 0.0f || m[6] != 0.0f || m[7] != 0.0f ||
-                            m[8] != 0.0f || m[9] != 0.0f || m[11] != 0.0f;
+            has_transform = lfs::rendering::has_non_identity_transform(m);
             if (has_transform) {
                 model_rot = {m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]};
+
+                float rot_sh[9];
+                if (lfs::rendering::extract_rotation_row_major(m, rot_sh)) {
+                    model_rot_sh = {rot_sh[0], rot_sh[1], rot_sh[2],
+                                    rot_sh[3], rot_sh[4], rot_sh[5],
+                                    rot_sh[6], rot_sh[7], rot_sh[8]};
+                    has_valid_sh_rotation = true;
+                }
+
                 const float3 t = make_float3(m[3], m[7], m[11]);
                 mean3d = make_float3(
                     model_rot.m11 * mean3d.x + model_rot.m12 * mean3d.y + model_rot.m13 * mean3d.z + t.x,
@@ -353,9 +362,15 @@ namespace lfs::rendering::kernels::forward {
             static_cast<ushort>(screen_bounds.w));
         primitive_mean2d[primitive_idx] = mean2d;
         primitive_conic_opacity[primitive_idx] = make_float4(conic, output_opacity);
-        float3 color = convert_sh_to_color(
+        float3 view_dir = mean3d - cam_position[0];
+        if (has_transform && has_valid_sh_rotation) {
+            // SH is object-locked by rotation only (matches export transform behavior).
+            view_dir = mat3_transpose_mul_vec3(model_rot_sh, view_dir);
+        }
+
+        float3 color = convert_sh_to_color_from_dir(
             sh_coefficients_0, sh_coefficients_rest,
-            mean3d, cam_position[0],
+            view_dir,
             global_idx, active_sh_bases, total_bases_sh_rest);
 
         // Brush hit test

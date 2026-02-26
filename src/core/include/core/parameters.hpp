@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "core/export.hpp"
+
 #include <array>
 #include <expected>
 #include <filesystem>
@@ -32,7 +34,7 @@ namespace lfs::core {
             Random      // Random per-pixel colors each iteration
         };
 
-        struct OptimizationParameters {
+        struct LFS_CORE_API OptimizationParameters {
             size_t iterations = 30'000;
             size_t sh_degree_interval = 1'000;
             float means_lr = 0.00016f;
@@ -48,8 +50,9 @@ namespace lfs::core {
             float means_lr_mul_power = 2.0f; // curve power (p), 2 = quadratic
             bool means_lr_mul_cli_override = false; // runtime-only: true if CLI set any of the above
              
+            //this is the original! float means_lr = 0.000016f;
             float shs_lr = 0.0025f;
-            float opacity_lr = 0.05f;
+            float opacity_lr = 0.025f;
             float scaling_lr = 0.005f;
             float rotation_lr = 0.001f;
             float lambda_dssim = 0.2f;
@@ -75,6 +78,8 @@ namespace lfs::core {
             bool auto_train = false;                          // Start training immediately on startup
             bool no_splash = false;                           // Skip splash screen on startup
             bool no_interop = false;                          // Disable CUDA-GL interop (use CPU fallback)
+            bool debug_python = false;                        // Start debugpy listener for plugin debugging
+            int debug_python_port = 5678;                     // Port for debugpy listener
             std::string strategy = "mcmc";                    // Optimization strategy: mcmc, adc.
 
             // Mask parameters
@@ -83,6 +88,7 @@ namespace lfs::core {
             float mask_threshold = 0.5f;              // Threshold: >= threshold → 1.0, < threshold → keep original
             float mask_opacity_penalty_weight = 1.0f; // Opacity penalty weight for segment mode
             float mask_opacity_penalty_power = 2.0f;  // Penalty falloff (1=linear, 2=quadratic)
+            bool use_alpha_as_mask = true;            // Auto-use alpha channel from RGBA images as mask
 
             // Mip filter (anti-aliasing)
             bool mip_filter = false;
@@ -124,6 +130,7 @@ namespace lfs::core {
             size_t pause_refine_after_reset = 0;
             bool revised_opacity = false;
             bool gut = false;
+            bool undistort = false;
             float steps_scaler = 1.f; // Scales training step counts; values <= 0 disable scaling
 
             // Random initialization parameters
@@ -143,15 +150,21 @@ namespace lfs::core {
 
             std::string config_file = "";
 
+            void scale_steps(float ratio);
+            void apply_step_scaling();
+            void remove_step_scaling();
+
             nlohmann::json to_json() const;
             static OptimizationParameters from_json(const nlohmann::json& j);
+
+            [[nodiscard]] std::string validate() const;
 
             // Factory methods for strategy presets
             static OptimizationParameters mcmc_defaults();
             static OptimizationParameters adc_defaults();
         };
 
-        struct LoadingParams {
+        struct LFS_CORE_API LoadingParams {
             bool use_cpu_memory = true;
             float min_cpu_free_memory_ratio = 0.1f; // make sure at least 10% RAM is free
             float min_cpu_free_GB = 1.0f;           // min GB we want to be free
@@ -163,7 +176,7 @@ namespace lfs::core {
             static LoadingParams from_json(const nlohmann::json& j);
         };
 
-        struct DatasetConfig {
+        struct LFS_CORE_API DatasetConfig {
             std::filesystem::path data_path = "";
             std::filesystem::path output_path = "";
             std::string images = "images";
@@ -182,18 +195,24 @@ namespace lfs::core {
             static DatasetConfig from_json(const nlohmann::json& j);
         };
 
-        struct TrainingParameters {
+        struct LFS_CORE_API TrainingParameters {
             DatasetConfig dataset;
             OptimizationParameters optimization;
 
             // Viewer mode: splat files to load (.ply, .sog, .resume)
             std::vector<std::filesystem::path> view_paths;
 
+            // COLMAP sparse folder for camera-only import (no images required)
+            std::optional<std::filesystem::path> import_cameras_path = std::nullopt;
+
             // Optional splat file for initialization (.ply, .sog, .spz, .resume)
             std::optional<std::string> init_path = std::nullopt;
 
             // Checkpoint to resume training from
             std::optional<std::filesystem::path> resume_checkpoint = std::nullopt;
+
+            // Python scripts to execute for custom training callbacks
+            std::vector<std::filesystem::path> python_scripts;
         };
 
         // Output format for conversion tool
@@ -203,7 +222,7 @@ namespace lfs::core {
                                   HTML };
 
         // Parameters for the convert command
-        struct ConvertParameters {
+        struct LFS_CORE_API ConvertParameters {
             std::filesystem::path input_path;
             std::filesystem::path output_path; // Empty = derive from input
             OutputFormat format = OutputFormat::PLY;
@@ -213,10 +232,10 @@ namespace lfs::core {
         };
 
         // Modern C++23 functions returning expected values
-        std::expected<OptimizationParameters, std::string> read_optim_params_from_json(const std::filesystem::path& path);
+        LFS_CORE_API std::expected<OptimizationParameters, std::string> read_optim_params_from_json(const std::filesystem::path& path);
 
         // Save training parameters to JSON
-        std::expected<void, std::string> save_training_parameters_to_json(
+        LFS_CORE_API std::expected<void, std::string> save_training_parameters_to_json(
             const TrainingParameters& params,
             const std::filesystem::path& output_path);
 

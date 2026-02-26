@@ -10,7 +10,7 @@
 #include "core/point_cloud.hpp"
 #include "formats/transforms.hpp"
 #include "io/error.hpp"
-#include "training/dataset.hpp"
+#include "io/filesystem_utils.hpp"
 #include <chrono>
 #include <filesystem>
 #include <format>
@@ -27,11 +27,9 @@ namespace lfs::io {
 
     namespace {
         constexpr std::array MASK_FOLDERS = {"masks", "mask", "segmentation"};
-        constexpr std::array MASK_EXTENSIONS = {".png", ".jpg", ".jpeg", ".PNG", ".JPG", ".JPEG", ".mask.png"};
+        constexpr std::array MASK_EXTENSIONS = {".png", ".jpg", ".jpeg", ".mask.png"};
     } // namespace
 
-    // Searches for mask file matching image_name in mask folders.
-    // Priority: exact match, stem+ext (e.g., img.png), full+ext (e.g., img.jpg.png)
     static std::filesystem::path find_mask_path(const std::filesystem::path& base_path,
                                                 const std::string& image_name) {
         const std::filesystem::path img_path = lfs::core::utf8_to_path(image_name);
@@ -39,24 +37,27 @@ namespace lfs::io {
 
         for (const auto& folder : MASK_FOLDERS) {
             const std::filesystem::path mask_dir = base_path / folder;
-            if (!std::filesystem::exists(mask_dir))
+            if (!safe_exists(mask_dir))
                 continue;
 
-            if (const auto exact = mask_dir / img_path; std::filesystem::exists(exact))
+            if (const auto exact = mask_dir / img_path; safe_exists(exact))
                 return exact;
 
+            if (auto found = find_path_ci(mask_dir, img_path); !found.empty())
+                return found;
+
             for (const auto& ext : MASK_EXTENSIONS) {
-                auto path = mask_dir / stem_path;
-                path += ext;
-                if (std::filesystem::exists(path))
-                    return path;
+                std::filesystem::path target_path = stem_path;
+                target_path += ext;
+                if (auto found = find_path_ci(mask_dir, target_path); !found.empty())
+                    return found;
             }
 
             for (const auto& ext : MASK_EXTENSIONS) {
-                auto path = mask_dir / img_path;
-                path += ext;
-                if (std::filesystem::exists(path))
-                    return path;
+                std::filesystem::path target_path = img_path;
+                target_path += ext;
+                if (auto found = find_path_ci(mask_dir, target_path); !found.empty())
+                    return found;
             }
         }
         return {};
@@ -137,7 +138,7 @@ namespace lfs::io {
             auto end_time = std::chrono::high_resolution_clock::now();
             return LoadResult{
                 .data = LoadedScene{
-                    .cameras = nullptr,
+                    .cameras = {},
                     .point_cloud = nullptr},
                 .scene_center = Tensor::zeros({3}, Device::CPU, DataType::Float32),
                 .loader_used = name(),
@@ -154,7 +155,7 @@ namespace lfs::io {
             LOG_INFO("Loading Blender/NeRF dataset from: {}", lfs::core::path_to_utf8(transforms_file));
 
             // Read transforms and create cameras
-            auto [camera_infos, scene_center, scene_scale, train_val_split] = read_transforms_cameras_and_images(transforms_file);
+            auto [camera_infos, scene_center, train_val_split] = read_transforms_cameras_and_images(transforms_file);
 
             if (options.progress) {
                 options.progress(40.0f, std::format("Creating {} cameras...", camera_infos.size()));
@@ -213,15 +214,14 @@ namespace lfs::io {
                 }
             }
 
-            // Create dataset configuration
-            lfs::training::DatasetConfig dataset_config;
-            dataset_config.resize_factor = options.resize_factor;
-            dataset_config.max_width = options.max_width;
-            dataset_config.test_every = 8; // Default split behavior
-
-            // Create dataset with ALL images
-            auto dataset = std::make_shared<lfs::training::CameraDataset>(
-                std::move(cameras), dataset_config, lfs::training::CameraDataset::Split::ALL);
+            bool images_have_alpha = false;
+            if (!cameras.empty()) {
+                try {
+                    auto [w, h, c] = lfs::core::get_image_info(cameras[0]->image_path());
+                    images_have_alpha = (c == 4);
+                } catch (const std::exception&) {
+                }
+            }
 
             if (options.progress) {
                 options.progress(60.0f, "Loading point cloud...");
@@ -263,19 +263,17 @@ namespace lfs::io {
             auto load_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                 end_time - start_time);
 
-            // Get scene center values for logging
             auto scene_center_cpu = scene_center.cpu();
             const float* sc_ptr = scene_center_cpu.template ptr<float>();
 
-            // Save dataset size before moving
-            size_t num_cameras = dataset->size();
+            size_t num_cameras = cameras.size();
 
             LoadResult result{
                 .data = LoadedScene{
-                    .cameras = std::move(dataset),
+                    .cameras = std::move(cameras),
                     .point_cloud = std::move(point_cloud)},
                 .scene_center = scene_center,
-                .scene_scale = scene_scale,
+                .images_have_alpha = images_have_alpha,
                 .loader_used = name(),
                 .load_time = load_time,
                 .warnings = std::move(warnings)};

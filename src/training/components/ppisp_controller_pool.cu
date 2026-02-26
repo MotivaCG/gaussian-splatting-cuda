@@ -81,19 +81,6 @@ namespace lfs::training {
             bias_grad_accumulate_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(grad, bias_grad, n);
         }
 
-        __global__ void mse_gradient_kernel(const float* pred, const float* target, float* out, const int n,
-                                            const float scale) {
-            const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-            if (idx < n) {
-                out[idx] = scale * (pred[idx] - target[idx]);
-            }
-        }
-
-        void launch_mse_gradient(const float* pred, const float* target, float* out, const int n,
-                                 const float scale, cudaStream_t stream) {
-            const int blocks = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
-            mse_gradient_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(pred, target, out, n, scale);
-        }
     } // namespace
 
     PPISPControllerPool::PPISPControllerPool(const int num_cameras, const int total_iterations, Config config)
@@ -167,7 +154,6 @@ namespace lfs::training {
         grad_fc3_out_ = lfs::core::Tensor::empty({1, FC_HIDDEN_DIM}, lfs::core::Device::CUDA);
         grad_fc2_out_ = lfs::core::Tensor::empty({1, FC_HIDDEN_DIM}, lfs::core::Device::CUDA);
         grad_fc1_out_ = lfs::core::Tensor::empty({1, FC_HIDDEN_DIM}, lfs::core::Device::CUDA);
-        mse_grad_ = lfs::core::Tensor::empty({1, FC_OUTPUT_DIM}, lfs::core::Device::CUDA);
 
         const size_t per_cam_bytes =
             (FC_HIDDEN_DIM * FC1_INPUT_DIM + FC_HIDDEN_DIM + FC_HIDDEN_DIM * FC_HIDDEN_DIM + FC_HIDDEN_DIM +
@@ -296,20 +282,6 @@ namespace lfs::training {
         launch_outer_product_accumulate(grad_fc1, cached_flat_.ptr<float>(), fc1_w_grad_.ptr<float>(), FC_HIDDEN_DIM,
                                         FC1_INPUT_DIM, 1.0f, stream);
         launch_bias_grad_accumulate(grad_fc1, fc1_b_grad_.ptr<float>(), FC_HIDDEN_DIM, stream);
-    }
-
-    lfs::core::Tensor PPISPControllerPool::distillation_loss(const lfs::core::Tensor& pred,
-                                                             const lfs::core::Tensor& target) {
-        assert(pred.shape() == target.shape());
-        return pred.sub(target).square().mean();
-    }
-
-    void PPISPControllerPool::compute_mse_gradient(const lfs::core::Tensor& pred, const lfs::core::Tensor& target) {
-        assert(pred.shape() == target.shape());
-        assert(pred.numel() == FC_OUTPUT_DIM);
-        const float scale = 2.0f / static_cast<float>(FC_OUTPUT_DIM);
-        launch_mse_gradient(pred.ptr<float>(), target.ptr<float>(), mse_grad_.ptr<float>(), FC_OUTPUT_DIM, scale,
-                            nullptr);
     }
 
     void PPISPControllerPool::compute_bias_corrections(float& bc1_rcp, float& bc2_sqrt_rcp) const {

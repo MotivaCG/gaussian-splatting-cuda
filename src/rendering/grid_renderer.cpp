@@ -4,6 +4,7 @@
 
 #include "grid_renderer.hpp"
 #include "core/logger.hpp"
+#include "gl_state_guard.hpp"
 #include "shader_paths.hpp"
 #include <cmath>
 
@@ -137,18 +138,12 @@ namespace lfs::rendering {
 
         const glm::mat4 view_proj = projection * view;
 
-        // Save GL state
-        GLboolean prev_depth_mask;
-        glGetBooleanv(GL_DEPTH_WRITEMASK, &prev_depth_mask);
-        GLint prev_blend_src, prev_blend_dst;
-        glGetIntegerv(GL_BLEND_SRC_RGB, &prev_blend_src);
-        glGetIntegerv(GL_BLEND_DST_RGB, &prev_blend_dst);
-        const GLboolean prev_blend = glIsEnabled(GL_BLEND);
-        const GLboolean prev_depth_test = glIsEnabled(GL_DEPTH_TEST);
+        GLStateGuard state_guard;
 
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
         glDepthMask(GL_TRUE);
 
         ShaderScope s(shader_);
@@ -176,15 +171,6 @@ namespace lfs::rendering {
 
         VAOBinder vao_bind(vao_);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, QUAD_VERTEX_COUNT);
-
-        // Restore GL state
-        glDepthMask(prev_depth_mask);
-        if (!prev_blend)
-            glDisable(GL_BLEND);
-        else
-            glBlendFunc(prev_blend_src, prev_blend_dst);
-        if (!prev_depth_test)
-            glDisable(GL_DEPTH_TEST);
 
         return {};
     }

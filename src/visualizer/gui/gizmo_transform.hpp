@@ -4,12 +4,14 @@
 
 #pragma once
 
-#include "gui/panels/gizmo_toolbar.hpp"
-#include "scene/scene.hpp"
+#include "core/editor_context.hpp"
+#include "core/scene.hpp"
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <string>
 #include <vector>
+#include <imgui.h>
+#include <ImGuizmo.h>
 
 namespace lfs::vis::gui {
 
@@ -55,7 +57,7 @@ namespace lfs::vis::gui {
 
         // Settings at drag start
         bool use_world_space = false;
-        panels::PivotMode pivot_mode = panels::PivotMode::Origin;
+        PivotMode pivot_mode = PivotMode::Origin;
 
         bool isActive() const { return !target_names.empty(); }
         void reset();
@@ -75,9 +77,9 @@ namespace lfs::vis::gui {
 
         // Compute local pivot based on pivot mode and target type
         glm::vec3 computeLocalPivot(
-            const Scene& scene,
-            NodeId target_id,
-            panels::PivotMode mode,
+            const core::Scene& scene,
+            core::NodeId target_id,
+            PivotMode mode,
             GizmoTargetType type);
 
         // Compute gizmo display matrix for ImGuizmo
@@ -90,44 +92,44 @@ namespace lfs::vis::gui {
 
         // Capture context at drag start
         GizmoTransformContext captureCropBox(
-            const Scene& scene,
+            const core::Scene& scene,
             const std::string& name,
             const glm::vec3& pivot_world,
             const glm::vec3& pivot_local,
-            panels::TransformSpace space,
-            panels::PivotMode pivot_mode,
+            TransformSpace space,
+            PivotMode pivot_mode,
             ImGuizmo::OPERATION operation);
 
         GizmoTransformContext captureEllipsoid(
-            const Scene& scene,
+            const core::Scene& scene,
             const std::string& name,
             const glm::vec3& pivot_world,
             const glm::vec3& pivot_local,
-            panels::TransformSpace space,
-            panels::PivotMode pivot_mode,
+            TransformSpace space,
+            PivotMode pivot_mode,
             ImGuizmo::OPERATION operation);
 
         // Apply cumulative transforms - updates scene nodes
         void applyTranslation(
             GizmoTransformContext& ctx,
-            Scene& scene,
+            core::Scene& scene,
             const glm::vec3& new_pivot_world);
 
         void applyRotation(
             GizmoTransformContext& ctx,
-            Scene& scene,
+            core::Scene& scene,
             const glm::mat3& delta_rotation);
 
         void applyScale(
             GizmoTransformContext& ctx,
-            Scene& scene,
+            core::Scene& scene,
             const glm::vec3& delta_scale,
             const glm::vec3& new_pivot_world);
 
         // For cropbox/ellipsoid bounds scaling
         void applyBoundsScale(
             GizmoTransformContext& ctx,
-            Scene& scene,
+            core::Scene& scene,
             const glm::vec3& new_size);
 
         // Multi-node capture for transform panel (simpler than GizmoTransformContext)
@@ -146,24 +148,24 @@ namespace lfs::vis::gui {
         // Capture state for multiple nodes at edit start
         // Filters out nodes whose ancestors are also selected (prevents double-transform)
         MultiNodeCapture captureNodes(
-            const Scene& scene,
+            const core::Scene& scene,
             const std::vector<std::string>& selected_names);
 
         // Apply cumulative transforms to captured nodes around pivot
         void applyMultiTranslation(
             const MultiNodeCapture& capture,
-            Scene& scene,
+            core::Scene& scene,
             const glm::vec3& cumulative_delta);
 
         void applyMultiRotation(
             const MultiNodeCapture& capture,
-            Scene& scene,
+            core::Scene& scene,
             const glm::mat3& cumulative_rotation,
             const glm::vec3& pivot_world);
 
         void applyMultiScale(
             const MultiNodeCapture& capture,
-            Scene& scene,
+            core::Scene& scene,
             const glm::vec3& cumulative_scale,
             const glm::vec3& pivot_world);
 

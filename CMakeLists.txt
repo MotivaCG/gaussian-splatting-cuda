@@ -16,6 +16,8 @@ cmake_minimum_required(VERSION 3.30)
 # Suppress CMake developer warnings
 set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS ON CACHE BOOL "" FORCE)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Default to Release build
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     message(STATUS "No build type specified, defaulting to Release")
@@ -64,6 +66,7 @@ option(ENABLE_CUDA_GL_INTEROP "Enable CUDA-OpenGL interoperability" ON)
 option(BUILD_TESTS "Build tests" OFF)
 option(BUILD_UNICODE_TEST_ONLY "Build only Unicode path test (no CUDA)" OFF)
 option(ENABLE_ALLOCATION_PROFILING "Enable tensor allocation profiling" OFF)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Debug options
 option(ENABLE_TENSOR_VALIDATION "Enable runtime tensor NaN/Inf validation" OFF)
@@ -151,7 +154,11 @@ if(NVIDIA_SMI)
     string(REGEX REPLACE "\n.*" "" DETECTED_COMPUTE_CAP "${DETECTED_COMPUTE_CAP}")
 
     message(STATUS "Detected GPU compute capability: ${DETECTED_COMPUTE_CAP}")
-    set(LichtFeld-Studio_CUDA_ARCH "native")
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.1)
+        string(REPLACE "." "" LichtFeld-Studio_CUDA_ARCH "${DETECTED_COMPUTE_CAP}")
+    else()
+        set(LichtFeld-Studio_CUDA_ARCH "native")
+    endif()
 else()
     message(WARNING "nvidia-smi not found! We are likely in CI, default to 8.6.")
     set(DETECTED_COMPUTE_CAP 8.6)
@@ -173,7 +180,6 @@ if(BUILD_CUDA_PTX_ONLY)
     endif()
 
     set(LichtFeld-Studio_CUDA_ARCH "${BUILD_CUDA_MIN_SM}-virtual")
-    set(LFS_DEFER_DEVICE_SYMBOLS ON CACHE INTERNAL "Disable separable compilation for PTX-only")
 
     math(EXPR _maj "${BUILD_CUDA_MIN_SM}/10")
     math(EXPR _min "${BUILD_CUDA_MIN_SM}%10")
@@ -190,7 +196,7 @@ enable_language(CUDA)
 find_package(CUDAToolkit 12.8 REQUIRED)
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --extended-lambda --expt-relaxed-constexpr")
 if(WIN32)
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --diag-suppress 221 -Xcompiler=/wd4267")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --diag-suppress 221,1394,1388 -Xcompiler=/wd4267")
 endif()
 
 # Create nvToolsExt target BEFORE finding Torch (PyTorch expects this)
@@ -226,7 +232,7 @@ find_package(TBB REQUIRED)
 find_package(Threads REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(glad REQUIRED)
-find_package(glfw3 REQUIRED)
+find_package(SDL3 REQUIRED)
 find_package(glm REQUIRED)
 find_package(imgui REQUIRED)
 find_package(implot REQUIRED)
@@ -239,6 +245,7 @@ find_package(LibArchive REQUIRED)
 find_package(OpenImageIO REQUIRED)
 find_package(Boost REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_package(assimp REQUIRED)
 
 # TORCH_CUDA_ARCH_LIST is already defined by Torch
 # use it here as the global default CUDA architecture list too
@@ -298,9 +305,22 @@ configure_file(
 # Project-wide definitions
 add_definitions(-DPROJECT_ROOT_PATH="${PROJ_ROOT_DIR}")
 
+# CUDA device debugging (-G flag) generates huge object files. Disable in CI.
+option(CUDA_DEVICE_DEBUG "Enable CUDA device debugging (-G flag)" ON)
+
+if(CUDA_DEVICE_DEBUG)
+    set(LFS_CUDA_DEVICE_DEBUG_FLAGS "-G" CACHE INTERNAL "")
+else()
+    set(LFS_CUDA_DEVICE_DEBUG_FLAGS "" CACHE INTERNAL "")
+endif()
+
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0")
-    set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G -O0")
+    if(CUDA_DEVICE_DEBUG)
+        set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G -O0")
+    else()
+        set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -O0")
+    endif()
 endif()
 
 # External dependencies (EXCLUDE_FROM_ALL to handle install ourselves)
@@ -309,12 +329,15 @@ add_subdirectory(external EXCLUDE_FROM_ALL)
 # =============================================================================
 # LIBRARY MODULES
 # =============================================================================
-add_subdirectory(src/core)      # Core module (lfs::core namespace)
-add_subdirectory(src/training)  # Training module (lfs::training namespace)
-add_subdirectory(src/io)        # I/O module (lfs::io namespace)
-add_subdirectory(src/rendering) # Rendering module (lfs::rendering namespace)
+add_subdirectory(src/core)       # Core module (lfs::core namespace)
+add_subdirectory(src/training)   # Training module (lfs::training namespace)
+add_subdirectory(src/io)         # I/O module (lfs::io namespace)
+add_subdirectory(src/rendering)  # Rendering module (lfs::rendering namespace)
+add_subdirectory(src/sequencer)  # Sequencer module (lfs::sequencer namespace)
 add_subdirectory(src/visualizer) # Visualizer module (lfs::vis namespace)
-add_subdirectory(src/geometry)  # Geometry utilities
+add_subdirectory(src/geometry)   # Geometry utilities
+add_subdirectory(src/mcp)        # MCP server (AI agent integration)
+add_subdirectory(src/python)
 
 # =============================================================================
 # MAIN EXECUTABLES
@@ -323,17 +346,19 @@ add_subdirectory(src/geometry)  # Geometry utilities
 # -----------------------------------------------------------------------------
 # LichtFeld-Studio
 # -----------------------------------------------------------------------------
+
 add_executable(${PROJECT_NAME}
     src/app/main.cpp
     src/app/application.cpp
+    src/app/converter.cpp
     src/app/splash_screen.cpp
     resources/lichtfeld-studio.rc
 )
 
+
 set_target_properties(${PROJECT_NAME} PROPERTIES
         CUDA_ARCHITECTURES "${LichtFeld-Studio_CUDA_ARCH}"
-        CUDA_SEPARABLE_COMPILATION ON
-        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        CUDA_SEPARABLE_COMPILATION OFF
 )
 
 target_include_directories(${PROJECT_NAME}
@@ -350,21 +375,22 @@ target_include_directories(${PROJECT_NAME}
 
 target_link_libraries(${PROJECT_NAME}
         PRIVATE
-        # Application layer dependencies (needed by application.cpp)
-        lfs_visualizer     # For Visualizer class
-        lfs_training       # For training setup
-        lfs_geometry       # For EuclideanTransform
-        lfs_core           # Core library
-        lfs_io             # For CacheLoader
-        fastlfs_backend    # Rasterizer and optimizer
+        lfs_visualizer
+        lfs_mcp
+        lfs_training
+        lfs_geometry
+        lfs_core
+        lfs_io
+        fastlfs_backend
+        lfs_python_utils
 
         ${OPENGL_LIBRARIES}
         CUDA::cudart
         spdlog::spdlog
         taywee::args
         OpenImageIO::OpenImageIO
-        glad::glad         # For splash screen
-        glfw               # For splash screen
+        glad::glad
+        SDL3::SDL3
 )
 
 # Copy nvImageCodec shared libraries next to executable for easy deployment
@@ -394,6 +420,44 @@ if(TARGET nvimgcodec)
     endif()
 
     message(STATUS "Post-build: nvImageCodec libraries will be copied to executable directory")
+endif()
+
+# Copy Python DLLs for Windows runtime (Python is embedded in the application)
+if(WIN32)
+    get_filename_component(VCPKG_PYTHON_DIR "${Python_EXECUTABLE}" DIRECTORY)
+
+    # Glob python*.dll - check both tools/python3/ and parent bin/ (vcpkg layout varies)
+    file(GLOB PYTHON_RUNTIME_DLLS
+        "${VCPKG_PYTHON_DIR}/python*.dll"
+        "${VCPKG_PYTHON_DIR}/../bin/python*.dll"
+    )
+    if(PYTHON_RUNTIME_DLLS)
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${PYTHON_RUNTIME_DLLS}
+                "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
+            COMMENT "Copying Python DLLs to executable directory"
+        )
+        message(STATUS "Post-build: Python DLLs will be copied: ${PYTHON_RUNTIME_DLLS}")
+    endif()
+endif()
+
+# Copy CUDA runtime DLLs for Windows (needed for Python module loading)
+if(WIN32 AND CUDAToolkit_FOUND)
+    file(GLOB CUDA_DLLS_1 "${CUDAToolkit_BIN_DIR}/cudart64*.dll" "${CUDAToolkit_BIN_DIR}/curand64*.dll")
+    file(GLOB CUDA_DLLS_2 "${CUDAToolkit_BIN_DIR}/x64/cudart64*.dll" "${CUDAToolkit_BIN_DIR}/x64/curand64*.dll")
+    set(CUDA_RUNTIME_DLLS ${CUDA_DLLS_1} ${CUDA_DLLS_2})
+    foreach(CUDA_DLL ${CUDA_RUNTIME_DLLS})
+        if(EXISTS "${CUDA_DLL}")
+            add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${CUDA_DLL}"
+                    "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
+                COMMENT "Copying ${CUDA_DLL} to executable directory"
+            )
+        endif()
+    endforeach()
+    message(STATUS "Post-build: CUDA DLLs will be copied from ${CUDAToolkit_BIN_DIR}")
 endif()
 
 # Before extension post-build copying: remove stale 'extensions' file if present (prevent mkdir failure)
@@ -449,7 +513,7 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
 
 # Copy rendering shaders
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
         "${CMAKE_SOURCE_DIR}/src/rendering/resources/shaders"
         "${RESOURCE_DIR}/shaders"
     COMMENT "Copying rendering shaders"
@@ -457,7 +521,7 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
 
 # Copy visualizer icons
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
         "${CMAKE_SOURCE_DIR}/src/visualizer/gui/assets/icon"
         "${RESOURCE_DIR}/assets/icon"
     COMMENT "Copying visualizer icons"
@@ -465,7 +529,7 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
 
 # Copy fonts (from visualizer)
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
         "${CMAKE_SOURCE_DIR}/src/visualizer/gui/assets/fonts"
         "${RESOURCE_DIR}/assets/fonts"
     COMMENT "Copying visualizer fonts"
@@ -481,7 +545,7 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
 
 # Copy themes
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
         "${CMAKE_SOURCE_DIR}/src/visualizer/gui/assets/themes"
         "${RESOURCE_DIR}/assets/themes"
     COMMENT "Copying themes"
@@ -515,7 +579,7 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
 
 # Copy locale files
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
         "${CMAKE_SOURCE_DIR}/src/visualizer/gui/resources/locales"
         "${RESOURCE_DIR}/locales"
     COMMENT "Copying locale files"
@@ -527,16 +591,29 @@ message(STATUS "Post-build: Resources will be copied to \${BUILD_DIR}/resources/
 if(UNIX)
     target_link_libraries(${PROJECT_NAME} PRIVATE GL GLU)
 
-    set_target_properties(${PROJECT_NAME} PROPERTIES
-            INSTALL_RPATH "$ORIGIN:$ORIGIN/lib:${CUDAToolkit_LIBRARY_DIR}"
-            BUILD_WITH_INSTALL_RPATH TRUE
-            INSTALL_RPATH_USE_LINK_PATH TRUE
-    )
+    if(BUILD_PORTABLE)
+        set_target_properties(${PROJECT_NAME} PROPERTIES
+                INSTALL_RPATH "$ORIGIN:$ORIGIN/lib"
+                BUILD_WITH_INSTALL_RPATH TRUE
+                INSTALL_RPATH_USE_LINK_PATH FALSE
+        )
+    else()
+        set_target_properties(${PROJECT_NAME} PROPERTIES
+                INSTALL_RPATH "$ORIGIN:$ORIGIN/lib:${CUDAToolkit_LIBRARY_DIR}"
+                BUILD_WITH_INSTALL_RPATH TRUE
+                INSTALL_RPATH_USE_LINK_PATH TRUE
+        )
+    endif()
 
 elseif(WIN32)
     # On Windows, DLLs in the same directory as the .exe are automatically found
+    # For multi-config generators (MSVC), set all configs to same directory
     set_target_properties(${PROJECT_NAME} PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+            RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}"
+            RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}"
+            RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}"
+            RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}"
     )
 endif()
 
@@ -583,7 +660,6 @@ endfunction()
 configure_build_type(fastlfs_backend)
 configure_build_type(lfs_core)
 configure_build_type(lfs_core_cuda)
-configure_build_type(lfs_tensor)
 configure_build_type(lfs_training)
 configure_build_type(lfs_rendering)
 configure_build_type(lfs_visualizer)
@@ -644,6 +720,26 @@ include(GNUInstallDirs)
 include(InstallRequiredSystemLibraries)
 
 install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS lfs_core
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+install(TARGETS lfs_logger
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+install(TARGETS lfs_event_bridge
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+install(TARGETS lfs_visualizer
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+install(TARGETS lfs_mcp
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
 install(FILES "${CMAKE_SOURCE_DIR}/LICENSE" DESTINATION ".")
 
 set(INSTALL_RESOURCE_DIR "${CMAKE_INSTALL_DATADIR}/LichtFeld-Studio")
@@ -659,14 +755,35 @@ install(FILES "${CMAKE_SOURCE_DIR}/src/visualizer/gui/assets/lichtfeld-splash-lo
 install(FILES "${CMAKE_SOURCE_DIR}/src/visualizer/gui/assets/lichtfeld-splash-loading-dark.png" DESTINATION "${INSTALL_RESOURCE_DIR}/assets")
 install(FILES "${CMAKE_SOURCE_DIR}/src/visualizer/gui/assets/core11-logo.png" DESTINATION "${INSTALL_RESOURCE_DIR}/assets")
 install(FILES "${CMAKE_SOURCE_DIR}/src/visualizer/gui/assets/core11-logo-dark.png" DESTINATION "${INSTALL_RESOURCE_DIR}/assets")
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/src/visualizer/gui/resources/locales" DESTINATION "${INSTALL_RESOURCE_DIR}")
+
+# Plugin development documentation
+set(DOC_INSTALL_DIR "${CMAKE_INSTALL_DATADIR}/doc/LichtFeld-Studio")
+install(FILES
+    "${CMAKE_SOURCE_DIR}/docs/PYTHON_API.md"
+    "${CMAKE_SOURCE_DIR}/docs/plugin-system.md"
+    "${CMAKE_SOURCE_DIR}/docs/plugin-use-cases.md"
+    "${CMAKE_SOURCE_DIR}/docs/plugin-dev-workflow.md"
+    DESTINATION "${DOC_INSTALL_DIR}"
+    OPTIONAL
+)
 
 if(TARGET nvimgcodec)
-    install(TARGETS nvimgcodec LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(TARGETS nvimgcodec
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
     if(TARGET nvjpeg_ext)
-        install(TARGETS nvjpeg_ext LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}/extensions")
+        install(TARGETS nvjpeg_ext
+            LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}/extensions"
+            RUNTIME DESTINATION "extensions"
+        )
     endif()
     if(TARGET nvjpeg2k_ext)
-        install(TARGETS nvjpeg2k_ext LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}/extensions")
+        install(TARGETS nvjpeg2k_ext
+            LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}/extensions"
+            RUNTIME DESTINATION "extensions"
+        )
     endif()
 endif()
 

@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #pragma once
+#include "core/export.hpp"
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -39,7 +40,7 @@ namespace lfs::core {
         Count = 11
     };
 
-    class Logger {
+    class LFS_LOGGER_API Logger {
     public:
         static Logger& get();
 
@@ -55,6 +56,10 @@ namespace lfs::core {
         void set_module_level(LogModule module, LogLevel level);
         void set_level(LogLevel level);
         void flush();
+
+        bool is_enabled(LogLevel level) const {
+            return static_cast<uint8_t>(level) >= global_level_.load(std::memory_order_relaxed);
+        }
 
         // Runtime string logging - no format args, works for both CUDA and non-CUDA
         // Use this when you need to log a dynamically constructed string
@@ -129,7 +134,7 @@ namespace lfs::core {
     };
 
     // Scoped timer for performance measurement
-    class ScopedTimer {
+    class LFS_LOGGER_API ScopedTimer {
     public:
         explicit ScopedTimer(std::string name, LogLevel level = LogLevel::Performance,
                              std::source_location loc = std::source_location::current());

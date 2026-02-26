@@ -1,6 +1,7 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
+#include "core/cuda_debug.hpp"
 #include "core/logger.hpp"
 #include "internal/memory_pool.hpp"
 #include "internal/tensor_functors.hpp"
@@ -34,17 +35,7 @@
 #include <thrust/tuple.h>
 #include <unordered_map>
 
-// CUDA error checking macro
-#define CHECK_CUDA(call)                              \
-    do {                                              \
-        cudaError_t error = call;                     \
-        if (error != cudaSuccess) {                   \
-            LOG_ERROR("CUDA error at {}:{} - {}: {}", \
-                      __FILE__, __LINE__,             \
-                      cudaGetErrorName(error),        \
-                      cudaGetErrorString(error));     \
-        }                                             \
-    } while (0)
+// CHECK_CUDA provided by core/cuda_debug.hpp
 
 namespace lfs::core::tensor_ops {
 
@@ -2168,6 +2159,78 @@ namespace lfs::core::tensor_ops {
     template void launch_unary_op_generic<unsigned char, unsigned char, ops::logical_not_op>(
         const unsigned char*, unsigned char*, size_t, ops::logical_not_op, cudaStream_t);
 
+    // Extended unary operations (log2, log10, rsqrt, exp2, trig, hyperbolic, etc.)
+    template void launch_unary_op_generic<float, float, ops::log2_op>(
+        const float*, float*, size_t, ops::log2_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::log2_op>(
+        const int*, int*, size_t, ops::log2_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::log10_op>(
+        const float*, float*, size_t, ops::log10_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::log10_op>(
+        const int*, int*, size_t, ops::log10_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::log1p_op>(
+        const float*, float*, size_t, ops::log1p_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::log1p_op>(
+        const int*, int*, size_t, ops::log1p_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::exp2_op>(
+        const float*, float*, size_t, ops::exp2_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::exp2_op>(
+        const int*, int*, size_t, ops::exp2_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::rsqrt_op>(
+        const float*, float*, size_t, ops::rsqrt_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::rsqrt_op>(
+        const int*, int*, size_t, ops::rsqrt_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::asin_op>(
+        const float*, float*, size_t, ops::asin_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::asin_op>(
+        const int*, int*, size_t, ops::asin_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::acos_op>(
+        const float*, float*, size_t, ops::acos_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::acos_op>(
+        const int*, int*, size_t, ops::acos_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::atan_op>(
+        const float*, float*, size_t, ops::atan_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::atan_op>(
+        const int*, int*, size_t, ops::atan_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::sinh_op>(
+        const float*, float*, size_t, ops::sinh_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::sinh_op>(
+        const int*, int*, size_t, ops::sinh_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::cosh_op>(
+        const float*, float*, size_t, ops::cosh_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::cosh_op>(
+        const int*, int*, size_t, ops::cosh_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::trunc_op>(
+        const float*, float*, size_t, ops::trunc_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::trunc_op>(
+        const int*, int*, size_t, ops::trunc_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::gelu_op>(
+        const float*, float*, size_t, ops::gelu_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::gelu_op>(
+        const int*, int*, size_t, ops::gelu_op, cudaStream_t);
+    template void launch_unary_op_generic<float, float, ops::swish_op>(
+        const float*, float*, size_t, ops::swish_op, cudaStream_t);
+    template void launch_unary_op_generic<int, int, ops::swish_op>(
+        const int*, int*, size_t, ops::swish_op, cudaStream_t);
+    template void launch_unary_op_generic<float, unsigned char, ops::isnan_op>(
+        const float*, unsigned char*, size_t, ops::isnan_op, cudaStream_t);
+    template void launch_unary_op_generic<int, unsigned char, ops::isnan_op>(
+        const int*, unsigned char*, size_t, ops::isnan_op, cudaStream_t);
+    template void launch_unary_op_generic<float, unsigned char, ops::isinf_op>(
+        const float*, unsigned char*, size_t, ops::isinf_op, cudaStream_t);
+    template void launch_unary_op_generic<int, unsigned char, ops::isinf_op>(
+        const int*, unsigned char*, size_t, ops::isinf_op, cudaStream_t);
+    template void launch_unary_op_generic<float, unsigned char, ops::isfinite_op>(
+        const float*, unsigned char*, size_t, ops::isfinite_op, cudaStream_t);
+    template void launch_unary_op_generic<int, unsigned char, ops::isfinite_op>(
+        const int*, unsigned char*, size_t, ops::isfinite_op, cudaStream_t);
+    template void launch_unary_op_generic<unsigned char, unsigned char, ops::isnan_op>(
+        const unsigned char*, unsigned char*, size_t, ops::isnan_op, cudaStream_t);
+    template void launch_unary_op_generic<unsigned char, unsigned char, ops::isinf_op>(
+        const unsigned char*, unsigned char*, size_t, ops::isinf_op, cudaStream_t);
+    template void launch_unary_op_generic<unsigned char, unsigned char, ops::isfinite_op>(
+        const unsigned char*, unsigned char*, size_t, ops::isfinite_op, cudaStream_t);
+
     // Basic binary operations (same input/output type - comprehensive list)
     template void launch_binary_op_generic<float, float, ops::add_op>(
         const float*, const float*, float*, size_t, ops::add_op, cudaStream_t);
@@ -2257,12 +2320,14 @@ namespace lfs::core::tensor_ops {
         const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::not_equal_op, cudaStream_t);
 
     // Scalar operations (uses constant_iterator, different from scalar_right_op!)
-    template void launch_scalar_op_generic<float, float, ops::add_op>(
+    template LFS_CORE_API void launch_scalar_op_generic<float, float, ops::add_op>(
         const float*, float, float*, size_t, ops::add_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, float, ops::sub_op>(
+    template LFS_CORE_API void launch_scalar_op_generic<float, float, ops::sub_op>(
         const float*, float, float*, size_t, ops::sub_op, cudaStream_t);
-    template void launch_scalar_op_generic<float, float, ops::mul_op>(
+    template LFS_CORE_API void launch_scalar_op_generic<float, float, ops::mul_op>(
         const float*, float, float*, size_t, ops::mul_op, cudaStream_t);
+    template LFS_CORE_API void launch_scalar_op_generic<float, float, ops::div_op>(
+        const float*, float, float*, size_t, ops::div_op, cudaStream_t);
 
     // scalar_right_op instantiations for various operations (comprehensive list)
     template void launch_unary_op_generic<float, float, ops::scalar_right_op<ops::add_op, float>>(
@@ -2406,6 +2471,10 @@ namespace lfs::core::tensor_ops {
         const float*, const float*, float*, size_t, ops::mod_op, cudaStream_t);
     template void launch_binary_op_generic<int, int, ops::mod_op>(
         const int*, const int*, int*, size_t, ops::mod_op, cudaStream_t);
+    template void launch_binary_op_generic<unsigned char, unsigned char, ops::mod_op>(
+        const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::mod_op, cudaStream_t);
+    template void launch_binary_op_generic<__half, __half, ops::mod_op>(
+        const __half*, const __half*, __half*, size_t, ops::mod_op, cudaStream_t);
 
     // Comparison operations for additional types
     template void launch_binary_op_generic<int64_t, unsigned char, ops::greater_op>(
@@ -2443,6 +2512,16 @@ namespace lfs::core::tensor_ops {
         const __half*, const __half*, unsigned char*, size_t, ops::logical_and_op, cudaStream_t);
     template void launch_binary_op_generic<__half, unsigned char, ops::logical_or_op>(
         const __half*, const __half*, unsigned char*, size_t, ops::logical_or_op, cudaStream_t);
+    template void launch_binary_op_generic<float, unsigned char, ops::logical_xor_op>(
+        const float*, const float*, unsigned char*, size_t, ops::logical_xor_op, cudaStream_t);
+    template void launch_binary_op_generic<int, unsigned char, ops::logical_xor_op>(
+        const int*, const int*, unsigned char*, size_t, ops::logical_xor_op, cudaStream_t);
+    template void launch_binary_op_generic<unsigned char, unsigned char, ops::logical_xor_op>(
+        const unsigned char*, const unsigned char*, unsigned char*, size_t, ops::logical_xor_op, cudaStream_t);
+    template void launch_binary_op_generic<int64_t, unsigned char, ops::logical_xor_op>(
+        const int64_t*, const int64_t*, unsigned char*, size_t, ops::logical_xor_op, cudaStream_t);
+    template void launch_binary_op_generic<__half, unsigned char, ops::logical_xor_op>(
+        const __half*, const __half*, unsigned char*, size_t, ops::logical_xor_op, cudaStream_t);
 
     // ============= STRIDED FILL KERNEL =============
 

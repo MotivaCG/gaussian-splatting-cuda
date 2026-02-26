@@ -9,6 +9,7 @@
 #include "io/error.hpp"
 #include "tinyply.hpp"
 #include <algorithm>
+#include <cassert>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -56,9 +57,7 @@ namespace lfs::io {
         constexpr int POSITION_DIMS = 3;
         constexpr int SCALE_DIMS = 3;
         constexpr int QUATERNION_DIMS = 4;
-        constexpr float DEFAULT_LOG_SCALE = -5.0f;
         constexpr float IDENTITY_QUATERNION_W = 1.0f;
-        constexpr float SCENE_SCALE_FACTOR = 0.5f;
         constexpr int SH_DEGREE_3_REST_COEFFS = 15;
         constexpr int SH_DEGREE_OFFSET = 1;
 
@@ -673,12 +672,33 @@ namespace lfs::io {
                 g_save_futures.end());
         }
 
-        Result<void> write_ply_binary(const PointCloud& pc, const std::filesystem::path& output_path) {
-            std::vector<Tensor> tensors;
-            tensors.push_back(pc.means.cpu().contiguous());
+        std::vector<std::string> make_indexed_names(const std::string& prefix, const size_t count) {
+            std::vector<std::string> names;
+            names.reserve(count);
+            for (size_t i = 0; i < count; ++i) {
+                names.emplace_back(prefix + std::to_string(i));
+            }
+            return names;
+        }
+
+        Result<void> write_ply_binary(const PointCloud& pc, const std::filesystem::path& output_path,
+                                      bool binary = true) {
+            if (!pc.means.is_valid() || pc.means.ndim() != 2 || pc.means.size(1) != 3) {
+                return make_error(ErrorCode::INTERNAL_ERROR, "PointCloud.means must be [N,3]", output_path);
+            }
+
+            // Write using tinyply
+            tinyply::PlyFile ply;
+            const size_t N = pc.means.size(0);
+
+            using TensorWithNames = std::pair<Tensor, std::vector<std::string>>;
+            std::vector<TensorWithNames> float_blocks;
+            float_blocks.reserve(8);
+            float_blocks.emplace_back(pc.means.cpu().contiguous(), std::vector<std::string>{"x", "y", "z"});
 
             if (pc.normals.is_valid()) {
-                tensors.push_back(pc.normals.cpu().contiguous());
+                float_blocks.emplace_back(pc.normals.cpu().contiguous(),
+                                          std::vector<std::string>{"nx", "ny", "nz"});
             }
 
             auto process_sh = [](const Tensor& sh) -> Tensor {
@@ -689,29 +709,62 @@ namespace lfs::io {
                 return sh.cpu().contiguous();
             };
 
-            if (pc.sh0.is_valid())
-                tensors.push_back(process_sh(pc.sh0));
-            if (pc.shN.is_valid())
-                tensors.push_back(process_sh(pc.shN));
+            if (pc.sh0.is_valid()) {
+                auto t = process_sh(pc.sh0);
+                float_blocks.emplace_back(t, make_indexed_names("f_dc_", static_cast<size_t>(t.size(1))));
+            }
+            if (pc.shN.is_valid()) {
+                auto t = process_sh(pc.shN);
+                float_blocks.emplace_back(t, make_indexed_names("f_rest_", static_cast<size_t>(t.size(1))));
+            }
             if (pc.opacity.is_valid())
-                tensors.push_back(pc.opacity.cpu().contiguous());
-            if (pc.scaling.is_valid())
-                tensors.push_back(pc.scaling.cpu().contiguous());
-            if (pc.rotation.is_valid())
-                tensors.push_back(pc.rotation.cpu().contiguous());
+                float_blocks.emplace_back(pc.opacity.cpu().contiguous(), std::vector<std::string>{"opacity"});
+            if (pc.scaling.is_valid()) {
+                auto t = pc.scaling.cpu().contiguous();
+                float_blocks.emplace_back(t, make_indexed_names("scale_", static_cast<size_t>(t.size(1))));
+            }
+            if (pc.rotation.is_valid()) {
+                auto t = pc.rotation.cpu().contiguous();
+                float_blocks.emplace_back(t, make_indexed_names("rot_", static_cast<size_t>(t.size(1))));
+            }
 
-            // Write using tinyply
-            tinyply::PlyFile ply;
+            // Optional colors: write as uchar red/green/blue
+            Tensor colors_u8;
+            if (pc.colors.is_valid() && pc.colors.numel() > 0) {
+                auto colors_cpu = pc.colors.cpu().contiguous();
+                if (colors_cpu.ndim() == 2 && colors_cpu.size(0) == static_cast<int64_t>(N) && colors_cpu.size(1) == 3) {
+                    if (colors_cpu.dtype() == DataType::UInt8) {
+                        colors_u8 = colors_cpu;
+                    } else if (colors_cpu.dtype() == DataType::Float32) {
+                        // PLY convention: float colors are typically [0,1]
+                        colors_u8 = (colors_cpu * 255.0f).clamp(0, 255).to(DataType::UInt8);
+                    } else {
+                        colors_u8 = colors_cpu.to(DataType::UInt8);
+                    }
+
+                    ply.add_properties_to_element(
+                        "vertex", {"red", "green", "blue"}, tinyply::Type::UINT8, N,
+                        const_cast<uint8_t*>(colors_u8.ptr<uint8_t>()),
+                        tinyply::Type::INVALID, 0);
+                }
+            }
+
             size_t attr_off = 0;
+            for (auto& [t, fallback_names] : float_blocks) {
+                const size_t cols = t.size(1);
+                assert(fallback_names.size() == cols);
 
-            for (const auto& tensor : tensors) {
-                const size_t cols = tensor.size(1);
-                std::vector<std::string> attrs(pc.attribute_names.begin() + attr_off,
-                                               pc.attribute_names.begin() + attr_off + cols);
+                std::vector<std::string> attrs;
+                if (pc.attribute_names.size() >= attr_off + cols) {
+                    attrs.assign(pc.attribute_names.begin() + static_cast<int64_t>(attr_off),
+                                 pc.attribute_names.begin() + static_cast<int64_t>(attr_off + cols));
+                } else {
+                    attrs = std::move(fallback_names);
+                }
 
                 ply.add_properties_to_element(
-                    "vertex", attrs, tinyply::Type::FLOAT32, tensor.size(0),
-                    reinterpret_cast<uint8_t*>(const_cast<float*>(tensor.ptr<float>())),
+                    "vertex", attrs, tinyply::Type::FLOAT32, t.size(0),
+                    reinterpret_cast<uint8_t*>(const_cast<float*>(t.ptr<float>())),
                     tinyply::Type::INVALID, 0);
 
                 attr_off += cols;
@@ -728,7 +781,7 @@ namespace lfs::io {
             }
 
             std::ostream out_stream(&fb);
-            ply.write(out_stream, true);
+            ply.write(out_stream, binary);
 
             if (!out_stream.good()) {
                 return make_error(ErrorCode::WRITE_FAILURE, "Write failed", output_path);
@@ -863,7 +916,10 @@ namespace lfs::io {
         if (point_cloud.rotation.is_valid())
             floats_per_vertex += 4;
 
-        const size_t estimated_size = 1024 + vertex_count * floats_per_vertex * sizeof(float);
+        size_t estimated_size = 1024 + vertex_count * floats_per_vertex * sizeof(float);
+        if (point_cloud.colors.is_valid() && point_cloud.colors.numel() > 0) {
+            estimated_size += vertex_count * 3; // uchar RGB
+        }
 
         // Check disk space with 10% margin
         if (auto space_check = check_disk_space(options.output_path, estimated_size, 1.1f); !space_check) {
@@ -884,21 +940,57 @@ namespace lfs::io {
                               options.output_path.parent_path());
         }
 
+        if (options.progress_callback) {
+            if (!options.progress_callback(0.1f, "Preparing data"))
+                return make_error(ErrorCode::INTERNAL_ERROR, "Export cancelled", options.output_path);
+        }
+
         if (options.async) {
             cleanup_finished_saves();
             const std::lock_guard lock(g_save_mutex);
             g_save_futures.emplace_back(
-                std::async(std::launch::async, [pc = point_cloud, path = options.output_path]() {
-                    if (const auto result = write_ply_binary(pc, path); !result) {
+                std::async(std::launch::async, [pc = point_cloud, opts = options]() {
+                    if (const auto result = write_ply_binary(pc, opts.output_path, opts.binary); !result) {
                         LOG_ERROR("PLY save failed: {}", result.error().format());
                     }
                 }));
         } else {
-            if (const auto result = write_ply_binary(point_cloud, options.output_path); !result) {
+            if (options.progress_callback) {
+                if (!options.progress_callback(0.5f, "Writing PLY"))
+                    return make_error(ErrorCode::INTERNAL_ERROR, "Export cancelled", options.output_path);
+            }
+
+            if (const auto result = write_ply_binary(point_cloud, options.output_path, options.binary);
+                !result) {
                 return std::unexpected(result.error());
+            }
+
+            if (options.progress_callback) {
+                options.progress_callback(1.0f, "Done");
             }
         }
         return {};
+    }
+
+    bool ply_has_faces(const std::filesystem::path& filepath) {
+        if (!std::filesystem::exists(filepath))
+            return false;
+
+        std::ifstream file;
+        if (!lfs::core::open_file_for_read(filepath, std::ios::binary, file))
+            return false;
+
+        std::string line;
+        while (std::getline(file, line)) {
+            if (line.find("end_header") != std::string::npos)
+                break;
+            if (line.compare(0, 13, "element face ") == 0) {
+                const int count = std::atoi(line.c_str() + 13);
+                if (count > 0)
+                    return true;
+            }
+        }
+        return false;
     }
 
     bool is_gaussian_splat_ply(const std::filesystem::path& filepath) {

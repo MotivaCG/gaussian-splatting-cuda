@@ -117,6 +117,18 @@ namespace lfs::training {
         lfs::core::Tensor backward(const lfs::core::Tensor& rgb, const lfs::core::Tensor& grad_output, int camera_id,
                                    int uid);
 
+        /// Backward pass through ISP using controller-predicted params.
+        /// Returns gradient w.r.t. controller_params [1,9] for controller backward.
+        /// Does NOT accumulate into base PPISP gradients (base params frozen during controller phase).
+        /// @param rgb input image [C,H,W] (same as forward)
+        /// @param grad_output gradient from photometric loss [C,H,W]
+        /// @param controller_params [1,9] = [exposure, color_params[0:8]]
+        /// @param camera_idx contiguous camera index for vignetting/CRF
+        lfs::core::Tensor backward_with_controller_params(const lfs::core::Tensor& rgb,
+                                                          const lfs::core::Tensor& grad_output,
+                                                          const lfs::core::Tensor& controller_params,
+                                                          int camera_idx);
+
         /// Compute regularization loss (returns GPU tensor for async accumulation)
         lfs::core::Tensor reg_loss_gpu();
 
@@ -205,6 +217,16 @@ namespace lfs::training {
         lfs::core::Tensor crf_exp_avg_;
         lfs::core::Tensor crf_exp_avg_sq_;
         lfs::core::Tensor crf_grad_;
+
+        // Scratch buffers for backward_with_controller_params (preallocated)
+        lfs::core::Tensor ctrl_bwd_exposure_;
+        lfs::core::Tensor ctrl_bwd_color_;
+        lfs::core::Tensor ctrl_bwd_vignetting_;
+        lfs::core::Tensor ctrl_bwd_crf_;
+        lfs::core::Tensor ctrl_bwd_rgb_;
+        lfs::core::Tensor ctrl_bwd_output_;
+        size_t ctrl_bwd_rgb_h_ = 0;
+        size_t ctrl_bwd_rgb_w_ = 0;
 
         Config config_;
         int64_t step_ = 0;

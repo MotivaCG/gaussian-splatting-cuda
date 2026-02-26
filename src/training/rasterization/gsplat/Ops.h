@@ -239,11 +239,13 @@ namespace gsplat_lfs {
         const float* v_render_colors, // [C, image_height, image_width, channels]
         const float* v_render_alphas, // [C, image_height, image_width, 1]
         // gradient outputs (pre-allocated, accumulated with atomics)
-        float* v_means,     // [N, 3]
-        float* v_quats,     // [N, 4]
-        float* v_scales,    // [N, 3]
-        float* v_colors,    // [C, N, channels]
-        float* v_opacities, // [C, N]
+        float* v_means,                       // [N, 3]
+        float* v_quats,                       // [N, 4]
+        float* v_scales,                      // [N, 3]
+        float* v_colors,                      // [C, N, channels]
+        float* v_opacities,                   // [C, N]
+        float* densification_info,            // [2, N] flattened or nullptr
+        const float* densification_error_map, // [H, W] or nullptr
         cudaStream_t stream = nullptr);
 
     //=========================================================================
@@ -361,11 +363,13 @@ namespace gsplat_lfs {
         const float* v_render_colors, // [C, H, W, channels]
         const float* v_render_alphas, // [C, H, W, 1]
         // gradient outputs (pre-allocated, accumulated)
-        float* v_means,     // [N, 3]
-        float* v_quats,     // [N, 4]
-        float* v_scales,    // [N, 3]
-        float* v_opacities, // [N]
-        float* v_sh_coeffs, // [N, K, 3]
+        float* v_means,                       // [N, 3]
+        float* v_quats,                       // [N, 4]
+        float* v_scales,                      // [N, 3]
+        float* v_opacities,                   // [N]
+        float* v_sh_coeffs,                   // [N, K, 3]
+        float* densification_info,            // [2, N] flattened or nullptr
+        const float* densification_error_map, // [H, W] or nullptr
         cudaStream_t stream = nullptr);
 
 } // namespace gsplat_lfs

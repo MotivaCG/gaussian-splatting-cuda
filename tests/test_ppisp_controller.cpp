@@ -106,28 +106,6 @@ namespace {
         EXPECT_LT(controller.get_lr(), config.lr);
     }
 
-    TEST_F(PPISPControllerTest, DistillationLossComputes) {
-        lfs::training::PPISPController controller(10000);
-
-        auto pred = lfs::core::Tensor::randn({1, 9}, lfs::core::Device::CUDA);
-        auto target = lfs::core::Tensor::randn({1, 9}, lfs::core::Device::CUDA);
-
-        auto loss = controller.distillation_loss(pred, target);
-
-        EXPECT_EQ(loss.shape().rank(), 0);
-        EXPECT_GE(loss.cpu().item<float>(), 0.0f);
-    }
-
-    TEST_F(PPISPControllerTest, DistillationLossZeroForSameTensor) {
-        lfs::training::PPISPController controller(10000);
-
-        auto tensor = lfs::core::Tensor::randn({1, 9}, lfs::core::Device::CUDA);
-
-        auto loss = controller.distillation_loss(tensor, tensor);
-
-        EXPECT_NEAR(loss.cpu().item<float>(), 0.0f, 1e-6f);
-    }
-
     TEST_F(PPISPControllerTest, ZeroGradClearsGradients) {
         lfs::training::PPISPController controller(10000);
 
@@ -208,7 +186,7 @@ namespace {
 
         for (int iter = 0; iter < 100; ++iter) {
             auto pred = controller.predict(input, 1.0f);
-            auto loss = controller.distillation_loss(pred, target);
+            auto loss = pred.sub(target).square().mean();
 
             if (iter == 0) {
                 initial_loss = loss.cpu().item<float>();

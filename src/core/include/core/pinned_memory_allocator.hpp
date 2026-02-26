@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include "core/export.hpp"
+
+#include <atomic>
 #include <cstddef>
 #include <cuda_runtime.h>
 #include <memory>
@@ -30,7 +33,7 @@ namespace lfs::core {
      * - cudaMemcpyAsync can overlap with CPU work
      * - Reduced PCIe latency
      */
-    class PinnedMemoryAllocator {
+    class LFS_CORE_API PinnedMemoryAllocator {
     public:
         /**
          * @brief Get the singleton instance
@@ -83,6 +86,14 @@ namespace lfs::core {
          * Call once during application startup.
          */
         void prewarm();
+
+        /**
+         * @brief Explicitly shut down the allocator and release all resources
+         *
+         * Should be called before CUDA context destruction to ensure safe cleanup.
+         * Safe to call multiple times.
+         */
+        void shutdown();
 
         /**
          * @brief Get statistics about allocator usage
@@ -152,6 +163,7 @@ namespace lfs::core {
         mutable std::mutex mutex_;
         Stats stats_;
         bool enabled_{true}; // Can disable for A/B testing
+        std::atomic<bool> shutdown_{false};
     };
 
 } // namespace lfs::core

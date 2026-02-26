@@ -27,9 +27,21 @@ namespace lfs::core {
             return queue;
         }
 
+        void shutdown() {
+            bool expected = false;
+            if (!shutdown_.compare_exchange_strong(expected, true))
+                return;
+            flush();
+            cleanup_event_pool();
+        }
+
         void defer_free(void* ptr, size_t size, cudaStream_t stream, FreeCallback callback) {
             if (!ptr)
                 return;
+            if (shutdown_.load(std::memory_order_acquire)) {
+                callback(ptr, size);
+                return;
+            }
 
             cudaEvent_t event = acquire_event();
             if (!event) {
@@ -145,8 +157,7 @@ namespace lfs::core {
         }
 
         ~DeferredFreeQueue() {
-            flush();
-            cleanup_event_pool();
+            shutdown();
         }
 
         void initialize_event_pool() {
@@ -197,6 +208,8 @@ namespace lfs::core {
 
         std::vector<cudaEvent_t> event_pool_;
         std::mutex event_pool_mutex_;
+
+        std::atomic<bool> shutdown_{false};
 
         Stats stats_;
     };

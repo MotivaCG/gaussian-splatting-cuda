@@ -17,18 +17,10 @@ set(FASTLFS_SOURCES
 # One unified library - renamed from fastgs_backend to fastlfs_backend
 add_library(fastlfs_backend STATIC ${FASTLFS_SOURCES})
 
-# PTX-only builds require separable compilation OFF
-if(LFS_DEFER_DEVICE_SYMBOLS)
-    set(_sep_comp OFF)
-else()
-    set(_sep_comp ON)
-endif()
-
 set_target_properties(fastlfs_backend PROPERTIES
         CUDA_ARCHITECTURES "${LichtFeld-Studio_CUDA_ARCH}"
-        CUDA_SEPARABLE_COMPILATION ${_sep_comp}
+        CUDA_SEPARABLE_COMPILATION OFF
         POSITION_INDEPENDENT_CODE ON
-        CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
 
 target_include_directories(fastlfs_backend
@@ -52,7 +44,7 @@ target_link_libraries(fastlfs_backend
 
 target_compile_options(fastlfs_backend PRIVATE
   # CUDA device code + MSVC host compiler flags (Windows only)
-  $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Debug>>:-O0 -g -G -lineinfo -Xcompiler=/Od -Xcompiler=/Z7>
+  $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Debug>>:-O0 -g ${LFS_CUDA_DEVICE_DEBUG_FLAGS} -lineinfo -Xcompiler=/Od -Xcompiler=/Z7>
   $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release>>:-O3 --use_fast_math --expt-relaxed-constexpr --diag-suppress=20012,186,221 -Xcompiler=/O2 -Xcompiler=/DNDEBUG>
 
   # CUDA on Windows: Pass /utf-8 to MSVC when invoked by nvcc

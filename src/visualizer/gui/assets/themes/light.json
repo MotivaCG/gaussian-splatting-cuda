@@ -152,8 +152,8 @@
     "header_alpha": 0.4,
     "header_hover_alpha": 0.6,
     "header_active_alpha": 0.8,
-    "padding": [12.0, 8.0],
-    "item_spacing": [8.0, 6.0]
+    "padding": [14.0, 10.0],
+    "item_spacing": [10.0, 8.0]
   },
 
   "overlay": {

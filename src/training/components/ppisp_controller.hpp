@@ -30,9 +30,6 @@ namespace lfs::training {
 
         lfs::core::Tensor predict(const lfs::core::Tensor& rendered_rgb, float exposure_prior = 1.0f);
         void backward(const lfs::core::Tensor& grad_output);
-        lfs::core::Tensor distillation_loss(const lfs::core::Tensor& pred, const lfs::core::Tensor& target);
-        void compute_mse_gradient(const lfs::core::Tensor& pred, const lfs::core::Tensor& target);
-        const lfs::core::Tensor& get_mse_gradient() const { return bwd_mse_grad_; }
         void optimizer_step();
         void zero_grad();
         void scheduler_step();
@@ -102,7 +99,6 @@ namespace lfs::training {
         lfs::core::Tensor bwd_grad_fc3_out_;
         lfs::core::Tensor bwd_grad_fc2_out_;
         lfs::core::Tensor bwd_grad_fc1_out_;
-        lfs::core::Tensor bwd_mse_grad_;
 
         Config config_;
         int64_t step_ = 0;

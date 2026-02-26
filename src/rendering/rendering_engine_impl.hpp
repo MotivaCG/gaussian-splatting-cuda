@@ -7,8 +7,10 @@
 #include "axes_renderer.hpp"
 #include "bbox_renderer.hpp"
 #include "camera_frustum_renderer.hpp"
+#include "depth_compositor.hpp"
 #include "ellipsoid_renderer.hpp"
 #include "grid_renderer.hpp"
+#include "mesh_renderer.hpp"
 #include "pivot_renderer.hpp"
 #include "rendering/rendering.hpp"
 #include "rendering_pipeline.hpp"
@@ -38,6 +40,25 @@ namespace lfs::rendering {
 
         Result<RenderResult> renderSplitView(
             const SplitViewRequest& request) override;
+
+        Result<void> renderMesh(
+            const lfs::core::MeshData& mesh,
+            const ViewportData& viewport,
+            const glm::mat4& model_transform = glm::mat4(1.0f),
+            const MeshRenderOptions& options = {},
+            bool use_fbo = false) override;
+
+        unsigned int getMeshColorTexture() const override;
+        unsigned int getMeshDepthTexture() const override;
+        unsigned int getMeshFramebuffer() const override;
+        bool hasMeshRender() const override;
+        void resetMeshFrameState() override { mesh_rendered_this_frame_ = false; }
+
+        Result<void> compositeMeshAndSplat(
+            const RenderResult& splat_result,
+            const glm::ivec2& viewport_size) override;
+
+        Result<void> presentMeshOnly() override;
 
         Result<void> presentToScreen(
             const RenderResult& result,
@@ -85,22 +106,6 @@ namespace lfs::rendering {
 
         void setViewportGizmoHover(int axis) override;
 
-        Result<void> renderTranslationGizmo(
-            const glm::vec3& position,
-            const ViewportData& viewport,
-            float scale) override;
-
-        std::shared_ptr<GizmoInteraction> getGizmoInteraction() override;
-
-        Result<void> renderCameraFrustums(
-            const std::vector<std::shared_ptr<const lfs::core::Camera>>& cameras,
-            const ViewportData& viewport,
-            float scale,
-            const glm::vec3& train_color,
-            const glm::vec3& eval_color,
-            const glm::mat4& scene_transform = glm::mat4(1.0f),
-            bool equirectangular_view = false) override;
-
         Result<void> renderCameraFrustumsWithHighlight(
             const std::vector<std::shared_ptr<const lfs::core::Camera>>& cameras,
             const ViewportData& viewport,
@@ -109,7 +114,9 @@ namespace lfs::rendering {
             const glm::vec3& eval_color,
             int highlight_index,
             const glm::mat4& scene_transform = glm::mat4(1.0f),
-            bool equirectangular_view = false) override;
+            bool equirectangular_view = false,
+            const std::unordered_set<int>& disabled_uids = {},
+            const std::unordered_set<int>& selected_uids = {}) override;
 
         Result<int> pickCameraFrustum(
             const std::vector<std::shared_ptr<const lfs::core::Camera>>& cameras,
@@ -122,28 +129,15 @@ namespace lfs::rendering {
 
         void clearFrustumCache() override;
 
-        // Pipeline compatibility
-        RenderingPipelineResult renderWithPipeline(
-            const lfs::core::SplatData& model,
-            const RenderingPipelineRequest& request) override;
-
-        // Factory methods
-        Result<std::shared_ptr<IBoundingBox>> createBoundingBox() override;
-        Result<std::shared_ptr<ICoordinateAxes>> createCoordinateAxes() override;
-
     private:
         Result<void> initializeShaders();
         glm::mat4 createProjectionMatrix(const ViewportData& viewport) const;
         glm::mat4 createViewMatrix(const ViewportData& viewport) const;
 
-        // Core components
         RenderingPipeline pipeline_;
         std::shared_ptr<ScreenQuadRenderer> screen_renderer_;
-
-        // Split view renderer
         std::unique_ptr<SplitViewRenderer> split_view_renderer_;
 
-        // Overlay renderers
         RenderInfiniteGrid grid_renderer_;
         RenderBoundingBox bbox_renderer_;
         EllipsoidRenderer ellipsoid_renderer_;
@@ -152,8 +146,22 @@ namespace lfs::rendering {
         CameraFrustumRenderer camera_frustum_renderer_;
         RenderPivotPoint pivot_renderer_;
 
-        // Shaders
+        MeshRenderer mesh_renderer_;
+        DepthCompositor depth_compositor_;
+        bool mesh_rendered_this_frame_ = false;
+
         ManagedShader quad_shader_;
+
+        // Cache the last uploaded frame payload to avoid redundant CUDA->GL uploads
+        // when presenting the exact same render result repeatedly (idle cached frames).
+        std::shared_ptr<const Tensor> last_presented_image_;
+        std::shared_ptr<const Tensor> last_presented_depth_;
+        unsigned int last_presented_external_depth_texture_ = 0;
+        bool last_presented_depth_is_ndc_ = false;
+        float last_presented_near_plane_ = 0.0f;
+        float last_presented_far_plane_ = 0.0f;
+        bool last_presented_orthographic_ = false;
+        bool has_present_upload_cache_ = false;
     };
 
 } // namespace lfs::rendering

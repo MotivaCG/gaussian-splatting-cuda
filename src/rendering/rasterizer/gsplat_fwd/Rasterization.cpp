@@ -136,7 +136,9 @@ namespace gsplat_fwd {
         const float* radial_coeffs,
         const float* tangential_coeffs,
         const float* thin_prism_coeffs,
+        const float* model_transforms,
         const int* transform_indices,
+        int num_transforms,
         const bool* node_visibility_mask,
         int num_visibility_nodes,
         const int* visible_indices,
@@ -178,10 +180,12 @@ namespace gsplat_fwd {
             result.compensations, stream);
 
         // Step 2: Tile intersection (output buffers sized to M)
+        const bool wrap_x = (camera_model == CameraModelType::EQUIRECTANGULAR);
         auto isect_result = intersect_tile(
             result.means2d, result.radii, result.depths,
             nullptr, nullptr,
             C, M, tile_size, tile_width, tile_height,
+            wrap_x,
             true,
             result.tiles_per_gauss, stream);
 
@@ -196,7 +200,11 @@ namespace gsplat_fwd {
 
         // Step 3: Compute viewing directions and evaluate SH (uses indirect indexing)
         if (render_mode == 0 || render_mode == 3 || render_mode == 4) {
-            compute_view_dirs(means, viewmats0, C, N_total, M, visible_indices, result.dirs, stream);
+            compute_view_dirs(
+                means, viewmats0, C, N_total, M,
+                model_transforms, transform_indices, num_transforms,
+                visible_indices,
+                result.dirs, stream);
 
             spherical_harmonics_fwd(
                 sh_degree, result.dirs, sh_coeffs, nullptr, visible_indices,

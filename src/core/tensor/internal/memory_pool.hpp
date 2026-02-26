@@ -4,6 +4,7 @@
 #pragma once
 
 #include "allocation_profiler.hpp"
+#include "core/export.hpp"
 #include "core/logger.hpp"
 #include "deferred_free_queue.hpp"
 #include "gpu_slab_allocator.hpp"
@@ -26,16 +27,28 @@ namespace lfs::core {
                                        Direct };
 
     // Multi-tier CUDA memory pool: slab (≤256KB), bucketed (≤16GB), cudaMallocAsync.
-    class CudaMemoryPool {
+    class LFS_CORE_API CudaMemoryPool {
     public:
-        static CudaMemoryPool& instance() {
-            static CudaMemoryPool pool;
-            return pool;
+        static CudaMemoryPool& instance();
+
+        void shutdown() {
+            bool expected = false;
+            if (!shutdown_.compare_exchange_strong(expected, true))
+                return;
+            LOG_INFO("Shutting down CudaMemoryPool...");
+            DeferredFreeQueue::instance().shutdown();
+            SizeBucketedPool::instance().shutdown();
+            GPUSlabAllocator::instance().shutdown();
         }
 
         void* allocate(size_t bytes, cudaStream_t stream = nullptr) {
             if (bytes == 0)
                 return nullptr;
+
+            if (shutdown_.load(std::memory_order_acquire)) {
+                LOG_ERROR("Attempted to allocate CUDA memory after shutdown!");
+                return nullptr;
+            }
 
             void* ptr = nullptr;
 
@@ -110,6 +123,8 @@ namespace lfs::core {
         void deallocate(void* ptr, cudaStream_t stream = nullptr) {
             if (!ptr)
                 return;
+            if (shutdown_.load(std::memory_order_acquire))
+                return;
 
             if constexpr (ENABLE_ALLOCATION_PROFILING) {
                 AllocationProfiler::instance().record_deallocation(ptr);
@@ -145,6 +160,8 @@ namespace lfs::core {
 
         void deallocate(void* ptr, size_t bytes, cudaStream_t stream = nullptr) {
             if (!ptr)
+                return;
+            if (shutdown_.load(std::memory_order_acquire))
                 return;
 
             if constexpr (ENABLE_ALLOCATION_PROFILING) {
@@ -276,11 +293,11 @@ namespace lfs::core {
         }
 
         void trim_cached_memory() {
-#if CUDART_VERSION >= 12080
             cudaDeviceSynchronize();
             DeferredFreeQueue::instance().flush();
             SizeBucketedPool::instance().trim_cache();
 
+#if CUDART_VERSION >= 12080
             int device;
             cudaGetDevice(&device);
             cudaMemPool_t pool;
@@ -323,8 +340,7 @@ namespace lfs::core {
         }
 
         ~CudaMemoryPool() {
-            DeferredFreeQueue::instance().flush();
-            SizeBucketedPool::instance().trim_cache();
+            shutdown();
         }
 
         void* allocate_direct(size_t bytes) {
@@ -420,6 +436,7 @@ namespace lfs::core {
         std::mutex map_mutex_;
         std::atomic<size_t> direct_alloc_count_{0};
         bool slab_enabled_{false};
+        std::atomic<bool> shutdown_{false};
         Stats stats_;
     };
 

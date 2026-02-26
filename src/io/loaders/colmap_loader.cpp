@@ -4,12 +4,12 @@
 
 #include "io/loaders/colmap_loader.hpp"
 #include "core/camera.hpp"
+#include "core/image_io.hpp"
 #include "core/logger.hpp"
 #include "core/point_cloud.hpp"
 #include "formats/colmap.hpp"
 #include "io/error.hpp"
 #include "io/filesystem_utils.hpp"
-#include "training/dataset.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -157,7 +157,7 @@ namespace lfs::io {
             auto end_time = std::chrono::high_resolution_clock::now();
             return LoadResult{
                 .data = LoadedScene{
-                    .cameras = nullptr,
+                    .cameras = {},
                     .point_cloud = nullptr},
                 .scene_center = Tensor::zeros({3}, Device::CPU),
                 .loader_used = name(),
@@ -173,7 +173,6 @@ namespace lfs::io {
         try {
             std::vector<std::shared_ptr<Camera>> cameras;
             Tensor scene_center;
-            float scene_scale = 0.f;
 
             if (has_cameras && has_images) {
                 LOG_DEBUG("Reading binary COLMAP data");
@@ -181,14 +180,14 @@ namespace lfs::io {
                 if (!result) {
                     return std::unexpected(result.error());
                 }
-                std::tie(cameras, scene_center, scene_scale) = std::move(*result);
+                std::tie(cameras, scene_center) = std::move(*result);
             } else if (has_cameras_text && has_images_text) {
                 LOG_DEBUG("Reading text COLMAP data");
                 auto result = read_colmap_cameras_and_images_text(path, actual_images_folder);
                 if (!result) {
                     return std::unexpected(result.error());
                 }
-                std::tie(cameras, scene_center, scene_scale) = std::move(*result);
+                std::tie(cameras, scene_center) = std::move(*result);
             } else {
                 return make_error(ErrorCode::MISSING_REQUIRED_FILES,
                                   "No valid COLMAP camera and image data found", path);
@@ -200,15 +199,14 @@ namespace lfs::io {
 
             LOG_DEBUG("Creating {} camera objects", cameras.size());
 
-            // Create dataset configuration
-            lfs::training::DatasetConfig dataset_config;
-            dataset_config.resize_factor = options.resize_factor;
-            dataset_config.max_width = options.max_width;
-            dataset_config.test_every = 8; // Default split behavior
-
-            // Create dataset with ALL images
-            auto dataset = std::make_shared<lfs::training::CameraDataset>(
-                std::move(cameras), dataset_config, lfs::training::CameraDataset::Split::ALL);
+            bool images_have_alpha = false;
+            if (!cameras.empty()) {
+                try {
+                    auto [w, h, c] = lfs::core::get_image_info(cameras[0]->image_path());
+                    images_have_alpha = (c == 4);
+                } catch (const std::exception&) {
+                }
+            }
 
             if (options.progress) {
                 options.progress(60.0f, "Loading point cloud...");
@@ -239,17 +237,16 @@ namespace lfs::io {
             auto load_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                 end_time - start_time);
 
-            // Get scene center values and dataset size for logging BEFORE moving
             auto scene_center_cpu = scene_center.cpu();
             const float* sc_ptr = scene_center_cpu.ptr<float>();
-            size_t num_cameras = dataset->size();
+            size_t num_cameras = cameras.size();
 
             LoadResult result{
                 .data = LoadedScene{
-                    .cameras = std::move(dataset),
+                    .cameras = std::move(cameras),
                     .point_cloud = std::move(point_cloud)},
                 .scene_center = scene_center,
-                .scene_scale = scene_scale,
+                .images_have_alpha = images_have_alpha,
                 .loader_used = name(),
                 .load_time = load_time,
                 .warnings = (has_points || has_points_text) ? std::vector<std::string>{} : std::vector<std::string>{"No sparse point cloud found - using random initialization"}};

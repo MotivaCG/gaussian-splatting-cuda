@@ -138,6 +138,9 @@ namespace lfs::training {
          * @param new_size New number of Gaussians
          */
         void shrink_to_size(size_t new_size);
+        // Control notifications for external mutations
+        void reset_state(ParamType type);
+        void invalidate_state(ParamType type);
 
     private:
         AdamConfig config_;

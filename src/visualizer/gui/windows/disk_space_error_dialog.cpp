@@ -3,12 +3,12 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "disk_space_error_dialog.hpp"
+#include "core/event_bridge/localization_manager.hpp"
 #include "core/path_utils.hpp"
-#include "gui/dpi_scale.hpp"
-#include "gui/localization_manager.hpp"
 #include "gui/string_keys.hpp"
 #include "gui/ui_widgets.hpp"
 #include "gui/utils/windows_utils.hpp"
+#include "python/python_runtime.hpp"
 #include "theme/theme.hpp"
 #include <format>
 #include <imgui.h>
@@ -77,7 +77,7 @@ namespace lfs::vis::gui {
         }
 
         const auto& t = theme();
-        const float scale = getDpiScale();
+        const float scale = lfs::python::get_shared_dpi_scale();
         const ImVec4 popup_bg{t.palette.surface.x, t.palette.surface.y,
                               t.palette.surface.z, POPUP_ALPHA};
         const ImVec4 title_bg = darken(t.palette.surface, 0.1f);

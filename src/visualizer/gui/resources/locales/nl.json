@@ -1,32 +1,36 @@
 {
   "_language_name": "Nederlands",
-
   "menu": {
     "file": "Bestand",
     "file.new_project": "Nieuw Project",
     "file.import_dataset": "Dataset Importeren",
     "file.import_ply": "PLY, SOG, SPZ Importeren",
+    "file.import_mesh": "Mesh Importeren",
     "file.import_checkpoint": "Controlepunt Importeren",
     "file.import_config": "Configuratie Importeren",
     "file.export": "Exporteren...",
     "file.export_config": "Configuratie Exporteren...",
+    "file.extract_video_frames": "Frames uit video extraheren...",
+    "file.mesh_to_splat": "Mesh naar Splat...",
     "file.exit": "Afsluiten",
-
     "edit": "Bewerken",
     "edit.input_settings": "Invoerinstellingen...",
     "edit.preferences": "Voorkeuren...",
-
     "view": "Weergave",
     "view.theme": "Thema",
     "view.theme.dark": "Donker",
     "view.theme.light": "Licht",
+    "view.theme.gruvbox": "Gruvbox",
+    "view.theme.catppuccin_mocha": "Catppuccin Mocha",
+    "view.theme.catppuccin_latte": "Catppuccin Latte",
+    "view.theme.nord": "Nord",
     "view.debug_info": "Debug Info...",
-
     "help": "Help",
     "help.getting_started": "Aan de Slag",
-    "help.about": "Over LichtFeld Studio"
+    "help.about": "Over LichtFeld Studio",
+    "view.python_console": "Python-console",
+    "view.plugin_marketplace": "Plugin-marktplaats"
   },
-
   "window": {
     "getting_started": "Aan de Slag",
     "about": "Over LichtFeld Studio",
@@ -38,7 +42,6 @@
     "training": "Training",
     "preferences": "Voorkeuren"
   },
-
   "getting_started": {
     "title": "SNELSTARTGIDS",
     "description": "Leer hoe je datasets voorbereidt en aan de slag gaat met LichtFeld Studio:",
@@ -49,9 +52,10 @@
     "video_colmap": "COLMAP Tutorial",
     "video_lichtfeld": "LichtFeld Tutorial",
     "video_masks": "Maskers Tutorial",
-    "loading": "Laden..."
+    "loading": "Laden...",
+    "wiki_label": "Wiki:",
+    "watch_tooltip": "Bekijk: {title}"
   },
-
   "about": {
     "title": "LICHTFELD STUDIO",
     "description": "Een hoogwaardige C++ en CUDA implementatie van 3D Gaussian Splatting voor realtime neurale rendering, training en visualisatie.",
@@ -72,9 +76,11 @@
     "repository": "Repository:",
     "website": "Website:",
     "authors": "LichtFeld Studio Auteurs",
-    "license": "Gelicenseerd onder GPLv3"
+    "license": "Gelicenseerd onder GPLv3",
+    "build_info.property": "Eigenschap",
+    "build_info.value": "Waarde",
+    "separator": "  |  "
   },
-
   "training": {
     "section.dataset": "Dataset",
     "section.optimization": "Optimalisatie",
@@ -89,7 +95,6 @@
     "section.advanced_params": "Geavanceerde Training Params",
     "section.sparsity": "Sparsity Instellingen",
     "section.pruning_growing": "Snoeien/Groeien",
-
     "dataset.path": "Path:",
     "dataset.images": "Images:",
     "dataset.resize_factor": "Resize Factor:",
@@ -97,7 +102,6 @@
     "dataset.cpu_cache": "CPU Cache:",
     "dataset.fs_cache": "FS Cache:",
     "dataset.output": "Output:",
-
     "opt.strategy": "Strategy:",
     "opt.learning_rates": "Learning Rates:",
     "opt.iterations": "Iterations:",
@@ -106,6 +110,7 @@
     "opt.mask_mode": "Mask Mode:",
     "opt.sparsity": "Sparsity:",
     "opt.gut": "GUT:",
+    "opt.undistort": "Undistort:",
     "opt.mip_filter": "Mip Filter:",
     "opt.bg_modulation": "BG Modulation:",
     "opt.lr.position": "  Position:",
@@ -113,35 +118,31 @@
     "opt.lr.opacity": "  Opacity:",
     "opt.lr.scaling": "  Scaling:",
     "opt.lr.rotation": "  Rotation:",
-
     "refinement.refine_every": "  Refine Every:",
     "refinement.start_refine": "  Start Refine:",
     "refinement.stop_refine": "  Stop Refine:",
     "refinement.gradient_thr": "  Gradient Thr:",
     "refinement.reset_every": "  Reset Every:",
     "refinement.sh_upgrade_every": "  SH Upgrade Every:",
-
     "bilateral.grid_x": "Grid X:",
     "bilateral.grid_y": "Grid Y:",
     "bilateral.grid_w": "Grid W:",
     "bilateral.learning_rate": "Learning Rate:",
-
     "masking.invert_masks": "Invert Masks:",
     "masking.threshold": "Threshold:",
     "masking.penalty_weight": "Penalty Weight:",
     "masking.penalty_power": "Penalty Power:",
-
     "mask.invert": "  Invert Masks:",
     "mask.threshold": "  Mask Threshold:",
     "mask.penalty_weight": "  Opacity Penalty Weight:",
     "mask.penalty_power": "  Opacity Penalty Power:",
     "mask.no_masks": "(no masks)",
-
     "tooltip.invert_masks": "Wissel object/achtergrond in maskers",
     "tooltip.penalty_weight": "Gewicht voor dekking straf in achtergrond gebieden",
     "tooltip.penalty_power": "Straf afname: 1=lineair, 2=kwadratisch, >2=zachter",
     "tooltip.mask_threshold": "Waarden >= drempel worden 1.0 (object)",
     "tooltip.mask_mode": "Hoe attentiemaskers te gebruiken: segmenteren, achtergrond negeren of alpha-consistent",
+    "tooltip.use_alpha_as_mask": "Gebruik het alfakanaal van RGBA-afbeeldingen als maskerbron in plaats van aparte maskerbestanden",
     "tooltip.mip_filter": "Anti-aliasing filter voor training (mip-splatting)",
     "tooltip.keep_model": "Behoud getraind model, verwijder dataset",
     "tooltip.strategy": "Verdichtingsstrategie (default/mcmc)",
@@ -149,10 +150,11 @@
     "tooltip.max_gaussians": "Maximaal aantal Gaussians",
     "tooltip.sh_degree": "Sferische harmonischen graad (0-3)",
     "tooltip.tile_mode": "Getegelde rendering voor grote afbeeldingen",
-    "tooltip.steps_scaler": "Schaal verfijningsintervallen",
+    "tooltip.steps_scaler": "Schaal trainingsstappen. Automatisch berekend uit beeldaantal (1.0 voor <=300, beelden/300 voor meer)",
     "tooltip.bilateral_grid": "Uiterlijk embedding voor belichting/kleurcorrectie",
     "tooltip.sparsity": "Schakel snoeien in voor modelcompressie",
     "tooltip.gut": "Uniforme behandeling voor vervormde camera's",
+    "tooltip.undistort": "Beelden corrigeren voor vervorming vóór training",
     "tooltip.bg_modulation": "Leer aparte achtergrondkleur",
     "tooltip.gradient_thr": "Gradiëntdrempel voor verdichting",
     "tooltip.opacity_reg": "Dekking regularisatiegewicht",
@@ -197,18 +199,23 @@
     "tooltip.ppisp_activation_step": "Iteratie wanneer controller-training begint (-1 = auto: iteraties - 5000)",
     "tooltip.ppisp_controller_lr": "Leersnelheid voor het controller-netwerk",
     "tooltip.ppisp_freeze_gaussians": "Gaussian-parameters bevriezen tijdens controller-training",
-
+    "tooltip.strategy_gut_conflict": "ADC-strategie is niet beschikbaar wanneer GUT is ingeschakeld",
+    "tooltip.gut_adc_conflict": "GUT is niet beschikbaar met ADC-strategie. Schakel eerst over naar MCMC.",
+    "error.adc_gut_title": "Incompatibele instellingen",
+    "conflict.adc_gut_start_message": "GUT en ADC-strategie kunnen niet samen worden gebruikt. Kies een actie om de training te starten.",
+    "conflict.adc_gut_strategy_message": "ADC-strategie is niet compatibel met GUT. GUT uitschakelen om naar ADC te schakelen?",
+    "conflict.btn_use_mcmc": "MCMC gebruiken",
+    "conflict.btn_disable_gut": "GUT uitschakelen",
+    "conflict.btn_cancel": "Annuleren",
     "losses.lambda_dssim": "Lambda DSSIM:",
     "losses.opacity_reg": "Opacity Reg:",
     "losses.scale_reg": "Scale Reg:",
     "losses.tv_loss_weight": "TV Loss Weight:",
-
     "init.init_opacity": "Init Opacity:",
     "init.init_scaling": "Init Scaling:",
     "init.random_init": "Random Init:",
     "init.num_points": "  Num Points:",
     "init.extent": "  Extent:",
-
     "thresholds.min_opacity": "Min Opacity:",
     "thresholds.prune_opacity": "Prune Opacity:",
     "thresholds.grow_scale_3d": "Grow Scale 3D:",
@@ -217,12 +224,10 @@
     "thresholds.prune_scale_2d": "Prune Scale 2D:",
     "thresholds.pause_after_reset": "Pause After Reset:",
     "thresholds.revised_opacity": "Revised Opacity:",
-
     "status.enabled": "Ingeschakeld",
     "status.disabled": "Uitgeschakeld",
     "status.yes": "Ja",
     "status.no": "Nee",
-
     "button.start": "Start Training",
     "button.resume": "Hervatten",
     "button.pause": "Pauzeren",
@@ -230,11 +235,26 @@
     "button.reset": "Reset Training",
     "button.clear": "Wissen",
     "button.save_checkpoint": "Controlepunt Opslaan",
-    "button.switch_edit_mode": "Schakel naar Bewerk Modus",
+    "button.switch_edit_mode": "Bewerkingsmodus",
     "button.add": "Toevoegen",
-    "button.remove": "Verwijderen"
+    "button.remove": "Verwijderen",
+    "value.none": "(geen)",
+    "value.default": "(standaard)",
+    "value.not_set": "(niet ingesteld)",
+    "options.strategy.mcmc": "MCMC",
+    "options.strategy.adc": "ADC",
+    "options.tile.full": "1 (Volledig)",
+    "options.tile.half": "2 (Half)",
+    "options.tile.quarter": "4 (Kwart)",
+    "options.mask.none": "Geen",
+    "options.mask.segment": "Segment",
+    "options.mask.ignore": "Negeren",
+    "options.mask.alpha_consistent": "Alpha-consistent",
+    "options.bg.color": "Kleur",
+    "options.bg.modulation": "Modulatie",
+    "options.bg.image": "Afbeelding",
+    "options.bg.random": "Willekeurig"
   },
-
   "scene": {
     "add_ply": "PLY Toevoegen...",
     "add_group": "Groep Toevoegen",
@@ -243,6 +263,7 @@
     "delete": "Verwijderen",
     "rename": "Hernoemen",
     "duplicate": "Dupliceren",
+    "save_to_disk": "Opslaan naar schijf",
     "go_to_camera_view": "Ga naar Camera Weergave",
     "go_to_cam_view": "Ga naar Cam Weergave",
     "fit_to_scene": "Aanpassen aan Scène",
@@ -267,9 +288,25 @@
     "no_groups_available": "Geen groepen beschikbaar",
     "delete_node": "Verwijderen",
     "cannot_delete_training": "Kan niet verwijderen tijdens training",
-    "background": "Achtergrond"
+    "background": "Achtergrond",
+    "enable_for_training": "Inschakelen voor training",
+    "disable_for_training": "Uitschakelen voor training",
+    "enable_all_training": "Alles inschakelen voor training",
+    "disable_all_training": "Alles uitschakelen voor training",
+    "training_enabled_tooltip": "Opgenomen in training",
+    "training_disabled_tooltip": "Uitgesloten van training",
+    "go_to_keyframe": "Ga naar keyframe-weergave",
+    "update_keyframe": "Bijwerken naar huidige weergave",
+    "select_in_timeline": "Selecteer in tijdlijn",
+    "add_keyframe_scene": "Keyframe toevoegen",
+    "keyframe_easing": "Easing",
+    "new_group_name": "Nieuwe groep",
+    "keyframe_easing.linear": "Lineair",
+    "keyframe_easing.ease_in": "Langzaam in",
+    "keyframe_easing.ease_out": "Langzaam uit",
+    "keyframe_easing.ease_in_out": "Langzaam in/uit",
+    "keyframe_label": "Keyframe {index}  ({time:.2f}s)"
   },
-
   "export": {
     "title": "Exporteren",
     "format.ply_standard": "PLY (Standaard)",
@@ -288,7 +325,6 @@
     "failed": "Mislukt",
     "select_at_least_one": "Selecteer minimaal één model"
   },
-
   "common": {
     "ok": "OK",
     "cancel": "Annuleren",
@@ -302,9 +338,12 @@
     "browse": "Bladeren...",
     "apply": "Toepassen",
     "reset": "Resetten",
-    "double_click_reset": "dubbelklik om te resetten"
+    "double_click_reset": "dubbelklik om te resetten",
+    "auto": "Auto",
+    "column_label": "Label",
+    "column_control": "Besturing",
+    "na": "n.v.t."
   },
-
   "status": {
     "ready": "Gereed",
     "training": "Training",
@@ -329,14 +368,13 @@
     "training_finished": "Training Voltooid",
     "ply_models_count": "PLY Modellen: {}"
   },
-
   "mode": {
     "empty": "Leeg",
     "dataset": "Dataset",
     "edit_mode": "Bewerk Modus",
-    "ply_models": "PLY Modellen:"
+    "ply_models": "PLY Modellen:",
+    "viewer": "Viewer"
   },
-
   "messages": {
     "no_data_loaded": "Geen data geladen",
     "use_file_menu": "Gebruik Bestand menu om te importeren",
@@ -346,20 +384,20 @@
     "training_stopped": "Training Gestopt",
     "training_error": "Training Fout",
     "param_manager_unavailable": "ParameterManager niet beschikbaar",
-    "failed_to_load_params": "Laden van params mislukt:"
+    "failed_to_load_params": "Laden van params mislukt:",
+    "err_distorted_images": "Vervormde beelden gedetecteerd. Activeer --gut of --undistort om te trainen met vervormde camera's.",
+    "err_ortho_not_supported": "Training met orthografisch cameramodel wordt nog niet ondersteund.",
+    "err_non_pinhole": "Activeer --gut of --undistort om te trainen met niet-pinhole camera's."
   },
-
   "controls": {
-    "wasd": "WASD:",
-    "zoom": "Zoom:"
+    "wasd": "WASD",
+    "zoom": "Zoom"
   },
-
   "preferences": {
     "title": "Voorkeuren",
     "language": "Taal:",
     "select_language": "Selecteer Taal"
   },
-
   "main_panel": {
     "windows": "Vensters",
     "scene_panel": "Scène Paneel",
@@ -410,9 +448,9 @@
     "selection_groups": "Selectie Groepen",
     "add_group": "+ Groep Toevoegen",
     "no_selection_groups": "Geen selectie groepen",
-    "clear": "Wissen"
+    "clear": "Wissen",
+    "mesh": "Mesh"
   },
-
   "toolbar": {
     "selection": "Selectie",
     "translate": "Verplaatsen",
@@ -444,9 +482,10 @@
     "gaussian_rings": "Gaussian Ringen",
     "center_markers": "Centrum Markeringen",
     "perspective": "Perspectief (O)",
-    "orthographic": "Orthografisch (O)"
+    "orthographic": "Orthografisch (O)",
+    "sequencer": "Sequencer",
+    "ellipsoid": "Ellipsoid"
   },
-
   "transform": {
     "node": "Node: %s",
     "space": "Ruimte: %s",
@@ -462,7 +501,6 @@
     "reset_transform": "Reset Transformatie",
     "nodes_selected": "%zu nodes geselecteerd"
   },
-
   "cropbox": {
     "title": "Bijsnijvak",
     "not_visible": "Bijsnijvak niet zichtbaar",
@@ -475,7 +513,6 @@
     "line_width": "Lijndikte",
     "instructions": "Enter: Bijsnijden bevestigen | Ctrl+C: Inhoud kopiëren"
   },
-
   "file_browser": {
     "title": "Bestandsbrowser",
     "quick_access": "Snelle Toegang",
@@ -490,7 +527,6 @@
     "load_ply": "PLY Laden",
     "enter_dir": "Map Openen"
   },
-
   "training_panel": {
     "start_training": "Start Training",
     "resume_training": "Hervat Training",
@@ -499,7 +535,7 @@
     "stop": "Stop Training",
     "reset": "Reset Training",
     "clear": "Wissen",
-    "switch_edit_mode": "Schakel naar Bewerk Modus",
+    "switch_edit_mode": "Bewerkingsmodus",
     "save_checkpoint": "Controlepunt Opslaan",
     "checkpoint_saved": "Controlepunt opgeslagen!",
     "idle": "Inactief",
@@ -509,16 +545,17 @@
     "new_step": "Nieuwe Stap",
     "no_save_steps": "Geen bewaar stappen geconfigureerd",
     "sparsity": "Sparsity Instellingen",
-    "pruning_growing": "Snoeien/Groeien"
+    "pruning_growing": "Snoeien/Groeien",
+    "no_trainer_loaded": "Geen trainer geladen",
+    "parameters_unavailable": "Parameters niet beschikbaar",
+    "no_dataset_loaded": "Geen dataset geladen",
+    "iters_per_sec": "iter/s"
   },
-
   "tooltip": {
     "gut_mode": "Voor fisheye/vervormde/equirectangulaire camera's",
     "mip_filter": "Verminder aliasing voor sub-pixel Gaussians",
     "appearance_correction": "PPISP Correction",
     "ppisp_mode": "Mode",
-    "ppisp_mode_manual": "Manual",
-    "ppisp_mode_auto": "Auto (Controller)",
     "ppisp_exposure": "Adjust exposure in EV stops",
     "ppisp_gamma": "Gammacurve aanpassen",
     "ppisp_color_rgb": "Chromaticiteit verschuiven voor dit kleurkanaal",
@@ -545,14 +582,12 @@
     "point_cloud_mode": "Render als punten in plaats van splats",
     "selection_colors": "Kleuren voor selectie visualisatie"
   },
-
   "exit_popup": {
     "title": "Applicatie Afsluiten?",
     "message": "Weet u zeker dat u wilt afsluiten?",
     "unsaved_warning": "Alle niet-opgeslagen wijzigingen gaan verloren.",
     "exit": "Afsluiten"
   },
-
   "load_dataset_popup": {
     "title": "Dataset Laden",
     "configure_paths": "Dataset paden configureren",
@@ -560,9 +595,9 @@
     "sparse_dir": "Sparse:      ",
     "masks_dir": "Maskers:     ",
     "output_dir": "Output:      ",
+    "init_file": "Init file (optioneel, vervangt points3D):",
     "help_text": "Checkpoints, logs en geëxporteerde modellen worden opgeslagen in de output map."
   },
-
   "notification": {
     "cannot_open": "Kan niet openen",
     "dropped_not_recognized": "Het gesleepte",
@@ -571,7 +606,6 @@
     "items": "items",
     "and_more": "... en"
   },
-
   "export_dialog": {
     "format": "FORMAAT",
     "models": "MODELLEN",
@@ -579,12 +613,10 @@
     "sh_degree": "SH DEGREE",
     "export_merged": "Exporteer Samengevoegd..."
   },
-
   "selection_group": {
     "lock": "Vergrendelen",
     "unlock": "Ontgrendelen"
   },
-
   "file_browser_ext": {
     "dataset": "[Dataset]",
     "sog": "[SOG]",
@@ -594,11 +626,11 @@
     "sog_meta": "(SOG meta.json)",
     "error": "Fout:"
   },
-
   "progress": {
     "loss": "Verlies:",
     "gaussians_count": "%s Gaussians",
     "exporting": "Exporteren %s...",
+    "exporting_video": "Video exporteren...",
     "importing": "Importeren %s...",
     "import_complete": "Import voltooid: %zu afbeeldingen, %zu punten",
     "import_failed": "Import mislukt: %s",
@@ -607,7 +639,6 @@
     "num_splats": "aantal Splats: %s",
     "status_label": "Status: %s"
   },
-
   "input_settings": {
     "active_profile": "Actief Profiel:",
     "save_current_profile": "Huidig Profiel Opslaan",
@@ -639,9 +670,13 @@
     "mode.scale": "Schalen",
     "mode.align": "Uitlijn Gereedschap",
     "mode.crop_box": "Bijsnijvak",
-    "mode.unknown": "Onbekend"
+    "mode.unknown": "Onbekend",
+    "title": "INVOERINSTELLINGEN",
+    "save_hint": "Opslaan om aangepaste bindings te bewaren",
+    "double_click_hint": "Tip: dubbelklik om dubbelklikactie te binden",
+    "export_dialog_title": "Invoerbindingen exporteren",
+    "import_dialog_title": "Invoerbindingen importeren"
   },
-
   "debug_info": {
     "free_memory": "Vrij: %.2f GB",
     "enable_tracing": "Schakel Operatie Tracing In",
@@ -649,7 +684,6 @@
     "clear_history": "Geschiedenis Wissen",
     "print_to_log": "Afdrukken naar Log"
   },
-
   "training_params": {
     "strategy": "Strategy:",
     "iterations": "Iterations:",
@@ -663,8 +697,10 @@
     "opacity_penalty_weight": "  Opacity Penalty Weight:",
     "opacity_penalty_power": "  Opacity Penalty Power:",
     "mask_threshold": "  Mask Threshold:",
+    "use_alpha_as_mask": "Use Alpha as Mask:",
     "sparsity": "Sparsity:",
     "gut": "GUT:",
+    "undistort": "Undistort:",
     "mip_filter": "Mip Filter:",
     "bg_settings": "Achtergrond Instellingen",
     "bg_mode": "Modus:",
@@ -702,8 +738,10 @@
     "ppisp_freeze_gaussians": "Gaussians bevriezen:",
     "disabled": "Uitgeschakeld"
   },
-
   "image_preview": {
+    "image_section": "AFBEELDING",
+    "file_section": "BESTAND",
+    "view_section": "WEERGAVE",
     "view": "Weergave",
     "navigate": "Navigeren",
     "fit_to_window": "Aanpassen aan Venster",
@@ -738,9 +776,12 @@
     "file_label": "Bestand: %s",
     "visible": "Zichtbaar",
     "hidden": "Verborgen",
-    "mask_section": "MASKER"
+    "mask_section": "MASKER",
+    "no_images_loaded": "Geen afbeeldingen geladen",
+    "no_image": "Geen afbeelding",
+    "zoom": "Zoom",
+    "fit": "Passend"
   },
-
   "startup": {
     "supported_by": "Ondersteund door",
     "click_to_continue": "Klik ergens om door te gaan",
@@ -750,14 +791,12 @@
     "drop_to_import": "Loslaten om te importeren",
     "drop_to_import_subtitle": "PLY, SOG, COLMAP dataset of Project"
   },
-
   "axis": {
     "x": "X:",
     "y": "Y:",
     "z": "Z:",
     "u": "U:"
   },
-
   "resume_checkpoint_popup": {
     "title": "Checkpoint Hervatten",
     "checkpoint": "CHECKPOINT",
@@ -770,7 +809,20 @@
     "output_path": "Uitvoer Pad:",
     "help_text": "Het dataset-pad dat in het checkpoint is opgeslagen, is mogelijk gewijzigd. Werk het indien nodig bij."
   },
-
+  "mesh2splat": {
+    "title": "Mesh naar Splat",
+    "source_mesh": "Bronmesh",
+    "no_meshes": "Geen meshes geladen",
+    "convert": "Converteren",
+    "gaussian_scale": "Gaussian Scale",
+    "tooltip_gaussian_scale": "Standaardafwijking van elke Gaussian. Regelt de visuele spreiding.",
+    "sampling_density_header": "Instellingen bemonsteringsdichtheid",
+    "sampling_density": "Sampling Density",
+    "tooltip_quality": "Regelt hoe dicht het mesh-oppervlak wordt bemonsterd. Hogere waarden produceren meer Gaussians.",
+    "max_resolution": "Max Resolution",
+    "tooltip_max_resolution": "Maximale resolutie voor het bemonsteringsraster. Hogere waarden maken fijnere bemonstering mogelijk bij kwaliteit 1.0.",
+    "effective_resolution": "Effectieve resolutie"
+  },
   "disk_space_dialog": {
     "title": "Onvoldoende Schijfruimte",
     "error_label": "Fout",
@@ -785,5 +837,164 @@
     "change_location": "Locatie Wijzigen",
     "retry": "Opnieuw Proberen",
     "select_output_location": "Selecteer Uitvoerlocatie"
+  },
+  "video_extractor": {
+    "title": "Frames uit video extraheren",
+    "select_preview": "Selecteer een videobestand voor voorbeeld",
+    "step_backward": "Stap achteruit",
+    "step_forward": "Stap vooruit",
+    "pause": "Pauze (Spatie)",
+    "play": "Afspelen (Spatie)",
+    "trim_range": "Trimbereik:",
+    "set": "Instellen",
+    "set_start": "Start instellen op huidige positie",
+    "set_end": "Einde instellen op huidige positie",
+    "reset": "Herstellen",
+    "estimated_frames": "(~%d frames)",
+    "input_video": "Invoervideo",
+    "video": "Video:",
+    "no_file": "Geen bestand geselecteerd",
+    "browse": "Bladeren...",
+    "output": "Uitvoer:",
+    "no_dir": "Geen map geselecteerd",
+    "select_folder": "Uitvoermap selecteren",
+    "settings": "Extractie-instellingen",
+    "mode": "Modus:",
+    "mode_fps": "FPS-gebaseerd",
+    "mode_interval": "Frame-interval",
+    "fps_label": "FPS",
+    "fps_tooltip": "Frames extraheren met dit tempo",
+    "every_label": "Elke",
+    "frames_format": "%d frames",
+    "interval_tooltip": "Elke N-de frame extraheren",
+    "output_format": "Uitvoerformaat",
+    "format": "Formaat:",
+    "format_png": "PNG (verliesvrij)",
+    "format_jpeg": "JPEG (kleiner)",
+    "quality_label": "Kwaliteit",
+    "resolution": "Resolutie",
+    "resolution_label": "Resolutie:",
+    "res_original": "Origineel",
+    "res_scale": "Schaal",
+    "res_custom": "Aangepast",
+    "width": "Breedte",
+    "height": "Hoogte",
+    "output_res": "Uitvoer: %dx%d",
+    "naming": "Uitvoernaamgeving",
+    "pattern": "Patroon:",
+    "pattern_tooltip": "Gebruik %%d voor framenummer (bijv. frame_%%04d voor opvulling met nullen)",
+    "example": "Voorbeeld: %s%s",
+    "start": "Extractie starten",
+    "cancel": "Annuleren",
+    "select_both": "Selecteer video en uitvoermap",
+    "extracting": "Extraheren: %d / %d frames",
+    "starting": "Extractie wordt gestart...",
+    "complete": "Extractie succesvol voltooid!",
+    "extracted": "%d frames geëxtraheerd",
+    "ok": "OK",
+    "error": "Fout: %s",
+    "dismiss": "Sluiten"
+  },
+  "plugin_marketplace": {
+    "title_line": "Bekijk installeerbare plug-ins uit het plugin-register.",
+    "warning_body": "WAARSCHUWING: LFS keurt niet direct goed en neemt geen verantwoordelijkheid. Gebruik op eigen risico.",
+    "filter_label": "Filter",
+    "sort_label": "Sorteren",
+    "filter.all": "Alle",
+    "filter.installed": "Geïnstalleerd",
+    "filter.not_installed": "Niet geïnstalleerd",
+    "sort.popularity_desc": "Populariteit: hoog -> laag",
+    "sort.popularity_asc": "Populariteit: laag -> hoog",
+    "sort.name_asc": "Naam: A -> Z",
+    "sort.name_desc": "Naam: Z -> A",
+    "loading": "Plugin-register ophalen...",
+    "no_plugins": "Geen plugins beschikbaar.",
+    "edit_list_hint": "Controleer uw registerconfiguratie of internetverbinding.",
+    "unknown_plugin": "Onbekende plug-in",
+    "no_description": "Geen beschrijving beschikbaar.",
+    "stars": "Sterren",
+    "downloads": "Downloads",
+    "invalid_link": "Ongeldige link",
+    "button.install": "Installeren",
+    "button.github": "GitHub",
+    "local_install": "Lokale installatie",
+    "confirm_uninstall_title": "Verwijderen van plugin bevestigen",
+    "confirm_uninstall_message": "Weet je zeker dat je \"{name}\" wilt verwijderen?",
+    "confirm_uninstall_yes": "Ja",
+    "confirm_uninstall_no": "Nee",
+    "load_on_startup": "Laden bij opstarten"
+  },
+  "sequencer": {
+    "edit_focal_length": "Brandpuntsafstand bewerken...",
+    "edit_focal_length_title": "Brandpuntsafstand bewerken",
+    "focal_length_mm": "Brandpuntsafstand (mm)"
+  },
+  "rendering_panel": {
+    "fov_format": "FOV: {hfov:.1f}° H / {vfov:.1f}° V"
+  },
+  "scripts_panel": {
+    "actions": "Acties",
+    "reload_all": "Alles herladen",
+    "clear_all": "Alles wissen",
+    "no_scripts_loaded": "Geen Python-scripts geladen.",
+    "load_hint": "Gebruik --python-script <pad> om scripts te laden.",
+    "loaded_scripts": "Geladen scripts:",
+    "path": "Pad",
+    "error": "Fout",
+    "reload": "Herladen"
+  },
+  "status_bar": {
+    "gt_compare": "GT-vergelijking",
+    "camera": "Cam {cam_id}",
+    "split": "Splitsing:",
+    "gpu": "GPU",
+    "strategy_default": "Standaard"
+  },
+  "plugin_manager": {
+    "section.install_from_github": "Installeren vanaf GitHub",
+    "section.installed_plugins": "Geinstalleerde plugins",
+    "github_url_or_shorthand": "GitHub-URL of verkorte vorm:",
+    "supported_formats": "Ondersteunde formaten",
+    "working": "Bezig...",
+    "output": "Uitvoer",
+    "button.install_plugin": "Plugin installeren",
+    "button.explore_options": "Opties verkennen",
+    "button.reload": "Herladen",
+    "button.unload": "Uitladen",
+    "button.load": "Laden",
+    "button.update": "Bijwerken",
+    "button.uninstall": "Verwijderen",
+    "no_plugins_installed": "Geen plugins geinstalleerd",
+    "version": "Versie",
+    "description": "Beschrijving",
+    "status": "Status",
+    "status_not_loaded": "niet geladen",
+    "error.enter_github_url": "Voer een GitHub-URL in",
+    "status.installed": "Geïnstalleerd: {}",
+    "status.install_failed": "Installatie mislukt",
+    "status.loaded": "Geladen: {name}",
+    "status.load_failed": "Laden mislukt",
+    "status.unloaded": "Ontladen: {name}",
+    "status.unload_failed": "Ontladen mislukt",
+    "status.reloaded": "Herladen: {name}",
+    "status.reload_failed": "Herladen mislukt",
+    "status.updated": "Bijgewerkt: {name}",
+    "status.update_failed": "Bijwerken mislukt",
+    "status.uninstalled": "Verwijderd: {name}",
+    "status.uninstall_failed": "Verwijderen mislukt",
+    "status.unloading": "Unloading {name}...",
+    "status.uninstalling": "Uninstalling {name}..."
+  },
+  "ellipsoid": {
+    "title": "Ellipsoid",
+    "not_visible": "Ellipsoid not visible",
+    "no_selection": "No ellipsoid selected",
+    "invalid": "Invalid ellipsoid",
+    "position": "Position",
+    "rotation": "Rotation",
+    "radii": "Radii",
+    "appearance": "Appearance",
+    "line_width": "Line Width",
+    "instructions": "Enter: Commit selection | Ctrl+C: Copy contents"
   }
 }

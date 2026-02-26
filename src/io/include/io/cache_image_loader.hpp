@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "core/export.hpp"
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -15,7 +16,8 @@
 
 namespace lfs::core {
     class Tensor;
-}
+    struct UndistortParams;
+} // namespace lfs::core
 
 namespace lfs::io {
 
@@ -38,6 +40,7 @@ namespace lfs::io {
         int resize_factor = 1;
         int max_width = 0;
         void* cuda_stream = nullptr;
+        const lfs::core::UndistortParams* undistort = nullptr;
     };
 
     struct CachedImageData {
@@ -57,7 +60,7 @@ namespace lfs::io {
         std::chrono::steady_clock::time_point last_access;
     };
 
-    class CacheLoader {
+    class LFS_IO_API CacheLoader {
     public:
         enum class CacheMode { Undetermined,
                                NoCache,

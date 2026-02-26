@@ -5,6 +5,7 @@
 #pragma once
 
 #include "core/camera.hpp"
+#include "core/export.hpp"
 #include "core/parameters.hpp"
 #include "training/trainer.hpp"
 #include "training_state.hpp"
@@ -15,13 +16,16 @@
 #include <stop_token>
 #include <thread>
 
+namespace lfs::core {
+    class Scene;
+}
+
 namespace lfs::vis {
 
     // Forward declarations
     class VisualizerImpl;
-    class Scene;
 
-    class TrainerManager {
+    class LFS_VIS_API TrainerManager {
     public:
         // Legacy State enum for backwards compatibility
         // Use TrainingState from training_state.hpp for new code
@@ -48,7 +52,8 @@ namespace lfs::vis {
         void setViewer(VisualizerImpl* viewer) { viewer_ = viewer; }
 
         // Link to scene for data access (Scene-based trainer mode)
-        void setScene(Scene* scene) { scene_ = scene; }
+        void setScene(core::Scene* scene) { scene_ = scene; }
+        [[nodiscard]] const core::Scene* getScene() const { return scene_; }
 
         // Training control
         bool startTraining();
@@ -56,7 +61,6 @@ namespace lfs::vis {
         void resumeTraining();
         void stopTraining();
         void requestSaveCheckpoint();
-        bool resetTraining();
 
         // Temporary pause (for camera movement - doesn't change UI state)
         void pauseTrainingTemporary();
@@ -110,7 +114,8 @@ namespace lfs::vis {
 
         // Camera access
         std::shared_ptr<const lfs::core::Camera> getCamById(int camId) const;
-        std::vector<std::shared_ptr<const lfs::core::Camera>> getCamList() const;
+        std::vector<std::shared_ptr<lfs::core::Camera>> getCamList() const;
+        std::vector<std::shared_ptr<lfs::core::Camera>> getAllCamList() const;
 
         // Pending parameters (editable in Ready state, applied on start)
         lfs::core::param::OptimizationParameters& getEditableOptParams() { return pending_opt_params_; }
@@ -136,7 +141,7 @@ namespace lfs::vis {
         std::unique_ptr<lfs::training::Trainer> trainer_;
         std::unique_ptr<std::jthread> training_thread_;
         VisualizerImpl* viewer_ = nullptr;
-        Scene* scene_ = nullptr;
+        core::Scene* scene_ = nullptr;
 
         // State machine (single source of truth for state)
         TrainingStateMachine state_machine_;
@@ -148,7 +153,7 @@ namespace lfs::vis {
         std::mutex completion_mutex_;
         bool training_complete_ = false;
 
-        // Loss buffer
+        static constexpr int COMPLETION_TIMEOUT_SEC = 30;
         static constexpr int MAX_LOSS_POINTS = 200;
         std::deque<float> loss_buffer_;
         mutable std::mutex loss_buffer_mutex_;

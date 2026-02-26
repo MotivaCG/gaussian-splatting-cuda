@@ -11,28 +11,36 @@ using namespace lfs::training;
 
 namespace {
 
-    size_t get_free_vram() {
-        size_t free_bytes, total_bytes;
-        cudaMemGetInfo(&free_bytes, &total_bytes);
-        return free_bytes;
-    }
-
     size_t get_used_vram() {
         size_t free_bytes, total_bytes;
         cudaMemGetInfo(&free_bytes, &total_bytes);
         return total_bytes - free_bytes;
     }
 
+    void run_photometric_distillation_step(PPISPController& controller, PPISP& ppisp,
+                                           const Tensor& rendered_rgb, const Tensor& gt_image, int cam_idx) {
+        auto pred = controller.predict(rendered_rgb.unsqueeze(0), 1.0f);
+        auto isp_output = ppisp.apply_with_controller_params(rendered_rgb, pred, cam_idx);
+
+        // L1 photometric loss and gradient
+        auto diff = isp_output.sub(gt_image);
+        auto tile_grad = diff.sign();
+
+        auto ctrl_grad = ppisp.backward_with_controller_params(rendered_rgb, tile_grad, pred, cam_idx);
+        controller.backward(ctrl_grad);
+        controller.optimizer_step();
+        controller.zero_grad();
+        controller.scheduler_step();
+    }
+
 } // namespace
 
-// Simulate the controller distillation loop to check for memory leaks
 TEST(PPISPControllerMemoryTest, DistillationLoopNoLeak) {
     constexpr int NUM_CAMERAS = 10;
     constexpr int NUM_ITERATIONS = 1000;
     constexpr int IMAGE_H = 544;
     constexpr int IMAGE_W = 816;
 
-    // Create PPISP and controllers
     PPISP ppisp(30000);
     for (int i = 0; i < NUM_CAMERAS; ++i) {
         ppisp.register_frame(i, i);
@@ -44,39 +52,23 @@ TEST(PPISPControllerMemoryTest, DistillationLoopNoLeak) {
     }
     PPISPController::preallocate_shared_buffers(IMAGE_H, IMAGE_W);
 
-    // Warm up - do a few iterations to stabilize memory
-    auto input = Tensor::uniform({1, 3, IMAGE_H, IMAGE_W}, 0.0f, 1.0f, Device::CUDA);
+    auto rendered = Tensor::uniform({3, IMAGE_H, IMAGE_W}, 0.0f, 1.0f, Device::CUDA);
+    auto gt = Tensor::uniform({3, IMAGE_H, IMAGE_W}, 0.0f, 1.0f, Device::CUDA);
+
+    // Warm up
     for (int i = 0; i < 10; ++i) {
         int cam_idx = i % NUM_CAMERAS;
-        auto pred = controllers[cam_idx]->predict(input, 1.0f);
-        auto target = ppisp.get_params_for_frame(cam_idx);
-        auto loss = controllers[cam_idx]->distillation_loss(pred, target);
-        controllers[cam_idx]->compute_mse_gradient(pred, target);
-        controllers[cam_idx]->backward(controllers[cam_idx]->get_mse_gradient());
-        controllers[cam_idx]->optimizer_step();
-        controllers[cam_idx]->zero_grad();
-        controllers[cam_idx]->scheduler_step();
+        run_photometric_distillation_step(*controllers[cam_idx], ppisp, rendered, gt, cam_idx);
     }
     cudaDeviceSynchronize();
 
-    // Record baseline VRAM
     const size_t baseline_vram = get_used_vram();
     std::cout << "Baseline VRAM: " << baseline_vram / (1024 * 1024) << " MB" << std::endl;
 
-    // Run many iterations
     for (int iter = 0; iter < NUM_ITERATIONS; ++iter) {
         int cam_idx = iter % NUM_CAMERAS;
+        run_photometric_distillation_step(*controllers[cam_idx], ppisp, rendered, gt, cam_idx);
 
-        auto pred = controllers[cam_idx]->predict(input, 1.0f);
-        auto target = ppisp.get_params_for_frame(cam_idx);
-        auto loss = controllers[cam_idx]->distillation_loss(pred, target);
-        controllers[cam_idx]->compute_mse_gradient(pred, target);
-        controllers[cam_idx]->backward(controllers[cam_idx]->get_mse_gradient());
-        controllers[cam_idx]->optimizer_step();
-        controllers[cam_idx]->zero_grad();
-        controllers[cam_idx]->scheduler_step();
-
-        // Check VRAM every 100 iterations
         if ((iter + 1) % 100 == 0) {
             cudaDeviceSynchronize();
             size_t current_vram = get_used_vram();
@@ -93,11 +85,9 @@ TEST(PPISPControllerMemoryTest, DistillationLoopNoLeak) {
     std::cout << "Memory growth: " << leak / (1024 * 1024) << " MB over " << NUM_ITERATIONS << " iterations"
               << std::endl;
 
-    // Allow up to 50MB growth (cache warming)
     EXPECT_LT(leak, 50 * 1024 * 1024) << "Memory leak detected: " << leak / (1024 * 1024) << " MB";
 }
 
-// Test with varying image sizes (simulates different cameras)
 TEST(PPISPControllerMemoryTest, VaryingImageSizesNoLeak) {
     constexpr int NUM_ITERATIONS = 500;
 
@@ -114,13 +104,9 @@ TEST(PPISPControllerMemoryTest, VaryingImageSizesNoLeak) {
     // Warm up
     for (int i = 0; i < 20; ++i) {
         auto [h, w] = sizes[i % sizes.size()];
-        auto input = Tensor::uniform({1, 3, static_cast<size_t>(h), static_cast<size_t>(w)}, 0.0f, 1.0f, Device::CUDA);
-        auto pred = controller.predict(input, 1.0f);
-        auto target = ppisp.get_params_for_frame(0);
-        controller.compute_mse_gradient(pred, target);
-        controller.backward(controller.get_mse_gradient());
-        controller.optimizer_step();
-        controller.zero_grad();
+        auto rendered = Tensor::uniform({3, static_cast<size_t>(h), static_cast<size_t>(w)}, 0.0f, 1.0f, Device::CUDA);
+        auto gt = Tensor::uniform({3, static_cast<size_t>(h), static_cast<size_t>(w)}, 0.0f, 1.0f, Device::CUDA);
+        run_photometric_distillation_step(controller, ppisp, rendered, gt, 0);
     }
     cudaDeviceSynchronize();
 
@@ -129,13 +115,9 @@ TEST(PPISPControllerMemoryTest, VaryingImageSizesNoLeak) {
 
     for (int iter = 0; iter < NUM_ITERATIONS; ++iter) {
         auto [h, w] = sizes[iter % sizes.size()];
-        auto input = Tensor::uniform({1, 3, static_cast<size_t>(h), static_cast<size_t>(w)}, 0.0f, 1.0f, Device::CUDA);
-        auto pred = controller.predict(input, 1.0f);
-        auto target = ppisp.get_params_for_frame(0);
-        controller.compute_mse_gradient(pred, target);
-        controller.backward(controller.get_mse_gradient());
-        controller.optimizer_step();
-        controller.zero_grad();
+        auto rendered = Tensor::uniform({3, static_cast<size_t>(h), static_cast<size_t>(w)}, 0.0f, 1.0f, Device::CUDA);
+        auto gt = Tensor::uniform({3, static_cast<size_t>(h), static_cast<size_t>(w)}, 0.0f, 1.0f, Device::CUDA);
+        run_photometric_distillation_step(controller, ppisp, rendered, gt, 0);
     }
 
     cudaDeviceSynchronize();
@@ -143,6 +125,5 @@ TEST(PPISPControllerMemoryTest, VaryingImageSizesNoLeak) {
     const size_t leak = final_vram > baseline_vram ? final_vram - baseline_vram : 0;
     std::cout << "Memory growth (varying sizes): " << leak / (1024 * 1024) << " MB" << std::endl;
 
-    // Varying sizes will cause more cache growth, allow 100MB
     EXPECT_LT(leak, 100 * 1024 * 1024) << "Memory leak detected: " << leak / (1024 * 1024) << " MB";
 }

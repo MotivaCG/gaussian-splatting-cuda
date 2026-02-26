@@ -8,26 +8,30 @@
 #include "components/ppisp_controller_pool.hpp"
 #include "components/ppisp_file.hpp"
 #include "components/sparsity_optimizer.hpp"
+#include "control/command_api.hpp"
+#include "control/control_boundary.hpp"
 #include "core/cuda/memory_arena.hpp"
 #include "core/events.hpp"
 #include "core/image_io.hpp"
 #include "core/logger.hpp"
 #include "core/path_utils.hpp"
-#include "core/splat_data_export.hpp"
+#include "core/scene.hpp"
 #include "core/splat_data_transform.hpp"
-#include "core/tensor/internal/memory_pool.hpp"
 #include "io/cache_image_loader.hpp"
 #include "io/exporter.hpp"
 #include "io/filesystem_utils.hpp"
 #include "lfs/kernels/ssim.cuh"
 #include "losses/losses.hpp"
 #include "optimizer/adam_optimizer.hpp"
+#include "python/runner.hpp"
 #include "rasterization/fast_rasterizer.hpp"
 #include "rasterization/gsplat_rasterizer.hpp"
 #include "strategies/adc.hpp"
 #include "strategies/mcmc.hpp"
+#include "strategies/strategy_factory.hpp"
 #include "training/kernels/grad_alpha.hpp"
-#include "visualizer/scene/scene.hpp"
+
+#include <filesystem>
 
 #include <atomic>
 #include <cmath>
@@ -36,6 +40,7 @@
 #include <expected>
 #include <memory>
 #include <nvtx3/nvToolsExt.h>
+#include <thread>
 
 #include "smn/mask_penalty.hpp" //matting modes
 #include "smn/mask_pruning.hpp"
@@ -220,9 +225,8 @@ namespace lfs::training {
         const lfs::core::Tensor& rendered,
         const lfs::core::Tensor& gt_image,
         const lfs::core::param::OptimizationParameters& opt_params) {
-        lfs::training::losses::PhotometricLoss photometric_loss;
         lfs::training::losses::PhotometricLoss::Params params{.lambda_dssim = opt_params.lambda_dssim};
-        auto result = photometric_loss.forward(rendered, gt_image, params);
+        auto result = photometric_loss_.forward(rendered, gt_image, params);
         if (!result) {
             return std::unexpected(result.error());
         }
@@ -233,6 +237,12 @@ namespace lfs::training {
     std::expected<void, std::string> Trainer::validate_masks() {
         const auto& opt = params_.optimization;
         if (opt.mask_mode == lfs::core::param::MaskMode::None) {
+            return {};
+        }
+
+        const bool alpha_available = scene_ && scene_->imagesHaveAlpha();
+        if (opt.use_alpha_as_mask && alpha_available) {
+            LOG_INFO("Using alpha channel as mask source{}", opt.invert_masks ? " (inverted)" : "");
             return {};
         }
 
@@ -287,15 +297,12 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                 }
             } else {
                 // Pure L1 with mask (no SSIM)
-                const Tensor mask_expanded = mask_2d.unsqueeze(0).expand({static_cast<int>(rendered.shape()[0]),
-                                                                          static_cast<int>(mask_2d.shape()[0]),
-                                                                          static_cast<int>(mask_2d.shape()[1])});
-                const Tensor mask_sum = mask_expanded.sum() + EPSILON;
-
-                const Tensor l1_diff = (rendered - gt_image).abs();
-                const Tensor masked_l1 = (l1_diff * mask_expanded).sum() / mask_sum;
-                const Tensor sign_diff = (rendered - gt_image).sign();
-                grad = sign_diff * mask_expanded / mask_sum;
+                const Tensor mask_3d = mask_2d.unsqueeze(0);
+                const Tensor mask_sum = mask_2d.sum() * static_cast<float>(rendered.shape()[0]) + EPSILON;
+                const Tensor diff = rendered - gt_image;
+                const Tensor masked_l1 = (diff.abs() * mask_3d).sum() / mask_sum;
+                const Tensor sign_diff = diff.sign();
+                grad = sign_diff * mask_3d / mask_sum;
                 loss = masked_l1;
             }
 
@@ -313,9 +320,8 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
 
         } else if (mode == param::MaskMode::AlphaConsistent) {
             // Standard photometric loss
-            lfs::training::losses::PhotometricLoss photo_loss_fn;
             const lfs::training::losses::PhotometricLoss::Params params{.lambda_dssim = opt_params.lambda_dssim};
-            auto result = photo_loss_fn.forward(rendered, gt_image, params);
+            auto result = photometric_loss_.forward(rendered, gt_image, params);
             if (!result) {
                 return std::unexpected(result.error());
             }
@@ -577,10 +583,8 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
         LOG_DEBUG("Trainer constructed with {} cameras", base_dataset_->get_cameras().size());
     }
 
-    // New constructor - Scene owns all data
-    Trainer::Trainer(lfs::vis::Scene& scene)
+    Trainer::Trainer(lfs::core::Scene& scene)
         : scene_(&scene) {
-        // Check CUDA availability
         int device_count = 0;
         cudaError_t error = cudaGetDeviceCount(&device_count);
         if (error != cudaSuccess || device_count == 0) {
@@ -589,12 +593,11 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
 
         cudaStreamCreateWithFlags(&callback_stream_, cudaStreamNonBlocking);
 
-        // Datasets will be created in initialize() from Scene cameras
-        if (!scene.getTrainCameras()) {
-            throw std::runtime_error("Scene has no train cameras");
+        if (!scene.hasTrainingData()) {
+            throw std::runtime_error("Scene has no cameras");
         }
 
-        LOG_DEBUG("Trainer constructed from Scene with {} cameras", scene.getTrainCameras()->get_cameras().size());
+        LOG_DEBUG("Trainer constructed from Scene with {} cameras", scene.getAllCameras().size());
     }
 
     std::expected<void, std::string> Trainer::initialize(const lfs::core::param::TrainingParameters& params) {
@@ -619,17 +622,14 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
             dataset_config.max_width = params.dataset.max_width;
             dataset_config.test_every = params.dataset.test_every;
 
-            // Get source cameras - from Scene (new mode) or base_dataset_ (legacy mode)
+            // Get source cameras from Scene nodes or base_dataset_
             std::vector<std::shared_ptr<lfs::core::Camera>> source_cameras;
             if (scene_) {
-                // Scene mode: get cameras from Scene
-                auto scene_dataset = scene_->getTrainCameras();
-                if (!scene_dataset) {
-                    return std::unexpected("Scene has no train cameras");
+                source_cameras = scene_->getActiveCameras();
+                if (source_cameras.empty()) {
+                    return std::unexpected("Scene has no active cameras enabled for training");
                 }
-                source_cameras = scene_dataset->get_cameras();
             } else if (base_dataset_) {
-                // Legacy mode: use base_dataset_
                 source_cameras = base_dataset_->get_cameras();
             } else {
                 return std::unexpected("No camera source available");
@@ -667,13 +667,12 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                     return std::unexpected("Scene has no training model set");
                 }
 
-                if (params.optimization.strategy == "mcmc") {
-                    strategy_ = std::make_unique<MCMC>(*model);
-                    LOG_DEBUG("Created MCMC strategy from Scene model");
-                } else {
-                    strategy_ = std::make_unique<ADC>(*model);
-                    LOG_DEBUG("Created ADC strategy from Scene model");
+                auto result = StrategyFactory::instance().create(params.optimization.strategy, *model);
+                if (!result) {
+                    return std::unexpected(result.error());
                 }
+                strategy_ = std::move(*result);
+                LOG_DEBUG("Created {} strategy from Scene model", params.optimization.strategy);
             }
 
             auto& splat = strategy_->get_model();
@@ -706,6 +705,27 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
             // Validate masks if mask mode is enabled
             if (auto result = validate_masks(); !result) {
                 return std::unexpected(result.error());
+            }
+
+            // Apply undistortion to camera intrinsics (params already precomputed at load time)
+            if (params.optimization.undistort) {
+                int prepared = 0;
+                for (auto& cam : train_dataset_->get_cameras()) {
+                    if (cam && cam->has_distortion()) {
+                        cam->prepare_undistortion();
+                        ++prepared;
+                    }
+                }
+                if (val_dataset_) {
+                    for (auto& cam : val_dataset_->get_cameras()) {
+                        if (cam && cam->has_distortion()) {
+                            cam->prepare_undistortion();
+                        }
+                    }
+                }
+                if (prepared > 0) {
+                    LOG_INFO("Prepared undistortion for {} cameras", prepared);
+                }
             }
 
             // Initialize sparsity optimizer
@@ -839,6 +859,28 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                 LOG_INFO("Starting from iteration: {}", current_iteration_.load());
             }
 
+            // Expose initial snapshot for Python control (iteration 0)
+            {
+                lfs::training::HookContext ctx{
+                    .iteration = current_iteration_.load(),
+                    .loss = current_loss_.load(),
+                    .num_gaussians = strategy_ ? strategy_->get_model().size() : 0,
+                    .is_refining = strategy_ ? strategy_->is_refining(current_iteration_.load()) : false,
+                    .trainer = this};
+                lfs::training::CommandCenter::instance().set_phase(lfs::training::TrainingPhase::SafeControl);
+                lfs::training::CommandCenter::instance().update_snapshot(
+                    ctx, params_.optimization.iterations, is_paused_.load(), is_running_.load(), stop_requested_.load(),
+                    lfs::training::TrainingPhase::SafeControl);
+            }
+
+            // Execute configured Python scripts to register iteration callbacks
+            if (!python_scripts_.empty()) {
+                auto py_result = lfs::python::run_scripts(python_scripts_);
+                if (!py_result) {
+                    return std::unexpected(std::format("Failed to run Python scripts: {}", py_result.error()));
+                }
+            }
+
             initialized_ = true;
             LOG_INFO("Trainer initialization complete");
             return {};
@@ -881,8 +923,8 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
         val_dataset_.reset();
 
         // Release GPU memory pools back to system
-        lfs::core::CudaMemoryPool::instance().trim_cached_memory();
-        lfs::core::GlobalArenaManager::instance().get_arena().emergency_cleanup();
+        lfs::core::Tensor::trim_memory_pool();
+        lfs::core::GlobalArenaManager::instance().get_arena().full_reset();
         cudaDeviceSynchronize();
         LOG_DEBUG("GPU memory released");
 
@@ -1077,7 +1119,7 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
             bg_mix_buffer_ = lfs::core::Tensor::empty({3}, lfs::core::Device::CUDA, lfs::core::DataType::Float32);
         }
 
-        cudaMemcpyAsync(bg_mix_buffer_.ptr<float>(), result, sizeof(result), cudaMemcpyHostToDevice, nullptr);
+        cudaMemcpyAsync(bg_mix_buffer_.ptr<float>(), result, sizeof(result), cudaMemcpyHostToDevice, bg_mix_buffer_.stream());
         return bg_mix_buffer_;
     }
 
@@ -1201,8 +1243,7 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
             channels,
             src_h, src_w,
             height, width,
-            nullptr // default stream
-        );
+            resized.stream());
 
         // Cache the resized image
         bg_image_cache_[cache_key] = resized;
@@ -1225,7 +1266,7 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
             random_bg_buffer_.ptr<float>(),
             height, width,
             static_cast<uint64_t>(iteration),
-            nullptr);
+            random_bg_buffer_.stream());
 
         return random_bg_buffer_;
     }
@@ -1245,13 +1286,13 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                 if (cam->camera_model_type() == core::CameraModelType::ORTHO) {
                     return std::unexpected("Training on cameras with ortho model is not supported yet.");
                 }
-            } else {
+            } else if (!params_.optimization.undistort || !cam->is_undistort_prepared()) {
                 if (cam->radial_distortion().numel() != 0 ||
                     cam->tangential_distortion().numel() != 0) {
-                    return std::unexpected("Distorted images detected.  You can use --gut option to train on cameras with distortion.");
+                    return std::unexpected("Distorted images detected. Use --gut or --undistort to train on cameras with distortion.");
                 }
                 if (cam->camera_model_type() != core::CameraModelType::PINHOLE) {
-                    return std::unexpected("You must use --gut option to train on cameras with non-pinhole model.");
+                    return std::unexpected("Use --gut or --undistort to train on cameras with non-pinhole model.");
                 }
             }
 
@@ -1259,6 +1300,29 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
 
             // Check control requests at the beginning
             handle_control_requests(iter, stop_token);
+
+            if (on_iteration_start_)
+                on_iteration_start_();
+
+            // Python hook: iteration start (safe, pre-forward)
+            {
+                lfs::training::HookContext ctx{
+                    .iteration = iter,
+                    .loss = current_loss_.load(),
+                    .num_gaussians = strategy_ ? strategy_->get_model().size() : 0,
+                    .is_refining = strategy_ ? strategy_->is_refining(iter) : false,
+                    .trainer = this};
+                lfs::training::CommandCenter::instance().set_phase(lfs::training::TrainingPhase::IterationStart);
+                lfs::training::CommandCenter::instance().update_snapshot(
+                    ctx, params_.optimization.iterations, is_paused_.load(), is_running_.load(), stop_requested_.load(),
+                    lfs::training::TrainingPhase::IterationStart);
+                lfs::training::ControlBoundary::instance().notify(lfs::training::ControlHook::IterationStart, ctx);
+                auto view = lfs::training::CommandCenter::instance().snapshot();
+                lfs::training::CommandCenter::instance().drain_enqueued(view);
+            }
+
+            // Training step entering forward/backward/optimizer region (commands blocked)
+            lfs::training::CommandCenter::instance().set_phase(lfs::training::TrainingPhase::Forward);
 
             // If stop requested, return Stop
             if (stop_requested_.load() || stop_token.stop_requested()) {
@@ -1315,9 +1379,28 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
             const int tile_height = full_height / tile_rows;
             const int num_tiles = tile_rows * tile_cols;
 
-            core::Tensor loss_tensor_gpu = core::Tensor::zeros({1}, core::Device::CUDA);
+            if (!loss_accumulator_.is_valid()) {
+                loss_accumulator_ = core::Tensor::zeros({1}, core::Device::CUDA);
+            } else {
+                loss_accumulator_.zero_();
+            }
+            auto& loss_tensor_gpu = loss_accumulator_;
             RenderOutput r_output;
             int tiles_processed = 0;
+
+            // Determine controller phase before tile loop (does not depend on tile results)
+            const bool known_ppisp_camera = ppisp_ && ppisp_->is_known_camera(cam->camera_id());
+            const int ppisp_cam_idx = known_ppisp_camera ? ppisp_->camera_index(cam->camera_id()) : -1;
+            const bool in_controller_phase = ppisp_controller_pool_ && known_ppisp_camera &&
+                                             params_.optimization.ppisp_use_controller &&
+                                             params_.optimization.ppisp_freeze_gaussians_on_distill &&
+                                             iter >= params_.optimization.ppisp_controller_activation_step &&
+                                             ppisp_cam_idx >= 0 &&
+                                             ppisp_cam_idx < ppisp_controller_pool_->num_cameras();
+            const bool use_pixel_error_densification =
+                (params_.optimization.strategy == "mcmc");
+            const bool use_ssim_error = use_pixel_error_densification &&
+                                        (params_.optimization.strategy == "mcmc");
 
             // Loop over tiles (row-major order)
             for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
@@ -1438,199 +1521,348 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                 r_output = output; // Save last tile for densification
                 nvtxRangePop();
 
-                // Apply bilateral grid if enabled (before loss computation)
-                lfs::core::Tensor corrected_image = output.image;
-                if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
-                    nvtxRangePush("bilateral_grid_forward");
-                    corrected_image = bilateral_grid_->apply(output.image, cam->uid());
-                    nvtxRangePop();
-                }
-
-                // Apply background noise if enabled
-                if (params_.optimization.bg_noise) {
-                    nvtxRangePush("apply_background_noise");
-                    corrected_image = apply_background_noise(corrected_image, output.alpha, iter);
-                    nvtxRangePop();
-                }
-                
-                // Apply PPISP if enabled (after bilateral grid if both are enabled)
-                if (ppisp_ && params_.optimization.use_ppisp) {
-                    nvtxRangePush("ppisp_forward");
-                    corrected_image = ppisp_->apply(corrected_image, cam->camera_id(), cam->uid());
-                    nvtxRangePop();
-                }
-
-                // Compute photometric loss and gradients for this tile
-                nvtxRangePush("compute_photometric_loss");
-                lfs::core::Tensor tile_loss;
-                lfs::core::Tensor tile_grad;
-                lfs::core::Tensor tile_grad_alpha; // Gradient for alpha (from mask penalty)
-
-                const bool use_mask = params_.optimization.mask_mode != lfs::core::param::MaskMode::None && cam->has_mask();
-                if (use_mask) {
-                    // Use pipelined mask if available, otherwise load from camera (fallback for validation, etc.)
-                    lfs::core::Tensor mask;
-                    if (pipelined_mask_.is_valid() && pipelined_mask_.numel() > 0) {
-                        mask = pipelined_mask_;
-                    } else {
-                        // Fallback: load mask from camera (cached after first load)
-                        mask = cam->load_and_get_mask(
-                            params_.dataset.resize_factor,
-                            params_.dataset.max_width,
-                            params_.optimization.invert_masks,
-                            params_.optimization.mask_threshold);
-                    }
-
-                    // Extract mask tile if tiling
-                    lfs::core::Tensor mask_tile = mask;
-                    if (num_tiles > 1 && mask.ndim() == 2) {
-                        const lfs::core::Tensor tile_h = mask.slice(0, tile_y_offset, tile_y_offset + tile_height);
-                        mask_tile = tile_h.slice(1, tile_x_offset, tile_x_offset + tile_width);
-                    }
- 
-                    // === NUEVA LÓGICA: HYBRID SWITCH ===
-                    // Creamos una copia local de los parámetros para este paso
-                    lfs::core::param::OptimizationParameters step_params = params_.optimization;
-
-                    const float progress = static_cast<float>(iter) / static_cast<float>(params_.optimization.iterations);
-
-                    // ESTRATEGIA: "Cleaning Phase" (Último 20%)
-                    // Si estamos acabando y estamos en modo Matting, cambiamos temporalmente a AlphaConsistent
-                    // para limpiar los floaters.
-                    if (progress < 0.2f) {
-                        if (step_params.mask_mode == lfs::core::param::MaskMode::SoftMatting ||
-                            step_params.mask_mode == lfs::core::param::MaskMode::HardMatting) {
-
-                            // Forzamos el modo estricto para limpiar
-                            step_params.mask_mode = lfs::core::param::MaskMode::None;
-
-                            // Opcional: Aumentar lambda_dssim ligeramente en esta fase para preservar estructura
-                            // step_params.lambda_dssim = 0.2f;
+                if (in_controller_phase) {
+                    // Controller phase: forward through ISP with controller params, photometric loss,
+                    // backward only through controller (base params frozen)
+                    nvtxRangePush("controller_phase");
+                    auto cleanup_controller_tile_context = [&]() {
+                        auto& arena = lfs::core::GlobalArenaManager::instance().get_arena();
+                        if (fast_ctx) {
+                            arena.end_frame(fast_ctx->forward_ctx.frame_id);
+                        } else if (gsplat_ctx) {
+                            if (gsplat_ctx->isect_ids_ptr != nullptr) {
+                                cudaFree(gsplat_ctx->isect_ids_ptr);
+                                gsplat_ctx->isect_ids_ptr = nullptr;
+                            }
+                            if (gsplat_ctx->flatten_ids_ptr != nullptr) {
+                                cudaFree(gsplat_ctx->flatten_ids_ptr);
+                                gsplat_ctx->flatten_ids_ptr = nullptr;
+                            }
+                            arena.end_frame(gsplat_ctx->frame_id);
                         }
-                    }
-                    else if (progress > 0.8f)
-                    {
-                        step_params.mask_opacity_penalty_weight = 0.0f;
-                    }
+                    };
 
-                    // ===================================
-                    
-
-                    // Matting uses precomputed eroded "core" masks to avoid fighting uncertain boundaries.
-                    // These cores are computed lazily and cached per Camera, so this is NOT a per-iteration cost.
-                    lfs::core::Tensor fg_core;
-                    lfs::core::Tensor bg_core;
-                    bool use_matting_cores = false;
-
-                    if (step_params.mask_mode == lfs::core::param::MaskMode::SoftMatting) {
-                        constexpr int kMattingCoreErodeRadiusPx = 2;
-
-                        fg_core = cam->load_and_get_mask_fg_core(
-                            params_.dataset.resize_factor,
-                            params_.dataset.max_width,
-                            step_params.invert_masks,
-                            step_params.mask_threshold,
-                            kMattingCoreErodeRadiusPx);
-
-                        bg_core = cam->load_and_get_mask_bg_core(
-                            params_.dataset.resize_factor,
-                            params_.dataset.max_width,
-                            step_params.invert_masks,
-                            step_params.mask_threshold,
-                            kMattingCoreErodeRadiusPx);
-
-                        if (!fg_core.is_valid() || !bg_core.is_valid()) {
-                            nvtxRangePop();
-                            nvtxRangePop();
-                            return std::unexpected("MaskMode::Matting: failed to load fg/bg core masks.");
-                        }
-                        use_matting_cores = true;
-                    }
-                    
-                    // Extract core tiles if Matting is enabled (must match mask_tile spatially)
-                    lfs::core::Tensor fg_core_tile;
-                    lfs::core::Tensor bg_core_tile;
-                    const lfs::core::Tensor* fg_core_ptr = nullptr;
-                    const lfs::core::Tensor* bg_core_ptr = nullptr;
-
-                    if (use_matting_cores) {
-                        fg_core_tile = fg_core;
-                        bg_core_tile = bg_core;
-
-                        if (num_tiles > 1 && fg_core.ndim() == 2) {
-                            const lfs::core::Tensor tile_h_fg = fg_core.slice(0, tile_y_offset, tile_y_offset + tile_height);
-                            fg_core_tile = tile_h_fg.slice(1, tile_x_offset, tile_x_offset + tile_width);
-
-                            const lfs::core::Tensor tile_h_bg = bg_core.slice(0, tile_y_offset, tile_y_offset + tile_height);
-                            bg_core_tile = tile_h_bg.slice(1, tile_x_offset, tile_x_offset + tile_width);
-                        }
-
-                        fg_core_ptr = &fg_core_tile;
-                        bg_core_ptr = &bg_core_tile;
-                    }
-
-
-                    auto result = compute_photometric_loss_with_mask(
-                        corrected_image, gt_tile, mask_tile, output.alpha, step_params,
-                        fg_core_ptr, bg_core_ptr);
-                    if (!result) {
-                        nvtxRangePop();
-                        nvtxRangePop();
-                        return std::unexpected(result.error());
-                    }
-                    tile_loss = result->loss;
-                    tile_grad = result->grad_image;
-                    tile_grad_alpha = result->grad_alpha;
-                } else {
-                    auto result = compute_photometric_loss_with_gradient(
-                        corrected_image, gt_tile, params_.optimization);
-                    if (!result) {
-                        nvtxRangePop();
-                        nvtxRangePop();
-                        return std::unexpected(result.error());
-                    }
-                    tile_loss = result->first;
-                    tile_grad = result->second;
-                }
-
-                // Accumulate tile loss (stay on GPU)
-                loss_tensor_gpu = loss_tensor_gpu + tile_loss;
-                tiles_processed++;
-                nvtxRangePop();
-
-                // Backward through PPISP (accumulates gradients, no Adam yet)
-                lfs::core::Tensor raster_grad = tile_grad;
-                if (ppisp_ && params_.optimization.use_ppisp) {
-                    nvtxRangePush("ppisp_backward");
-                    lfs::core::Tensor ppisp_input = output.image;
+                    lfs::core::Tensor corrected_image = output.image;
                     if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
-                        ppisp_input = bilateral_grid_->apply(output.image, cam->uid());
+                        corrected_image = bilateral_grid_->apply(output.image, cam->uid());
                     }
-                    raster_grad = ppisp_->backward(ppisp_input, raster_grad, cam->camera_id(), cam->uid());
-                    nvtxRangePop();
-                }
+                    auto ppisp_input = corrected_image;
 
-                // Backward through bilateral grid (accumulates gradients, no Adam yet)
-                if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
-                    nvtxRangePush("bilateral_grid_backward");
-                    raster_grad = bilateral_grid_->backward(output.image, raster_grad, cam->uid());
-                    nvtxRangePop();
-                }
+                    auto pred = ppisp_controller_pool_->predict(ppisp_cam_idx, corrected_image.unsqueeze(0), 1.0f);
+                    corrected_image = ppisp_->apply_with_controller_params(corrected_image, pred, ppisp_cam_idx);
 
-                nvtxRangePush("rasterize_backward");
-                if (gsplat_ctx) {
-                    // GUT mode: use gsplat backward (needs grad_alpha too)
-                    auto grad_alpha = tile_grad_alpha.is_valid()
-                                          ? tile_grad_alpha
-                                          : lfs::core::Tensor::zeros_like(output.alpha);
-                    gsplat_rasterize_backward(*gsplat_ctx, raster_grad, grad_alpha,
-                                              strategy_->get_model(), strategy_->get_optimizer());
+                    // Photometric loss
+                    nvtxRangePush("compute_photometric_loss");
+                    lfs::core::Tensor tile_loss;
+                    lfs::core::Tensor tile_grad;
+
+                    const bool use_mask = params_.optimization.mask_mode != lfs::core::param::MaskMode::None &&
+                                          (cam->has_mask() || (params_.optimization.use_alpha_as_mask && scene_ && scene_->imagesHaveAlpha()));
+                    if (use_mask) {
+                        lfs::core::Tensor mask;
+                        if (pipelined_mask_.is_valid() && pipelined_mask_.numel() > 0) {
+                            mask = pipelined_mask_;
+                        } else {
+                            mask = cam->load_and_get_mask(
+                                params_.dataset.resize_factor,
+                                params_.dataset.max_width,
+                                params_.optimization.invert_masks,
+                                params_.optimization.mask_threshold);
+                        }
+
+                        lfs::core::Tensor mask_tile = mask;
+                        if (num_tiles > 1 && mask.ndim() == 2) {
+                            auto tile_h = mask.slice(0, tile_y_offset, tile_y_offset + tile_height);
+                            mask_tile = tile_h.slice(1, tile_x_offset, tile_x_offset + tile_width);
+                        }
+
+                        // ------------- victor start
+                        // === NUEVA LOGICA: HYBRID SWITCH ===
+                        // Creamos una copia local de los parametros para este paso
+                        lfs::core::param::OptimizationParameters step_params = params_.optimization;
+
+                        const float progress = static_cast<float>(iter) / static_cast<float>(params_.optimization.iterations);
+
+                        // ESTRATEGIA: "Cleaning Phase" (ultimo 20%)
+                        // Si estamos acabando y estamos en modo Matting, cambiamos temporalmente a AlphaConsistent
+                        // para limpiar los floaters.
+                        if (progress < 0.2f) {
+                            if (step_params.mask_mode == lfs::core::param::MaskMode::SoftMatting ||
+                                step_params.mask_mode == lfs::core::param::MaskMode::HardMatting) {
+
+                                // Forzamos el modo estricto para limpiar
+                                step_params.mask_mode = lfs::core::param::MaskMode::None;
+
+                                // Opcional: Aumentar lambda_dssim ligeramente en esta fase para preservar estructura
+                                // step_params.lambda_dssim = 0.2f;
+                            }
+                        }
+                        else if (progress > 0.8f)
+                        {
+                            step_params.mask_opacity_penalty_weight = 0.0f;
+                        }
+
+                        // ===================================
+                        
+
+                        // Matting uses precomputed eroded "core" masks to avoid fighting uncertain boundaries.
+                        // These cores are computed lazily and cached per Camera, so this is NOT a per-iteration cost.
+                        lfs::core::Tensor fg_core;
+                        lfs::core::Tensor bg_core;
+                        bool use_matting_cores = false;
+
+                        if (step_params.mask_mode == lfs::core::param::MaskMode::SoftMatting) {
+                            constexpr int kMattingCoreErodeRadiusPx = 2;
+
+                            fg_core = cam->load_and_get_mask_fg_core(
+                                params_.dataset.resize_factor,
+                                params_.dataset.max_width,
+                                step_params.invert_masks,
+                                step_params.mask_threshold,
+                                kMattingCoreErodeRadiusPx);
+
+                            bg_core = cam->load_and_get_mask_bg_core(
+                                params_.dataset.resize_factor,
+                                params_.dataset.max_width,
+                                step_params.invert_masks,
+                                step_params.mask_threshold,
+                                kMattingCoreErodeRadiusPx);
+
+                            if (!fg_core.is_valid() || !bg_core.is_valid()) {
+                                nvtxRangePop();
+                                nvtxRangePop();
+                                return std::unexpected("MaskMode::Matting: failed to load fg/bg core masks.");
+                            }
+                            use_matting_cores = true;
+                        }
+                        
+                        // Extract core tiles if Matting is enabled (must match mask_tile spatially)
+                        lfs::core::Tensor fg_core_tile;
+                        lfs::core::Tensor bg_core_tile;
+                        const lfs::core::Tensor* fg_core_ptr = nullptr;
+                        const lfs::core::Tensor* bg_core_ptr = nullptr;
+
+                        if (use_matting_cores) {
+                            fg_core_tile = fg_core;
+                            bg_core_tile = bg_core;
+
+                            if (num_tiles > 1 && fg_core.ndim() == 2) {
+                                const lfs::core::Tensor tile_h_fg = fg_core.slice(0, tile_y_offset, tile_y_offset + tile_height);
+                                fg_core_tile = tile_h_fg.slice(1, tile_x_offset, tile_x_offset + tile_width);
+
+                                const lfs::core::Tensor tile_h_bg = bg_core.slice(0, tile_y_offset, tile_y_offset + tile_height);
+                                bg_core_tile = tile_h_bg.slice(1, tile_x_offset, tile_x_offset + tile_width);
+                            }
+
+                            fg_core_ptr = &fg_core_tile;
+                            bg_core_ptr = &bg_core_tile;
+                        }
+                        // ------------- victor end
+
+                        auto result = compute_photometric_loss_with_mask(
+                            corrected_image, gt_tile, mask_tile, output.alpha, params_.optimization);
+                        if (!result) {
+                            cleanup_controller_tile_context();
+                            nvtxRangePop();
+                            nvtxRangePop();
+                            nvtxRangePop();
+                            return std::unexpected(result.error());
+                        }
+                        tile_loss = result->loss;
+                        tile_grad = result->grad_image;
+                    } else {
+                        auto result = compute_photometric_loss_with_gradient(
+                            corrected_image, gt_tile, params_.optimization);
+                        if (!result) {
+                            cleanup_controller_tile_context();
+                            nvtxRangePop();
+                            nvtxRangePop();
+                            nvtxRangePop();
+                            return std::unexpected(result.error());
+                        }
+                        tile_loss = result->first;
+                        tile_grad = result->second;
+                    }
+
+                    loss_tensor_gpu = loss_tensor_gpu + tile_loss;
+                    tiles_processed++;
+                    nvtxRangePop(); // compute_photometric_loss
+
+                    // ISP backward for controller params
+                    auto ctrl_grad = ppisp_->backward_with_controller_params(ppisp_input, tile_grad, pred, ppisp_cam_idx);
+                    ppisp_controller_pool_->backward(ppisp_cam_idx, ctrl_grad);
+
+                    // End arena frame explicitly (normally done inside rasterize_backward which we skip)
+                    cleanup_controller_tile_context();
+
+                    nvtxRangePop(); // controller_phase
                 } else {
-                    // Standard mode: use fast rasterizer backward with optional alpha gradient
-                    fast_rasterize_backward(*fast_ctx, raster_grad, strategy_->get_model(),
-                                            strategy_->get_optimizer(), tile_grad_alpha);
+                    // Normal phase: full forward + backward through all components
+                    lfs::core::Tensor corrected_image = output.image;
+                    if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
+                        nvtxRangePush("bilateral_grid_forward");
+                        corrected_image = bilateral_grid_->apply(output.image, cam->uid());
+                        nvtxRangePop();
+                    }
+
+                    if (ppisp_ && params_.optimization.use_ppisp) {
+                        nvtxRangePush("ppisp_forward");
+                        corrected_image = ppisp_->apply(corrected_image, cam->camera_id(), cam->uid());
+                        nvtxRangePop();
+                    }
+
+                    // Final tonemapping: clamp to [0, 1] for loss computation.
+                    // This is redundant when PPISP is active (CRF already clamps), but ensures
+                    // valid output range for bilateral grids and raw rasterizer output.
+                    corrected_image = corrected_image.clamp(0.0f, 1.0f);
+
+                    nvtxRangePush("compute_photometric_loss");
+                    lfs::core::Tensor tile_loss;
+                    lfs::core::Tensor tile_grad;
+                    lfs::core::Tensor tile_grad_alpha;
+                    lfs::core::Tensor tile_error_map;
+                    lfs::core::Tensor mask_tile;
+
+                    // 1) Compute photometric loss (populates ssim_map in workspace)
+                    const bool use_mask = params_.optimization.mask_mode != lfs::core::param::MaskMode::None &&
+                                          (cam->has_mask() || (params_.optimization.use_alpha_as_mask && scene_ && scene_->imagesHaveAlpha()));
+                    const bool used_masked_fused =
+                        use_mask &&
+                        (params_.optimization.mask_mode == lfs::core::param::MaskMode::Segment ||
+                         params_.optimization.mask_mode == lfs::core::param::MaskMode::Ignore) &&
+                        params_.optimization.lambda_dssim > 0.0f;
+                    if (use_mask) {
+                        lfs::core::Tensor mask;
+                        if (pipelined_mask_.is_valid() && pipelined_mask_.numel() > 0) {
+                            mask = pipelined_mask_;
+                        } else {
+                            mask = cam->load_and_get_mask(
+                                params_.dataset.resize_factor,
+                                params_.dataset.max_width,
+                                params_.optimization.invert_masks,
+                                params_.optimization.mask_threshold);
+                        }
+
+                        mask_tile = mask;
+                        if (num_tiles > 1 && mask.ndim() == 2) {
+                            auto tile_h = mask.slice(0, tile_y_offset, tile_y_offset + tile_height);
+                            mask_tile = tile_h.slice(1, tile_x_offset, tile_x_offset + tile_width);
+                        }
+
+                        auto result = compute_photometric_loss_with_mask(
+                            corrected_image, gt_tile, mask_tile, output.alpha, params_.optimization);
+                        if (!result) {
+                            nvtxRangePop();
+                            nvtxRangePop();
+                            return std::unexpected(result.error());
+                        }
+                        tile_loss = result->loss;
+                        tile_grad = result->grad_image;
+                        tile_grad_alpha = result->grad_alpha;
+                    } else {
+                        auto result = compute_photometric_loss_with_gradient(
+                            corrected_image, gt_tile, params_.optimization);
+                        if (!result) {
+                            nvtxRangePop();
+                            nvtxRangePop();
+                            return std::unexpected(result.error());
+                        }
+                        tile_loss = result->first;
+                        tile_grad = result->second;
+                    }
+
+                    // 2) Extract error map from workspace's ssim_map
+                    if (use_pixel_error_densification) {
+                        if (use_ssim_error && params_.optimization.lambda_dssim > 0.0f) {
+                            lfs::core::Tensor ssim_map;
+                            if (used_masked_fused) {
+                                ssim_map = masked_fused_workspace_.ssim_map;
+                            } else if (params_.optimization.lambda_dssim < 1.0f) {
+                                ssim_map = photometric_loss_.fused_workspace().ssim_map;
+                            } else {
+                                ssim_map = photometric_loss_.ssim_workspace().ssim_map;
+                            }
+                            tile_error_map = ssim_map.neg()
+                                                 .add(1.0f)
+                                                 .mean({1}, false)
+                                                 .squeeze(0)
+                                                 .clamp_min(0.0f)
+                                                 .contiguous();
+                        } else if (use_ssim_error) {
+                            // lambda_dssim == 0 but MCMC needs SSIM error: standalone pass
+                            lfs::core::Tensor pred_chw = corrected_image;
+                            lfs::core::Tensor gt_chw = gt_tile;
+                            if (pred_chw.ndim() == 3 && pred_chw.shape()[2] == 3 &&
+                                gt_chw.ndim() == 3 && gt_chw.shape()[2] == 3) {
+                                pred_chw = pred_chw.permute({2, 0, 1}).contiguous();
+                                gt_chw = gt_chw.permute({2, 0, 1}).contiguous();
+                            }
+                            auto [ssim_value, ssim_ctx] = lfs::training::kernels::ssim_forward(
+                                pred_chw, gt_chw, densification_ssim_workspace_, false);
+                            (void)ssim_value;
+                            (void)ssim_ctx;
+                            const auto& fallback_ssim_map = densification_ssim_workspace_.ssim_map;
+                            tile_error_map = fallback_ssim_map.neg()
+                                                 .add(1.0f)
+                                                 .mean({1}, false)
+                                                 .squeeze(0)
+                                                 .clamp_min(0.0f)
+                                                 .contiguous();
+                        } else {
+                            const lfs::core::Tensor abs_diff = (corrected_image - gt_tile).abs();
+                            if (abs_diff.ndim() == 3 && abs_diff.shape()[0] == 3) {
+                                tile_error_map = abs_diff.mean({0}, false);
+                            } else if (abs_diff.ndim() == 3 && abs_diff.shape()[2] == 3) {
+                                tile_error_map = abs_diff.mean({2}, false);
+                            } else {
+                                tile_error_map = abs_diff;
+                            }
+                            tile_error_map = tile_error_map.contiguous();
+                        }
+
+                        if (use_mask &&
+                            (params_.optimization.mask_mode == lfs::core::param::MaskMode::Segment ||
+                             params_.optimization.mask_mode == lfs::core::param::MaskMode::Ignore)) {
+                            tile_error_map = (tile_error_map * mask_tile).contiguous();
+                        }
+                    }
+
+                    loss_tensor_gpu = loss_tensor_gpu + tile_loss;
+                    tiles_processed++;
+                    nvtxRangePop();
+
+                    lfs::core::Tensor raster_grad = tile_grad;
+                    if (ppisp_ && params_.optimization.use_ppisp) {
+                        nvtxRangePush("ppisp_backward");
+                        lfs::core::Tensor ppisp_input = output.image;
+                        if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
+                            ppisp_input = bilateral_grid_->apply(output.image, cam->uid());
+                        }
+                        raster_grad = ppisp_->backward(ppisp_input, raster_grad, cam->camera_id(), cam->uid());
+                        nvtxRangePop();
+                    }
+
+                    if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
+                        nvtxRangePush("bilateral_grid_backward");
+                        raster_grad = bilateral_grid_->backward(output.image, raster_grad, cam->uid());
+                        nvtxRangePop();
+                    }
+
+                    nvtxRangePush("rasterize_backward");
+                    if (gsplat_ctx) {
+                        auto grad_alpha = tile_grad_alpha.is_valid()
+                                              ? tile_grad_alpha
+                                              : lfs::core::Tensor::zeros_like(output.alpha);
+                        gsplat_rasterize_backward(*gsplat_ctx, raster_grad, grad_alpha,
+                                                  strategy_->get_model(), strategy_->get_optimizer(),
+                                                  use_pixel_error_densification ? tile_error_map : lfs::core::Tensor{});
+                    } else {
+                        fast_rasterize_backward(*fast_ctx, raster_grad, strategy_->get_model(),
+                                                strategy_->get_optimizer(), tile_grad_alpha,
+                                                use_pixel_error_densification ? tile_error_map : lfs::core::Tensor{});
+                    }
+                    nvtxRangePop();
                 }
-                nvtxRangePop();
 
                 nvtxRangePop(); // End tile
             }
@@ -1645,79 +1877,60 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                            : StepResult::Stop;
             }
 
-            // Regularization losses are computed ONCE on full model (after all tiles)
-            // They accumulate gradients on top of the per-tile gradients
-
-            // Scale regularization loss - accumulate on GPU (AFTER rasterizer backward)
-            if (params_.optimization.scale_reg > 0.0f) {
-                nvtxRangePush("compute_scale_reg_loss");
-                auto scale_loss_result = compute_scale_reg_loss(strategy_->get_model(), strategy_->get_optimizer(), params_.optimization);
-                if (!scale_loss_result) {
-                    return std::unexpected(scale_loss_result.error());
-                }
-                loss_tensor_gpu = loss_tensor_gpu + *scale_loss_result;
-                nvtxRangePop();
-            }
-
-            // Opacity regularization loss - accumulate on GPU (AFTER rasterizer backward)
-            if (params_.optimization.opacity_reg > 0.0f) {
-                nvtxRangePush("compute_opacity_reg_loss");
-                auto opacity_loss_result = compute_opacity_reg_loss(strategy_->get_model(), strategy_->get_optimizer(), params_.optimization);
-                if (!opacity_loss_result) {
-                    return std::unexpected(opacity_loss_result.error());
-                }
-                loss_tensor_gpu = loss_tensor_gpu + *opacity_loss_result;
-                nvtxRangePop();
-            }
-
-            // Bilateral grid: TV loss + optimizer step
-            if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
-                nvtxRangePush("bilateral_grid_tv_and_step");
-                const float tv_weight = params_.optimization.tv_loss_weight;
-
-                loss_tensor_gpu = loss_tensor_gpu + bilateral_grid_->tv_loss_gpu() * tv_weight;
-                bilateral_grid_->tv_backward(tv_weight);
-                bilateral_grid_->optimizer_step();
-                bilateral_grid_->zero_grad();
-                bilateral_grid_->scheduler_step();
-
-                nvtxRangePop();
-            }
-
-            // PPISP: regularization loss + optimizer step
-            if (ppisp_ && params_.optimization.use_ppisp) {
-                nvtxRangePush("ppisp_reg_and_step");
-
-                // Individual reg weights are applied inside reg_loss_gpu()
-                loss_tensor_gpu = loss_tensor_gpu + ppisp_->reg_loss_gpu();
-                ppisp_->reg_backward();
-                ppisp_->optimizer_step();
-                ppisp_->zero_grad();
-                ppisp_->scheduler_step();
-
-                nvtxRangePop();
-            }
-
-            // PPISP controller distillation
-            const bool known_ppisp_camera = ppisp_ && ppisp_->is_known_camera(cam->camera_id());
-            const int ppisp_cam_idx = known_ppisp_camera ? ppisp_->camera_index(cam->camera_id()) : -1;
-            const bool in_controller_phase = ppisp_controller_pool_ && known_ppisp_camera &&
-                                             params_.optimization.ppisp_use_controller &&
-                                             iter >= params_.optimization.ppisp_controller_activation_step &&
-                                             ppisp_cam_idx >= 0 &&
-                                             ppisp_cam_idx < ppisp_controller_pool_->num_cameras();
             if (in_controller_phase) {
-                nvtxRangePush("ppisp_controller_distillation");
-
-                auto pred = ppisp_controller_pool_->predict(ppisp_cam_idx, r_output.image.unsqueeze(0), 1.0f);
-                auto target = ppisp_->get_params_for_frame(cam->uid());
-                ppisp_controller_pool_->compute_mse_gradient(pred, target);
-                ppisp_controller_pool_->backward(ppisp_cam_idx, ppisp_controller_pool_->get_mse_gradient());
+                // Controller phase: only update controller weights
+                nvtxRangePush("controller_optimizer_step");
                 ppisp_controller_pool_->optimizer_step(ppisp_cam_idx);
                 ppisp_controller_pool_->zero_grad();
                 ppisp_controller_pool_->scheduler_step(ppisp_cam_idx);
-
                 nvtxRangePop();
+            } else {
+                // Normal phase: regularization losses + optimizer steps for all components
+
+                if (params_.optimization.scale_reg > 0.0f) {
+                    nvtxRangePush("compute_scale_reg_loss");
+                    auto scale_loss_result = compute_scale_reg_loss(strategy_->get_model(), strategy_->get_optimizer(), params_.optimization);
+                    if (!scale_loss_result) {
+                        return std::unexpected(scale_loss_result.error());
+                    }
+                    loss_tensor_gpu = loss_tensor_gpu + *scale_loss_result;
+                    nvtxRangePop();
+                }
+
+                if (params_.optimization.opacity_reg > 0.0f) {
+                    nvtxRangePush("compute_opacity_reg_loss");
+                    auto opacity_loss_result = compute_opacity_reg_loss(strategy_->get_model(), strategy_->get_optimizer(), params_.optimization);
+                    if (!opacity_loss_result) {
+                        return std::unexpected(opacity_loss_result.error());
+                    }
+                    loss_tensor_gpu = loss_tensor_gpu + *opacity_loss_result;
+                    nvtxRangePop();
+                }
+
+                if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
+                    nvtxRangePush("bilateral_grid_tv_and_step");
+                    const float tv_weight = params_.optimization.tv_loss_weight;
+
+                    loss_tensor_gpu = loss_tensor_gpu + bilateral_grid_->tv_loss_gpu() * tv_weight;
+                    bilateral_grid_->tv_backward(tv_weight);
+                    bilateral_grid_->optimizer_step();
+                    bilateral_grid_->zero_grad();
+                    bilateral_grid_->scheduler_step();
+
+                    nvtxRangePop();
+                }
+
+                if (ppisp_ && params_.optimization.use_ppisp) {
+                    nvtxRangePush("ppisp_reg_and_step");
+
+                    loss_tensor_gpu = loss_tensor_gpu + ppisp_->reg_loss_gpu();
+                    ppisp_->reg_backward();
+                    ppisp_->optimizer_step();
+                    ppisp_->zero_grad();
+                    ppisp_->scheduler_step();
+
+                    nvtxRangePop();
+                }
             }
 
             // Sparsity loss - ALL ON GPU, no CPU sync here
@@ -1785,9 +1998,26 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                 {
                     std::unique_lock<std::shared_mutex> lock(render_mutex_);
 
-                    // Skip topology-changing ops during sparsification OR NGS noise phase
+                    // Python hook: pre-optimizer-step (post-backward, pre-step)
+                    {
+                        lfs::training::HookContext ctx{
+                            .iteration = iter,
+                            .loss = current_loss_.load(),
+                            .num_gaussians = strategy_ ? strategy_->get_model().size() : 0,
+                            .is_refining = strategy_ ? strategy_->is_refining(iter) : false,
+                            .trainer = this};
+                        lfs::training::CommandCenter::instance().set_phase(lfs::training::TrainingPhase::OptimizerStep);
+                        lfs::training::CommandCenter::instance().update_snapshot(
+                            ctx, params_.optimization.iterations, is_paused_.load(), is_running_.load(), stop_requested_.load(),
+                            lfs::training::TrainingPhase::OptimizerStep);
+                        lfs::training::ControlBoundary::instance().notify(lfs::training::ControlHook::PreOptimizerStep, ctx);
+                    }
+
+                    // Skip post_backward during sparsification phase
                     const bool in_sparsification = params_.optimization.enable_sparsity &&
                                                    iter > (params_.optimization.iterations - params_.optimization.sparsify_steps);
+                                                   
+                    // Skip topology-changing ops during sparsification OR NGS noise phase
                     const bool ngs_block_topology = (ngs_current_phase_ == NGSPhase::WithNoise);
 
                     // Freeze noise gaussians: means/scaling/rotation/SH, keep opacity trainable
@@ -1853,10 +2083,12 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                 // Clean evaluation - let the evaluator handle everything
                 if (evaluator_->is_enabled() && evaluator_->should_evaluate(iter)) {
                     evaluator_->print_evaluation_header(iter);
+                    const bool alpha_available = scene_ && scene_->imagesHaveAlpha();
                     auto metrics = evaluator_->evaluate(iter,
                                                         strategy_->get_model(),
                                                         val_dataset_,
-                                                        background_);
+                                                        background_,
+                                                        alpha_available);
                     LOG_INFO("{}", metrics.to_string());
                 }
 
@@ -1910,6 +2142,21 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                 }
             }
 
+            // Python hook: post-step (after optimizer and side-effects)
+            {
+                lfs::training::HookContext ctx{
+                    .iteration = iter,
+                    .loss = current_loss_.load(),
+                    .num_gaussians = strategy_ ? strategy_->get_model().size() : 0,
+                    .is_refining = strategy_ ? strategy_->is_refining(iter) : false,
+                    .trainer = this};
+                lfs::training::CommandCenter::instance().set_phase(lfs::training::TrainingPhase::SafeControl);
+                lfs::training::CommandCenter::instance().update_snapshot(
+                    ctx, params_.optimization.iterations, is_paused_.load(), is_running_.load(), stop_requested_.load(),
+                    lfs::training::TrainingPhase::SafeControl);
+                lfs::training::ControlBoundary::instance().notify(lfs::training::ControlHook::PostStep, ctx);
+            }
+
             // Return Continue if we should continue training
             if (iter < params_.optimization.iterations && !stop_requested_.load() && !stop_token.stop_requested()) {
                 return StepResult::Continue;
@@ -1930,6 +2177,7 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
         is_running_ = false;
         training_complete_ = false;
         ready_to_start_ = false; // Reset the flag
+        lfs::training::CommandCenter::instance().set_phase(lfs::training::TrainingPhase::SafeControl);
 
         ready_to_start_ = true; // Skip GUI wait for now
 
@@ -1946,6 +2194,21 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                                          params_.dataset.loading_params.min_cpu_free_memory_ratio,
                                          params_.dataset.loading_params.print_cache_status,
                                          params_.dataset.loading_params.print_status_freq_num);
+
+        // Notify Python control layer that training is starting
+        {
+            lfs::training::HookContext ctx{
+                .iteration = 0,
+                .loss = current_loss_.load(),
+                .num_gaussians = strategy_ ? strategy_->get_model().size() : 0,
+                .is_refining = strategy_ ? strategy_->is_refining(0) : false,
+                .trainer = this};
+            lfs::training::CommandCenter::instance().set_phase(lfs::training::TrainingPhase::SafeControl);
+            lfs::training::CommandCenter::instance().update_snapshot(
+                ctx, params_.optimization.iterations, is_paused_.load(), is_running_.load(), stop_requested_.load(),
+                lfs::training::TrainingPhase::SafeControl);
+            lfs::training::ControlBoundary::instance().notify(lfs::training::ControlHook::TrainingStart, ctx);
+        }
 
         try {
             // Start from current_iteration_ (allows resume from checkpoint)
@@ -1978,14 +2241,20 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                 LOG_INFO("{:.0f}% non-JPEG images, using {} cold threads", non_jpeg_ratio * 100.0f, cold_threads);
             }
 
-            // Configure mask loading if masks are enabled
+            const bool alpha_available = scene_ && scene_->imagesHaveAlpha();
             PipelinedMaskConfig mask_pipeline_config;
             if (params_.optimization.mask_mode != lfs::core::param::MaskMode::None) {
-                mask_pipeline_config.load_masks = true;
                 mask_pipeline_config.invert_masks = params_.optimization.invert_masks;
                 mask_pipeline_config.mask_threshold = params_.optimization.mask_threshold;
-                LOG_INFO("Mask loading enabled in pipeline (invert={}, threshold={})",
-                         mask_pipeline_config.invert_masks, mask_pipeline_config.mask_threshold);
+                if (params_.optimization.use_alpha_as_mask && alpha_available) {
+                    mask_pipeline_config.use_alpha_as_mask = true;
+                    LOG_INFO("Alpha-as-mask enabled (invert={}, threshold={})",
+                             mask_pipeline_config.invert_masks, mask_pipeline_config.mask_threshold);
+                } else {
+                    mask_pipeline_config.load_masks = true;
+                    LOG_INFO("Mask file loading enabled (invert={}, threshold={})",
+                             mask_pipeline_config.invert_masks, mask_pipeline_config.mask_threshold);
+                }
             }
 
             auto train_dataloader = create_infinite_pipelined_dataloader(
@@ -1993,12 +2262,19 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
 
             LOG_DEBUG("Starting training iterations");
             while (iter <= params_.optimization.iterations) {
-                lfs::core::CudaMemoryPool::instance().set_iteration(iter);
+                lfs::core::Tensor::set_memory_pool_iteration(iter);
 
                 if (stop_token.stop_requested() || stop_requested_.load())
                     break;
-                if (callback_busy_.load())
-                    cudaStreamSynchronize(callback_stream_);
+                if (callback_busy_.load(std::memory_order_acquire)) {
+                    const cudaError_t callback_status = cudaStreamQuery(callback_stream_);
+                    if (callback_status == cudaSuccess) {
+                        callback_busy_.store(false, std::memory_order_release);
+                    } else if (callback_status != cudaErrorNotReady) {
+                        LOG_WARN("Callback stream query failed: {}", cudaGetErrorString(callback_status));
+                        callback_busy_.store(false, std::memory_order_release);
+                    }
+                }
 
                 lfs::core::Camera* cam = nullptr;
                 lfs::core::Tensor gt_image;
@@ -2018,43 +2294,16 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                 if (!step_result) {
                     // Check if this is an OOM_RETRY signal
                     if (step_result.error() == "OOM_RETRY") {
-                        // Aggressive memory cleanup before retry
-                        LOG_INFO("Performing aggressive memory cleanup before retry...");
-
-                        // 0. CRITICAL: Synchronize and clear any pending CUDA errors
-                        cudaError_t sync_err = cudaDeviceSynchronize();
-                        if (sync_err != cudaSuccess) {
-                            LOG_WARN("cudaDeviceSynchronize before cleanup returned: {}", cudaGetErrorString(sync_err));
-                            // Clear the error so we can continue
-                            cudaGetLastError();
-                        }
-
-                        // 1. Emergency cleanup of arena (resets offsets, clears inactive frames)
-                        lfs::core::GlobalArenaManager::instance().get_arena().emergency_cleanup();
-
-                        // 2. Trim cached memory pool
-                        lfs::core::CudaMemoryPool::instance().trim_cached_memory();
-
-                        // 3. Synchronize again after cleanup
                         cudaDeviceSynchronize();
-
-                        // 4. Clear any error state from the OOM
                         cudaGetLastError();
 
-                        // 5. Log memory status
-                        size_t free_mem = 0, total_mem = 0;
-                        cudaError_t err = cudaMemGetInfo(&free_mem, &total_mem);
-                        if (err == cudaSuccess) {
-                            LOG_INFO("CUDA memory after aggressive cleanup: {:.2f} GB free / {:.2f} GB total",
-                                     free_mem / (1024.0 * 1024.0 * 1024.0),
-                                     total_mem / (1024.0 * 1024.0 * 1024.0));
-                        } else {
-                            LOG_WARN("cudaMemGetInfo failed: {}", cudaGetErrorString(err));
-                            cudaGetLastError(); // Clear this error too
-                        }
+                        lfs::core::GlobalArenaManager::instance().get_arena().full_reset();
+                        lfs::core::Tensor::trim_memory_pool();
 
-                        // Retry the same step with upgraded tile mode
-                        LOG_INFO("Retrying iteration {} with upgraded tile mode", iter);
+                        cudaDeviceSynchronize();
+                        cudaGetLastError();
+
+                        LOG_INFO("OOM recovery: retrying iteration {}", iter);
                         step_result = train_step(iter, cam, gt_image, render_mode, stop_token);
                         if (!step_result) {
                             // If retry also failed, propagate the error
@@ -2066,13 +2315,17 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                     }
                 }
 
+                // Transition to safe control phase and execute deferred Python callbacks
+                lfs::training::CommandCenter::instance().set_phase(lfs::training::TrainingPhase::SafeControl);
+                lfs::training::ControlBoundary::instance().drain_callbacks();
+
                 if (*step_result == StepResult::Stop) {
                     break;
                 }
 
                 // Launch callback for async progress update (except first iteration)
-                if (iter > 1 && callback_) {
-                    callback_busy_ = true;
+                if (iter > 1 && callback_ && !callback_busy_.load(std::memory_order_acquire)) {
+                    callback_busy_.store(true, std::memory_order_release);
                     auto err = cudaLaunchHostFunc(
                         callback_stream_,
                         [](void* self) {
@@ -2080,12 +2333,12 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                             if (trainer->callback_) {
                                 trainer->callback_();
                             }
-                            trainer->callback_busy_ = false;
+                            trainer->callback_busy_.store(false, std::memory_order_release);
                         },
                         this);
                     if (err != cudaSuccess) {
                         LOG_WARN("Failed to launch callback: {}", cudaGetErrorString(err));
-                        callback_busy_ = false;
+                        callback_busy_.store(false, std::memory_order_release);
                     }
                 }
 
@@ -2188,12 +2441,30 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
             cache_loader.clear_cpu_cache();
             lfs::core::image_io::wait_for_pending_saves();
 
+            // Notify training end
+            {
+                lfs::training::HookContext ctx{
+                    .iteration = current_iteration_.load(),
+                    .loss = current_loss_.load(),
+                    .num_gaussians = strategy_ ? strategy_->get_model().size() : 0,
+                    .is_refining = strategy_ ? strategy_->is_refining(current_iteration_.load()) : false,
+                    .trainer = this};
+                lfs::training::CommandCenter::instance().set_phase(lfs::training::TrainingPhase::SafeControl);
+                lfs::training::CommandCenter::instance().update_snapshot(
+                    ctx, params_.optimization.iterations, is_paused_.load(), is_running_.load(), stop_requested_.load(),
+                    lfs::training::TrainingPhase::SafeControl);
+                lfs::training::ControlBoundary::instance().notify(lfs::training::ControlHook::TrainingEnd, ctx);
+            }
+
+            lfs::training::CommandCenter::instance().set_phase(lfs::training::TrainingPhase::Idle);
+
             LOG_INFO("Training completed successfully");
             return {};
         } catch (const std::exception& e) {
             is_running_ = false;
             cache_loader.clear_cpu_cache();
             lfs::core::image_io::wait_for_pending_saves();
+            lfs::training::CommandCenter::instance().set_phase(lfs::training::TrainingPhase::Idle);
 
             return std::unexpected(std::format("Training failed: {}", e.what()));
         }

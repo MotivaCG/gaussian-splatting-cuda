@@ -7,6 +7,7 @@
 #include "core/point_cloud.hpp"
 #include "core/splat_data.hpp"
 #include "gs_rasterizer_tensor.hpp"
+#include "image_layout.hpp"
 
 #include <cstring>
 #include <print>
@@ -128,9 +129,14 @@ namespace lfs::rendering {
 
         try {
             if (request.sh_degree != model.get_active_sh_degree()) {
-                // Temporarily set sh_degree for rendering, then immediately restore
-                int original_sh_degree = model.get_active_sh_degree();
-                const_cast<lfs::core::SplatData&>(model).set_active_sh_degree(request.sh_degree);
+                auto& mutable_sh = const_cast<lfs::core::SplatData&>(model);
+                const int original_sh_degree = model.get_active_sh_degree();
+                mutable_sh.set_active_sh_degree(request.sh_degree);
+                const struct ShDegreeGuard {
+                    lfs::core::SplatData& m;
+                    int original;
+                    ~ShDegreeGuard() { m.set_active_sh_degree(original); }
+                } sh_guard{mutable_sh, original_sh_degree};
 
                 RenderResult result;
 
@@ -140,7 +146,8 @@ namespace lfs::rendering {
                                                   : GutCameraModel::PINHOLE;
                     auto render_output = gut_rasterize_tensor(
                         cam, const_cast<lfs::core::SplatData&>(model), background_,
-                        request.scaling_modifier, camera_model, transform_indices_ptr, request.node_visibility_mask);
+                        request.scaling_modifier, camera_model, model_transforms_tensor.get(),
+                        transform_indices_ptr, request.node_visibility_mask);
                     result.image = std::move(render_output.image);
                     result.depth = std::move(render_output.depth);
                 } else {
@@ -180,13 +187,9 @@ namespace lfs::rendering {
                     }
                 }
 
-                // IMMEDIATELY restore original sh_degree
-                const_cast<lfs::core::SplatData&>(model).set_active_sh_degree(original_sh_degree);
-
                 result.valid = true;
                 result.orthographic = request.orthographic;
                 result.far_plane = request.far_plane;
-                LOG_TRACE("Rasterization completed successfully (sh_degree restored to {})", original_sh_degree);
                 return result;
             }
 
@@ -200,7 +203,7 @@ namespace lfs::rendering {
                                               : GutCameraModel::PINHOLE;
                 auto render_output = gut_rasterize_tensor(
                     cam, mutable_model, background_, request.scaling_modifier, camera_model,
-                    transform_indices_ptr, request.node_visibility_mask);
+                    model_transforms_tensor.get(), transform_indices_ptr, request.node_visibility_mask);
                 return RenderResult{
                     .image = std::move(render_output.image),
                     .depth = std::move(render_output.depth),
@@ -672,27 +675,60 @@ namespace lfs::rendering {
         }
 
         if (renderer.isInteropEnabled() && result.image.device() == lfs::core::Device::CUDA) {
-            const auto image_hwc = result.image.permute({1, 2, 0}).contiguous();
-
-            if (image_hwc.size(0) == static_cast<size_t>(viewport_size.y) &&
-                image_hwc.size(1) == static_cast<size_t>(viewport_size.x)) {
-                if (auto upload_result = renderer.uploadFromCUDA(image_hwc, viewport_size.x, viewport_size.y);
-                    !upload_result) {
-                    return upload_result;
+            if (result.image.ndim() != 3) {
+                LOG_WARN("Unsupported CUDA image rank for interop upload: {}", result.image.ndim());
+            } else {
+                const auto layout = detectImageLayout(result.image);
+                size_t image_h = 0;
+                size_t image_w = 0;
+                if (layout != ImageLayout::Unknown) {
+                    image_h = imageHeight(result.image, layout);
+                    image_w = imageWidth(result.image, layout);
+                } else {
+                    LOG_WARN("Unsupported CUDA image layout for interop upload: shape=[{}, {}, {}]",
+                             result.image.size(0), result.image.size(1), result.image.size(2));
                 }
-                applyDepthParams(result, renderer, viewport_size);
-                return {};
+
+                if (image_h == static_cast<size_t>(viewport_size.y) &&
+                    image_w == static_cast<size_t>(viewport_size.x)) {
+                    if (auto upload_result = renderer.uploadFromCUDA(result.image, viewport_size.x, viewport_size.y);
+                        !upload_result) {
+                        return upload_result;
+                    }
+                    applyDepthParams(result, renderer, viewport_size);
+                    return {};
+                }
+
+                if (image_h > 0 && image_w > 0) {
+                    LOG_WARN("Dimension mismatch: image {}x{}, expected {}x{}",
+                             image_w, image_h, viewport_size.x, viewport_size.y);
+                }
             }
-            LOG_WARN("Dimension mismatch: image {}x{}, expected {}x{}",
-                     image_hwc.size(1), image_hwc.size(0), viewport_size.x, viewport_size.y);
         }
 
         // CPU fallback
-        const auto image = (result.image * 255.0f)
-                               .cpu()
-                               .to(lfs::core::DataType::UInt8)
-                               .permute({1, 2, 0})
-                               .contiguous();
+        if (result.image.ndim() != 3) {
+            LOG_ERROR("CPU upload requires rank-3 image tensor, got {}", result.image.ndim());
+            return std::unexpected("CPU upload requires rank-3 image tensor");
+        }
+
+        const auto cpu_layout = detectImageLayout(result.image);
+        if (cpu_layout == ImageLayout::Unknown) {
+            LOG_ERROR("CPU upload unsupported image layout: shape=[{}, {}, {}]",
+                      result.image.size(0), result.image.size(1), result.image.size(2));
+            return std::unexpected("CPU upload unsupported image layout");
+        }
+
+        Tensor image_hwc = (cpu_layout == ImageLayout::HWC)
+                               ? result.image
+                               : result.image.permute({1, 2, 0}).contiguous();
+        if (image_hwc.size(2) == 4) {
+            image_hwc = image_hwc.slice(2, 0, 3).contiguous();
+        }
+        if (image_hwc.dtype() != lfs::core::DataType::UInt8) {
+            image_hwc = (image_hwc.clamp(0.0f, 1.0f) * 255.0f).to(lfs::core::DataType::UInt8);
+        }
+        const auto image = image_hwc.cpu().contiguous();
 
         if (image.size(0) != static_cast<size_t>(viewport_size.y) ||
             image.size(1) != static_cast<size_t>(viewport_size.x) ||

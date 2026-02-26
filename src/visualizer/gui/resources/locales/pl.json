@@ -1,32 +1,36 @@
 {
   "_language_name": "Polski",
-
   "menu": {
     "file": "Plik",
     "file.new_project": "Nowy Projekt",
     "file.import_dataset": "Importuj Zbiór Danych",
     "file.import_ply": "Importuj PLY, SOG, SPZ",
+    "file.import_mesh": "Importuj Mesh",
     "file.import_checkpoint": "Importuj Punkt Kontrolny",
     "file.import_config": "Importuj Konfigurację",
     "file.export": "Eksportuj...",
     "file.export_config": "Eksportuj Konfigurację...",
+    "file.extract_video_frames": "Wyodrębnij klatki z wideo...",
+    "file.mesh_to_splat": "Mesh na Splat...",
     "file.exit": "Zakończ",
-
     "edit": "Edycja",
     "edit.input_settings": "Ustawienia Wejścia...",
     "edit.preferences": "Preferencje...",
-
     "view": "Widok",
     "view.theme": "Motyw",
     "view.theme.dark": "Ciemny",
     "view.theme.light": "Jasny",
+    "view.theme.gruvbox": "Gruvbox",
+    "view.theme.catppuccin_mocha": "Catppuccin Mocha",
+    "view.theme.catppuccin_latte": "Catppuccin Latte",
+    "view.theme.nord": "Nord",
     "view.debug_info": "Informacje Debugowania...",
-
     "help": "Pomoc",
     "help.getting_started": "Wprowadzenie",
-    "help.about": "O LichtFeld Studio"
+    "help.about": "O LichtFeld Studio",
+    "view.python_console": "Konsola Pythona",
+    "view.plugin_marketplace": "Marketplace wtyczek"
   },
-
   "window": {
     "getting_started": "Wprowadzenie",
     "about": "O LichtFeld Studio",
@@ -38,7 +42,6 @@
     "training": "Trening",
     "preferences": "Preferencje"
   },
-
   "getting_started": {
     "title": "PRZEWODNIK SZYBKIEGO STARTU",
     "description": "Dowiedz się, jak przygotować zbiory danych i rozpocząć pracę z LichtFeld Studio:",
@@ -49,9 +52,10 @@
     "video_colmap": "Samouczek COLMAP",
     "video_lichtfeld": "Samouczek LichtFeld",
     "video_masks": "Samouczek Masek",
-    "loading": "Ładowanie..."
+    "loading": "Ładowanie...",
+    "wiki_label": "Wiki:",
+    "watch_tooltip": "Obejrzyj: {title}"
   },
-
   "about": {
     "title": "LICHTFELD STUDIO",
     "description": "Wydajna implementacja C++ i CUDA 3D Gaussian Splatting dla renderowania neuronowego w czasie rzeczywistym, treningu i wizualizacji.",
@@ -72,9 +76,11 @@
     "repository": "Repozytorium:",
     "website": "Strona WWW:",
     "authors": "Autorzy LichtFeld Studio",
-    "license": "Licencjonowane na GPLv3"
+    "license": "Licencjonowane na GPLv3",
+    "build_info.property": "Właściwość",
+    "build_info.value": "Wartość",
+    "separator": "  |  "
   },
-
   "training": {
     "section.dataset": "Zbiór Danych",
     "section.optimization": "Optymalizacja",
@@ -89,7 +95,6 @@
     "section.advanced_params": "Zaawansowane Parametry Treningu",
     "section.sparsity": "Ustawienia Rzadkości",
     "section.pruning_growing": "Przycinanie/Rozrost",
-
     "dataset.path": "Path:",
     "dataset.images": "Images:",
     "dataset.resize_factor": "Resize Factor:",
@@ -97,7 +102,6 @@
     "dataset.cpu_cache": "CPU Cache:",
     "dataset.fs_cache": "FS Cache:",
     "dataset.output": "Output:",
-
     "opt.strategy": "Strategy:",
     "opt.learning_rates": "Learning Rates:",
     "opt.iterations": "Iterations:",
@@ -106,6 +110,7 @@
     "opt.mask_mode": "Mask Mode:",
     "opt.sparsity": "Sparsity:",
     "opt.gut": "GUT:",
+    "opt.undistort": "Undistort:",
     "opt.mip_filter": "Mip Filter:",
     "opt.bg_modulation": "BG Modulation:",
     "opt.lr.position": "  Position:",
@@ -113,35 +118,31 @@
     "opt.lr.opacity": "  Opacity:",
     "opt.lr.scaling": "  Scaling:",
     "opt.lr.rotation": "  Rotation:",
-
     "refinement.refine_every": "  Refine Every:",
     "refinement.start_refine": "  Start Refine:",
     "refinement.stop_refine": "  Stop Refine:",
     "refinement.gradient_thr": "  Gradient Thr:",
     "refinement.reset_every": "  Reset Every:",
     "refinement.sh_upgrade_every": "  SH Upgrade Every:",
-
     "bilateral.grid_x": "Grid X:",
     "bilateral.grid_y": "Grid Y:",
     "bilateral.grid_w": "Grid W:",
     "bilateral.learning_rate": "Learning Rate:",
-
     "masking.invert_masks": "Invert Masks:",
     "masking.threshold": "Threshold:",
     "masking.penalty_weight": "Penalty Weight:",
     "masking.penalty_power": "Penalty Power:",
-
     "mask.invert": "  Invert Masks:",
     "mask.threshold": "  Mask Threshold:",
     "mask.penalty_weight": "  Opacity Penalty Weight:",
     "mask.penalty_power": "  Opacity Penalty Power:",
     "mask.no_masks": "(brak masek)",
-
     "tooltip.invert_masks": "Zamień obiekt/tło w maskach",
     "tooltip.penalty_weight": "Waga kary nieprzezroczystości w obszarach tła",
     "tooltip.penalty_power": "Spadek kary: 1=liniowy, 2=kwadratowy, >2=łagodniejszy",
     "tooltip.mask_threshold": "Wartości >= progu stają się 1.0 (obiekt)",
     "tooltip.mask_mode": "Jak używać masek uwagi: segmentuj, ignoruj tło lub alpha-spójne",
+    "tooltip.use_alpha_as_mask": "Użyj kanału alfa z obrazów RGBA jako źródła maski zamiast osobnych plików masek",
     "tooltip.mip_filter": "Filtr antyaliasingu dla treningu (mip-splatting)",
     "tooltip.keep_model": "Zachowaj wytrenowany model, odrzuć zbiór danych",
     "tooltip.strategy": "Strategia zagęszczania (default/mcmc)",
@@ -149,10 +150,11 @@
     "tooltip.max_gaussians": "Maksymalna liczba Gaussowskich",
     "tooltip.sh_degree": "Stopień harmonik sferycznych (0-3)",
     "tooltip.tile_mode": "Kafelkowe renderowanie dla dużych obrazów",
-    "tooltip.steps_scaler": "Skaluj interwały udoskonalania",
+    "tooltip.steps_scaler": "Skaluj kroki treningowe. Automatycznie obliczane z liczby obrazów (1.0 dla <=300, obrazy/300 dla więcej)",
     "tooltip.bilateral_grid": "Osadzenie wyglądu dla korekcji ekspozycji/koloru",
     "tooltip.sparsity": "Włącz przycinanie dla kompresji modelu",
     "tooltip.gut": "Jednolite traktowanie zniekształconych kamer",
+    "tooltip.undistort": "Korekcja zniekształceń obrazów przed treningiem",
     "tooltip.bg_modulation": "Naucz osobnego koloru tła",
     "tooltip.gradient_thr": "Próg gradientu dla zagęszczania",
     "tooltip.opacity_reg": "Waga regularyzacji nieprzezroczystości",
@@ -197,18 +199,23 @@
     "tooltip.ppisp_activation_step": "Iteracja rozpoczęcia treningu kontrolera (-1 = auto: iteracje - 5000)",
     "tooltip.ppisp_controller_lr": "Tempo uczenia dla sieci kontrolera",
     "tooltip.ppisp_freeze_gaussians": "Zamroź parametry Gaussowskich podczas treningu kontrolera",
-
+    "tooltip.strategy_gut_conflict": "Strategia ADC jest niedostępna gdy GUT jest włączony",
+    "tooltip.gut_adc_conflict": "GUT jest niedostępny ze strategią ADC. Najpierw przełącz na MCMC.",
+    "error.adc_gut_title": "Niekompatybilne ustawienia",
+    "conflict.adc_gut_start_message": "GUT i strategia ADC nie mogą być używane jednocześnie. Wybierz akcję, aby rozpocząć trening.",
+    "conflict.adc_gut_strategy_message": "Strategia ADC jest niekompatybilna z GUT. Wyłączyć GUT, aby przełączyć na ADC?",
+    "conflict.btn_use_mcmc": "Użyj MCMC",
+    "conflict.btn_disable_gut": "Wyłącz GUT",
+    "conflict.btn_cancel": "Anuluj",
     "losses.lambda_dssim": "Lambda DSSIM:",
     "losses.opacity_reg": "Opacity Reg:",
     "losses.scale_reg": "Scale Reg:",
     "losses.tv_loss_weight": "TV Loss Weight:",
-
     "init.init_opacity": "Init Opacity:",
     "init.init_scaling": "Init Scaling:",
     "init.random_init": "Random Init:",
     "init.num_points": "  Num Points:",
     "init.extent": "  Extent:",
-
     "thresholds.min_opacity": "Min Opacity:",
     "thresholds.prune_opacity": "Prune Opacity:",
     "thresholds.grow_scale_3d": "Grow Scale 3D:",
@@ -217,12 +224,10 @@
     "thresholds.prune_scale_2d": "Prune Scale 2D:",
     "thresholds.pause_after_reset": "Pause After Reset:",
     "thresholds.revised_opacity": "Revised Opacity:",
-
     "status.enabled": "Włączony",
     "status.disabled": "Wyłączony",
     "status.yes": "Tak",
     "status.no": "Nie",
-
     "button.start": "Rozpocznij Trening",
     "button.resume": "Wznów",
     "button.pause": "Pauza",
@@ -230,11 +235,26 @@
     "button.reset": "Resetuj Trening",
     "button.clear": "Wyczyść",
     "button.save_checkpoint": "Zapisz Punkt Kontrolny",
-    "button.switch_edit_mode": "Przełącz na Tryb Edycji",
+    "button.switch_edit_mode": "Tryb Edycji",
     "button.add": "Dodaj",
-    "button.remove": "Usuń"
+    "button.remove": "Usuń",
+    "value.none": "(brak)",
+    "value.default": "(domyslne)",
+    "value.not_set": "(nie ustawiono)",
+    "options.strategy.mcmc": "MCMC",
+    "options.strategy.adc": "ADC",
+    "options.tile.full": "1 (Pelny)",
+    "options.tile.half": "2 (Polowa)",
+    "options.tile.quarter": "4 (Cwierc)",
+    "options.mask.none": "Brak",
+    "options.mask.segment": "Segment",
+    "options.mask.ignore": "Ignoruj",
+    "options.mask.alpha_consistent": "Spojne z alfa",
+    "options.bg.color": "Kolor",
+    "options.bg.modulation": "Modulacja",
+    "options.bg.image": "Obraz",
+    "options.bg.random": "Losowe"
   },
-
   "scene": {
     "add_ply": "Dodaj PLY...",
     "add_group": "Dodaj Grupę",
@@ -243,6 +263,7 @@
     "delete": "Usuń",
     "rename": "Zmień Nazwę",
     "duplicate": "Duplikuj",
+    "save_to_disk": "Zapisz na dysk",
     "go_to_camera_view": "Przejdź do Widoku Kamery",
     "go_to_cam_view": "Przejdź do Widoku Kamery",
     "fit_to_scene": "Dopasuj do Sceny",
@@ -267,9 +288,25 @@
     "no_groups_available": "Brak dostępnych grup",
     "delete_node": "Usuń",
     "cannot_delete_training": "Nie można usunąć podczas treningu",
-    "background": "Tło"
+    "background": "Tło",
+    "enable_for_training": "Włącz do treningu",
+    "disable_for_training": "Wyłącz z treningu",
+    "enable_all_training": "Włącz wszystkie do treningu",
+    "disable_all_training": "Wyłącz wszystkie z treningu",
+    "training_enabled_tooltip": "Uwzględniono w treningu",
+    "training_disabled_tooltip": "Wykluczono z treningu",
+    "go_to_keyframe": "Przejdź do widoku klatki kluczowej",
+    "update_keyframe": "Aktualizuj do bieżącego widoku",
+    "select_in_timeline": "Wybierz na osi czasu",
+    "add_keyframe_scene": "Dodaj klatkę kluczową",
+    "keyframe_easing": "Easing",
+    "new_group_name": "Nowa grupa",
+    "keyframe_easing.linear": "Liniowe",
+    "keyframe_easing.ease_in": "Lagodne wejscie",
+    "keyframe_easing.ease_out": "Lagodne wyjscie",
+    "keyframe_easing.ease_in_out": "Lagodne wejscie/wyjscie",
+    "keyframe_label": "Klatka kluczowa {index}  ({time:.2f}s)"
   },
-
   "export": {
     "title": "Eksportuj",
     "format.ply_standard": "PLY (Standard)",
@@ -288,7 +325,6 @@
     "failed": "Niepowodzenie",
     "select_at_least_one": "Wybierz co najmniej jeden model"
   },
-
   "common": {
     "ok": "OK",
     "cancel": "Anuluj",
@@ -302,9 +338,12 @@
     "browse": "Przeglądaj...",
     "apply": "Zastosuj",
     "reset": "Resetuj",
-    "double_click_reset": "podwójne kliknięcie resetuje"
+    "double_click_reset": "podwójne kliknięcie resetuje",
+    "auto": "Auto",
+    "column_label": "Etykieta",
+    "column_control": "Sterowanie",
+    "na": "brak"
   },
-
   "status": {
     "ready": "Gotowy",
     "training": "Trening",
@@ -329,14 +368,13 @@
     "training_finished": "Trening Ukończony",
     "ply_models_count": "Modele PLY: {}"
   },
-
   "mode": {
     "empty": "Pusty",
     "dataset": "Zbiór Danych",
     "edit_mode": "Tryb Edycji",
-    "ply_models": "Modele PLY:"
+    "ply_models": "Modele PLY:",
+    "viewer": "Podglad"
   },
-
   "messages": {
     "no_data_loaded": "Nie załadowano danych",
     "use_file_menu": "Użyj menu Plik, aby zaimportować",
@@ -346,20 +384,20 @@
     "training_stopped": "Trening Zatrzymany",
     "training_error": "Błąd Treningu",
     "param_manager_unavailable": "Menedżer parametrów niedostępny",
-    "failed_to_load_params": "Nie udało się załadować parametrów:"
+    "failed_to_load_params": "Nie udało się załadować parametrów:",
+    "err_distorted_images": "Wykryto zniekształcone obrazy. Włącz --gut lub --undistort, aby trenować z kamerami ze zniekształceniami.",
+    "err_ortho_not_supported": "Trening z ortograficznym modelem kamery nie jest jeszcze obsługiwany.",
+    "err_non_pinhole": "Włącz --gut lub --undistort, aby trenować z kamerami innymi niż pinhole."
   },
-
   "controls": {
-    "wasd": "WASD:",
-    "zoom": "Zoom:"
+    "wasd": "WASD",
+    "zoom": "Zoom"
   },
-
   "preferences": {
     "title": "Preferencje",
     "language": "Język:",
     "select_language": "Wybierz Język"
   },
-
   "main_panel": {
     "windows": "Okna",
     "scene_panel": "Panel Sceny",
@@ -410,9 +448,9 @@
     "selection_groups": "Grupy Zaznaczenia",
     "add_group": "+ Dodaj Grupę",
     "no_selection_groups": "Brak grup zaznaczenia",
-    "clear": "Wyczyść"
+    "clear": "Wyczyść",
+    "mesh": "Siatka"
   },
-
   "toolbar": {
     "selection": "Zaznaczenie",
     "translate": "Przesunięcie",
@@ -444,9 +482,10 @@
     "gaussian_rings": "Pierścienie Gaussowskie",
     "center_markers": "Znaczniki Środkowe",
     "perspective": "Perspektywa (O)",
-    "orthographic": "Ortograficzna (O)"
+    "orthographic": "Ortograficzna (O)",
+    "sequencer": "Sekwencer",
+    "ellipsoid": "Ellipsoid"
   },
-
   "transform": {
     "node": "Węzeł: %s",
     "space": "Przestrzeń: %s",
@@ -462,7 +501,6 @@
     "reset_transform": "Resetuj Transformację",
     "nodes_selected": "%zu węzłów zaznaczonych"
   },
-
   "cropbox": {
     "title": "Pole Przycinania",
     "not_visible": "Pole przycinania niewidoczne",
@@ -475,7 +513,6 @@
     "line_width": "Szerokość Linii",
     "instructions": "Enter: Zatwierdź przycinanie | Ctrl+C: Kopiuj zawartość"
   },
-
   "file_browser": {
     "title": "Przeglądarka Plików",
     "quick_access": "Szybki Dostęp",
@@ -490,7 +527,6 @@
     "load_ply": "Wczytaj PLY",
     "enter_dir": "Wejdź do Katalogu"
   },
-
   "training_panel": {
     "start_training": "Rozpocznij Trening",
     "resume_training": "Wznów Trening",
@@ -499,7 +535,7 @@
     "stop": "Zatrzymaj Trening",
     "reset": "Resetuj Trening",
     "clear": "Wyczyść",
-    "switch_edit_mode": "Przełącz na Tryb Edycji",
+    "switch_edit_mode": "Tryb Edycji",
     "save_checkpoint": "Zapisz Punkt Kontrolny",
     "checkpoint_saved": "Punkt kontrolny zapisany!",
     "idle": "Bezczynny",
@@ -509,16 +545,17 @@
     "new_step": "Nowy Krok",
     "no_save_steps": "Nie skonfigurowano kroków zapisu",
     "sparsity": "Ustawienia Rzadkości",
-    "pruning_growing": "Przycinanie/Rozrost"
+    "pruning_growing": "Przycinanie/Rozrost",
+    "no_trainer_loaded": "Brak zaladowanego trenera",
+    "parameters_unavailable": "Parametry niedostepne",
+    "no_dataset_loaded": "Brak zaladowanego zbioru danych",
+    "iters_per_sec": "iter/s"
   },
-
   "tooltip": {
     "gut_mode": "Dla kamer rybie oko/zniekształconych/równokątnych",
     "mip_filter": "Zmniejsz aliasing dla sub-pikselowych Gaussowskich",
     "appearance_correction": "PPISP Correction",
     "ppisp_mode": "Mode",
-    "ppisp_mode_manual": "Manual",
-    "ppisp_mode_auto": "Auto (Controller)",
     "ppisp_exposure": "Adjust exposure in EV stops",
     "ppisp_gamma": "Dostosuj krzywą gamma",
     "ppisp_color_rgb": "Przesuń chrominancję dla tego kanału koloru",
@@ -545,14 +582,12 @@
     "point_cloud_mode": "Renderuj jako punkty zamiast splatów",
     "selection_colors": "Kolory wizualizacji zaznaczenia"
   },
-
   "exit_popup": {
     "title": "Zakończyć Aplikację?",
     "message": "Czy na pewno chcesz zakończyć?",
     "unsaved_warning": "Wszystkie niezapisane zmiany zostaną utracone.",
     "exit": "Zakończ"
   },
-
   "load_dataset_popup": {
     "title": "Wczytaj Zbiór Danych",
     "configure_paths": "Skonfiguruj ścieżki zbioru danych",
@@ -560,9 +595,9 @@
     "sparse_dir": "Sparse:  ",
     "masks_dir": "Maski:   ",
     "output_dir": "Wyjście: ",
+    "init_file": "Init file (opcjonalnie, zastępuje points3D):",
     "help_text": "Punkty kontrolne, logi i wyeksportowane modele zostaną zapisane w katalogu wyjściowym."
   },
-
   "notification": {
     "cannot_open": "Nie można otworzyć",
     "dropped_not_recognized": "Upuszczony",
@@ -571,7 +606,6 @@
     "items": "elementy",
     "and_more": "... i"
   },
-
   "export_dialog": {
     "format": "FORMAT",
     "models": "MODELE",
@@ -579,12 +613,10 @@
     "sh_degree": "SH DEGREE",
     "export_merged": "Eksportuj Połączony..."
   },
-
   "selection_group": {
     "lock": "Zablokuj",
     "unlock": "Odblokuj"
   },
-
   "file_browser_ext": {
     "dataset": "[Zbiór Danych]",
     "sog": "[SOG]",
@@ -594,11 +626,11 @@
     "sog_meta": "(SOG meta.json)",
     "error": "Błąd:"
   },
-
   "progress": {
     "loss": "Strata:",
     "gaussians_count": "%s Gaussowskich",
     "exporting": "Eksportowanie %s...",
+    "exporting_video": "Eksportowanie wideo...",
     "importing": "Importowanie %s...",
     "import_complete": "Import zakończony: %zu obrazów, %zu punktów",
     "import_failed": "Import nieudany: %s",
@@ -607,7 +639,6 @@
     "num_splats": "liczba Splatów: %s",
     "status_label": "Status: %s"
   },
-
   "input_settings": {
     "active_profile": "Aktywny Profil:",
     "save_current_profile": "Zapisz Bieżący Profil",
@@ -639,9 +670,13 @@
     "mode.scale": "Skala",
     "mode.align": "Narzędzie Wyrównania",
     "mode.crop_box": "Pole Przycinania",
-    "mode.unknown": "Nieznany"
+    "mode.unknown": "Nieznany",
+    "title": "USTAWIENIA WEJSCIA",
+    "save_hint": "Zapisz, aby zachowac niestandardowe skr oty",
+    "double_click_hint": "Wskazowka: kliknij dwukrotnie, aby przypisac akcje podwojnego klikniecia",
+    "export_dialog_title": "Eksportuj przypisania wejsc",
+    "import_dialog_title": "Importuj przypisania wejsc"
   },
-
   "debug_info": {
     "free_memory": "Wolna: %.2f GB",
     "enable_tracing": "Włącz Śledzenie Operacji",
@@ -649,7 +684,6 @@
     "clear_history": "Wyczyść Historię",
     "print_to_log": "Wydrukuj do Logu"
   },
-
   "training_params": {
     "strategy": "Strategy:",
     "iterations": "Iterations:",
@@ -663,8 +697,10 @@
     "opacity_penalty_weight": "  Opacity Penalty Weight:",
     "opacity_penalty_power": "  Opacity Penalty Power:",
     "mask_threshold": "  Mask Threshold:",
+    "use_alpha_as_mask": "Use Alpha as Mask:",
     "sparsity": "Sparsity:",
     "gut": "GUT:",
+    "undistort": "Undistort:",
     "mip_filter": "Filtr Mip:",
     "bg_settings": "Ustawienia Tła",
     "bg_mode": "Tryb:",
@@ -702,8 +738,10 @@
     "ppisp_freeze_gaussians": "Zamroź Gaussowskie:",
     "disabled": "Wyłączony"
   },
-
   "image_preview": {
+    "image_section": "OBRAZ",
+    "file_section": "PLIK",
+    "view_section": "WIDOK",
     "view": "Widok",
     "navigate": "Nawiguj",
     "fit_to_window": "Dopasuj do Okna",
@@ -738,9 +776,12 @@
     "file_label": "Plik: %s",
     "visible": "Widoczny",
     "hidden": "Ukryty",
-    "mask_section": "MASKA"
+    "mask_section": "MASKA",
+    "no_images_loaded": "Brak zaladowanych obrazow",
+    "no_image": "Brak obrazu",
+    "zoom": "Zoom",
+    "fit": "Dopasuj"
   },
-
   "startup": {
     "supported_by": "Wspierane przez",
     "click_to_continue": "Kliknij gdziekolwiek, aby kontynuować",
@@ -750,14 +791,12 @@
     "drop_to_import": "Upuść, aby Zaimportować",
     "drop_to_import_subtitle": "PLY, SOG, zbiór danych COLMAP lub Projekt"
   },
-
   "axis": {
     "x": "X:",
     "y": "Y:",
     "z": "Z:",
     "u": "U:"
   },
-
   "resume_checkpoint_popup": {
     "title": "Wznów Checkpoint",
     "checkpoint": "CHECKPOINT",
@@ -770,7 +809,20 @@
     "output_path": "Ścieżka Wyjściowa:",
     "help_text": "Ścieżka datasetu zapisana w punkcie kontrolnym mogła się zmienić. Zaktualizuj ją w razie potrzeby."
   },
-
+  "mesh2splat": {
+    "title": "Mesh na Splat",
+    "source_mesh": "Mesh źródłowy",
+    "no_meshes": "Brak załadowanych meshy",
+    "convert": "Konwertuj",
+    "gaussian_scale": "Gaussian Scale",
+    "tooltip_gaussian_scale": "Odchylenie standardowe każdego gaussiana. Kontroluje wizualne rozproszenie.",
+    "sampling_density_header": "Ustawienia gęstości próbkowania",
+    "sampling_density": "Sampling Density",
+    "tooltip_quality": "Kontroluje jak gęsto próbkowana jest powierzchnia meshy. Wyższe wartości generują więcej gaussianów.",
+    "max_resolution": "Max Resolution",
+    "tooltip_max_resolution": "Maksymalna rozdzielczość siatki próbkowania. Wyższe wartości umożliwiają dokładniejsze próbkowanie przy jakości 1.0.",
+    "effective_resolution": "Efektywna rozdzielczość"
+  },
   "disk_space_dialog": {
     "title": "Niewystarczające Miejsce na Dysku",
     "error_label": "Błąd",
@@ -785,5 +837,164 @@
     "change_location": "Zmień Lokalizację",
     "retry": "Ponów",
     "select_output_location": "Wybierz Lokalizację Wyjściową"
+  },
+  "video_extractor": {
+    "title": "Wyodrębnij klatki z wideo",
+    "select_preview": "Wybierz plik wideo do podglądu",
+    "step_backward": "Klatka wstecz",
+    "step_forward": "Klatka do przodu",
+    "pause": "Pauza (Spacja)",
+    "play": "Odtwórz (Spacja)",
+    "trim_range": "Zakres przycinania:",
+    "set": "Ustaw",
+    "set_start": "Ustaw początek na bieżącą pozycję",
+    "set_end": "Ustaw koniec na bieżącą pozycję",
+    "reset": "Resetuj",
+    "estimated_frames": "(~%d klatek)",
+    "input_video": "Wideo wejściowe",
+    "video": "Wideo:",
+    "no_file": "Nie wybrano pliku",
+    "browse": "Przeglądaj...",
+    "output": "Wyjście:",
+    "no_dir": "Nie wybrano katalogu",
+    "select_folder": "Wybierz folder wyjściowy",
+    "settings": "Ustawienia ekstrakcji",
+    "mode": "Tryb:",
+    "mode_fps": "Oparty na FPS",
+    "mode_interval": "Interwał klatek",
+    "fps_label": "FPS",
+    "fps_tooltip": "Wyodrębniaj klatki z tą częstotliwością",
+    "every_label": "Co",
+    "frames_format": "%d klatek",
+    "interval_tooltip": "Wyodrębniaj co N-tą klatkę",
+    "output_format": "Format wyjściowy",
+    "format": "Format:",
+    "format_png": "PNG (bezstratny)",
+    "format_jpeg": "JPEG (mniejszy)",
+    "quality_label": "Jakość",
+    "resolution": "Rozdzielczość",
+    "resolution_label": "Rozdzielczość:",
+    "res_original": "Oryginalna",
+    "res_scale": "Skala",
+    "res_custom": "Niestandardowa",
+    "width": "Szerokość",
+    "height": "Wysokość",
+    "output_res": "Wyjście: %dx%d",
+    "naming": "Nazewnictwo wyjścia",
+    "pattern": "Wzorzec:",
+    "pattern_tooltip": "Użyj %%d dla numeru klatki (np. frame_%%04d dla wypełnienia zerami)",
+    "example": "Przykład: %s%s",
+    "start": "Rozpocznij ekstrakcję",
+    "cancel": "Anuluj",
+    "select_both": "Wybierz wideo i katalog wyjściowy",
+    "extracting": "Wyodrębnianie: %d / %d klatek",
+    "starting": "Rozpoczynanie ekstrakcji...",
+    "complete": "Ekstrakcja zakończona pomyślnie!",
+    "extracted": "Wyodrębniono %d klatek",
+    "ok": "OK",
+    "error": "Błąd: %s",
+    "dismiss": "Zamknij"
+  },
+  "plugin_marketplace": {
+    "title_line": "Przeglądaj instalowalne wtyczki z rejestru wtyczek.",
+    "warning_body": "OSTRZEŻENIE: LFS nie udziela bezpośredniej rekomendacji ani nie ponosi odpowiedzialności. Używasz na własne ryzyko.",
+    "filter_label": "Filtr",
+    "sort_label": "Sortowanie",
+    "filter.all": "Wszystkie",
+    "filter.installed": "Zainstalowane",
+    "filter.not_installed": "Niezainstalowane",
+    "sort.popularity_desc": "Popularność: malejąco",
+    "sort.popularity_asc": "Popularność: rosnąco",
+    "sort.name_asc": "Nazwa: A -> Z",
+    "sort.name_desc": "Nazwa: Z -> A",
+    "loading": "Pobieranie rejestru wtyczek...",
+    "no_plugins": "Brak dostępnych wtyczek.",
+    "edit_list_hint": "Sprawdź konfigurację rejestru lub połączenie internetowe.",
+    "unknown_plugin": "Nieznana wtyczka",
+    "no_description": "Brak opisu.",
+    "stars": "Gwiazdki",
+    "downloads": "Pobierania",
+    "invalid_link": "Nieprawidłowy link",
+    "button.install": "Zainstaluj",
+    "button.github": "GitHub",
+    "local_install": "Instalacja lokalna",
+    "confirm_uninstall_title": "Potwierdz odinstalowanie wtyczki",
+    "confirm_uninstall_message": "Czy na pewno chcesz odinstalować \"{name}\"?",
+    "confirm_uninstall_yes": "Tak",
+    "confirm_uninstall_no": "Nie",
+    "load_on_startup": "Ładuj przy starcie"
+  },
+  "sequencer": {
+    "edit_focal_length": "Edytuj ogniskową...",
+    "edit_focal_length_title": "Edytuj ogniskową",
+    "focal_length_mm": "Ogniskowa (mm)"
+  },
+  "rendering_panel": {
+    "fov_format": "FOV: {hfov:.1f}° H / {vfov:.1f}° V"
+  },
+  "scripts_panel": {
+    "actions": "Akcje",
+    "reload_all": "Przeladuj wszystko",
+    "clear_all": "Wyczysc wszystko",
+    "no_scripts_loaded": "Brak zaladowanych skryptow Pythona.",
+    "load_hint": "Uzyj --python-script <sciezka>, aby zaladowac skrypty.",
+    "loaded_scripts": "Zaladowane skrypty:",
+    "path": "Sciezka",
+    "error": "Blad",
+    "reload": "Przeladuj"
+  },
+  "status_bar": {
+    "gt_compare": "Porownanie GT",
+    "camera": "Cam {cam_id}",
+    "split": "Podzial:",
+    "gpu": "GPU",
+    "strategy_default": "Domyslny"
+  },
+  "plugin_manager": {
+    "section.install_from_github": "Instaluj z GitHub",
+    "section.installed_plugins": "Zainstalowane wtyczki",
+    "github_url_or_shorthand": "URL GitHub lub skrot:",
+    "supported_formats": "Obslugiwane formaty",
+    "working": "Przetwarzanie...",
+    "output": "Wyjscie",
+    "button.install_plugin": "Zainstaluj wtyczke",
+    "button.explore_options": "Przegladaj opcje",
+    "button.reload": "Przeladuj",
+    "button.unload": "Wyladuj",
+    "button.load": "Zaladuj",
+    "button.update": "Aktualizuj",
+    "button.uninstall": "Odinstaluj",
+    "no_plugins_installed": "Brak zainstalowanych wtyczek",
+    "version": "Wersja",
+    "description": "Opis",
+    "status": "Stan",
+    "status_not_loaded": "niezaładowany",
+    "error.enter_github_url": "Wpisz URL GitHub",
+    "status.installed": "Zainstalowano: {}",
+    "status.install_failed": "Instalacja nie powiodła się",
+    "status.loaded": "Załadowano: {name}",
+    "status.load_failed": "Ładowanie nie powiodło się",
+    "status.unloaded": "Wyładowano: {name}",
+    "status.unload_failed": "Wyładowanie nie powiodło się",
+    "status.reloaded": "Przeładowano: {name}",
+    "status.reload_failed": "Przeładowanie nie powiodło się",
+    "status.updated": "Zaktualizowano: {name}",
+    "status.update_failed": "Aktualizacja nie powiodła się",
+    "status.uninstalled": "Odinstalowano: {name}",
+    "status.uninstall_failed": "Odinstalowanie nie powiodło się",
+    "status.unloading": "Unloading {name}...",
+    "status.uninstalling": "Uninstalling {name}..."
+  },
+  "ellipsoid": {
+    "title": "Ellipsoid",
+    "not_visible": "Ellipsoid not visible",
+    "no_selection": "No ellipsoid selected",
+    "invalid": "Invalid ellipsoid",
+    "position": "Position",
+    "rotation": "Rotation",
+    "radii": "Radii",
+    "appearance": "Appearance",
+    "line_width": "Line Width",
+    "instructions": "Enter: Commit selection | Ctrl+C: Copy contents"
   }
 }

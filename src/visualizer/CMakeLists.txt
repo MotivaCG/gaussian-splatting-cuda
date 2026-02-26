@@ -2,7 +2,17 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-add_library(lfs_visualizer STATIC
+# Fetch libvterm for terminal emulation
+include(${CMAKE_SOURCE_DIR}/cmake/FetchLibvterm.cmake)
+
+# SHARED on Windows to avoid singleton duplication across .exe/.pyd boundary
+if(WIN32)
+    set(LFS_VIS_LIB_TYPE SHARED)
+else()
+    set(LFS_VIS_LIB_TYPE STATIC)
+endif()
+
+add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         # Core
         visualizer.cpp
         visualizer_impl.cpp
@@ -10,66 +20,117 @@ add_library(lfs_visualizer STATIC
         core/data_loading_service.cpp
         core/editor_context.cpp
         core/parameter_manager.cpp
+        core/services.cpp
 
         # Window management
         window/window_manager.cpp
 
         # Rendering
         rendering/rendering_manager.cpp
+        rendering/render_pass.cpp
         rendering/framerate_controller.cpp
+        rendering/passes/overlay_pass.cpp
+        rendering/passes/splat_raster_pass.cpp
+        rendering/passes/mesh_pass.cpp
+        rendering/passes/present_pass.cpp
+        rendering/passes/point_cloud_pass.cpp
+        rendering/passes/split_view_pass.cpp
 
         # Theme system
         theme/theme.cpp
 
         # GUI system
         gui/gui_manager.cpp
+        gui/gizmo_manager.cpp
+        gui/pie_menu.cpp
+        gui/panel_layout.cpp
+        gui/panel_registry.cpp
+        gui/native_panels.cpp
+        gui/layout_state.cpp
+        gui/async_task_manager.cpp
+        gui/startup_overlay.cpp
+        gui/sequencer_ui_manager.cpp
+        gui/keyframe_scene_sync.cpp
         gui/gizmo_transform.cpp
         gui/html_viewer_export.cpp
         gui/ui_widgets.cpp
-        gui/localization_manager.cpp
-        gui/panels/main_panel.cpp
-        gui/panels/training_panel.cpp
-        gui/panels/crop_box_panel.cpp
-        gui/panels/ellipsoid_panel.cpp
-        gui/panels/transform_panel.cpp
-        gui/panels/gizmo_toolbar.cpp
-        gui/panels/scene_panel.cpp
+        gui/panels/windows_console_utils.cpp
         gui/panels/tools_panel.cpp
+        gui/panels/python_console_panel.cpp
+        gui/panels/python_scripts_panel.cpp
+        gui/panels/mesh2splat_panel.cpp
+        gui/editor/python_language_def.cpp
+        gui/editor/editor_theme.cpp
+        gui/editor/autocomplete/static_providers.cpp
+        gui/editor/autocomplete/autocomplete_manager.cpp
+        gui/editor/autocomplete/python_introspector.cpp
+        gui/editor/python_editor.cpp
+        gui/editor/console_output.cpp
+
+        # Terminal emulator
+        gui/terminal/pty_process.cpp
+        gui/terminal/terminal_widget.cpp
         gui/windows/file_browser.cpp
-        gui/windows/image_preview.cpp
-        gui/windows/export_dialog.cpp
-        gui/windows/notification_popup.cpp
-        gui/windows/save_directory_popup.cpp
-        gui/windows/resume_checkpoint_popup.cpp
-        gui/windows/exit_confirmation_popup.cpp
         gui/windows/disk_space_error_dialog.cpp
+        gui/windows/video_extractor_dialog.cpp
 
         # Scene management
-        scene/scene.cpp
         scene/scene_manager.cpp
+        scene/selection_state.cpp
 
         # Input handling
         input/input_controller.cpp
         input/input_bindings.cpp
+        input/sdl_key_mapping.cpp
 
         # Training integration
         training/training_state.cpp
         training/training_manager.cpp
 
         # Tools
+        tools/selection_tool.cpp
         tools/brush_tool.cpp
         tools/align_tool.cpp
-        tools/selection_tool.cpp
+        tools/unified_tool_registry.cpp
+        tools/builtin_tools.cpp
 
-        # Command system (undo/redo)
-        command/command_history.cpp
-        command/commands/cropbox_command.cpp
-        command/commands/ellipsoid_command.cpp
-        command/commands/crop_command.cpp
-        command/commands/selection_command.cpp
-        command/commands/saturation_command.cpp
-        command/commands/mirror_command.cpp
-        command/commands/transform_command.cpp
+        # Icon cache
+        gui/icon_cache.cpp
+
+        # Selection system
+        selection/selection_service.cpp
+
+        # Sequencer (camera animation)
+        sequencer/sequencer_controller.cpp
+        sequencer/sequencer_panel.cpp
+
+        # Operator system (Blender-style)
+        operator/operator_context.cpp
+        operator/operator_id.cpp
+        operator/operator_registry.cpp
+        operator/property_schema.cpp
+        operator/ops/align_ops.cpp
+        operator/ops/brush_ops.cpp
+        operator/ops/edit_ops.cpp
+        operator/ops/selection_ops.cpp
+        operator/ops/transform_ops.cpp
+
+        # Compositional operations system
+        operation/undo_entry.cpp
+        operation/undo_history.cpp
+        operation/operation.cpp
+        operation/pipeline.cpp
+        operation/ops/select_ops.cpp
+        operation/ops/edit_ops.cpp
+        operation/ops/transform_ops.cpp
+
+        # Python hook invoker (DLL boundary singleton)
+        ${CMAKE_SOURCE_DIR}/src/python/ui_hooks.cpp
+
+        # IPC for MCP integration
+        ipc/selection_server.cpp
+        ipc/view_context.cpp
+
         gui/panels/menu_bar.cpp
         gui/panels/menu_bar.hpp
         gui/utils/windows_utils.cpp
@@ -88,19 +149,22 @@ target_include_directories(lfs_visualizer
         ${OPENGL_INCLUDE_DIRS}
 )
 
-# Link dependencies
 target_link_libraries(lfs_visualizer
         PRIVATE
-        lfs_core           # Use modular core library (LibTorch-free)
-        lfs_geometry       # LibTorch-free geometry module
+        lfs_core
+        lfs_geometry
         lfs_io
         lfs_rendering
         lfs_training
+        lfs_python_runtime
+        lfs_python_utils
+        lfs_sequencer
         glad::glad
-        glfw
+        SDL3::SDL3
         imgui::imgui
         implot::implot
-        imguizmo::imguizmo # 3D manipulation gizmo
+        imguizmo::imguizmo
+        imgui_textedit
         glm::glm
         TBB::tbb
         spdlog::spdlog
@@ -109,10 +173,25 @@ target_link_libraries(lfs_visualizer
         OpenSSL::Crypto
         CUDA::cudart
         ${OPENGL_LIBRARIES}
+        vterm
 )
 
 # Set C++ standard
 target_compile_features(lfs_visualizer PUBLIC cxx_std_23)
+
+if(WIN32)
+    set_target_properties(lfs_visualizer PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR}
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}
+        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO ${CMAKE_BINARY_DIR}
+        RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL ${CMAKE_BINARY_DIR}
+    )
+endif()
 
 # Compiler options
 target_compile_options(lfs_visualizer PRIVATE
@@ -174,6 +253,7 @@ endforeach ()
 
 # Compile definitions
 target_compile_definitions(lfs_visualizer PRIVATE
+        LFS_VIS_EXPORTS
         $<$<BOOL:${CUDA_GL_INTEROP_ENABLED}>:CUDA_GL_INTEROP_ENABLED>
         PROJECT_ROOT_PATH="${PROJECT_SOURCE_DIR}"
         VISUALIZER_SHADER_PATH="${VISUALIZER_BUILD_RESOURCE_DIR}/shaders"
@@ -199,13 +279,14 @@ elseif (UNIX AND NOT APPLE)
             GL
             GLU
             X11
+            util  # PTY support (forkpty)
     )
 endif ()
 
-# Export only the public header
-install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/include/visualizer/visualizer.hpp
-        DESTINATION include/visualizer
-)
+if(NOT BUILD_PORTABLE)
+    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/include/visualizer/visualizer.hpp
+            DESTINATION include/visualizer)
+endif()
 
 # Optionally install resources
 install(DIRECTORY ${VISUALIZER_SOURCE_RESOURCE_DIR}/

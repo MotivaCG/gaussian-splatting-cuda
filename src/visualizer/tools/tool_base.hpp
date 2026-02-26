@@ -9,8 +9,7 @@
 #include <string>
 #include <string_view>
 
-// Forward declaration for GLFW
-struct GLFWwindow;
+struct SDL_Window;
 
 namespace lfs::vis {
     // Forward declarations
@@ -24,10 +23,6 @@ class Viewport;
 
 namespace lfs::vis::gui {
     struct UIContext;
-}
-
-namespace lfs::vis::command {
-    class CommandHistory;
 }
 
 namespace lfs::vis {
@@ -56,21 +51,18 @@ namespace lfs::vis {
     // Concrete context passed to tools for accessing visualizer resources
     class ToolContext {
     public:
-        ToolContext(RenderingManager* rm, SceneManager* sm, const Viewport* vp, GLFWwindow* win,
-                    command::CommandHistory* ch = nullptr)
+        ToolContext(RenderingManager* rm, SceneManager* sm, const Viewport* vp, SDL_Window* win)
             : rendering_manager(rm),
               scene_manager(sm),
               viewport(vp),
-              window(win),
-              command_history(ch) {}
+              window(win) {}
 
         // Direct access to components
         RenderingManager* getRenderingManager() const { return rendering_manager; }
         SceneManager* getSceneManager() const { return scene_manager; }
         const Viewport& getViewport() const { return *viewport; }
-        GLFWwindow* getWindow() const { return window; }
+        SDL_Window* getWindow() const { return window; }
         const ViewportBounds& getViewportBounds() const { return viewport_bounds_; }
-        command::CommandHistory* getCommandHistory() const { return command_history; }
 
         // Update viewport bounds (called by GUI manager)
         void updateViewportBounds(float x, float y, float w, float h) {
@@ -80,7 +72,7 @@ namespace lfs::vis {
         // Helper methods
         void requestRender() const {
             if (rendering_manager) {
-                rendering_manager->markDirty();
+                rendering_manager->markDirty(DirtyFlag::ALL);
             }
         }
 
@@ -90,9 +82,8 @@ namespace lfs::vis {
         RenderingManager* rendering_manager;
         SceneManager* scene_manager;
         const Viewport* viewport;
-        GLFWwindow* window;
+        SDL_Window* window;
         ViewportBounds viewport_bounds_;
-        command::CommandHistory* command_history;
     };
 
     // Base class providing default implementations

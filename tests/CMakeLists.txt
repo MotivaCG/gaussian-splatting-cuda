@@ -6,6 +6,16 @@
 # Find GTest
 find_package(GTest CONFIG REQUIRED)
 
+# Reuse nanobind headers for Python UI regression tests
+if(NOT DEFINED NB_DIR)
+    find_package(Python REQUIRED COMPONENTS Interpreter Development Development.Module Development.SABIModule)
+    find_package(nanobind CONFIG REQUIRED)
+endif()
+
+if(COMMAND nanobind_build_library AND NOT TARGET nanobind-static)
+    nanobind_build_library(nanobind-static)
+endif()
+
 # =============================================================================
 # Unicode Path Test Only (no CUDA dependencies)
 # =============================================================================
@@ -110,6 +120,7 @@ set(TEST_FILES
     test_tensor_ops.cpp
     test_tensor_memory.cpp
     test_tensor_reduction.cpp
+    test_tensor_reduction_alignment.cpp
     test_isolation.cpp
     test_tensor_views.cpp
     test_tensor_math.cpp
@@ -175,6 +186,7 @@ set(TEST_FILES
     test_tensor_index_select_bool.cpp
     test_tensor_index_select_uint8.cpp
     test_tensor_uint8_inversion.cpp
+    test_tensor_uint8_masking.cpp
     test_tensor_serialization.cpp
     test_tensor_cat_reduction_bug.cpp
     test_tensor_inplace_capacity.cpp
@@ -188,10 +200,17 @@ set(TEST_FILES
     test_tensor_zero_dimension.cpp
     test_mask_loss.cpp
     test_checkpoint_resume.cpp
+    test_video_color_convert.cpp
+    test_python_integration.cpp
+    test_uv_runner.cpp
+    test_uv_runner_proof.cpp
+    test_pytorch_install_proof.cpp
     test_nan_inf_gpu_check.cpp
     test_mcmc_nan_fix.cpp
     test_vram_resize.cpp
     test_stride_bugs.cpp
+    test_strided_fill.cpp
+    test_expanded_tensor_ops.cpp
     test_bool_any_all.cpp
     test_fused_l1_ssim.cpp
     test_add_new_gs_tensor_ops.cpp
@@ -204,16 +223,35 @@ set(TEST_FILES
     test_tensor_cat_bug.cpp
     test_tensor_slicing_safety.cpp
     test_tensor_struct_init.cpp
+    test_tensor_lazy_ir.cpp
+    test_tensor_lazy_stateful_ops.cpp
+    test_fusion_performance.cpp
     test_torch_conversion.cpp
     test_fastgs_kernels.cpp
     test_fastgs_fuzz.cpp
+    test_python_io.cpp
+    test_extended_unary_ops_vs_torch.cpp
+    # test_property_system.cpp  # Disabled: needs API update after merge
+    test_scene_validity.cpp
     test_fastgs_analytical_gradients.cpp
     test_background_image.cpp
+    test_operator_return_value.cpp
+    test_tensor_storage_version.cpp
+    test_modal_registry_regression.cpp
+    # test_property_schema_thread_safety.cpp  # Disabled: API mismatch after merge
+    # test_property_system.cpp  # Disabled: API mismatch after merge
     test_tensor_nn_ops.cpp
     test_ppisp_controller.cpp
     test_ppisp_regularization.cpp
     test_ppisp_cuda_vs_torch.cpp
     test_controller_memory.cpp
+    test_undistort.cpp
+    test_mesh_data.cpp
+    test_openmesh_bridge.cpp
+    test_mesh_loader.cpp
+    test_rotated_sh_correctness.cpp
+    test_tensor_stream.cpp
+    test_tensor_memory_planner.cpp
 )
 
 # Build test sources list
@@ -223,6 +261,11 @@ foreach(TEST_FILE ${TEST_FILES})
         list(APPEND TEST_SOURCES ${TEST_FILE})
     endif()
 endforeach()
+
+# PyModalRegistry data layer (no ImGui) for lock-order regression tests.
+list(APPEND TEST_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/python/lfs/py_modal_registry.cpp
+)
 
 # Build benchmark sources list
 set(BENCHMARK_SOURCES test_main.cpp)
@@ -251,7 +294,9 @@ target_include_directories(lichtfeld_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/src/training   # For training headers
     ${CMAKE_SOURCE_DIR}/src            # For module headers
+    ${CMAKE_SOURCE_DIR}/src/visualizer # For visualizer-relative headers (e.g. gui/ui_widgets.hpp)
     ${CMAKE_SOURCE_DIR}/external/spz   # SPZ library headers
+    ${NB_DIR}/include
     ${CUDAToolkit_INCLUDE_DIRS}
     ${OPENGL_INCLUDE_DIRS}
 )
@@ -271,17 +316,22 @@ target_link_libraries(lichtfeld_tests PRIVATE
     lfs_core
     lfs_geometry
     lfs_io
-    lfs_tensor
+    lfs_video
+
 
     # Backend libraries
     fastlfs_backend
     spz_lib  # Niantic SPZ format library
+    lfs_python_utils
 
     # External libraries
     GTest::gtest
+    nanobind-static
     ${TORCH_LIBRARIES}
     ${OPENGL_LIBRARIES}
     OpenImageIO::OpenImageIO
+    OpenMeshCore
+    assimp::assimp
 
     # CUDA libraries
     CUDA::cudart
@@ -294,7 +344,7 @@ target_link_libraries(lichtfeld_tests PRIVATE
 
 # Compiler options for CUDA debugging
 target_compile_options(lichtfeld_tests PRIVATE
-    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-G -lineinfo>
+    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:${LFS_CUDA_DEVICE_DEBUG_FLAGS} -lineinfo>
     $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Debug>>:-O0 -g -fno-omit-frame-pointer>
     $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3 -DNDEBUG>
 )
@@ -318,7 +368,9 @@ target_include_directories(lichtfeld_benchmarks PRIVATE
     ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/src/training
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/visualizer
     ${CMAKE_SOURCE_DIR}/external/spz
+    ${NB_DIR}/include
     ${CUDAToolkit_INCLUDE_DIRS}
     ${OPENGL_INCLUDE_DIRS}
 )
@@ -335,7 +387,7 @@ target_link_libraries(lichtfeld_benchmarks PRIVATE
     lfs_core
     lfs_geometry
     lfs_io
-    lfs_tensor
+
     fastlfs_backend
     spz_lib
     GTest::gtest
@@ -349,7 +401,7 @@ target_link_libraries(lichtfeld_benchmarks PRIVATE
 )
 
 target_compile_options(lichtfeld_benchmarks PRIVATE
-    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-G -lineinfo>
+    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:${LFS_CUDA_DEVICE_DEBUG_FLAGS} -lineinfo>
     $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Debug>>:-O0 -g -fno-omit-frame-pointer>
     $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3 -DNDEBUG>
 )

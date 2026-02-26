@@ -45,16 +45,6 @@ namespace lfs::training {
         /// Backward pass for a specific camera. Must call predict() first.
         void backward(int camera_idx, const lfs::core::Tensor& grad_output);
 
-        /// Compute MSE loss between prediction and target.
-        [[nodiscard]] lfs::core::Tensor distillation_loss(const lfs::core::Tensor& pred,
-                                                          const lfs::core::Tensor& target);
-
-        /// Compute MSE gradient and store it internally.
-        void compute_mse_gradient(const lfs::core::Tensor& pred, const lfs::core::Tensor& target);
-
-        /// Get the stored MSE gradient.
-        [[nodiscard]] const lfs::core::Tensor& get_mse_gradient() const { return mse_grad_; }
-
         /// Update weights for a specific camera using stored gradients.
         void optimizer_step(int camera_idx);
 
@@ -114,7 +104,6 @@ namespace lfs::training {
 
         // Shared backward buffers
         lfs::core::Tensor grad_fc3_out_, grad_fc2_out_, grad_fc1_out_;
-        lfs::core::Tensor mse_grad_;
 
         // Shared gradients (only one camera trains at a time)
         lfs::core::Tensor fc1_w_grad_, fc1_b_grad_;

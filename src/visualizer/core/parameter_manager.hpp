@@ -4,15 +4,18 @@
 
 #pragma once
 
+#include "core/export.hpp"
 #include "core/parameters.hpp"
+#include <atomic>
 #include <expected>
+#include <mutex>
 #include <string>
 #include <string_view>
 
 namespace lfs::vis {
 
     // Session defaults set once at startup (CLI > --config > JSON), current params are user-editable.
-    class ParameterManager {
+    class LFS_VIS_API ParameterManager {
     public:
         std::expected<void, std::string> ensureLoaded();
 
@@ -40,11 +43,28 @@ namespace lfs::vis {
         [[nodiscard]] lfs::core::param::OptimizationParameters& getActiveParams();
         [[nodiscard]] const lfs::core::param::OptimizationParameters& getActiveParams() const;
 
+        void autoScaleSteps(size_t image_count);
+
         [[nodiscard]] lfs::core::param::TrainingParameters createForDataset(
             const std::filesystem::path& data_path,
             const std::filesystem::path& output_path) const;
 
         [[nodiscard]] bool isLoaded() const { return loaded_; }
+
+        void markDirty() { dirty_.store(true, std::memory_order_release); }
+        bool consumeDirty() { return dirty_.exchange(false, std::memory_order_acq_rel); }
+
+        [[nodiscard]] lfs::core::param::OptimizationParameters copyActiveParams() const {
+            std::lock_guard lock(params_mutex_);
+            return getActiveParams();
+        }
+
+        template <typename F>
+        void modifyActiveParams(F&& fn) {
+            std::lock_guard lock(params_mutex_);
+            fn(getActiveParams());
+            dirty_.store(true, std::memory_order_release);
+        }
 
     private:
         bool loaded_ = false;
@@ -61,6 +81,9 @@ namespace lfs::vis {
 
         // Dataset config (CLI overrides JSON defaults)
         lfs::core::param::DatasetConfig dataset_config_;
+
+        mutable std::mutex params_mutex_;
+        std::atomic<bool> dirty_{false};
     };
 
 } // namespace lfs::vis

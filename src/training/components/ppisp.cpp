@@ -47,9 +47,9 @@ namespace lfs::training {
 
     void PPISP::register_frame(int uid, int camera_id) {
         assert(!finalized_ && "Cannot register frames after finalize()");
-        assert(uid_to_frame_idx_.find(uid) == uid_to_frame_idx_.end() && "Duplicate frame UID");
+        assert(!is_known_frame(uid) && "Duplicate frame UID");
 
-        if (camera_id_to_idx_.find(camera_id) == camera_id_to_idx_.end()) {
+        if (!is_known_camera(camera_id)) {
             camera_id_to_idx_[camera_id] = static_cast<int>(camera_id_to_idx_.size());
         }
         uid_to_frame_idx_[uid] = static_cast<int>(uid_to_frame_idx_.size());
@@ -126,6 +126,13 @@ namespace lfs::training {
         crf_exp_avg_ = lfs::core::Tensor::zeros({crf_size}, lfs::core::Device::CUDA);
         crf_exp_avg_sq_ = lfs::core::Tensor::zeros({crf_size}, lfs::core::Device::CUDA);
         crf_grad_ = lfs::core::Tensor::zeros({crf_size}, lfs::core::Device::CUDA);
+
+        // Scratch buffers for backward_with_controller_params
+        ctrl_bwd_exposure_ = lfs::core::Tensor::zeros({1}, lfs::core::Device::CUDA);
+        ctrl_bwd_color_ = lfs::core::Tensor::zeros({8}, lfs::core::Device::CUDA);
+        ctrl_bwd_vignetting_ = lfs::core::Tensor::zeros({vig_size}, lfs::core::Device::CUDA);
+        ctrl_bwd_crf_ = lfs::core::Tensor::zeros({crf_size}, lfs::core::Device::CUDA);
+        ctrl_bwd_output_ = lfs::core::Tensor::empty({9}, lfs::core::Device::CUDA);
 
         kernels::launch_ppisp_init_identity(exposure_params_.ptr<float>(), vignetting_params_.ptr<float>(),
                                             color_params_.ptr<float>(), crf_params_.ptr<float>(), num_cameras_,
@@ -390,6 +397,54 @@ namespace lfs::training {
             w, num_cameras_, num_frames_, camera_idx, frame_idx, nullptr);
 
         return grad_rgb;
+    }
+
+    lfs::core::Tensor PPISP::backward_with_controller_params(const lfs::core::Tensor& rgb,
+                                                             const lfs::core::Tensor& grad_output,
+                                                             const lfs::core::Tensor& controller_params,
+                                                             int camera_idx) {
+        assert(finalized_ && "Must call finalize() before backward_with_controller_params()");
+        assert(controller_params.shape().rank() == 2 && "Expected [1,9]");
+        assert(controller_params.shape()[0] == 1 && controller_params.shape()[1] == 9);
+        assert(camera_idx >= 0 && camera_idx < num_cameras_ && "camera_idx out of range");
+
+        const auto& shape = rgb.shape();
+        assert(shape.rank() == 3 && shape[0] == 3 && "Expected CHW layout with 3 channels");
+
+        const size_t h = shape[1];
+        const size_t w = shape[2];
+
+        // Lazy-resize rgb scratch buffer if image dimensions changed
+        if (h != ctrl_bwd_rgb_h_ || w != ctrl_bwd_rgb_w_) {
+            ctrl_bwd_rgb_ = lfs::core::Tensor::empty({3, h, w}, lfs::core::Device::CUDA);
+            ctrl_bwd_rgb_h_ = h;
+            ctrl_bwd_rgb_w_ = w;
+        }
+
+        auto exposure_temp = controller_params.slice(1, 0, 1).reshape({1});
+        auto color_temp = controller_params.slice(1, 1, 9).reshape({8});
+
+        // Zero preallocated gradient scratch buffers
+        cudaMemsetAsync(ctrl_bwd_exposure_.ptr<float>(), 0, sizeof(float), nullptr);
+        cudaMemsetAsync(ctrl_bwd_color_.ptr<float>(), 0, 8 * sizeof(float), nullptr);
+        cudaMemsetAsync(ctrl_bwd_vignetting_.ptr<float>(), 0, ctrl_bwd_vignetting_.numel() * sizeof(float), nullptr);
+        cudaMemsetAsync(ctrl_bwd_crf_.ptr<float>(), 0, ctrl_bwd_crf_.numel() * sizeof(float), nullptr);
+
+        kernels::launch_ppisp_backward_chw(exposure_temp.ptr<float>(), vignetting_params_.ptr<float>(),
+                                           color_temp.ptr<float>(), crf_params_.ptr<float>(), rgb.ptr<float>(),
+                                           grad_output.ptr<float>(), ctrl_bwd_exposure_.ptr<float>(),
+                                           ctrl_bwd_vignetting_.ptr<float>(), ctrl_bwd_color_.ptr<float>(),
+                                           ctrl_bwd_crf_.ptr<float>(), ctrl_bwd_rgb_.ptr<float>(),
+                                           static_cast<int>(h), static_cast<int>(w), num_cameras_, 1, camera_idx, 0,
+                                           nullptr);
+
+        // Assemble [exposure(1), color(8)] -> [9] via D2D copy into preallocated output
+        cudaMemcpyAsync(ctrl_bwd_output_.ptr<float>(), ctrl_bwd_exposure_.ptr<float>(), sizeof(float),
+                        cudaMemcpyDeviceToDevice, nullptr);
+        cudaMemcpyAsync(ctrl_bwd_output_.ptr<float>() + 1, ctrl_bwd_color_.ptr<float>(), 8 * sizeof(float),
+                        cudaMemcpyDeviceToDevice, nullptr);
+
+        return ctrl_bwd_output_.reshape({1, 9});
     }
 
     namespace {
@@ -844,10 +899,20 @@ namespace lfs::training {
 
         // Recreate gradient buffers
         exposure_grad_ = lfs::core::Tensor::zeros({static_cast<size_t>(num_frames_)}, lfs::core::Device::CUDA);
-        vignetting_grad_ =
-            lfs::core::Tensor::zeros({static_cast<size_t>(num_cameras_) * 3 * 5}, lfs::core::Device::CUDA);
+        size_t vig_size = static_cast<size_t>(num_cameras_) * 3 * 5;
+        vignetting_grad_ = lfs::core::Tensor::zeros({vig_size}, lfs::core::Device::CUDA);
         color_grad_ = lfs::core::Tensor::zeros({static_cast<size_t>(num_frames_) * 8}, lfs::core::Device::CUDA);
-        crf_grad_ = lfs::core::Tensor::zeros({static_cast<size_t>(num_cameras_) * 3 * 4}, lfs::core::Device::CUDA);
+        size_t crf_size = static_cast<size_t>(num_cameras_) * 3 * 4;
+        crf_grad_ = lfs::core::Tensor::zeros({crf_size}, lfs::core::Device::CUDA);
+
+        // Recreate scratch buffers for backward_with_controller_params
+        ctrl_bwd_exposure_ = lfs::core::Tensor::zeros({1}, lfs::core::Device::CUDA);
+        ctrl_bwd_color_ = lfs::core::Tensor::zeros({8}, lfs::core::Device::CUDA);
+        ctrl_bwd_vignetting_ = lfs::core::Tensor::zeros({vig_size}, lfs::core::Device::CUDA);
+        ctrl_bwd_crf_ = lfs::core::Tensor::zeros({crf_size}, lfs::core::Device::CUDA);
+        ctrl_bwd_output_ = lfs::core::Tensor::empty({9}, lfs::core::Device::CUDA);
+        ctrl_bwd_rgb_h_ = 0;
+        ctrl_bwd_rgb_w_ = 0;
 
         finalized_ = true;
     }

@@ -5,6 +5,8 @@
 #pragma once
 
 #include "core/camera_types.h"
+#include "core/cuda/undistort/undistort.hpp"
+#include "core/export.hpp"
 #include "core/tensor.hpp"
 #include <cuda_runtime.h>
 #include <filesystem>
@@ -13,7 +15,7 @@
 
 namespace lfs::core {
 
-    class Camera {
+    class LFS_CORE_API Camera {
     public:
         Camera() = default;
 
@@ -116,6 +118,13 @@ namespace lfs::core {
         float FoVx() const noexcept { return _FoVx; }
         float FoVy() const noexcept { return _FoVy; }
 
+        void precompute_undistortion(float blank_pixels = 0.0f);
+        bool is_undistort_precomputed() const noexcept { return _undistort_precomputed; }
+        void prepare_undistortion(float blank_pixels = 0.0f);
+        bool is_undistort_prepared() const noexcept { return _undistort_prepared; }
+        bool has_distortion() const noexcept;
+        const UndistortParams& undistort_params() const noexcept { return _undistort_params; }
+
     private:
         // IDs
         float _FoVx = 0.f;
@@ -163,6 +172,10 @@ namespace lfs::core {
         int _cached_cores_max_width = -999;
         bool _cached_cores_invert = false;
         float _cached_cores_threshold = -1.0f;
+        // Undistortion state
+        bool _undistort_precomputed = false;
+        bool _undistort_prepared = false;
+        UndistortParams _undistort_params{};
 
         // CUDA stream for async operations
         cudaStream_t _stream = nullptr;

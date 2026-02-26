@@ -13,7 +13,7 @@ namespace lfs::vis {
             mode_ = EditorMode::EMPTY;
             has_selection_ = false;
             has_gaussians_ = false;
-            selected_node_type_ = NodeType::SPLAT;
+            selected_node_type_ = core::NodeType::SPLAT;
             return;
         }
 
@@ -46,7 +46,7 @@ namespace lfs::vis {
 
         // Update selection state
         has_selection_ = scene_manager->hasSelectedNode();
-        selected_node_type_ = has_selection_ ? scene_manager->getSelectedNodeType() : NodeType::SPLAT;
+        selected_node_type_ = has_selection_ ? scene_manager->getSelectedNodeType() : core::NodeType::SPLAT;
 
         has_gaussians_ = (mode_ == EditorMode::VIEWING_SPLATS ||
                           mode_ == EditorMode::TRAINING ||
@@ -54,11 +54,12 @@ namespace lfs::vis {
                           mode_ == EditorMode::FINISHED);
     }
 
-    bool EditorContext::isTransformableNodeType(const NodeType type) {
-        return type == NodeType::DATASET ||
-               type == NodeType::SPLAT ||
-               type == NodeType::CROPBOX ||
-               type == NodeType::ELLIPSOID;
+    bool EditorContext::isTransformableNodeType(const core::NodeType type) {
+        return type == core::NodeType::DATASET ||
+               type == core::NodeType::SPLAT ||
+               type == core::NodeType::CROPBOX ||
+               type == core::NodeType::ELLIPSOID ||
+               type == core::NodeType::MESH;
     }
 
     bool EditorContext::canTransformSelectedNode() const {
@@ -87,7 +88,7 @@ namespace lfs::vis {
         case ToolType::Scale:
             return canTransformSelectedNode();
         case ToolType::Align:
-            return selected_node_type_ == NodeType::SPLAT;
+            return selected_node_type_ == core::NodeType::SPLAT;
         }
         return false;
     }
@@ -110,7 +111,7 @@ namespace lfs::vis {
         case ToolType::Scale:
             return isTransformableNodeType(selected_node_type_) ? nullptr : "select parent node";
         case ToolType::Align:
-            return selected_node_type_ == NodeType::SPLAT ? nullptr : "select PLY node";
+            return selected_node_type_ == core::NodeType::SPLAT ? nullptr : "select PLY node";
         }
         return nullptr;
     }
@@ -126,5 +127,23 @@ namespace lfs::vis {
             active_tool_ = ToolType::None;
         }
     }
+
+    void EditorContext::setActiveOperator(const std::string& id, const std::string& gizmo_type) {
+        LOG_DEBUG("EditorContext::setActiveOperator: id='{}', gizmo_type='{}'", id, gizmo_type);
+        active_operator_id_ = id;
+        gizmo_type_ = gizmo_type;
+        LOG_DEBUG("EditorContext::setActiveOperator: active_operator_id_='{}', hasActive={}",
+                  active_operator_id_, !active_operator_id_.empty());
+    }
+
+    void EditorContext::clearActiveOperator() {
+        LOG_DEBUG("EditorContext::clearActiveOperator: was '{}'", active_operator_id_);
+        active_operator_id_.clear();
+        gizmo_type_.clear();
+    }
+
+    void EditorContext::setGizmoType(const std::string& type) { gizmo_type_ = type; }
+
+    void EditorContext::clearGizmo() { gizmo_type_.clear(); }
 
 } // namespace lfs::vis

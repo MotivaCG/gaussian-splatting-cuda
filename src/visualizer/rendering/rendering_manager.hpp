@@ -4,11 +4,14 @@
 
 #pragma once
 
+#include "core/export.hpp"
+#include "dirty_flags.hpp"
 #include "framerate_controller.hpp"
 #include "internal/viewport.hpp"
 #include "io/nvcodec_image_loader.hpp"
 #include "rendering/cuda_gl_interop.hpp"
 #include "rendering/rendering.hpp"
+#include "rendering_types.hpp"
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -16,147 +19,14 @@
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+#include <vector>
 
 namespace lfs::vis {
+    class RenderPass;
     class SceneManager;
-} // namespace lfs::vis
-
-namespace lfs::vis {
-
-    enum class SplitViewMode {
-        Disabled,
-        PLYComparison,
-        GTComparison
-    };
-
-    struct PPISPOverrides {
-        // Exposure (Section 4.1)
-        float exposure_offset = 0.0f; // EV stops (-3 to +3)
-
-        // Vignetting (Section 4.2)
-        bool vignette_enabled = true;
-        float vignette_strength = 1.0f; // 0.0 to 2.0
-
-        // Color Correction (Section 4.3) - 4 chromaticity control points
-        // White point (neutral) - intuitive temperature/tint controls
-        float wb_temperature = 0.0f; // -1.0 to +1.0 (cool to warm)
-        float wb_tint = 0.0f;        // -1.0 to +1.0 (green to magenta)
-        // RGB primary offsets - direct chromaticity manipulation
-        float color_red_x = 0.0f;   // -0.5 to +0.5
-        float color_red_y = 0.0f;   // -0.5 to +0.5
-        float color_green_x = 0.0f; // -0.5 to +0.5
-        float color_green_y = 0.0f; // -0.5 to +0.5
-        float color_blue_x = 0.0f;  // -0.5 to +0.5
-        float color_blue_y = 0.0f;  // -0.5 to +0.5
-
-        // CRF (Section 4.4) - piecewise power curve per channel
-        float gamma_multiplier = 1.0f; // 0.5 to 2.5 (overall gamma)
-        float gamma_red = 0.0f;        // -0.5 to +0.5 (per-channel offset)
-        float gamma_green = 0.0f;      // -0.5 to +0.5
-        float gamma_blue = 0.0f;       // -0.5 to +0.5
-        float crf_toe = 0.0f;          // -1.0 to +1.0 (shadow compression)
-        float crf_shoulder = 0.0f;     // -1.0 to +1.0 (highlight roll-off)
-
-        [[nodiscard]] bool isIdentity() const {
-            return exposure_offset == 0.0f && vignette_enabled && vignette_strength == 1.0f &&
-                   wb_temperature == 0.0f && wb_tint == 0.0f && color_red_x == 0.0f && color_red_y == 0.0f &&
-                   color_green_x == 0.0f && color_green_y == 0.0f && color_blue_x == 0.0f && color_blue_y == 0.0f &&
-                   gamma_multiplier == 1.0f && gamma_red == 0.0f && gamma_green == 0.0f && gamma_blue == 0.0f &&
-                   crf_toe == 0.0f && crf_shoulder == 0.0f;
-        }
-    };
-
-    struct RenderSettings {
-        // Core rendering settings
-        float focal_length_mm = lfs::rendering::DEFAULT_FOCAL_LENGTH_MM;
-        float scaling_modifier = 1.0f;
-        bool antialiasing = false;
-        bool mip_filter = false;
-        int sh_degree = 3;
-        float render_scale = 1.0f; // Viewer resolution scale (0.25-1.0), does not affect training
-
-        // Crop box (data stored in scene graph CropBoxData, these are UI toggles only)
-        bool show_crop_box = false;
-        bool use_crop_box = false;
-        // Ellipsoid (data stored in scene graph EllipsoidData, these are UI toggles only)
-        bool show_ellipsoid = false;
-        bool use_ellipsoid = false;
-        bool desaturate_unselected = false; // Desaturate unselected PLYs when one is selected
-        bool desaturate_cropping = true;    // Desaturate outside crop box/ellipsoid instead of hiding
-
-        // Appearance correction (PPISP)
-        bool apply_appearance_correction = false;
-        enum class PPISPMode { MANUAL = 0,
-                               AUTO = 1 };
-        PPISPMode ppisp_mode = PPISPMode::AUTO;
-        PPISPOverrides ppisp_overrides;
-
-        // Background
-        glm::vec3 background_color = glm::vec3(0.0f, 0.0f, 0.0f);
-
-        // Coordinate axes
-        bool show_coord_axes = false;
-        float axes_size = 2.0f;
-        std::array<bool, 3> axes_visibility = {true, true, true};
-
-        // Grid
-        bool show_grid = true;
-        int grid_plane = 1;
-        float grid_opacity = 0.5f;
-
-        // Point cloud
-        bool point_cloud_mode = false;
-        float voxel_size = 0.03f;
-
-        // Ring mode (only active in splat mode)
-        bool show_rings = false;
-        float ring_width = 0.01f;
-        bool show_center_markers = false;
-
-        // Camera frustums
-        bool show_camera_frustums = true; // Master toggle for camera frustum rendering
-        float camera_frustum_scale = 0.25f;
-        glm::vec3 train_camera_color = glm::vec3(1.0f, 1.0f, 1.0f);
-        glm::vec3 eval_camera_color = glm::vec3(1.0f, 0.0f, 0.0f);
-
-        // Pivot point visualization
-        bool show_pivot = false;
-
-        // Split view
-        SplitViewMode split_view_mode = SplitViewMode::Disabled;
-        float split_position = 0.5f;
-        size_t split_view_offset = 0;
-
-        bool gut = false;
-        bool equirectangular = false;
-        bool orthographic = false;
-        float ortho_scale = 100.0f; // Pixels per world unit (larger = more zoomed in)
-
-        // Selection colors (RGB: committed=219,83,83 preview=0,222,76 center=0,154,187)
-        glm::vec3 selection_color_committed{0.859f, 0.325f, 0.325f};
-        glm::vec3 selection_color_preview{0.0f, 0.871f, 0.298f};
-        glm::vec3 selection_color_center_marker{0.0f, 0.604f, 0.733f};
-
-        // Depth clipping
-        bool depth_clip_enabled = false;
-        float depth_clip_far = 100.0f;
-
-        // Depth filter (Selection tool only - separate from crop box)
-        bool depth_filter_enabled = false;
-        glm::vec3 depth_filter_min = glm::vec3(-50.0f, -10000.0f, 0.0f);
-        glm::vec3 depth_filter_max = glm::vec3(50.0f, 10000.0f, 100.0f);
-        lfs::geometry::EuclideanTransform depth_filter_transform;
-    };
-
-    struct SplitViewInfo {
-        bool enabled = false;
-        std::string left_name;
-        std::string right_name;
-    };
-
-    struct ViewportRegion {
-        float x, y, width, height;
-    };
+    class SplatRasterPass;
+    class OverlayPass;
+    class PointCloudPass;
 
     // GT Image Cache for efficient GPU-resident texture management
     class GTTextureCache {
@@ -196,18 +66,7 @@ namespace lfs::vis {
         TextureInfo loadTextureGPU(const std::filesystem::path& path, CacheEntry& entry);
     };
 
-    struct GTComparisonContext {
-        unsigned int gt_texture_id = 0;
-        glm::ivec2 dimensions{0, 0};
-        glm::ivec2 gpu_aligned_dims{0, 0};
-        glm::vec2 render_texcoord_scale{1.0f, 1.0f};
-        glm::vec2 gt_texcoord_scale{1.0f, 1.0f};
-        bool gt_needs_flip = false;
-
-        [[nodiscard]] bool valid() const { return gt_texture_id != 0 && dimensions.x > 0 && dimensions.y > 0; }
-    };
-
-    class RenderingManager {
+    class LFS_VIS_API RenderingManager {
     public:
         struct RenderContext {
             const Viewport& viewport;
@@ -232,44 +91,62 @@ namespace lfs::vis {
         // Main render function
         void renderFrame(const RenderContext& context, SceneManager* scene_manager);
 
-        void markDirty();
+        // Render preview to external texture (for PiP preview)
+        bool renderPreviewFrame(SceneManager* scene_manager,
+                                const glm::mat3& camera_rotation,
+                                const glm::vec3& camera_position,
+                                float focal_length_mm,
+                                unsigned int target_fbo,
+                                unsigned int target_texture,
+                                int width, int height);
 
-        [[nodiscard]] bool needsRender() const {
+        void markDirty();
+        void markDirty(DirtyMask flags);
+
+        [[nodiscard]] bool pollDirtyState() {
             if (pivot_animation_active_.load() &&
-                std::chrono::steady_clock::now() < pivot_animation_end_time_) {
+                std::chrono::steady_clock::now() < from_ns(pivot_animation_end_ns_.load(std::memory_order_acquire))) {
+                dirty_mask_.fetch_or(DirtyFlag::CAMERA | DirtyFlag::OVERLAY, std::memory_order_relaxed);
                 return true;
             }
             pivot_animation_active_.store(false);
 
-            // Selection flash: continuous rendering while active
             if (selection_flash_active_.load()) {
-                const auto elapsed = std::chrono::steady_clock::now() - selection_flash_start_time_;
+                const auto elapsed = std::chrono::steady_clock::now() -
+                                     from_ns(selection_flash_start_ns_.load(std::memory_order_acquire));
                 if (std::chrono::duration<float>(elapsed).count() < SELECTION_FLASH_DURATION_SEC) {
-                    needs_render_.store(true);
+                    dirty_mask_.fetch_or(DirtyFlag::SPLATS | DirtyFlag::MESH | DirtyFlag::OVERLAY, std::memory_order_relaxed);
                     return true;
                 }
                 selection_flash_active_.store(false);
             }
 
-            return needs_render_.load();
+            if (overlay_animation_active_.load()) {
+                dirty_mask_.fetch_or(DirtyFlag::OVERLAY, std::memory_order_relaxed);
+                return true;
+            }
+            return dirty_mask_.load(std::memory_order_relaxed) != 0;
         }
 
         void setPivotAnimationEndTime(const std::chrono::steady_clock::time_point end_time) {
-            pivot_animation_end_time_ = end_time;
+            pivot_animation_end_ns_.store(to_ns(end_time), std::memory_order_release);
             pivot_animation_active_.store(true);
         }
 
         void triggerSelectionFlash() {
-            selection_flash_start_time_ = std::chrono::steady_clock::now();
+            selection_flash_start_ns_.store(to_ns(std::chrono::steady_clock::now()), std::memory_order_release);
             selection_flash_active_.store(true);
-            markDirty();
+            markDirty(DirtyFlag::SPLATS | DirtyFlag::MESH);
         }
+
+        void setOverlayAnimationActive(const bool active) { overlay_animation_active_.store(active); }
 
         [[nodiscard]] float getSelectionFlashIntensity() const {
             if (!selection_flash_active_.load())
                 return 0.0f;
             const float t = std::chrono::duration<float>(
-                                std::chrono::steady_clock::now() - selection_flash_start_time_)
+                                std::chrono::steady_clock::now() -
+                                from_ns(selection_flash_start_ns_.load(std::memory_order_acquire)))
                                 .count() /
                             SELECTION_FLASH_DURATION_SEC;
             if (t >= 1.0f)
@@ -302,7 +179,7 @@ namespace lfs::vis {
         // Current camera tracking for GT comparison
         void setCurrentCameraId(int cam_id) {
             current_camera_id_ = cam_id;
-            markDirty();
+            markDirty(DirtyFlag::SPLIT_VIEW | DirtyFlag::PPISP);
         }
         int getCurrentCameraId() const { return current_camera_id_; }
 
@@ -338,16 +215,50 @@ namespace lfs::vis {
                            lfs::core::Tensor* selection_tensor = nullptr,
                            bool saturation_mode = false, float saturation_amount = 0.0f);
         void clearBrushState();
+        [[nodiscard]] bool isBrushActive() const { return brush_active_; }
+        void getBrushState(float& x, float& y, float& radius, bool& add_mode) const {
+            x = brush_x_;
+            y = brush_y_;
+            radius = brush_radius_;
+            add_mode = brush_add_mode_;
+        }
+
+        // Rectangle preview
+        void setRectPreview(float x0, float y0, float x1, float y1, bool add_mode = true);
+        void clearRectPreview();
+        [[nodiscard]] bool isRectPreviewActive() const { return rect_preview_active_; }
+        void getRectPreview(float& x0, float& y0, float& x1, float& y1, bool& add_mode) const {
+            x0 = rect_x0_;
+            y0 = rect_y0_;
+            x1 = rect_x1_;
+            y1 = rect_y1_;
+            add_mode = rect_add_mode_;
+        }
+
+        // Polygon preview
+        void setPolygonPreview(const std::vector<std::pair<float, float>>& points, bool closed, bool add_mode = true);
+        void clearPolygonPreview();
+        [[nodiscard]] bool isPolygonPreviewActive() const { return polygon_preview_active_; }
+        [[nodiscard]] const std::vector<std::pair<float, float>>& getPolygonPoints() const { return polygon_points_; }
+        [[nodiscard]] bool isPolygonClosed() const { return polygon_closed_; }
+        [[nodiscard]] bool isPolygonAddMode() const { return polygon_add_mode_; }
+
+        // Lasso preview
+        void setLassoPreview(const std::vector<std::pair<float, float>>& points, bool add_mode = true);
+        void clearLassoPreview();
+        [[nodiscard]] bool isLassoPreviewActive() const { return lasso_preview_active_; }
+        [[nodiscard]] const std::vector<std::pair<float, float>>& getLassoPoints() const { return lasso_points_; }
+        [[nodiscard]] bool isLassoAddMode() const { return lasso_add_mode_; }
 
         // Preview selection
         void setPreviewSelection(lfs::core::Tensor* preview, bool add_mode = true) {
             preview_selection_ = preview;
             brush_add_mode_ = add_mode;
-            markDirty();
+            markDirty(DirtyFlag::SELECTION);
         }
         void clearPreviewSelection() {
             preview_selection_ = nullptr;
-            markDirty();
+            markDirty(DirtyFlag::SELECTION);
         }
 
         // Selection mode for brush tool
@@ -382,17 +293,22 @@ namespace lfs::vis {
         void setEllipsoidGizmoActive(bool active) { ellipsoid_gizmo_active_ = active; }
 
     private:
-        void doFullRender(const RenderContext& context, SceneManager* scene_manager, const lfs::core::SplatData* model);
-        void renderOverlays(const RenderContext& context);
-        void setupEventHandlers();
-        void renderToTexture(const RenderContext& context, SceneManager* scene_manager, const lfs::core::SplatData* model);
+        static int64_t to_ns(std::chrono::steady_clock::time_point tp) {
+            return std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count();
+        }
+        static std::chrono::steady_clock::time_point from_ns(int64_t ns) {
+            return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(ns));
+        }
 
-        std::optional<lfs::rendering::SplitViewRequest> createSplitViewRequest(
-            const RenderContext& context,
-            SceneManager* scene_manager);
+        void doFullRender(const RenderContext& context, SceneManager* scene_manager, const lfs::core::SplatData* model);
+        void setupEventHandlers();
 
         // Core components
         std::unique_ptr<lfs::rendering::RenderingEngine> engine_;
+        std::vector<std::unique_ptr<RenderPass>> passes_;
+        SplatRasterPass* splat_raster_pass_ = nullptr;
+        OverlayPass* overlay_pass_ = nullptr;
+        PointCloudPass* point_cloud_pass_ = nullptr;
         FramerateController framerate_controller_;
 
         // GT texture cache
@@ -400,18 +316,21 @@ namespace lfs::vis {
 
         // Cached render texture for reuse in split view
         unsigned int cached_render_texture_ = 0;
-        bool render_texture_valid_ = false;
+        std::atomic<bool> render_texture_valid_{false};
 
-        // State tracking
-        mutable std::atomic<bool> needs_render_{true};
-        mutable std::atomic<bool> pivot_animation_active_{false};
-        std::chrono::steady_clock::time_point pivot_animation_end_time_;
+        // Granular dirty tracking
+        std::atomic<uint32_t> dirty_mask_{DirtyFlag::ALL};
+
+        std::atomic<bool> pivot_animation_active_{false};
+        std::atomic<int64_t> pivot_animation_end_ns_{0};
         lfs::rendering::RenderResult cached_result_;
 
         // Selection flash animation
         mutable std::atomic<bool> selection_flash_active_{false};
-        std::chrono::steady_clock::time_point selection_flash_start_time_;
+        std::atomic<int64_t> selection_flash_start_ns_{0};
         static constexpr float SELECTION_FLASH_DURATION_SEC = 0.5f;
+
+        std::atomic<bool> overlay_animation_active_{false};
 
         size_t last_model_ptr_ = 0;
         std::chrono::steady_clock::time_point last_training_render_;
@@ -457,18 +376,22 @@ namespace lfs::vis {
         float brush_saturation_amount_ = 0.0f;
         lfs::rendering::SelectionMode selection_mode_ = lfs::rendering::SelectionMode::Centers;
 
-        // Ring mode hover preview (packed depth+id from atomicMin)
-        unsigned long long hovered_depth_id_ = 0xFFFFFFFFFFFFFFFFULL;
-        unsigned long long* d_hovered_depth_id_ = nullptr;
-        int hovered_gaussian_id_ = -1; // Extracted from lower 32 bits
+        // Selection shape preview state (for rectangle, polygon, lasso)
+        bool rect_preview_active_ = false;
+        float rect_x0_ = 0.0f, rect_y0_ = 0.0f, rect_x1_ = 0.0f, rect_y1_ = 0.0f;
+        bool rect_add_mode_ = true;
 
-        // Cached filtered point cloud for cropbox preview (avoid CPU filtering every frame)
-        mutable std::unique_ptr<lfs::core::PointCloud> cached_filtered_point_cloud_;
-        mutable glm::mat4 cached_cropbox_transform_{1.0f};
-        mutable glm::vec3 cached_cropbox_min_{0.0f};
-        mutable glm::vec3 cached_cropbox_max_{0.0f};
-        mutable bool cached_cropbox_inverse_ = false;
-        mutable const lfs::core::PointCloud* cached_source_point_cloud_ = nullptr;
+        bool polygon_preview_active_ = false;
+        std::vector<std::pair<float, float>> polygon_points_;
+        bool polygon_closed_ = false;
+        bool polygon_add_mode_ = true;
+
+        bool lasso_preview_active_ = false;
+        std::vector<std::pair<float, float>> lasso_points_;
+        bool lasso_add_mode_ = true;
+
+        // Ring mode hover preview (gaussian ID extracted from packed depth+id atomicMin)
+        int hovered_gaussian_id_ = -1;
 
         // Viewport state
         glm::ivec2 last_viewport_size_{0, 0}; // Last requested viewport size

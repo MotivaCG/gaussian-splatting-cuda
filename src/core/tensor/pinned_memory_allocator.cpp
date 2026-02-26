@@ -82,6 +82,14 @@ namespace lfs::core {
     }
 
     PinnedMemoryAllocator::~PinnedMemoryAllocator() {
+        shutdown();
+    }
+
+    void PinnedMemoryAllocator::shutdown() {
+        bool expected = false;
+        if (!shutdown_.compare_exchange_strong(expected, true))
+            return;
+        LOG_INFO("Shutting down PinnedMemoryAllocator...");
         empty_cache();
     }
 
@@ -114,6 +122,11 @@ namespace lfs::core {
         size_t rounded_size = round_size(bytes);
 
         std::lock_guard<std::mutex> lock(mutex_);
+
+        if (shutdown_.load(std::memory_order_acquire)) {
+            LOG_ERROR("Attempted to allocate pinned memory after shutdown!");
+            return nullptr;
+        }
 
         // Try to reuse a cached block (STREAM-SAFE VERSION)
         auto it = cache_.find(rounded_size);
@@ -188,6 +201,9 @@ namespace lfs::core {
         if (!ptr) {
             return;
         }
+
+        if (shutdown_.load(std::memory_order_acquire))
+            return;
 
         // Fall back to regular free if disabled
         if (!enabled_) {

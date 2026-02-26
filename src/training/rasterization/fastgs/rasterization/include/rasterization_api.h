@@ -77,18 +77,19 @@ namespace fast_lfs::rasterization {
     };
 
     BackwardOutputs backward_raw(
-        float* densification_info_ptr,         // Device pointer [2*N] or nullptr
-        const float* grad_image_ptr,           // Device pointer [3*H*W]
-        const float* grad_alpha_ptr,           // Device pointer [H*W]
-        const float* image_ptr,                // Device pointer [3*H*W]
-        const float* alpha_ptr,                // Device pointer [H*W]
-        const float* means_ptr,                // Device pointer [N*3]
-        const float* scales_raw_ptr,           // Device pointer [N*3]
-        const float* rotations_raw_ptr,        // Device pointer [N*4]
-        const float* raw_opacities_ptr,        // Device pointer [N]
-        const float* sh_coefficients_rest_ptr, // Device pointer [N*total_bases_sh_rest*3]
-        const float* w2c_ptr,                  // Device pointer [4*4]
-        const float* cam_position_ptr,         // Device pointer [3]
+        float* densification_info_ptr,            // Device pointer [2*N] or nullptr
+        const float* densification_error_map_ptr, // Device pointer [H*W] or nullptr
+        const float* grad_image_ptr,              // Device pointer [3*H*W]
+        const float* grad_alpha_ptr,              // Device pointer [H*W]
+        const float* image_ptr,                   // Device pointer [3*H*W]
+        const float* alpha_ptr,                   // Device pointer [H*W]
+        const float* means_ptr,                   // Device pointer [N*3]
+        const float* scales_raw_ptr,              // Device pointer [N*3]
+        const float* rotations_raw_ptr,           // Device pointer [N*4]
+        const float* raw_opacities_ptr,           // Device pointer [N]
+        const float* sh_coefficients_rest_ptr,    // Device pointer [N*total_bases_sh_rest*3]
+        const float* w2c_ptr,                     // Device pointer [4*4]
+        const float* cam_position_ptr,            // Device pointer [3]
         const ForwardContext& forward_ctx,
         float* grad_means_ptr,                // Device pointer [N*3] - output
         float* grad_scales_raw_ptr,           // Device pointer [N*3] - output

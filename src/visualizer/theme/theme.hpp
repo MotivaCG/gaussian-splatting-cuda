@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "core/export.hpp"
 #include <string>
 #include <imgui.h>
 
@@ -80,8 +81,8 @@ namespace lfs::vis {
         float header_alpha = 0.4f;
         float header_hover_alpha = 0.6f;
         float header_active_alpha = 0.8f;
-        ImVec2 padding = {12.0f, 8.0f};
-        ImVec2 item_spacing = {8.0f, 6.0f};
+        ImVec2 padding = {14.0f, 10.0f};
+        ImVec2 item_spacing = {10.0f, 8.0f};
     };
 
     struct ThemeViewport {
@@ -123,7 +124,7 @@ namespace lfs::vis {
     };
 
     // Complete theme
-    struct Theme {
+    struct LFS_VIS_API Theme {
         std::string name;
         ThemePalette palette;
         ThemeSizes sizes;
@@ -202,6 +203,10 @@ namespace lfs::vis {
         void pushContextMenuStyle() const;
         static void popContextMenuStyle();
 
+        // Modal dialog helpers (pushes 5 colors, 3 style vars)
+        void pushModalStyle() const;
+        static void popModalStyle();
+
         [[nodiscard]] bool isLightTheme() const {
             constexpr float BRIGHTNESS_THRESHOLD = 0.5f;
             const float brightness = (palette.background.x + palette.background.y + palette.background.z) / 3.0f;
@@ -215,29 +220,39 @@ namespace lfs::vis {
         }
     };
 
-    // Global access
-    [[nodiscard]] const Theme& theme();
-    void setTheme(const Theme& t);
-    void applyThemeToImGui();
+    // DPI scale for theme sizing
+    LFS_VIS_API void setThemeDpiScale(float scale);
+    [[nodiscard]] LFS_VIS_API float getThemeDpiScale();
+
+    [[nodiscard]] LFS_VIS_API const Theme& theme();
+    LFS_VIS_API void setTheme(const Theme& t);
+    LFS_VIS_API void applyThemeToImGui();
 
     // Presets (loaded from JSON files with hot-reload support)
-    [[nodiscard]] const Theme& darkTheme();
-    [[nodiscard]] const Theme& lightTheme();
-    void checkThemeFileChanges(); // Call periodically to hot-reload
+    [[nodiscard]] LFS_VIS_API const Theme& darkTheme();
+    [[nodiscard]] LFS_VIS_API const Theme& lightTheme();
+    [[nodiscard]] LFS_VIS_API const Theme& gruvboxTheme();
+    [[nodiscard]] LFS_VIS_API const Theme& catppuccinMochaTheme();
+    [[nodiscard]] LFS_VIS_API const Theme& catppuccinLatteTheme();
+    [[nodiscard]] LFS_VIS_API const Theme& nordTheme();
+    LFS_VIS_API bool setThemeByName(const std::string& name); // e.g. "dark", "light", "gruvbox", "catppuccin_mocha", "catppuccin_latte", "nord"
+    LFS_VIS_API void checkThemeFileChanges();                 // Call periodically to hot-reload
 
     // Persistence
-    bool saveTheme(const Theme& t, const std::string& path);
-    bool loadTheme(Theme& t, const std::string& path);
+    LFS_VIS_API bool saveTheme(const Theme& t, const std::string& path);
+    LFS_VIS_API bool loadTheme(Theme& t, const std::string& path);
 
     // Theme preference (for splash screen)
-    void saveThemePreference(bool is_dark);
-    [[nodiscard]] bool loadThemePreference(); // Returns true if dark theme
+    LFS_VIS_API void saveThemePreferenceName(const std::string& theme_name);
+    [[nodiscard]] LFS_VIS_API std::string loadThemePreferenceName(); // Returns a canonical theme id
+    LFS_VIS_API void saveThemePreference(bool is_dark);
+    [[nodiscard]] LFS_VIS_API bool loadThemePreference(); // Legacy: returns true for non-light themes
 
     // Color utilities
-    [[nodiscard]] ImVec4 lighten(const ImVec4& color, float amount);
-    [[nodiscard]] ImVec4 darken(const ImVec4& color, float amount);
-    [[nodiscard]] ImVec4 withAlpha(const ImVec4& color, float alpha);
-    [[nodiscard]] ImU32 toU32(const ImVec4& color);
-    [[nodiscard]] ImU32 toU32WithAlpha(const ImVec4& color, float alpha);
+    [[nodiscard]] LFS_VIS_API ImVec4 lighten(const ImVec4& color, float amount);
+    [[nodiscard]] LFS_VIS_API ImVec4 darken(const ImVec4& color, float amount);
+    [[nodiscard]] LFS_VIS_API ImVec4 withAlpha(const ImVec4& color, float alpha);
+    [[nodiscard]] LFS_VIS_API ImU32 toU32(const ImVec4& color);
+    [[nodiscard]] LFS_VIS_API ImU32 toU32WithAlpha(const ImVec4& color, float alpha);
 
 } // namespace lfs::vis
