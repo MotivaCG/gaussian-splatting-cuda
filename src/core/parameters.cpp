@@ -16,6 +16,7 @@
 #include <nlohmann/json.hpp>
 #include <set>
 #include <sstream>
+#include <variant>
 
 namespace lfs::core {
     namespace param {

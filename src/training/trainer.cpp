@@ -273,6 +273,23 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
         const lfs::core::Tensor* fg_core_2d,
         const lfs::core::Tensor* bg_core_2d) {
 
+    
+        // Guard: if mask is invalid or empty, fall back to standard photometric loss.
+        // This can happen when a camera has no mask file or alpha extraction failed.
+        if (!mask.is_valid() || mask.numel() == 0) {
+            static std::atomic<bool> s_logged_mask_error{false};
+            if (!s_logged_mask_error.exchange(true)) {
+                LOG_ERROR("compute_photometric_loss_with_mask: mask tensor is {} - falling back to unmasked loss. "
+                          "Check that mask files exist under <data_path>/masks/ or that alpha-as-mask is correctly configured. "
+                          "(This message will not repeat.)",
+                          !mask.is_valid() ? "invalid" : "empty (numel=0)");
+            }
+            auto fallback = compute_photometric_loss_with_gradient(rendered, gt_image, opt_params);
+            if (!fallback)
+                return std::unexpected(fallback.error());
+            return MaskLossResult{.loss = fallback->first, .grad_image = fallback->second, .grad_alpha = {}};
+        }
+
         using namespace lfs::core;
         constexpr float EPSILON = 1e-8f;
         constexpr float ALPHA_CONSISTENCY_WEIGHT = 10.0f;
@@ -1647,11 +1664,10 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                             bg_core_tile = bg_core;
 
                             if (num_tiles > 1 && fg_core.ndim() == 2) {
-                                const lfs::core::Tensor tile_h_fg = fg_core.slice(0, tile_y_offset, tile_y_offset + tile_height);
-                                fg_core_tile = tile_h_fg.slice(1, tile_x_offset, tile_x_offset + tile_width);
-
-                                const lfs::core::Tensor tile_h_bg = bg_core.slice(0, tile_y_offset, tile_y_offset + tile_height);
-                                bg_core_tile = tile_h_bg.slice(1, tile_x_offset, tile_x_offset + tile_width);
+                                auto fh = fg_core.slice(0, tile_y_offset, tile_y_offset + tile_height);
+                                fg_core_tile = fh.slice(1, tile_x_offset, tile_x_offset + tile_width);
+                                auto bh = bg_core.slice(0, tile_y_offset, tile_y_offset + tile_height);
+                                bg_core_tile = bh.slice(1, tile_x_offset, tile_x_offset + tile_width);
                             }
 
                             fg_core_ptr = &fg_core_tile;
@@ -1660,7 +1676,8 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                         // ------------- victor end
 
                         auto result = compute_photometric_loss_with_mask(
-                            corrected_image, gt_tile, mask_tile, output.alpha, params_.optimization);
+                            corrected_image, gt_tile, mask_tile, output.alpha, params_.optimization,
+                            fg_core_ptr, bg_core_ptr);
                         if (!result) {
                             cleanup_controller_tile_context();
                             nvtxRangePop();
@@ -1729,7 +1746,8 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                     const bool used_masked_fused =
                         use_mask &&
                         (params_.optimization.mask_mode == lfs::core::param::MaskMode::Segment ||
-                         params_.optimization.mask_mode == lfs::core::param::MaskMode::Ignore) &&
+                         params_.optimization.mask_mode == lfs::core::param::MaskMode::Ignore ||
+                         params_.optimization.mask_mode == lfs::core::param::MaskMode::HardMatting) &&
                         params_.optimization.lambda_dssim > 0.0f;
                     if (use_mask) {
                         lfs::core::Tensor mask;
@@ -1748,9 +1766,46 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                             auto tile_h = mask.slice(0, tile_y_offset, tile_y_offset + tile_height);
                             mask_tile = tile_h.slice(1, tile_x_offset, tile_x_offset + tile_width);
                         }
+                        bool use_matting_cores = false;
+                        lfs::core::Tensor fg_core, bg_core;
+
+                        if (params_.optimization.mask_mode == lfs::core::param::MaskMode::SoftMatting) {
+                            constexpr int kMattingCoreErodeRadiusPx = 2;
+                            fg_core = cam->load_and_get_mask_fg_core(
+                                params_.dataset.resize_factor, params_.dataset.max_width,
+                                params_.optimization.invert_masks, params_.optimization.mask_threshold,
+                                kMattingCoreErodeRadiusPx);
+                            bg_core = cam->load_and_get_mask_bg_core(
+                                params_.dataset.resize_factor, params_.dataset.max_width,
+                                params_.optimization.invert_masks, params_.optimization.mask_threshold,
+                                kMattingCoreErodeRadiusPx);
+
+                            if (fg_core.is_valid() && bg_core.is_valid())
+                                use_matting_cores = true;
+                        }
+
+                        lfs::core::Tensor fg_core_tile, bg_core_tile;
+                        const lfs::core::Tensor* fg_core_ptr = nullptr;
+                        const lfs::core::Tensor* bg_core_ptr = nullptr;
+
+                        if (use_matting_cores) {
+                            fg_core_tile = fg_core;
+                            bg_core_tile = bg_core;
+
+                            if (num_tiles > 1 && fg_core.ndim() == 2) {
+                                auto fh = fg_core.slice(0, tile_y_offset, tile_y_offset + tile_height);
+                                fg_core_tile = fh.slice(1, tile_x_offset, tile_x_offset + tile_width);
+                                auto bh = bg_core.slice(0, tile_y_offset, tile_y_offset + tile_height);
+                                bg_core_tile = bh.slice(1, tile_x_offset, tile_x_offset + tile_width);
+                            }
+
+                            fg_core_ptr = &fg_core_tile;
+                            bg_core_ptr = &bg_core_tile;
+                        }
 
                         auto result = compute_photometric_loss_with_mask(
-                            corrected_image, gt_tile, mask_tile, output.alpha, params_.optimization);
+                            corrected_image, gt_tile, mask_tile, output.alpha, params_.optimization,
+                            fg_core_ptr, bg_core_ptr);
                         if (!result) {
                             nvtxRangePop();
                             nvtxRangePop();
@@ -1773,7 +1828,8 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
 
                     // 2) Extract error map from workspace's ssim_map
                     if (use_pixel_error_densification) {
-                        if (use_ssim_error && params_.optimization.lambda_dssim > 0.0f) {
+                        if (use_ssim_error && params_.optimization.lambda_dssim > 0.0f &&
+                            params_.optimization.mask_mode != lfs::core::param::MaskMode::SoftMatting) {
                             lfs::core::Tensor ssim_map;
                             if (used_masked_fused) {
                                 ssim_map = masked_fused_workspace_.ssim_map;
@@ -1822,7 +1878,9 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
 
                         if (use_mask &&
                             (params_.optimization.mask_mode == lfs::core::param::MaskMode::Segment ||
-                             params_.optimization.mask_mode == lfs::core::param::MaskMode::Ignore)) {
+                             params_.optimization.mask_mode == lfs::core::param::MaskMode::Ignore ||
+                             params_.optimization.mask_mode == lfs::core::param::MaskMode::HardMatting ||
+                             params_.optimization.mask_mode == lfs::core::param::MaskMode::SoftMatting)) {
                             tile_error_map = (tile_error_map * mask_tile).contiguous();
                         }
                     }

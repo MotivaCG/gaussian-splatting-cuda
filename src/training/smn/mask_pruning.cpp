@@ -2,8 +2,8 @@
 
 #include "mask_pruning.hpp"
 
-#include "Common.h"     // CameraModelType, UnscentedTransformParameters, ShutterType
-#include "Projection.h" // launch_projection_ut_3dgs_fused_kernel
+#include "training/rasterization/gsplat/Common.h" // CameraModelType, UnscentedTransformParameters, ShutterType
+#include "training/rasterization/gsplat/Projection.h" // launch_projection_ut_3dgs_fused_kernel
 #include "core/logger.hpp"
 #include "nanoflann.hpp"
 

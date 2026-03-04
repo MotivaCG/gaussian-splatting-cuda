@@ -124,6 +124,7 @@ namespace {
             ::args::Flag random(init_group, "random", "Use random initialization instead of SfM", {"random"});
             ::args::ValueFlag<int> init_num_pts(init_group, "init_num_pts", "Number of random initialization points", {"init-num-pts"});
             ::args::ValueFlag<float> init_extent(init_group, "init_extent", "Extent of random initialization", {"init-extent"});
+            ::args::ValueFlag<int> high_confidence_count(init_group, "high_confidence_count", "Number of points with high confidence", {"high_confidence_count"});
 
             // =============================================================================
             // DATASET OPTIONS
