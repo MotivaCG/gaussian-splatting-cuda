@@ -317,7 +317,7 @@ namespace lfs::core {
             }
 
             // Mask parameters
-            static constexpr const char* MASK_MODE_NAMES[] = {"none", "segment", "ignore", "alpha_consistent", "hardmatting", "softmatting"};
+            static constexpr const char* MASK_MODE_NAMES[] = {"none", "segment", "ignore", "alpha_consistent", "hardmatting", "softmatting", "focused_segment"};
             opt_json["mask_mode"] = MASK_MODE_NAMES[static_cast<int>(mask_mode)];
             opt_json["invert_masks"] = invert_masks;
             opt_json["mask_opacity_penalty_weight"] = mask_opacity_penalty_weight;
@@ -574,6 +574,8 @@ namespace lfs::core {
                     params.mask_mode = MaskMode::HardMatting;
                 } else if (mode == "softmatting") {
                     params.mask_mode = MaskMode::SoftMatting;
+                } else if (mode == "focused_segment") {
+                    params.mask_mode = MaskMode::FocusedSegment;
                 }
             }
             if (json.contains("invert_masks")) {

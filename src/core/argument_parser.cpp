@@ -161,7 +161,8 @@ namespace {
                                                                                    {"ignore", lfs::core::param::MaskMode::Ignore},
                                                                                    {"alpha_consistent", lfs::core::param::MaskMode::AlphaConsistent},
                                                                                    {"hardmatting", lfs::core::param::MaskMode::HardMatting},
-                                                                                   {"softmatting", lfs::core::param::MaskMode::SoftMatting}});
+                                                                                   {"softmatting", lfs::core::param::MaskMode::SoftMatting},
+                                                                                   {"focused_segment", lfs::core::param::MaskMode::FocusedSegment}});
                                                                                    
             ::args::Flag invert_masks(mask_group, "invert_masks", "Invert mask values (swap object/background)", {"invert-masks"});
             ::args::Flag no_alpha_as_mask(mask_group, "no_alpha_as_mask", "Disable automatic alpha-as-mask for RGBA images", {"no-alpha-as-mask"});

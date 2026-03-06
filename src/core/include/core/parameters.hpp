@@ -23,7 +23,8 @@ namespace lfs::core {
             Ignore,          // Completely ignore masked regions in loss
             AlphaConsistent, // Enforce exact alpha values from mask
             HardMatting,
-            SoftMatting
+            SoftMatting,
+            FocusedSegment
         };
 
         // Background mode for training - only one can be active at a time
@@ -38,6 +39,7 @@ namespace lfs::core {
             size_t iterations = 30'000;
             size_t sh_degree_interval = 1'000;
             float means_lr = 0.00016f;
+            //this is the original! float means_lr = 0.000016f;
             // Optional schedule: additional multiplicative factor applied on top of exponential decay
             // Effective means LR per iteration:
             //   lr_means(iter) = (means_lr * scene_scale) * gamma^iter * M(iter)
@@ -50,7 +52,6 @@ namespace lfs::core {
             float means_lr_mul_power = 2.0f; // curve power (p), 2 = quadratic
             bool means_lr_mul_cli_override = false; // runtime-only: true if CLI set any of the above
              
-            //this is the original! float means_lr = 0.000016f;
             float shs_lr = 0.0025f;
             float opacity_lr = 0.025f;
             float scaling_lr = 0.005f;
