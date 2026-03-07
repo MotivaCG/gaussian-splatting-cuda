@@ -508,67 +508,74 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                         (fg_alpha_w * (kIn * scale) / fg_norm);
                 }
             }
-        } 
-        else if (mode == param::MaskMode::FocusedSegment) {
-            constexpr float kBgPhotoWeight = 0.05f;
-            constexpr float kAlphaFgWeight = 2.0f;
-            constexpr float kAlphaBgWeight = 0.5f;
+        } else if (mode == param::MaskMode::FocusedSegment) {
+            constexpr float kBgWeight = 0.05f;
+            constexpr float kDarknessBoost = 2.0f; // extra weight on dark pixels (0=disabled)
+            constexpr float kAlphaFgWeight = 1.5f;
+            constexpr float kAlphaBgWeight = 0.3f;
 
             const Tensor bg_mask = Tensor::full(mask_2d.shape(), 1.0f, mask_2d.device()) - mask_2d;
 
-            // FG fotométrico: L1+SSIM enmascarado, idéntico a Segment
-            if (opt_params.lambda_dssim > 0.0f) {
-                auto [loss_tensor, ctx] = lfs::training::kernels::masked_fused_l1_ssim_forward(
-                    rendered, gt_image, mask_2d, opt_params.lambda_dssim, masked_fused_workspace_);
-                grad = lfs::training::kernels::masked_fused_l1_ssim_backward(ctx, masked_fused_workspace_);
-                loss = loss_tensor;
-                if (grad.ndim() == 4 && rendered.ndim() == 3)
-                    grad = grad.squeeze(0);
-            } else {
-                const Tensor mask_3d = mask_2d.unsqueeze(0);
-                const Tensor mask_sum = mask_2d.sum() * static_cast<float>(rendered.shape()[0]) + EPSILON;
-                const Tensor diff = rendered - gt_image;
-                loss = (diff.abs() * mask_3d).sum() / mask_sum;
-                grad = diff.sign() * mask_3d / mask_sum;
+            // Step 1: full-image L1+SSIM, identical to None mode.
+            // ssim_map lands in photometric_loss_.fused_workspace() for densification.
+            lfs::training::losses::PhotometricLoss::Params params{.lambda_dssim = opt_params.lambda_dssim};
+            auto full_result = photometric_loss_.forward(rendered, gt_image, params);
+            if (!full_result)
+                return std::unexpected(full_result.error());
+            auto [full_loss, ctx] = *full_result;
+            grad = ctx.grad_image;
+            loss = full_loss;
+
+            // Step 2: build spatial weight map — FG=1.0, BG=kBgWeight.
+            // This focuses gradient on the masked object without discarding BG signal.
+            Tensor weight_map = mask_2d + bg_mask * kBgWeight;
+
+            // Step 3: darkness bonus (perceptual luminance, Rec.601).
+            // Reinforces gradient on dark pixels where photometric signal is ambiguous.
+            // Normalized by its own mean to keep global gradient scale stable.
+            if (kDarknessBoost > 0.0f) {
+                const bool chw = (rendered.ndim() == 3 && rendered.shape()[0] == 3);
+                const Tensor r = chw ? rendered.slice(0, 0, 1).squeeze(0) : rendered.slice(2, 0, 1).squeeze(2);
+                const Tensor g = chw ? rendered.slice(0, 1, 2).squeeze(0) : rendered.slice(2, 1, 2).squeeze(2);
+                const Tensor b = chw ? rendered.slice(0, 2, 3).squeeze(0) : rendered.slice(2, 2, 3).squeeze(2);
+                const Tensor brightness = r * 0.299f + g * 0.587f + b * 0.114f;
+                const Tensor darkness = Tensor::full(brightness.shape(), 1.0f, brightness.device()) - brightness;
+                weight_map = weight_map * (Tensor::full(darkness.shape(), 1.0f, darkness.device()) + darkness * kDarknessBoost);
             }
 
-            // BG fotométrico: gradiente ligero para anclar bordes
-            {
-                const Tensor bg_mask_3d = bg_mask.unsqueeze(0);
-                const Tensor bg_sum = bg_mask.sum() * static_cast<float>(rendered.shape()[0]) + EPSILON;
-                const Tensor diff_bg = rendered - gt_image;
-                loss = loss + (diff_bg.abs() * bg_mask_3d).sum() / bg_sum * kBgPhotoWeight;
-                grad = grad + diff_bg.sign() * bg_mask_3d / bg_sum * kBgPhotoWeight;
-            }
+            // Normalize by mean so global gradient magnitude stays comparable to None mode
+            const float weight_mean = weight_map.mean().item<float>();
+            weight_map = weight_map * (1.0f / std::max(weight_mean, 1e-4f));
 
-            // BG fotométrico: ponderado por ratio FG para no dominar en vistas con poco objeto
-            /*{
-                const Tensor bg_mask_3d = bg_mask.unsqueeze(0);
-                const Tensor bg_sum = bg_mask.sum() * static_cast<float>(rendered.shape()[0]) + EPSILON;
-                const Tensor fg_ratio = mask_2d.sum() / (static_cast<float>(mask_2d.numel()) + EPSILON);
-                const Tensor diff_bg = rendered - gt_image;
-                loss = loss + (diff_bg.abs() * bg_mask_3d).sum() / bg_sum * fg_ratio * kBgPhotoWeight;
-                grad = grad + diff_bg.sign() * bg_mask_3d / bg_sum * fg_ratio * kBgPhotoWeight;
-            }*/
+            // Step 4: apply weight map to gradient (FG gets full signal, BG gets kBgWeight fraction)
+            const Tensor weight_3d = rendered.ndim() == 3 && rendered.shape()[0] == 3
+                                         ? weight_map.unsqueeze(0)
+                                         : weight_map.unsqueeze(2);
+            grad = grad * weight_3d;
 
-            // Alpha: solo en fase 2, controlado por mask_opacity_penalty_weight desde train_step
+            // Step 5: alpha penalty — multiplicative style from old codebase.
+            // Scales with photometric loss magnitude so it never dominates when model is converged.
             if (alpha.is_valid() && opt_params.mask_opacity_penalty_weight > 0.0f) {
-                const float scale = opt_params.mask_opacity_penalty_weight;
+                const float w = opt_params.mask_opacity_penalty_weight;
                 const Tensor alpha_2d = alpha.ndim() == 3 ? alpha.squeeze(0) : alpha;
                 const Tensor ones = Tensor::full(alpha_2d.shape(), 1.0f, alpha_2d.device());
+                const float n_pixels = static_cast<float>(alpha_2d.numel());
 
-                const Tensor fg_norm = mask_2d.sum() + EPSILON;
-                const Tensor bg_norm = bg_mask.sum() + EPSILON;
+                // FG: penalize transparency inside mask (push alpha -> 1)
+                const Tensor fg_weights = mask_2d.pow(opt_params.mask_opacity_penalty_power);
+                const Tensor fg_penalty = ((ones - alpha_2d) * fg_weights).sum() / n_pixels * (w * kAlphaFgWeight);
 
-                // FG: empuja alpha -> 1
-                const Tensor fg_penalty = ((ones - alpha_2d) * mask_2d).sum() / fg_norm * (kAlphaFgWeight * scale);
-                // BG: empuja alpha -> 0
-                const Tensor bg_penalty = (alpha_2d * bg_mask).sum() / bg_norm * (kAlphaBgWeight * scale);
+                // BG: penalize opacity outside mask (push alpha -> 0)
+                const Tensor bg_weights = bg_mask.pow(opt_params.mask_opacity_penalty_power);
+                const Tensor bg_penalty = (alpha_2d * bg_weights).sum() / n_pixels * (w * kAlphaBgWeight);
 
-                loss = loss + fg_penalty + bg_penalty;
+                const Tensor total_penalty = fg_penalty + bg_penalty;
 
-                grad_alpha = (bg_mask * (kAlphaBgWeight * scale) / bg_norm) -
-                             (mask_2d * (kAlphaFgWeight * scale) / fg_norm);
+                // Multiplicative: pressure scales with photometric loss, never dominates
+                loss = loss * (Tensor::full({1}, 1.0f, loss.device()) + total_penalty) + total_penalty * 1e-2f;
+
+                grad_alpha = bg_weights * (w * kAlphaBgWeight / n_pixels) -
+                             fg_weights * (w * kAlphaFgWeight / n_pixels);
             }
         }
         else {
@@ -1666,30 +1673,32 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                         // ESTRATEGIA: "Cleaning Phase" (ultimo 20%)
                         // Si estamos acabando y estamos en modo Matting, cambiamos temporalmente a AlphaConsistent
                         // para limpiar los floaters.
-                        if (progress < 0.2f) {
-                            if (step_params.mask_mode == lfs::core::param::MaskMode::SoftMatting ||
-                                step_params.mask_mode == lfs::core::param::MaskMode::HardMatting) {
+
+                        if (step_params.mask_mode == lfs::core::param::MaskMode::SoftMatting ||
+                            step_params.mask_mode == lfs::core::param::MaskMode::HardMatting) {
+                            if (progress < 0.2f) {
 
                                 // Forzamos el modo estricto para limpiar
                                 step_params.mask_mode = lfs::core::param::MaskMode::None;
 
                                 // Opcional: Aumentar lambda_dssim ligeramente en esta fase para preservar estructura
                                 // step_params.lambda_dssim = 0.2f;
+                            } else if (progress > 0.8f) {
+                                step_params.mask_opacity_penalty_weight = 0.0f;
                             }
-                        }
-                        else if (progress > 0.8f)
-                        {
-                            step_params.mask_opacity_penalty_weight = 0.0f;
                         }
 
                         if (step_params.mask_mode == lfs::core::param::MaskMode::FocusedSegment) {
                             const float progress = static_cast<float>(iter) /
                                                    static_cast<float>(params_.optimization.iterations);
-                            if (progress < 0.2f) {
-                                step_params.mask_mode = lfs::core::param::MaskMode::None;
-                                step_params.lambda_dssim = 0.2f;
+                             // no se llama nunca
+                             if (progress < 0.2f) {
+                                //step_params.mask_mode = lfs::core::param::MaskMode::None;
+
+                                 step_params.mask_opacity_penalty_weight = 0.0f;
+                                //step_params.lambda_dssim = 0.2f;
                             } else if (progress > 0.70f) {
-                                step_params.mask_opacity_penalty_weight = 0.1f;
+                                //step_params.mask_opacity_penalty_weight = 0.1f;
                             }
                         }
 
@@ -1794,13 +1803,13 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                     if (step_params.mask_mode == lfs::core::param::MaskMode::FocusedSegment) {
                         const float progress = static_cast<float>(iter) /
                                                static_cast<float>(params_.optimization.iterations);
-                        if (progress < 0.05f) {
-                            step_params.mask_mode = lfs::core::param::MaskMode::Segment;
-                        } else if (progress < 0.15f) {
+                        if (progress < 0.3f) {
+                            step_params.mask_mode = lfs::core::param::MaskMode::None;
+                        } /* else if (progress < 0.15f) {
                             //step_params.mask_mode = lfs::core::param::MaskMode::None;
-                        } else if (progress > 0.80f) {
+                        }  else if (progress > 0.80f) {
                             step_params.mask_opacity_penalty_weight = 0.3f;
-                        }
+                        }*/
                     }
 
                     // Normal phase: full forward + backward through all components
@@ -1836,8 +1845,7 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                         use_mask &&
                         (step_params.mask_mode == lfs::core::param::MaskMode::Segment ||
                          step_params.mask_mode == lfs::core::param::MaskMode::Ignore ||
-                         step_params.mask_mode == lfs::core::param::MaskMode::HardMatting ||
-                         step_params.mask_mode == lfs::core::param::MaskMode::FocusedSegment) &&
+                         step_params.mask_mode == lfs::core::param::MaskMode::HardMatting) &&
                         params_.optimization.lambda_dssim > 0.0f;
                     if (use_mask) {
                         lfs::core::Tensor mask;
