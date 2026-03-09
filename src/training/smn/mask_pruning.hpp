@@ -1,4 +1,4 @@
-/* ScanMeNow file */
+﻿/* ScanMeNow file */
 
 #pragma once
 
@@ -37,10 +37,84 @@ namespace lfs::training {
         // Configuration
         // =============================================================================
 
+        
+        /**
+         * @brief Configuration for geometric pruning passes that don't require mask evaluation.
+         *
+         * Groups two cheap geometric filters that can run before any mask-based pruning:
+         *
+         * 1. Behind-camera pruning: In a dome capture rig, all cameras point inward toward
+         *    the subject. Any Gaussian that lies behind the optical plane of any camera is
+         *    by definition outside the dome volume — it cannot have been seen from that
+         *    camera during training and is therefore a floater or reconstruction artifact.
+         *    This test reduces to a single dot product per Gaussian per camera and requires
+         *    no masks, no projection, and no GPU synchronization.
+         *
+         * 2. Floor pruning: Removes Gaussians below a world-space Y threshold. In a dome
+         *    setup the floor plane is well defined — anything reconstructed below ground
+         *    level is an artifact of floor reflections, shadow Gaussians, or noise from
+         *    the lower camera ring. The threshold should be set slightly below the lowest
+         *    legitimate point of the subject (e.g. -0.01f for 1cm below floor level).
+         *
+         * Both passes operate entirely in 3D world space on CPU, making them the cheapest
+         * possible pre-filter before the more expensive mask-based passes (center vote,
+         * leakage, isolation). Running them first reduces the splat count for subsequent
+         * passes and avoids false positives from floaters that could skew voting statistics.
+         *
+         * @note The behind-camera test assumes all cameras point inward, which is true for
+         *       dome rigs but may not hold for general capture setups. Disable
+         *       enable_behind_camera if using outward-facing or free-placement cameras.
+         *
+         * @note The floor_y threshold depends on the world-space coordinate convention of
+         *       the COLMAP reconstruction. Verify the Y axis direction before setting this
+         *       value — in some COLMAP outputs Y points downward, which would invert the
+         *       expected threshold sign.
+         */
+        struct GeometricDomePruningConfig {
+            /// Enable/disable this entire pass
+            bool enabled = true;
+
+            /// Enable behind-camera geometric filter.
+            /// Removes any Gaussian whose position lies behind the optical plane of at
+            /// least one camera. In an inward-facing dome rig this is equivalent to
+            /// "outside the dome volume" — a necessary condition for a floater.
+            bool enable_behind_camera = true;
+
+            /// Tolerance for the behind-camera dot product test (world units).
+            /// A Gaussian at dot product distance <= behind_tolerance from the camera
+            /// plane is considered behind that camera. The small negative default (-0.01f)
+            /// avoids false positives for Gaussians that lie exactly on the plane due to
+            /// floating-point precision, without creating a meaningful blind zone.
+            float behind_tolerance = -0.1f;
+
+            /// Enable floor pruning based on world-space Y coordinate.
+            /// Removes Gaussians reconstructed below the capture floor, which are
+            /// typically caused by floor reflections, dark shadow regions, or
+            /// reconstruction noise from the lowest camera ring.
+            bool enable_floorandceil_pruning = true;
+
+            /// World-space Y coordinate threshold for floor pruning.
+            /// Gaussians with y <= floor_y are removed.
+            ///
+            /// Guidelines:
+            /// - Set to slightly below the lowest legitimate point of the subject.
+            ///   For a standing person with feet at y=0, a value of -0.01f (1cm) is safe.
+            /// - Verify coordinate convention: COLMAP may reconstruct with Y pointing
+            ///   down, in which case the sign of this threshold must be inverted.
+            /// - Set enable_floorandceil_pruning = false rather than using -FLT_MAX to disable.
+            /// - If ceil < floor it gets disabled
+            float floor_y = -0.01f;
+            float ceil_y = 2.6f;
+        };
+
+
         /**
          * @brief Configuration for center-vote pruning.
          */
         struct CenterVotePruningConfig {
+            
+            bool enabled = true;
+
             /// Minimum ratio of views where center must be inside mask to keep splat
             float vote_ratio_threshold = 0.90f;
 
@@ -223,6 +297,21 @@ namespace lfs::training {
         // =============================================================================
 
         /**
+         * @brief Remove splats outside the dome volume using geometric tests only.
+         *
+         * Runs up to two passes depending on config:
+         *   1. Behind-camera: dot product test against each camera's optical plane
+         *   2. Floor: world-space Y threshold
+         *
+         * This is always the first pruning pass — it is the cheapest possible filter
+         * and reduces splat count before the more expensive mask-based passes.
+         */
+        std::expected<PruningResult, std::string> prune_by_geometric_dome(
+            IStrategy& strategy,
+            const CameraDataset& dataset,
+            const GeometricDomePruningConfig& config = {});
+
+        /**
          * @brief Remove splats whose projected center doesn't fall inside mask consistently.
          */
         std::expected<PruningResult, std::string> prune_by_center_vote(
@@ -251,6 +340,7 @@ namespace lfs::training {
         std::expected<PruningResult, std::string> prune_after_training(
             IStrategy& strategy,
             const CameraDataset& dataset,
+            const GeometricDomePruningConfig& geometric_config = {},
             const CenterVotePruningConfig& center_config = DEFAULT_CONFIG,
             const LeakagePruningConfig& leakage_config = {},
             const IsolationPruningConfig& isolation_config = {});

@@ -246,6 +246,162 @@ namespace lfs::training::mask_pruning {
         return out;
     }
 
+    
+    // -----------------------------------------------------------------------------
+    // Geometric come pruning
+    // -----------------------------------------------------------------------------
+
+    std::expected<PruningResult, std::string> prune_by_geometric_dome(
+        IStrategy& strategy,
+        const CameraDataset& dataset,
+        const GeometricDomePruningConfig& config) {
+
+        using namespace lfs::core;
+
+        if (!config.enabled) {
+            const int n = static_cast<int>(strategy.get_model().size());
+            return PruningResult{.splats_before = n, .splats_after = n, .splats_removed = 0, .success = true};
+        }
+
+        auto& model = strategy.get_model();
+        const int N = static_cast<int>(model.size());
+        if (N == 0) {
+            return PruningResult{.splats_before = 0, .splats_after = 0, .splats_removed = 0, .success = true};
+        }
+
+        // Pull Gaussian positions to CPU [N, 3]
+        Tensor means_cpu = model.get_means().cpu().contiguous();
+        if (!means_cpu.is_valid() || means_cpu.ndim() != 2 ||
+            static_cast<int>(means_cpu.shape()[0]) != N ||
+            static_cast<int>(means_cpu.shape()[1]) != 3) {
+            return std::unexpected("prune_by_geometric_dome: invalid means tensor - expected [N,3] float32");
+        }
+        const float* pts = means_cpu.ptr<float>();
+
+        std::vector<bool> remove_flags(static_cast<size_t>(N), false);
+        int behind_removed = 0;
+        int floor_removed = 0;
+
+        // =========================================================================
+        // Pass 1: behind-camera filter
+        // In an inward-facing dome, any Gaussian behind the optical plane of any
+        // camera is outside the dome volume by definition.
+        // Cost: O(N * n_cams) dot products, no GPU sync, no mask access.
+        // =========================================================================
+        if (config.enable_behind_camera) {
+            const auto& cameras = dataset.get_cameras();
+            const int n_cams = static_cast<int>(cameras.size());
+
+            if (n_cams == 0) {
+                LOG_WARN("[prune_by_geometric_dome] enable_behind_camera=true but no cameras in dataset - skipping pass");
+            } else {
+                for (const auto& cam_ptr : cameras) {
+                    if (!cam_ptr)
+                        continue;
+
+                    // world_view_transform() always returns [1,4,4] because world_to_view()
+                    // always calls unsqueeze(0). The batch dim is cosmetic - data starts at
+                    // index 0. Do NOT use (ndim()==3 ? 16 : 0) as that always evaluates to
+                    // 16 and reads row 3 of the matrix instead of row 2.
+                    Tensor w2c_cpu = cam_ptr->world_view_transform().cpu().contiguous();
+                    const float* w2c = w2c_cpu.ptr<float>();
+
+                    // Row 2 of the 3x3 rotation block = camera Z axis in world space = forward.
+                    // Flat layout of [1,4,4]: element [0, row, col] = w2c[row*4 + col]
+                    const float fx = w2c[8];  // [0, 2, 0]
+                    const float fy = w2c[9];  // [0, 2, 1]
+                    const float fz = w2c[10]; // [0, 2, 2]
+
+                    // cam_position() is [3] on CUDA - must bring to CPU before reading ptr
+                    Tensor cam_pos_cpu = cam_ptr->cam_position().cpu().contiguous();
+                    const float* cp = cam_pos_cpu.ptr<float>();
+                    const float ox = cp[0], oy = cp[1], oz = cp[2];
+
+                    for (int i = 0; i < N; ++i) {
+                        if (remove_flags[static_cast<size_t>(i)])
+                            continue;
+
+                        const float dx = pts[i * 3 + 0] - ox;
+                        const float dy = pts[i * 3 + 1] - oy;
+                        const float dz = pts[i * 3 + 2] - oz;
+
+                        // In COLMAP/OpenCV convention, +Z is forward into the scene.
+                        // dot(to_splat, forward) <= behind_tolerance -> splat is behind this camera
+                        const float dot = dx * fx + dy * fy + dz * fz;
+                        if (dot <= config.behind_tolerance) {
+                            remove_flags[static_cast<size_t>(i)] = true;
+                            behind_removed++;
+                        }
+                    }
+                }
+
+                LOG_INFO("[prune_by_geometric_dome] Behind-camera pass: {} splats removed ({:.1f}%)",
+                         behind_removed,
+                         100.0f * static_cast<float>(behind_removed) / static_cast<float>(N));
+            }
+        }
+
+        // =========================================================================
+        // Pass 2: floor pruning
+        // Removes Gaussians below a world-space Y threshold. Floor reflections,
+        // shadow Gaussians, and noise from the lowest camera ring typically
+        // reconstruct slightly below y=0. Tests the Gaussian center only -
+        // Gaussians that legitimately cross the floor plane (feet, ankles) are
+        // preserved as long as their center is above floor_y.
+        // =========================================================================
+        if (config.enable_floorandceil_pruning) {
+            for (int i = 0; i < N; ++i) {
+                if (remove_flags[static_cast<size_t>(i)])
+                    continue;
+
+                const float y = pts[i * 3 + 1];
+                if (y <= config.floor_y) {
+                    remove_flags[static_cast<size_t>(i)] = true;
+                    floor_removed++;
+                } else if (y > config.ceil_y && config.ceil_y > config.floor_y) {
+                    remove_flags[static_cast<size_t>(i)] = true;
+                    floor_removed++;
+                }
+            }
+
+            LOG_INFO("[prune_by_geometric_dome] Floor pass (y <= {:.4f}m): {} splats removed ({:.1f}%)",
+                     config.floor_y, floor_removed,
+                     100.0f * static_cast<float>(floor_removed) / static_cast<float>(N));
+        }
+
+        // =========================================================================
+        // Apply removal mask
+        // =========================================================================
+        const int n_remove = behind_removed + floor_removed;
+
+        LOG_INFO("[prune_by_geometric_dome] Total to remove: {} / {} ({:.1f}%)",
+                 n_remove, N,
+                 100.0f * static_cast<float>(n_remove) / static_cast<float>(N));
+
+        if (n_remove == 0) {
+            return PruningResult{.splats_before = N, .splats_after = N, .splats_removed = 0, .success = true};
+        }
+
+        Tensor remove_mask_cpu = Tensor::zeros({static_cast<size_t>(N)},
+                                               Device::CPU, DataType::Bool);
+        auto rm_acc = remove_mask_cpu.accessor<uint8_t, 1>();
+        for (int i = 0; i < N; ++i) {
+            rm_acc(i) = remove_flags[static_cast<size_t>(i)] ? 1 : 0;
+        }
+
+        Tensor remove_mask = remove_mask_cpu.to(Device::CUDA).contiguous();
+        strategy.remove_gaussians(remove_mask);
+
+        const int after = static_cast<int>(strategy.get_model().size());
+        const int removed = N - after;
+        const double pct = (N > 0) ? (100.0 * removed / N) : 0.0;
+
+        LOG_INFO("[prune_by_geometric_dome] Requested: {}, actually removed: {} ({:.3f}%)",
+                 n_remove, removed, pct);
+
+        return PruningResult{.splats_before = N, .splats_after = after, .splats_removed = removed, .success = true};
+    }
+
     // -----------------------------------------------------------------------------
     // Center-vote pruning (replicates trainer_old.cpp semantics)
     // -----------------------------------------------------------------------------
@@ -254,7 +410,13 @@ namespace lfs::training::mask_pruning {
         IStrategy& strategy,
         const CameraDataset& dataset,
         const CenterVotePruningConfig& config) {
+        
         using namespace lfs::core;
+
+        if (!config.enabled) {
+            const int n = static_cast<int>(strategy.get_model().size());
+            return PruningResult{.splats_before = n, .splats_after = n, .splats_removed = 0, .success = true};
+        }
 
         auto& model = strategy.get_model();
         const int N = static_cast<int>(model.size());
@@ -282,22 +444,24 @@ namespace lfs::training::mask_pruning {
         const int num_threads = std::min(n_cams, omp_get_max_threads());
         LOG_INFO("[prune_by_center_vote] Using {} OpenMP threads for {} cameras", num_threads, n_cams);
 
-#pragma omp parallel num_threads(num_threads)
+        #pragma omp parallel num_threads(num_threads)
         {
             // Thread-local counters (cada thread tiene su copia)
             std::vector<int> local_tot(static_cast<size_t>(N), 0);
             std::vector<int> local_pos(static_cast<size_t>(N), 0);
 
-#pragma omp for schedule(dynamic, 1)
+            #pragma omp for schedule(dynamic, 1)
             for (int ci = 0; ci < n_cams; ++ci) {
                 const auto& cam_ptr = cams[static_cast<size_t>(ci)];
                 if (!cam_ptr) {
+                    #pragma omp atomic
                     ++skipped_no_mask;
                     continue;
                 }
 
                 auto& cam = *cam_ptr;
                 if (!cam.has_mask()) {
+                    #pragma omp atomic
                     ++skipped_no_mask;
                     continue;
                 }
@@ -317,6 +481,7 @@ namespace lfs::training::mask_pruning {
                 if (mask.ndim() != 2 ||
                     static_cast<int>(mask.shape()[0]) != H ||
                     static_cast<int>(mask.shape()[1]) != W) {
+                    #pragma omp atomic
                     ++skipped_size_mismatch;
                     continue;
                 }
@@ -324,6 +489,7 @@ namespace lfs::training::mask_pruning {
                 // Project
                 auto proj = project_splats(cam, model, config);
                 if (!proj) {
+                    #pragma omp atomic
                     ++skipped_proj_error;
                     continue;
                 }
@@ -390,13 +556,9 @@ namespace lfs::training::mask_pruning {
                              y >= -pad_h && y < H + pad_h) {
                         continue;
                     }
-                    // CASE 3: FAR OUTSIDE the safe margin
-                    // These are likely floaters or artifacts far from the object.
-                    // Action: Count as a negative vote (increase 'tot', keep 'pos' same).
-                    else {
-                        local_tot[static_cast<size_t>(i)]++;
-                        // pos doesn't increase -> Vote: REMOVE
-                    }
+                    // CASE 3: Far outside -> ALSO ignore
+                    // Do not count as negative vote. It gives noisy bias.
+                    continue;
                 }
 
                 // ===== DEPTH FILTERING =====
@@ -484,8 +646,8 @@ namespace lfs::training::mask_pruning {
                 }
             }
 
-// Merge thread-local results into global counters
-#pragma omp critical
+            // Merge thread-local results into global counters
+            #pragma omp critical
             {
                 for (int i = 0; i < N; ++i) {
                     tot[static_cast<size_t>(i)] += local_tot[static_cast<size_t>(i)];
@@ -1186,6 +1348,7 @@ namespace lfs::training::mask_pruning {
     std::expected<PruningResult, std::string> prune_after_training(
         IStrategy& strategy,
         const CameraDataset& dataset,
+        const GeometricDomePruningConfig& geometric_config,
         const CenterVotePruningConfig& center_config,
         const LeakagePruningConfig& leakage_config,
         const IsolationPruningConfig& isolation_config) {
@@ -1195,19 +1358,32 @@ namespace lfs::training::mask_pruning {
             return PruningResult{.splats_before = 0, .splats_after = 0, .splats_removed = 0, .success = true};
         }
 
-        auto center = prune_by_center_vote(strategy, dataset, center_config);
-        if (!center) {
-            return std::unexpected(center.error());
+        if (geometric_config.enabled) {
+            auto geomdome = prune_by_geometric_dome(strategy, dataset, geometric_config);
+            if (!geomdome) {
+                return std::unexpected(geomdome.error());
+            }
         }
 
-        auto leak = prune_by_mask_leakage(strategy, dataset, leakage_config);
-        if (!leak) {
-            return std::unexpected(leak.error());
+        if (center_config.enabled) {
+            auto center = prune_by_center_vote(strategy, dataset, center_config);
+            if (!center) {
+                return std::unexpected(center.error());
+            }
+        }
+        
+        if (leakage_config.enabled) {
+            auto leak = prune_by_mask_leakage(strategy, dataset, leakage_config);
+            if (!leak) {
+                return std::unexpected(leak.error());
+            }
         }
 
-        auto isolation = prune_by_isolation_distance(strategy, isolation_config);
-        if (!isolation) {
-            return std::unexpected(isolation.error());
+        if (isolation_config.enabled) {
+            auto isolation = prune_by_isolation_distance(strategy, isolation_config);
+            if (!isolation) {
+                return std::unexpected(isolation.error());
+            }
         }
 
         const int after = static_cast<int>(strategy.get_model().size());
