@@ -281,6 +281,7 @@ namespace lfs::training::mask_pruning {
         std::vector<bool> remove_flags(static_cast<size_t>(N), false);
         int behind_removed = 0;
         int floor_removed = 0;
+        int scale_removed = 0;
 
         // =========================================================================
         // Pass 1: behind-camera filter
@@ -369,10 +370,59 @@ namespace lfs::training::mask_pruning {
                      100.0f * static_cast<float>(floor_removed) / static_cast<float>(N));
         }
 
+        // Pass 3: max scale filter
+        // Removes Gaussians whose effective full size exceeds max_scale_in_meters.
+        // get_scaling() already returns world-space axis scales.
+        // We estimate full splat size as a 3-sigma diameter on the largest axis.
+        if (config.max_scale_in_meters > 0.0f) {
+            Tensor scales_cpu = model.get_scaling().cpu().contiguous();
+            if (scales_cpu.is_valid() && scales_cpu.ndim() == 2 &&
+                static_cast<int>(scales_cpu.shape()[0]) == N &&
+                static_cast<int>(scales_cpu.shape()[1]) == 3) {
+
+                const float* sc = scales_cpu.ptr<float>();
+
+                int over_threshold_count = 0;
+                float biggest_axis_found = 0.0f;
+
+                const float max_scale = config.max_scale_in_meters / 2.0f;
+                for (int i = 0; i < N; ++i) {
+                    if (remove_flags[static_cast<size_t>(i)])
+                        continue;
+
+                    const float s0 = sc[i * 3 + 0];
+                    const float s1 = sc[i * 3 + 1];
+                    const float s2 = sc[i * 3 + 2];
+
+                    if (!std::isfinite(s0) || !std::isfinite(s1) || !std::isfinite(s2)) {
+                        continue;
+                    }
+
+                    const float max_axis_m = std::max({s0, s1, s2});
+                    biggest_axis_found = std::max(biggest_axis_found, max_axis_m);
+
+                    if (max_axis_m > max_scale) {
+                        remove_flags[static_cast<size_t>(i)] = true;
+                        scale_removed++;
+                        over_threshold_count++;
+                    }
+                }
+
+                LOG_INFO("[prune_by_geometric_dome] max_scale debug: threshold = {:.4f} m, biggest axis found = {:.6f} m, over threshold = {}",
+                         config.max_scale_in_meters, biggest_axis_found, over_threshold_count);
+            } else {
+                LOG_WARN("[prune_by_geometric_dome] max_scale_in_meters filter: invalid scaling tensor - skipping");
+            }
+
+            LOG_INFO("[prune_by_geometric_dome] Max local-axis scale pass (> {:.4f} m): {} splats removed ({:.1f}%)",
+                     config.max_scale_in_meters, scale_removed,
+                     100.0f * static_cast<float>(scale_removed) / static_cast<float>(N));
+        }
+
         // =========================================================================
         // Apply removal mask
         // =========================================================================
-        const int n_remove = behind_removed + floor_removed;
+        const int n_remove = behind_removed + floor_removed + scale_removed;
 
         LOG_INFO("[prune_by_geometric_dome] Total to remove: {} / {} ({:.1f}%)",
                  n_remove, N,
@@ -410,7 +460,7 @@ namespace lfs::training::mask_pruning {
         IStrategy& strategy,
         const CameraDataset& dataset,
         const CenterVotePruningConfig& config) {
-        
+
         using namespace lfs::core;
 
         if (!config.enabled) {
@@ -444,24 +494,23 @@ namespace lfs::training::mask_pruning {
         const int num_threads = std::min(n_cams, omp_get_max_threads());
         LOG_INFO("[prune_by_center_vote] Using {} OpenMP threads for {} cameras", num_threads, n_cams);
 
-        #pragma omp parallel num_threads(num_threads)
+#pragma omp parallel num_threads(num_threads)
         {
-            // Thread-local counters (cada thread tiene su copia)
             std::vector<int> local_tot(static_cast<size_t>(N), 0);
             std::vector<int> local_pos(static_cast<size_t>(N), 0);
 
-            #pragma omp for schedule(dynamic, 1)
+#pragma omp for schedule(dynamic, 1)
             for (int ci = 0; ci < n_cams; ++ci) {
                 const auto& cam_ptr = cams[static_cast<size_t>(ci)];
                 if (!cam_ptr) {
-                    #pragma omp atomic
+#pragma omp atomic
                     ++skipped_no_mask;
                     continue;
                 }
 
                 auto& cam = *cam_ptr;
                 if (!cam.has_mask()) {
-                    #pragma omp atomic
+#pragma omp atomic
                     ++skipped_no_mask;
                     continue;
                 }
@@ -469,9 +518,11 @@ namespace lfs::training::mask_pruning {
                 // Old code: attentionMask > 0.5 -> binary. Keep same threshold.
                 Tensor mask = cam.load_and_get_mask(sizing->resize_factor, sizing->max_width, config.invert_masks, 0.5f);
                 if (!mask.is_valid() || mask.numel() == 0) {
+#pragma omp atomic
                     ++skipped_no_mask;
                     continue;
                 }
+
                 if (mask.ndim() == 3 && mask.shape()[0] == 1) {
                     mask = mask.squeeze(0);
                 }
@@ -481,20 +532,18 @@ namespace lfs::training::mask_pruning {
                 if (mask.ndim() != 2 ||
                     static_cast<int>(mask.shape()[0]) != H ||
                     static_cast<int>(mask.shape()[1]) != W) {
-                    #pragma omp atomic
+#pragma omp atomic
                     ++skipped_size_mismatch;
                     continue;
                 }
 
-                // Project
                 auto proj = project_splats(cam, model, config);
                 if (!proj) {
-                    #pragma omp atomic
+#pragma omp atomic
                     ++skipped_proj_error;
                     continue;
                 }
 
-                // CPU views for robust indexing (same effect as old's CPU mask indexing + CUDA counts).
                 Tensor radii_cpu = proj->radii.cpu().contiguous();     // [N,2] int32
                 Tensor means2d_cpu = proj->means2d.cpu().contiguous(); // [N,2] float
                 Tensor mask_cpu = mask.cpu().contiguous();             // [H,W] float/bool
@@ -503,25 +552,72 @@ namespace lfs::training::mask_pruning {
                 auto m_acc = means2d_cpu.accessor<float, 2>();
                 auto mask_acc = mask_cpu.accessor<float, 2>();
 
-                // Helper: "outside of frame" counts as "outside of mask"
-                auto center_inside_mask = [&](int i) -> bool {
+                // -----------------------------------------------------------------
+                // Border-tolerant mask queries:
+                //   - strict  : exact binary mask
+                //   - relaxed : dilated mask used as an "uncertain border band"
+                //
+                // Inside strict  -> positive vote
+                // Inside relaxed -> ignore
+                // Outside relaxed-> negative vote
+                // -----------------------------------------------------------------
+                constexpr int kMaskBorderTolPx = 2;
+
+                std::vector<uint8_t> mask01(static_cast<size_t>(H) * static_cast<size_t>(W), 0);
+                for (int yy = 0; yy < H; ++yy) {
+                    uint8_t* row = mask01.data() + static_cast<size_t>(yy) * static_cast<size_t>(W);
+                    for (int xx = 0; xx < W; ++xx) {
+                        row[xx] = (mask_acc(yy, xx) >= 0.5f) ? uint8_t(1) : uint8_t(0);
+                    }
+                }
+
+                IntegralImage sat;
+                if (kMaskBorderTolPx > 0) {
+                    sat.build(mask01.data(), H, W);
+                }
+
+                auto mask_inside_strict_xy = [&](int x, int y) -> bool {
+                    if ((static_cast<unsigned>(x) >= static_cast<unsigned>(W)) ||
+                        (static_cast<unsigned>(y) >= static_cast<unsigned>(H))) {
+                        return false;
+                    }
+                    return mask01[static_cast<size_t>(y) * static_cast<size_t>(W) + static_cast<size_t>(x)] != 0;
+                };
+
+                auto mask_inside_relaxed_xy = [&](int x, int y) -> bool {
+                    if ((static_cast<unsigned>(x) >= static_cast<unsigned>(W)) ||
+                        (static_cast<unsigned>(y) >= static_cast<unsigned>(H))) {
+                        return false;
+                    }
+
+                    if (kMaskBorderTolPx <= 0) {
+                        return mask_inside_strict_xy(x, y);
+                    }
+
+                    const int r = kMaskBorderTolPx;
+                    const int x0 = std::max(0, x - r);
+                    const int y0 = std::max(0, y - r);
+                    const int x1 = std::min(W - 1, x + r);
+                    const int y1 = std::min(H - 1, y + r);
+
+                    return sat.sum_rect(x0, y0, x1, y1) > 0;
+                };
+
+                // Helper for optional depth filtering:
+                // only splats whose center is in the STRICT mask are candidates
+                // for "inside-depth" statistics / vote removal.
+                auto center_inside_mask_strict = [&](int i) -> bool {
                     const float mx = m_acc(i, 0);
                     const float my = m_acc(i, 1);
-                    if (!std::isfinite(mx) || !std::isfinite(my))
+                    if (!std::isfinite(mx) || !std::isfinite(my)) {
                         return false;
+                    }
 
                     const int x = round_to_int(mx);
                     const int y = round_to_int(my);
-
-                    // No clamp. If out-of-bounds => outside of mask.
-                    if ((static_cast<unsigned>(x) >= static_cast<unsigned>(W)) ||
-                        (static_cast<unsigned>(y) >= static_cast<unsigned>(H)))
-                        return false;
-
-                    return mask_acc(y, x) >= 0.5f;
+                    return mask_inside_strict_xy(x, y);
                 };
 
-                // Pre-calculate safe margin in pixels
                 const int pad_w = static_cast<int>(W * config.border_safe_margin);
                 const int pad_h = static_cast<int>(H * config.border_safe_margin);
 
@@ -530,34 +626,36 @@ namespace lfs::training::mask_pruning {
                     const int rx = static_cast<int>(r_acc(i, 0));
                     const int ry = static_cast<int>(r_acc(i, 1));
 
-                    // Skip if radius is invalid (behind camera or too small)
                     if (!is_visible_radii_strict(rx, ry)) {
                         continue;
                     }
 
-                    // Get raw integer coordinates (no clamping)
-                    int x = round_to_int(m_acc(i, 0));
-                    int y = round_to_int(m_acc(i, 1));
+                    const int x = round_to_int(m_acc(i, 0));
+                    const int y = round_to_int(m_acc(i, 1));
 
-                    // CASE 1: Strictly INSIDE the image frame
+                    // CASE 1: Strictly inside the image frame
                     if (x >= 0 && x < W && y >= 0 && y < H) {
-                        local_tot[static_cast<size_t>(i)]++; // Valid view
-
-                        // Check the binary mask
-                        if (mask_acc(y, x) >= 0.5f) {
-                            local_pos[static_cast<size_t>(i)]++; // Vote: KEEP
+                        if (mask_inside_strict_xy(x, y)) {
+                            // Clear positive evidence
+                            local_tot[static_cast<size_t>(i)]++;
+                            local_pos[static_cast<size_t>(i)]++;
+                        } else if (mask_inside_relaxed_xy(x, y)) {
+                            // Border band around the mask -> ignore this camera for this splat
+                            continue;
+                        } else {
+                            // Clear negative evidence
+                            local_tot[static_cast<size_t>(i)]++;
                         }
-                        // Else: pos doesn't increase -> Vote: REMOVE
-                    }
-                    // CASE 2: Outside but within the SAFE MARGIN ("Pardon Zone")
-                    // We assume these splats might be valid parts of the object cut off by the frame.
-                    // Action: Ignore this camera for this splat (do not update 'tot' or 'pos').
-                    else if (x >= -pad_w && x < W + pad_w &&
-                             y >= -pad_h && y < H + pad_h) {
                         continue;
                     }
+
+                    // CASE 2: Outside but near the frame border -> ignore
+                    if (x >= -pad_w && x < W + pad_w &&
+                        y >= -pad_h && y < H + pad_h) {
+                        continue;
+                    }
+
                     // CASE 3: Far outside -> ALSO ignore
-                    // Do not count as negative vote. It gives noisy bias.
                     continue;
                 }
 
@@ -566,18 +664,19 @@ namespace lfs::training::mask_pruning {
                     Tensor depths_cpu = proj->depths.cpu().contiguous(); // [N]
                     auto d_acc = depths_cpu.accessor<float, 1>();
 
-                    // Collect {depth, index} for splats classified as "inside" in this view
                     std::vector<std::pair<float, int>> inside;
                     inside.reserve(static_cast<size_t>(N) / 10);
 
                     for (int i = 0; i < N; ++i) {
                         const int rx = static_cast<int>(r_acc(i, 0));
                         const int ry = static_cast<int>(r_acc(i, 1));
-                        if (!is_visible_radii_strict(rx, ry))
+                        if (!is_visible_radii_strict(rx, ry)) {
                             continue;
+                        }
 
-                        if (!center_inside_mask(i))
+                        if (!center_inside_mask_strict(i)) {
                             continue;
+                        }
 
                         const float depth = d_acc(i);
                         if (depth > config.near_plane && depth < config.far_plane) {
@@ -586,29 +685,28 @@ namespace lfs::training::mask_pruning {
                     }
 
                     if (inside.size() >= static_cast<size_t>(config.min_splats_for_depth_stats)) {
-                        // Median depth (robust)
                         std::vector<float> depth_vals;
                         depth_vals.reserve(inside.size());
-                        for (const auto& p : inside)
+                        for (const auto& p : inside) {
                             depth_vals.push_back(p.first);
+                        }
 
                         const size_t mid = depth_vals.size() / 2;
                         std::nth_element(depth_vals.begin(), depth_vals.begin() + mid, depth_vals.end());
                         const float median_depth = depth_vals[mid];
 
-                        // MAD (median absolute deviation)
                         std::vector<float> abs_devs;
                         abs_devs.reserve(inside.size());
-                        for (float d : depth_vals)
+                        for (float d : depth_vals) {
                             abs_devs.push_back(std::abs(d - median_depth));
+                        }
 
                         const size_t mid_dev = abs_devs.size() / 2;
                         std::nth_element(abs_devs.begin(), abs_devs.begin() + mid_dev, abs_devs.end());
                         const float mad = abs_devs[mid_dev];
 
-                        float robust_std = mad * 1.4826f;
+                        const float robust_std = mad * 1.4826f;
 
-                        // Guard: if robust_std ~ 0, do not over-filter.
                         if (robust_std > 1e-6f) {
                             const float K = config.depth_filter_sigma_multiplier;
                             const float min_acceptable_depth = median_depth - K * robust_std;
@@ -624,10 +722,10 @@ namespace lfs::training::mask_pruning {
                             int filtered_by_depth = 0;
                             for (const auto& [depth, idx] : inside) {
                                 if (depth < min_acceptable_depth || depth > max_acceptable_depth) {
-                                    // Remove the "inside" vote that was already added for this view
                                     int& p = local_pos[static_cast<size_t>(idx)];
-                                    if (p > 0)
+                                    if (p > 0) {
                                         p--;
+                                    }
                                     ++filtered_by_depth;
                                 }
                             }
@@ -646,26 +744,22 @@ namespace lfs::training::mask_pruning {
                 }
             }
 
-            // Merge thread-local results into global counters
-            #pragma omp critical
+#pragma omp critical
             {
                 for (int i = 0; i < N; ++i) {
                     tot[static_cast<size_t>(i)] += local_tot[static_cast<size_t>(i)];
                     pos[static_cast<size_t>(i)] += local_pos[static_cast<size_t>(i)];
                 }
             }
-        } // fin del pragma omp parallel
+        }
 
         LOG_INFO("[prune_by_center_vote] Processed {} cameras, skipped: {} no mask, {} size mismatch, {} proj error",
                  n_cams, skipped_no_mask, skipped_size_mismatch, skipped_proj_error);
 
-        // =========================================================================
-        // DIAGNOSTIC LOGGING - Analyze visibility distribution
-        // =========================================================================
         long long sum_tot = 0;
-        int count_zero_vis = 0;     // Never visible in any camera
-        int count_low_vis = 0;      // Visible but < min_visibility_count
-        int count_adequate_vis = 0; // >= min_visibility_count
+        int count_zero_vis = 0;
+        int count_low_vis = 0;
+        int count_adequate_vis = 0;
 
         for (int i = 0; i < N; ++i) {
             const int t = tot[static_cast<size_t>(i)];
@@ -701,6 +795,7 @@ namespace lfs::training::mask_pruning {
                 break;
             }
         }
+
         if (!any_meets) {
             LOG_WARN("[prune_by_center_vote] No splats reached min_vis={}; ALL WOULD BE REMOVED, skipping prune.",
                      config.min_visibility_count);
@@ -708,21 +803,14 @@ namespace lfs::training::mask_pruning {
             return PruningResult{.splats_before = N, .splats_after = N, .splats_removed = 0, .success = true};
         }
 
-        // =========================================================================
-        // BUILD REMOVAL MASK with detailed tracking
-        // =========================================================================
         Tensor remove_mask_cpu = Tensor::zeros({static_cast<size_t>(N)}, Device::CPU, DataType::Bool);
         auto rm_acc = remove_mask_cpu.accessor<uint8_t, 1>();
 
         int keep_cnt = 0;
         int n_remove = 0;
-
-        // Track removal reasons
         int removed_zero_vis = 0;
         int removed_low_vis = 0;
         int removed_bad_ratio = 0;
-
-        // Track ratio distribution for adequate visibility splats
         int adequate_kept = 0;
         int adequate_removed = 0;
 
@@ -731,7 +819,6 @@ namespace lfs::training::mask_pruning {
             const int p = pos[static_cast<size_t>(i)];
             const float ratio = static_cast<float>(p) / static_cast<float>(std::max(1, t));
 
-            // keep = (t >= min_vis) && (ratio >= threshold)
             const bool keep = (t >= config.min_visibility_count) && (ratio >= config.vote_ratio_threshold);
 
             if (keep) {
@@ -760,7 +847,7 @@ namespace lfs::training::mask_pruning {
                  removed_zero_vis);
         LOG_INFO("[prune_by_center_vote]   Removed (low_vis):      {:6d} <- Visible in <{} cameras",
                  removed_low_vis, config.min_visibility_count);
-        LOG_INFO("[prune_by_center_vote]   Removed (bad_ratio):    {:6d} <- {:.1f}% of views had center outside mask (threshold={:.1f}%)",
+        LOG_INFO("[prune_by_center_vote]   Removed (bad_ratio):    {:6d} <- {:.1f}% of valid votes were outside relaxed mask band (threshold={:.1f}%)",
                  removed_bad_ratio, 100.0 * (1.0 - config.vote_ratio_threshold), 100.0 * config.vote_ratio_threshold);
         LOG_INFO("[prune_by_center_vote]   TOTAL TO REMOVE:        {:6d} ({:5.1f}%)",
                  n_remove, 100.0 * n_remove / N);
@@ -788,17 +875,18 @@ namespace lfs::training::mask_pruning {
         const double pct = (N > 0) ? (100.0 * static_cast<double>(removed) / static_cast<double>(N)) : 0.0;
         LOG_INFO("[prune_by_center_vote] Requested removal: {}, actually removed: {} ({:.3f}%)", n_remove, removed, pct);
 
-        return PruningResult{.splats_before = N,
-                             .splats_after = after,
-                             .splats_removed = removed,
-                             .success = true};
+        return PruningResult{
+            .splats_before = N,
+            .splats_after = after,
+            .splats_removed = removed,
+            .success = true};
     }
 
     // -----------------------------------------------------------------------------
     // Leakage pruning (replicates trainer_old.cpp semantics)
     // -----------------------------------------------------------------------------
 
-    std::expected<PruningResult, std::string> prune_by_mask_leakage(
+    /* std::expected<PruningResult, std::string> prune_by_mask_leakage(
         IStrategy& strategy,
         const CameraDataset& dataset,
         const LeakagePruningConfig& config) {
@@ -858,7 +946,7 @@ namespace lfs::training::mask_pruning {
         const int num_threads_leak = std::min(n_cams, omp_get_max_threads());
         LOG_INFO("[prune_by_mask_leakage] Using {} OpenMP threads for {} cameras", num_threads_leak, n_cams);
 
-#pragma omp parallel num_threads(num_threads_leak)
+        #pragma omp parallel num_threads(num_threads_leak)
         {
             // Thread-local counters
             std::vector<int> local_vis_counts(static_cast<size_t>(N), 0);
@@ -868,18 +956,18 @@ namespace lfs::training::mask_pruning {
             std::vector<uint8_t> local_mask01;
             IntegralImage local_sat;
 
-#pragma omp for schedule(dynamic, 1)
+            #pragma omp for schedule(dynamic, 1)
             for (int ci = 0; ci < n_cams; ++ci) {
                 const auto& cam_ptr = cams[static_cast<size_t>(ci)];
                 if (!cam_ptr) {
-#pragma omp atomic
+                    #pragma omp atomic
                     ++skipped_no_mask;
                     continue;
                 }
 
                 auto& cam = *cam_ptr;
                 if (!cam.has_mask()) {
-#pragma omp atomic
+                    #pragma omp atomic
                     ++skipped_no_mask;
                     continue;
                 }
@@ -887,7 +975,7 @@ namespace lfs::training::mask_pruning {
                 // Old code: (attentionMask > 0.5).to(float). Mirror it with threshold.
                 Tensor mask = cam.load_and_get_mask(sizing->resize_factor, sizing->max_width, config.invert_masks, 0.5f);
                 if (!mask.is_valid() || mask.numel() == 0) {
-#pragma omp atomic
+                    #pragma omp atomic
                     ++skipped_no_mask;
                     continue;
                 }
@@ -900,7 +988,7 @@ namespace lfs::training::mask_pruning {
                 if (mask.ndim() != 2 ||
                     static_cast<int>(mask.shape()[0]) != H ||
                     static_cast<int>(mask.shape()[1]) != W) {
-#pragma omp atomic
+                    #pragma omp atomic
                     ++skipped_size_mismatch;
                     continue;
                 }
@@ -955,7 +1043,7 @@ namespace lfs::training::mask_pruning {
 
                 auto proj = project_splats(cam, model, proj_cfg);
                 if (!proj) {
-#pragma omp atomic
+                    #pragma omp atomic
                     ++skipped_proj_error;
                     continue;
                 }
@@ -1023,8 +1111,8 @@ namespace lfs::training::mask_pruning {
                 }
             }
 
-// Merge thread-local results into global counters
-#pragma omp critical
+            // Merge thread-local results into global counters
+            #pragma omp critical
             {
                 for (int i = 0; i < N; ++i) {
                     vis_counts[static_cast<size_t>(i)] += local_vis_counts[static_cast<size_t>(i)];
@@ -1165,8 +1253,736 @@ namespace lfs::training::mask_pruning {
                              .splats_after = after,
                              .splats_removed = removed,
                              .success = true};
+    }*/
+
+    std::expected<PruningResult, std::string> prune_by_mask_leakage(
+        IStrategy& strategy,
+        const CameraDataset& dataset,
+        const LeakagePruningConfig& config) {
+        using namespace lfs::core;
+
+        if (!config.enabled) {
+            const int n = static_cast<int>(strategy.get_model().size());
+            return PruningResult{.splats_before = n, .splats_after = n, .splats_removed = 0, .success = true};
+        }
+
+        auto& model = strategy.get_model();
+        const int N = static_cast<int>(model.size());
+        if (N <= 0) {
+            return PruningResult{.splats_before = 0, .splats_after = 0, .splats_removed = 0, .success = true};
+        }
+
+        auto sizing = get_dataset_sizing_or_error(dataset);
+        if (!sizing) {
+            return std::unexpected(sizing.error());
+        }
+
+        struct Dir {
+            float dx;
+            float dy;
+        };
+
+        std::vector<Dir> dirs;
+        dirs.reserve(8);
+        dirs.push_back({1.0f, 0.0f});
+        dirs.push_back({-1.0f, 0.0f});
+        dirs.push_back({0.0f, 1.0f});
+        dirs.push_back({0.0f, -1.0f});
+        if (config.sample_points >= 8) {
+            constexpr float s = 0.70710678f;
+            dirs.push_back({s, s});
+            dirs.push_back({-s, s});
+            dirs.push_back({s, -s});
+            dirs.push_back({-s, -s});
+        }
+
+        // Strong multiview evidence buckets
+        std::vector<int> good_votes(static_cast<size_t>(N), 0);      // strong positive views
+        std::vector<int> bad_votes(static_cast<size_t>(N), 0);       // strong negative views
+        std::vector<int> decisive_counts(static_cast<size_t>(N), 0); // good + bad
+        std::vector<int> uncertain_counts(static_cast<size_t>(N), 0);
+
+        int skipped_no_mask = 0;
+        int skipped_size_mismatch = 0;
+        int skipped_proj_error = 0;
+
+        const auto& cams = dataset.get_cameras();
+        const int n_cams = static_cast<int>(cams.size());
+
+        LOG_INFO("[prune_by_mask_leakage] Starting: {} splats, {} cameras", N, n_cams);
+
+        const int num_threads_leak = std::min(n_cams, omp_get_max_threads());
+        LOG_INFO("[prune_by_mask_leakage] Using {} OpenMP threads for {} cameras", num_threads_leak, n_cams);
+
+#pragma omp parallel num_threads(num_threads_leak)
+        {
+            std::vector<int> local_good_votes(static_cast<size_t>(N), 0);
+            std::vector<int> local_bad_votes(static_cast<size_t>(N), 0);
+            std::vector<int> local_decisive_counts(static_cast<size_t>(N), 0);
+            std::vector<int> local_uncertain_counts(static_cast<size_t>(N), 0);
+
+            std::vector<uint8_t> local_mask01;
+            IntegralImage local_sat;
+
+#pragma omp for schedule(dynamic, 1)
+            for (int ci = 0; ci < n_cams; ++ci) {
+                const auto& cam_ptr = cams[static_cast<size_t>(ci)];
+                if (!cam_ptr) {
+#pragma omp atomic
+                    ++skipped_no_mask;
+                    continue;
+                }
+
+                auto& cam = *cam_ptr;
+                if (!cam.has_mask()) {
+#pragma omp atomic
+                    ++skipped_no_mask;
+                    continue;
+                }
+
+                Tensor mask = cam.load_and_get_mask(sizing->resize_factor, sizing->max_width, config.invert_masks, 0.5f);
+                if (!mask.is_valid() || mask.numel() == 0) {
+#pragma omp atomic
+                    ++skipped_no_mask;
+                    continue;
+                }
+                if (mask.ndim() == 3 && mask.shape()[0] == 1) {
+                    mask = mask.squeeze(0);
+                }
+
+                const int H = static_cast<int>(cam.image_height());
+                const int W = static_cast<int>(cam.image_width());
+                if (mask.ndim() != 2 ||
+                    static_cast<int>(mask.shape()[0]) != H ||
+                    static_cast<int>(mask.shape()[1]) != W) {
+#pragma omp atomic
+                    ++skipped_size_mismatch;
+                    continue;
+                }
+
+                Tensor mask_cpu = mask.cpu().contiguous();
+                auto mask_acc = mask_cpu.accessor<float, 2>();
+
+                // Exact binary mask
+                local_mask01.assign(static_cast<size_t>(H) * static_cast<size_t>(W), 0);
+                for (int y = 0; y < H; ++y) {
+                    uint8_t* row = local_mask01.data() + static_cast<size_t>(y) * static_cast<size_t>(W);
+                    for (int x = 0; x < W; ++x) {
+                        row[x] = (mask_acc(y, x) >= 0.5f) ? uint8_t(1) : uint8_t(0);
+                    }
+                }
+
+                // Relaxed mask = dilated query band, used as "uncertain border"
+                if (config.dilate_px > 0) {
+                    local_sat.build(local_mask01.data(), H, W);
+                }
+
+                auto mask_inside_strict = [&](int x, int y) -> bool {
+                    if ((static_cast<unsigned>(x) >= static_cast<unsigned>(W)) ||
+                        (static_cast<unsigned>(y) >= static_cast<unsigned>(H))) {
+                        return false;
+                    }
+                    return local_mask01[static_cast<size_t>(y) * static_cast<size_t>(W) + static_cast<size_t>(x)] != 0;
+                };
+
+                auto mask_inside_relaxed = [&](int x, int y) -> bool {
+                    if ((static_cast<unsigned>(x) >= static_cast<unsigned>(W)) ||
+                        (static_cast<unsigned>(y) >= static_cast<unsigned>(H))) {
+                        return false;
+                    }
+
+                    if (config.dilate_px <= 0) {
+                        return mask_inside_strict(x, y);
+                    }
+
+                    const int r = config.dilate_px;
+                    const int x0 = std::max(0, x - r);
+                    const int y0 = std::max(0, y - r);
+                    const int x1 = std::min(W - 1, x + r);
+                    const int y1 = std::min(H - 1, y + r);
+
+                    return local_sat.sum_rect(x0, y0, x1, y1) > 0;
+                };
+
+                CenterVotePruningConfig proj_cfg;
+                proj_cfg.eps2d = config.eps2d;
+                proj_cfg.near_plane = config.near_plane;
+                proj_cfg.far_plane = config.far_plane;
+                proj_cfg.radius_clip = config.radius_clip;
+                proj_cfg.scaling_modifier = config.scaling_modifier;
+                proj_cfg.invert_masks = config.invert_masks;
+
+                auto proj = project_splats(cam, model, proj_cfg);
+                if (!proj) {
+#pragma omp atomic
+                    ++skipped_proj_error;
+                    continue;
+                }
+
+                Tensor radii_cpu = proj->radii.cpu().contiguous();
+                Tensor means2d_cpu = proj->means2d.cpu().contiguous();
+
+                auto r_acc = radii_cpu.accessor<int32_t, 2>();
+                auto m_acc = means2d_cpu.accessor<float, 2>();
+
+                for (int i = 0; i < N; ++i) {
+                    const int rx = static_cast<int>(r_acc(i, 0));
+                    const int ry = static_cast<int>(r_acc(i, 1));
+                    if (!is_visible_radii_strict(rx, ry)) {
+                        continue;
+                    }
+
+                    const float frx = static_cast<float>(std::abs(rx));
+                    const float fry = static_cast<float>(std::abs(ry));
+                    if (std::max(frx, fry) < config.min_pixel_radius) {
+                        continue;
+                    }
+
+                    const float mx = m_acc(i, 0);
+                    const float my = m_acc(i, 1);
+                    if (!std::isfinite(mx) || !std::isfinite(my)) {
+                        continue;
+                    }
+
+                    const int cx = round_to_int(mx);
+                    const int cy = round_to_int(my);
+
+                    const bool center_strict = mask_inside_strict(cx, cy);
+                    const bool center_relaxed = mask_inside_relaxed(cx, cy);
+
+                    // 4 cardinal extreme points
+                    const int px = round_to_int(frx);
+                    const int py = round_to_int(fry);
+
+                    const int xR = cx + px;
+                    const int xL = cx - px;
+                    const int yU = cy - py;
+                    const int yD = cy + py;
+
+                    const bool cardR_strict = mask_inside_strict(xR, cy);
+                    const bool cardL_strict = mask_inside_strict(xL, cy);
+                    const bool cardU_strict = mask_inside_strict(cx, yU);
+                    const bool cardD_strict = mask_inside_strict(cx, yD);
+
+                    const bool cardR_relaxed = mask_inside_relaxed(xR, cy);
+                    const bool cardL_relaxed = mask_inside_relaxed(xL, cy);
+                    const bool cardU_relaxed = mask_inside_relaxed(cx, yU);
+                    const bool cardD_relaxed = mask_inside_relaxed(cx, yD);
+
+                    const int strict_cardinals =
+                        static_cast<int>(cardR_strict) +
+                        static_cast<int>(cardL_strict) +
+                        static_cast<int>(cardU_strict) +
+                        static_cast<int>(cardD_strict);
+
+                    const int relaxed_cardinals =
+                        static_cast<int>(cardR_relaxed) +
+                        static_cast<int>(cardL_relaxed) +
+                        static_cast<int>(cardU_relaxed) +
+                        static_cast<int>(cardD_relaxed);
+
+                    // -----------------------------------------------------------------
+                    // STRONG GOOD fast-path:
+                    // center + 4 cardinals all strictly inside -> very strong evidence
+                    // -----------------------------------------------------------------
+                    if (center_strict && strict_cardinals == 4) {
+                        local_good_votes[static_cast<size_t>(i)]++;
+                        local_decisive_counts[static_cast<size_t>(i)]++;
+                        continue;
+                    }
+
+                    // -----------------------------------------------------------------
+                    // Candidate gate:
+                    // We mainly evaluate splats whose center is in/near the subject,
+                    // but also allow outside-center splats that clearly touch the mask band.
+                    // This avoids missing "intruders from outside".
+                    // -----------------------------------------------------------------
+                    const bool near_subject = center_relaxed || (relaxed_cardinals > 0);
+                    if (!near_subject) {
+                        continue;
+                    }
+
+                    // -----------------------------------------------------------------
+                    // Richer footprint inspection
+                    //   - strict inside  -> clear inside support
+                    //   - outside relaxed-> clear outside support
+                    //   - relaxed-only or off-frame -> uncertain
+                    // -----------------------------------------------------------------
+                    int strict_inside_samples = 0;
+                    int clear_outside_samples = 0;
+                    int uncertain_samples = 0;
+                    int valid_inframe_samples = 0;
+
+                    const int P = static_cast<int>(dirs.size());
+                    for (const auto& d : dirs) {
+                        const int dx = round_to_int(frx * d.dx);
+                        const int dy = round_to_int(fry * d.dy);
+
+                        const int sx = cx + dx;
+                        const int sy = cy + dy;
+
+                        // Off-frame does not count as "clear leak"; it is uncertain.
+                        if ((static_cast<unsigned>(sx) >= static_cast<unsigned>(W)) ||
+                            (static_cast<unsigned>(sy) >= static_cast<unsigned>(H))) {
+                            uncertain_samples++;
+                            continue;
+                        }
+
+                        ++valid_inframe_samples;
+
+                        const bool s_strict = mask_inside_strict(sx, sy);
+                        const bool s_relaxed = mask_inside_relaxed(sx, sy);
+
+                        if (s_strict) {
+                            strict_inside_samples++;
+                        } else if (!s_relaxed) {
+                            clear_outside_samples++;
+                        } else {
+                            uncertain_samples++;
+                        }
+                    }
+
+                    // If all rich samples are uncertain/off-frame, abstain in this view.
+                    if (valid_inframe_samples <= 0) {
+                        local_uncertain_counts[static_cast<size_t>(i)]++;
+                        continue;
+                    }
+
+                    const float outside_ratio =
+                        static_cast<float>(clear_outside_samples) / static_cast<float>(valid_inframe_samples);
+
+                    const float inside_ratio =
+                        static_cast<float>(strict_inside_samples) / static_cast<float>(valid_inframe_samples);
+
+                    // -----------------------------------------------------------------
+                    // STRONG BAD logic:
+                    // Negative evidence should weigh more than positive evidence, but
+                    // one single camera should not force removal by itself.
+                    //
+                    // We declare this view "strong bad" only when leakage is clear.
+                    // -----------------------------------------------------------------
+                    bool strong_bad = false;
+
+                    if (!center_relaxed) {
+                        // Center clearly outside the relaxed mask, but footprint touches
+                        // the relaxed band -> likely intruding from outside.
+                        // Require leakage evidence to be clearly non-trivial.
+                        strong_bad = (outside_ratio >= config.per_view_leak_fraction);
+                    } else {
+                        // Center is inside or near mask, but footprint spills clearly outside.
+                        // Demand both:
+                        //   1) enough outside evidence
+                        //   2) not enough strong-inside support to call it safe
+                        strong_bad =
+                            (outside_ratio >= config.per_view_leak_fraction) &&
+                            !(center_strict && inside_ratio >= 0.5f);
+                    }
+
+                    if (strong_bad) {
+                        local_bad_votes[static_cast<size_t>(i)]++;
+                        local_decisive_counts[static_cast<size_t>(i)]++;
+                    } else {
+                        // Not clearly good, not clearly bad -> uncertain
+                        local_uncertain_counts[static_cast<size_t>(i)]++;
+                    }
+                }
+
+                if ((ci + 1) % 25 == 0 || (ci + 1) == n_cams) {
+                    LOG_INFO("[prune_by_mask_leakage] Processing camera {}/{}", (ci + 1), n_cams);
+                }
+            }
+
+#pragma omp critical
+            {
+                for (int i = 0; i < N; ++i) {
+                    good_votes[static_cast<size_t>(i)] += local_good_votes[static_cast<size_t>(i)];
+                    bad_votes[static_cast<size_t>(i)] += local_bad_votes[static_cast<size_t>(i)];
+                    decisive_counts[static_cast<size_t>(i)] += local_decisive_counts[static_cast<size_t>(i)];
+                    uncertain_counts[static_cast<size_t>(i)] += local_uncertain_counts[static_cast<size_t>(i)];
+                }
+            }
+        }
+
+        LOG_INFO("[prune_by_mask_leakage] Processed {} cameras, skipped: {} no mask, {} size mismatch, {} proj error",
+                 n_cams, skipped_no_mask, skipped_size_mismatch, skipped_proj_error);
+
+        // =========================================================================
+        // DIAGNOSTIC LOGGING
+        // =========================================================================
+        long long sum_decisive = 0;
+        int count_zero_decisive = 0;
+        int count_low_decisive = 0;
+        int count_adequate_decisive = 0;
+
+        for (int i = 0; i < N; ++i) {
+            const int d = decisive_counts[static_cast<size_t>(i)];
+            sum_decisive += static_cast<long long>(d);
+
+            if (d == 0) {
+                count_zero_decisive++;
+            } else if (d < config.min_visibility_count) {
+                count_low_decisive++;
+            } else {
+                count_adequate_decisive++;
+            }
+        }
+
+        LOG_INFO("[prune_by_mask_leakage] === DECISIVE EVIDENCE DISTRIBUTION ===");
+        LOG_INFO("[prune_by_mask_leakage]   Zero decisive:       {:6d} ({:5.1f}%) <- No strong good/bad evidence",
+                 count_zero_decisive, 100.0 * count_zero_decisive / N);
+        LOG_INFO("[prune_by_mask_leakage]   Low decisive:        {:6d} ({:5.1f}%) <- Strong evidence in <{} views",
+                 count_low_decisive, 100.0 * count_low_decisive / N, config.min_visibility_count);
+        LOG_INFO("[prune_by_mask_leakage]   Adequate decisive:   {:6d} ({:5.1f}%) <- Enough decisive views",
+                 count_adequate_decisive, 100.0 * count_adequate_decisive / N);
+
+        if (sum_decisive == 0) {
+            LOG_WARN("[prune_by_mask_leakage] No decisive evidence accumulated; skipping prune.");
+            LOG_INFO("[prune_by_mask_leakage] Removed 0 splats (0.000%)");
+            return PruningResult{.splats_before = N, .splats_after = N, .splats_removed = 0, .success = true};
+        }
+
+        // =========================================================================
+        // BUILD REMOVAL MASK
+        // =========================================================================
+        Tensor remove_mask_cpu = Tensor::zeros({static_cast<size_t>(N)}, Device::CPU, DataType::Bool);
+        auto rm_acc = remove_mask_cpu.accessor<uint8_t, 1>();
+
+        int keep_cnt = 0;
+        int n_remove = 0;
+
+        int kept_zero_decisive = 0;
+        int kept_low_bad = 0;
+        int kept_positive_balance = 0;
+        int removed_by_negative_evidence = 0;
+
+        constexpr float kBadVoteWeight = 2.0f;
+        const int min_bad_votes = std::max(1, (config.min_visibility_count + 1) / 2);
+
+        for (int i = 0; i < N; ++i) {
+            const int good = good_votes[static_cast<size_t>(i)];
+            const int bad = bad_votes[static_cast<size_t>(i)];
+            const int dec = decisive_counts[static_cast<size_t>(i)];
+
+            // Never decisively evaluated -> keep
+            if (dec == 0) {
+                rm_acc(i) = 0;
+                ++keep_cnt;
+                ++kept_zero_decisive;
+                continue;
+            }
+
+            // Negative evidence needs fewer votes than positive evidence,
+            // but still must be multiview, not single-view.
+            if (bad < min_bad_votes) {
+                rm_acc(i) = 0;
+                ++keep_cnt;
+                ++kept_low_bad;
+                continue;
+            }
+
+            // Weighted vote:
+            // bad evidence counts more than good evidence.
+            const float weighted_keep_ratio =
+                static_cast<float>(good) /
+                std::max(1.0f, static_cast<float>(good) + kBadVoteWeight * static_cast<float>(bad));
+
+            const bool remove = (weighted_keep_ratio < config.leak_keep_threshold);
+
+            if (remove) {
+                rm_acc(i) = 1;
+                ++n_remove;
+                ++removed_by_negative_evidence;
+            } else {
+                rm_acc(i) = 0;
+                ++keep_cnt;
+                ++kept_positive_balance;
+            }
+        }
+
+        LOG_INFO("[prune_by_mask_leakage] === DECISION BREAKDOWN ===");
+        LOG_INFO("[prune_by_mask_leakage]   KEPT (zero_decisive):     {:6d} <- No strong multiview evidence",
+                 kept_zero_decisive);
+        LOG_INFO("[prune_by_mask_leakage]   KEPT (low_bad_votes):     {:6d} <- Bad votes < min_bad_votes ({})",
+                 kept_low_bad, min_bad_votes);
+        LOG_INFO("[prune_by_mask_leakage]   KEPT (positive_balance):  {:6d} <- Good evidence compensated bad evidence",
+                 kept_positive_balance);
+        LOG_INFO("[prune_by_mask_leakage]   Removed (neg_evidence):   {:6d} <- Weighted bad evidence won (bad weight={:.1f}, keep_thr={:.0f}%)",
+                 removed_by_negative_evidence, kBadVoteWeight, 100.0 * config.leak_keep_threshold);
+        LOG_INFO("[prune_by_mask_leakage]   TOTAL TO REMOVE:          {:6d} ({:5.1f}%)",
+                 n_remove, 100.0 * n_remove / N);
+
+        if (keep_cnt == 0) {
+            LOG_WARN("[prune_by_mask_leakage] keep_mask would be empty (keep_thr={}); skipping prune.", config.leak_keep_threshold);
+            LOG_INFO("[prune_by_mask_leakage] Removed 0 splats (0.000%)");
+            return PruningResult{.splats_before = N, .splats_after = N, .splats_removed = 0, .success = true};
+        }
+
+        if (n_remove == 0) {
+            LOG_INFO("[prune_by_mask_leakage] Removed 0 splats (0.000%)");
+            return PruningResult{.splats_before = N, .splats_after = N, .splats_removed = 0, .success = true};
+        }
+
+        Tensor remove_mask = remove_mask_cpu.to(Device::CUDA).contiguous();
+        strategy.remove_gaussians(remove_mask);
+
+        const int after = static_cast<int>(strategy.get_model().size());
+        const int removed = N - after;
+        const double pct = (N > 0) ? (100.0 * static_cast<double>(removed) / static_cast<double>(N)) : 0.0;
+
+        LOG_INFO("[prune_by_mask_leakage] Requested removal: {}, actually removed: {} ({:.3f}%)", n_remove, removed, pct);
+
+        return PruningResult{
+            .splats_before = N,
+            .splats_after = after,
+            .splats_removed = removed,
+            .success = true};
     }
 
+    // -----------------------------------------------------------------------------
+    // Alpha consensus accurate mass-weighted approach
+    // -----------------------------------------------------------------------------
+    std::expected<PruningResult, std::string> prune_by_alpha_consensus(
+        IStrategy& strategy,
+        const CameraDataset& dataset,
+        const AlphaConsensusPruningConfig& config) {
+
+        using namespace lfs::core;
+
+        if (!config.enabled) {
+            const int n = static_cast<int>(strategy.get_model().size());
+            return PruningResult{.splats_before = n, .splats_after = n, .splats_removed = 0, .success = true};
+        }
+
+        auto& model = strategy.get_model();
+        const int N = static_cast<int>(model.size());
+        if (N <= 0) {
+            return PruningResult{.splats_before = 0, .splats_after = 0, .splats_removed = 0, .success = true};
+        }
+
+        auto sizing = get_dataset_sizing_or_error(dataset);
+        if (!sizing) {
+            return std::unexpected(sizing.error());
+        }
+
+        // Per-splat accumulators: sum of (weighted_inside / weighted_total) per camera
+        std::vector<double> consensus_sum(static_cast<size_t>(N), 0.0);
+        std::vector<int> consensus_count(static_cast<size_t>(N), 0);
+
+        int skipped_no_mask = 0;
+        int skipped_size_mismatch = 0;
+        int skipped_proj_error = 0;
+
+        const auto& cams = dataset.get_cameras();
+        const int n_cams = static_cast<int>(cams.size());
+
+        LOG_INFO("[prune_by_alpha_consensus] Starting: {} splats, {} cameras", N, n_cams);
+
+        // Build a CenterVotePruningConfig just to call project_splats (reuses projection path)
+        CenterVotePruningConfig proj_cfg;
+        proj_cfg.eps2d = config.eps2d;
+        proj_cfg.near_plane = config.near_plane;
+        proj_cfg.far_plane = config.far_plane;
+        proj_cfg.radius_clip = config.radius_clip;
+        proj_cfg.scaling_modifier = config.scaling_modifier;
+
+        const int num_threads = std::min(n_cams, omp_get_max_threads());
+        LOG_INFO("[prune_by_alpha_consensus] Using {} OpenMP threads", num_threads);
+
+        #pragma omp parallel num_threads(num_threads)
+        {
+            std::vector<double> local_sum(static_cast<size_t>(N), 0.0);
+            std::vector<int> local_count(static_cast<size_t>(N), 0);
+
+            #pragma omp for schedule(dynamic, 1)
+            for (int ci = 0; ci < n_cams; ++ci) {
+                const auto& cam_ptr = cams[static_cast<size_t>(ci)];
+                if (!cam_ptr || !cam_ptr->has_mask()) {
+                    #pragma omp atomic
+                    skipped_no_mask++;
+                    continue;
+                }
+
+                auto& cam = *cam_ptr;
+
+                Tensor mask = cam.load_and_get_mask(
+                    sizing->resize_factor, sizing->max_width, config.invert_masks, 0.5f);
+                if (!mask.is_valid() || mask.numel() == 0) {
+                    #pragma omp atomic
+                    skipped_no_mask++;
+                    continue;
+                }
+                if (mask.ndim() == 3 && mask.shape()[0] == 1) {
+                    mask = mask.squeeze(0);
+                }
+
+                const int H = static_cast<int>(cam.image_height());
+                const int W = static_cast<int>(cam.image_width());
+                if (mask.ndim() != 2 ||
+                    static_cast<int>(mask.shape()[0]) != H ||
+                    static_cast<int>(mask.shape()[1]) != W) {
+                    #pragma omp atomic
+                    skipped_size_mismatch++;
+                    continue;
+                }
+
+                auto proj = project_splats(cam, model, proj_cfg);
+                if (!proj) {
+                #pragma omp atomic
+                    skipped_proj_error++;
+                    continue;
+                }
+
+                Tensor radii_cpu = proj->radii.cpu().contiguous();     // [N, 2] int32
+                Tensor means2d_cpu = proj->means2d.cpu().contiguous(); // [N, 2] float
+                Tensor conics_cpu = proj->conics.cpu().contiguous();   // [N, 3] float
+                Tensor mask_cpu = mask.cpu().contiguous();             // [H, W] float
+
+                auto r_acc = radii_cpu.accessor<int32_t, 2>();
+                auto m_acc = means2d_cpu.accessor<float, 2>();
+                auto con_acc = conics_cpu.accessor<float, 2>();
+                auto mask_acc = mask_cpu.accessor<float, 2>();
+
+                const int half_grid = config.sample_grid / 2;
+
+                for (int i = 0; i < N; ++i) {
+                    const int rx = static_cast<int>(r_acc(i, 0));
+                    const int ry = static_cast<int>(r_acc(i, 1));
+
+                    // Skip invisible splats (behind camera or culled)
+                    if (!is_visible_radii_strict(rx, ry))
+                        continue;
+
+                    const float cx = m_acc(i, 0); // projected center X
+                    const float cy = m_acc(i, 1); // projected center Y
+
+                    // Conic coefficients: Gaussian value = exp(-0.5*(a*dx^2 + 2*b*dx*dy + c*dy^2))
+                    const float a = con_acc(i, 0);
+                    const float b = con_acc(i, 1);
+                    const float c = con_acc(i, 2);
+
+                    // Sample NxN grid over the projected ellipse bounding box [rx x ry]
+                    double weighted_inside = 0.0;
+                    double weighted_total = 0.0;
+
+                    for (int gy = -half_grid; gy <= half_grid; ++gy) {
+                        for (int gx = -half_grid; gx <= half_grid; ++gx) {
+                            // Map grid coords to pixel offsets within [-rx, rx] x [-ry, ry]
+                            const float dx = (config.sample_grid > 1)
+                                                 ? static_cast<float>(gx) * static_cast<float>(rx) / static_cast<float>(half_grid)
+                                                 : 0.0f;
+                            const float dy = (config.sample_grid > 1)
+                                                 ? static_cast<float>(gy) * static_cast<float>(ry) / static_cast<float>(half_grid)
+                                                 : 0.0f;
+
+                            // 2D Gaussian weight at this sample point
+                            const float exponent = 0.5f * (a * dx * dx + 2.0f * b * dx * dy + c * dy * dy);
+                            if (exponent > 4.0f)
+                                continue;
+
+                            const float weight = std::exp(-exponent);
+
+                            // Pixel coordinates of this sample
+                            const int px = round_to_int(cx + dx);
+                            const int py = round_to_int(cy + dy);
+
+                            // Out of bounds = outside mask
+                            const bool in_bounds = (px >= 0 && px < W && py >= 0 && py < H);
+                            const bool inside = in_bounds && (mask_acc(py, px) >= 0.5f);
+
+                            weighted_total += static_cast<double>(weight);
+                            weighted_inside += inside ? static_cast<double>(weight) : 0.0;
+                        }
+                    }
+
+                    if (weighted_total > 1e-9) {
+                        local_sum[static_cast<size_t>(i)] += weighted_inside / weighted_total;
+                        local_count[static_cast<size_t>(i)] += 1;
+                    }
+                }
+
+                if ((ci + 1) % 25 == 0 || (ci + 1) == n_cams) {
+                    LOG_INFO("[prune_by_alpha_consensus] Processing camera {}/{}", (ci + 1), n_cams);
+                }
+            }
+
+            #pragma omp critical
+            {
+                for (int i = 0; i < N; ++i) {
+                    consensus_sum[static_cast<size_t>(i)] += local_sum[static_cast<size_t>(i)];
+                    consensus_count[static_cast<size_t>(i)] += local_count[static_cast<size_t>(i)];
+                }
+            }
+        }
+
+        LOG_INFO("[prune_by_alpha_consensus] Processed {} cameras, skipped: {} no mask, "
+                 "{} size mismatch, {} proj error",
+                 n_cams, skipped_no_mask, skipped_size_mismatch, skipped_proj_error);
+
+        // =========================================================================
+        // Build removal mask
+        // =========================================================================
+        Tensor remove_mask_cpu = Tensor::zeros({static_cast<size_t>(N)},
+                                               Device::CPU, DataType::Bool);
+        auto rm_acc = remove_mask_cpu.accessor<uint8_t, 1>();
+
+        int n_remove = 0;
+        int kept_low_vis = 0;
+        int removed_by_cons = 0;
+        int kept_by_cons = 0;
+
+        for (int i = 0; i < N; ++i) {
+            const int cnt = consensus_count[static_cast<size_t>(i)];
+            const double cons_val = (cnt > 0)
+                                        ? consensus_sum[static_cast<size_t>(i)] / static_cast<double>(cnt)
+                                        : 1.0; // not enough views -> keep
+
+            if (cnt < config.min_visibility_count) {
+                rm_acc(i) = 0;
+                kept_low_vis++;
+                continue;
+            }
+
+            if (static_cast<float>(cons_val) < config.consensus_threshold) {
+                rm_acc(i) = 1;
+                n_remove++;
+                removed_by_cons++;
+            } else {
+                rm_acc(i) = 0;
+                kept_by_cons++;
+            }
+        }
+
+        LOG_INFO("[prune_by_alpha_consensus] === DECISION BREAKDOWN ===");
+        LOG_INFO("[prune_by_alpha_consensus]   Kept (low visibility): {:6d} (< {} cameras)",
+                 kept_low_vis, config.min_visibility_count);
+        LOG_INFO("[prune_by_alpha_consensus]   Removed (failed consensus): {:6d} (ratio < {:.2f})",
+                 removed_by_cons, config.consensus_threshold);
+        LOG_INFO("[prune_by_alpha_consensus]   Kept (passed consensus):  {:6d}",
+                 kept_by_cons);
+        LOG_INFO("[prune_by_alpha_consensus]   TOTAL TO REMOVE: {:6d} ({:.1f}%)",
+                 n_remove, 100.0f * static_cast<float>(n_remove) / static_cast<float>(N));
+
+        if (n_remove == 0) {
+            return PruningResult{.splats_before = N, .splats_after = N, .splats_removed = 0, .success = true};
+        }
+        if (n_remove == N) {
+            LOG_WARN("[prune_by_alpha_consensus] Would remove all splats - skipping.");
+            return PruningResult{.splats_before = N, .splats_after = N, .splats_removed = 0, .success = true};
+        }
+
+        Tensor remove_mask = remove_mask_cpu.to(Device::CUDA).contiguous();
+        strategy.remove_gaussians(remove_mask);
+
+        const int after = static_cast<int>(strategy.get_model().size());
+        const int removed = N - after;
+        const double pct = (N > 0) ? (100.0 * removed / N) : 0.0;
+
+        LOG_INFO("[prune_by_alpha_consensus] Requested: {}, actually removed: {} ({:.3f}%)",
+                 n_remove, removed, pct);
+
+        return PruningResult{.splats_before = N, .splats_after = after, .splats_removed = removed, .success = true};
+    } 
+    
     // -----------------------------------------------------------------------------
     // Isolation pruning (3D nearest-neighbor outliers)
     // -----------------------------------------------------------------------------
@@ -1377,6 +2193,14 @@ namespace lfs::training::mask_pruning {
             if (!leak) {
                 return std::unexpected(leak.error());
             }
+        }
+        else
+        {
+            /* AlphaConsensusPruningConfig consensus_config; 
+            auto consensus = prune_by_alpha_consensus(strategy, dataset, consensus_config);
+            if (!consensus) {
+                return std::unexpected(consensus.error());
+            }*/
         }
 
         if (isolation_config.enabled) {

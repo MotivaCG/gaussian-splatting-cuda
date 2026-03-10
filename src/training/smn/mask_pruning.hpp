@@ -103,8 +103,9 @@ namespace lfs::training {
             ///   down, in which case the sign of this threshold must be inverted.
             /// - Set enable_floorandceil_pruning = false rather than using -FLT_MAX to disable.
             /// - If ceil < floor it gets disabled
-            float floor_y = -0.01f;
+            float floor_y = -0.1f;
             float ceil_y = 2.6f;
+            float max_scale_in_meters = 0.7;
         };
 
 
@@ -174,6 +175,52 @@ namespace lfs::training {
             int dilate_px = 0;
 
             /// Projection parameters (typically match CenterVote)
+            float eps2d = 0.3f;
+            float near_plane = 0.01f;
+            float far_plane = 10000.0f;
+            float radius_clip = 0.0f;
+            float scaling_modifier = 1.0f;
+
+            bool invert_masks = false;
+        };
+
+
+        /**
+         * @brief Configuration for alpha-consensus pruning.
+         *
+         * For each Gaussian, projects it to 2D across all cameras where it is visible
+         * and measures what fraction of its Gaussian mass (weighted by the 2D Gaussian
+         * function) falls inside the mask. The ratio is averaged across cameras to form
+         * a consensus. Gaussians whose mass is predominantly outside the mask are removed.
+         *
+         * Advantages over leakage pruning:
+         * - Uses the actual 2D Gaussian weighting (exp(-0.5 * conic * d^2)) so the
+         *   center contributes more than the edges, matching real visual contribution.
+         * - No min_pixel_radius threshold: thin elongated splats are evaluated correctly
+         *   regardless of their projected size.
+         * - Mask errors in isolated cameras are diluted by the multi-camera average.
+         * - Correctly handles elongated splats: a splat with center inside the mask but
+         *   significant Gaussian mass outside will fail the consensus test.
+         */
+        struct AlphaConsensusPruningConfig {
+            /// Enable/disable this pass
+            bool enabled = true;
+
+            /// Minimum fraction of Gaussian mass that must fall inside the mask.
+            /// Gaussians with consensus_ratio < this threshold are removed.
+            /// 0.50 = more than half the mass must be inside the mask.
+            float consensus_threshold = 0.75f;
+
+            /// Minimum number of cameras where the splat must be visible
+            /// to be evaluated. Splats seen in fewer cameras are kept (not enough evidence).
+            int min_visibility_count = 3;
+
+            /// NxN sample grid within the projected ellipse bounding box.
+            /// Higher values give more accurate mass estimation at the cost of compute.
+            /// 7 is a good balance: 49 samples per splat per camera.
+            int sample_grid = 7;
+
+            /// Projection parameters (match CenterVotePruningConfig for consistency)
             float eps2d = 0.3f;
             float near_plane = 0.01f;
             float far_plane = 10000.0f;
@@ -326,6 +373,13 @@ namespace lfs::training {
             IStrategy& strategy,
             const CameraDataset& dataset,
             const LeakagePruningConfig& config);
+        /**
+         * @brief Remove splats whose Gaussian mass is predominantly outside the mask.
+         */
+        std::expected<PruningResult, std::string> prune_by_alpha_consensus(
+            IStrategy& strategy,
+            const CameraDataset& dataset,
+            const AlphaConsensusPruningConfig& config = {});
         
         /**
          * @brief Isolation pruning in 3D space as neighbor outliers
