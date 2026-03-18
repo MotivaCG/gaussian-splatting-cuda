@@ -83,10 +83,20 @@ option(BUILD_CUDA_PTX_ONLY "Build PTX-only (JIT at runtime, ~5-15s first startup
 
 # Portable: PTX-only + bundled libs, no tests
 option(BUILD_PORTABLE "Build portable distribution" OFF)
+option(BUILD_CUDA_FATBIN "Build fatbin (multi-arch cubin + PTX fallback for future architectures)" OFF)
 if(BUILD_PORTABLE)
-    set(BUILD_CUDA_PTX_ONLY ON CACHE BOOL "" FORCE)
+    if(NOT BUILD_CUDA_FATBIN)
+        set(BUILD_CUDA_PTX_ONLY ON CACHE BOOL "" FORCE)
+        message(STATUS "Portable: PTX-only, tests disabled")
+    else()
+        message(STATUS "Portable: fatbin, tests disabled")
+    endif()
     set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    message(STATUS "Portable: PTX-only, tests disabled")
+endif()
+
+# PTX-only and fatbin are mutually exclusive
+if(BUILD_CUDA_PTX_ONLY AND BUILD_CUDA_FATBIN)
+    message(FATAL_ERROR "BUILD_CUDA_PTX_ONLY and BUILD_CUDA_FATBIN are mutually exclusive")
 endif()
 
 # Compiler cache (CUDA caching disabled on Windows due to nvcc compatibility issues)
@@ -186,6 +196,13 @@ if(BUILD_CUDA_PTX_ONLY)
     set(TORCH_CUDA_ARCH_LIST "${_maj}.${_min}+PTX" CACHE STRING "" FORCE)
 
     message(STATUS "CUDA: PTX-only (SM >= ${BUILD_CUDA_MIN_SM}, JIT at runtime)")
+
+elseif(BUILD_CUDA_FATBIN)
+    # Native cubins for all relevant generations + PTX fallback for Rubin and beyond
+    set(LichtFeld-Studio_CUDA_ARCH "75-real;80-real;86-real;89-real;90-real;100-real;100-virtual")
+    set(TORCH_CUDA_ARCH_LIST "7.5;8.0;8.6;8.9;9.0;10.0+PTX" CACHE STRING "" FORCE)
+    message(STATUS "CUDA: fatbin (Turing/Ampere/Ada/Hopper/Blackwell + PTX fallback)")
+
 else()
     # Native GPU only
     set(TORCH_CUDA_ARCH_LIST "${DETECTED_COMPUTE_CAP}" CACHE STRING "" FORCE)
@@ -704,6 +721,7 @@ if(BUILD_PORTABLE)
     message(STATUS "  -> PTX-only: ON (SM >= ${BUILD_CUDA_MIN_SM}, JIT at runtime)")
     message(STATUS "  -> Use: cmake --install build --prefix ./dist")
 endif()
+message(STATUS "  Fatbin Build: ${BUILD_CUDA_FATBIN}")
 message(STATUS "===========================================")
 
 # =============================================================================

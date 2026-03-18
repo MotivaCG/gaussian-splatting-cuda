@@ -1,6 +1,7 @@
 .vscode
 .claude
 build/
+LinuxBuild/
 cmake-build-debug/
 cmake-build-release/
 external/libtorch/
