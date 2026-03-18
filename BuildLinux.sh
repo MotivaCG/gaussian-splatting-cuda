@@ -28,9 +28,9 @@ cmake -B LinuxBuild -G Ninja -DBUILD_CUDA_FATBIN=ON
 # -----------------------------------------------------------------------------
 
 # Option 1: Full build
-cmake --build LinuxBuild
+# cmake --build LinuxBuild
 
 # Option 2: Portable install with bundled dependencies into ./dist
-# cmake -B LinuxBuild -G Ninja -DBUILD_PORTABLE=ON -DBUILD_CUDA_FATBIN=ON
-# cmake --build LinuxBuild
-# cmake --install LinuxBuild --prefix ./dist
+cmake -B LinuxBuild -G Ninja -DBUILD_PORTABLE=ON -DBUILD_CUDA_FATBIN=ON
+cmake --build LinuxBuild
+cmake --install LinuxBuild --prefix ./dist

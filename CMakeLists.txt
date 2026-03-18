@@ -610,7 +610,7 @@ if(UNIX)
 
     if(BUILD_PORTABLE)
         set_target_properties(${PROJECT_NAME} PROPERTIES
-                INSTALL_RPATH "$ORIGIN:$ORIGIN/lib"
+                INSTALL_RPATH "$ORIGIN:$ORIGIN/../lib"
                 BUILD_WITH_INSTALL_RPATH TRUE
                 INSTALL_RPATH_USE_LINK_PATH FALSE
         )
