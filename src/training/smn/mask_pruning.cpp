@@ -2008,6 +2008,393 @@ namespace lfs::training::mask_pruning {
         return v[mid];
     }
 
+    std::expected<PruningResult, std::string> prune_by_cluster_and_extremes(
+        IStrategy& strategy,
+        const ClusterExtremePruningConfig& config) {
+        using namespace lfs::core;
+
+        if (!config.enabled) {
+            const int n = static_cast<int>(strategy.get_model().size());
+            return PruningResult{
+                .splats_before = n,
+                .splats_after = n,
+                .splats_removed = 0,
+                .success = true};
+        }
+
+        auto& model = strategy.get_model();
+        const int N = static_cast<int>(model.size());
+        if (N <= 0) {
+            return PruningResult{
+                .splats_before = 0,
+                .splats_after = 0,
+                .splats_removed = 0,
+                .success = true};
+        }
+
+        if (N < 2) {
+            LOG_WARN("[prune_by_cluster_and_extremes] Not enough splats (N={}) to compute nearest-neighbor median; skipping.", N);
+            return PruningResult{
+                .splats_before = N,
+                .splats_after = N,
+                .splats_removed = 0,
+                .success = true};
+        }
+
+        Tensor means_cpu = model.get_means().cpu().contiguous();    // [N,3]
+        Tensor scales_cpu = model.get_scaling().cpu().contiguous(); // [N,3]
+        Tensor rots_cpu = model.get_rotation().cpu().contiguous();  // [N,4] as [w,x,y,z]
+
+        if (!means_cpu.is_valid() || means_cpu.ndim() != 2 ||
+            static_cast<int>(means_cpu.shape()[0]) != N ||
+            static_cast<int>(means_cpu.shape()[1]) != 3) {
+            return std::unexpected("prune_by_cluster_and_extremes: model.get_means() is invalid or not shaped [N,3].");
+        }
+
+        if (!scales_cpu.is_valid() || scales_cpu.ndim() != 2 ||
+            static_cast<int>(scales_cpu.shape()[0]) != N ||
+            static_cast<int>(scales_cpu.shape()[1]) != 3) {
+            return std::unexpected("prune_by_cluster_and_extremes: model.get_scaling() is invalid or not shaped [N,3].");
+        }
+
+        if (!rots_cpu.is_valid() || rots_cpu.ndim() != 2 ||
+            static_cast<int>(rots_cpu.shape()[0]) != N ||
+            static_cast<int>(rots_cpu.shape()[1]) != 4) {
+            return std::unexpected("prune_by_cluster_and_extremes: model.get_rotation() is invalid or not shaped [N,4].");
+        }
+
+        const float* pts = means_cpu.ptr<float>();
+        auto means_acc = means_cpu.accessor<float, 2>();
+        auto scales_acc = scales_cpu.accessor<float, 2>();
+        auto rots_acc = rots_cpu.accessor<float, 2>();
+
+        TensorPointCloud cloud;
+        cloud.pts = pts;
+        cloud.N = static_cast<size_t>(N);
+
+        using KDTree = nanoflann::KDTreeSingleIndexAdaptor<
+            nanoflann::L2_Simple_Adaptor<float, TensorPointCloud>,
+            TensorPointCloud, 3>;
+
+        using RadiusItem = nanoflann::ResultItem<uint32_t, float>;
+
+        KDTree tree_all(3, cloud, nanoflann::KDTreeSingleIndexAdaptorParams(10));
+        tree_all.buildIndex();
+
+        // -------------------------------------------------------------------------
+        // Step 1: median nearest-neighbor distance between centers
+        // -------------------------------------------------------------------------
+        std::vector<float> nn_dists(static_cast<size_t>(N), 0.0f);
+
+        {
+            const int kq = std::min(N, 4);
+            std::vector<size_t> indices(static_cast<size_t>(kq));
+            std::vector<float> dists_sq(static_cast<size_t>(kq));
+            nanoflann::KNNResultSet<float> resultSet(kq);
+
+            for (int i = 0; i < N; ++i) {
+                resultSet.init(indices.data(), dists_sq.data());
+                tree_all.findNeighbors(
+                    resultSet,
+                    pts + static_cast<size_t>(i) * 3ULL,
+                    nanoflann::SearchParameters());
+
+                float best = std::numeric_limits<float>::infinity();
+                for (int j = 0; j < kq; ++j) {
+                    const size_t idx = indices[static_cast<size_t>(j)];
+                    if (static_cast<int>(idx) == i) {
+                        continue;
+                    }
+                    best = std::min(best, std::sqrt(std::max(0.0f, dists_sq[static_cast<size_t>(j)])));
+                }
+
+                nn_dists[static_cast<size_t>(i)] = best;
+            }
+        }
+
+        std::vector<float> nn_pool;
+        nn_pool.reserve(static_cast<size_t>(N));
+        for (float d : nn_dists) {
+            if (std::isfinite(d) && d > 0.0f) {
+                nn_pool.push_back(d);
+            }
+        }
+
+        if (nn_pool.empty()) {
+            LOG_WARN("[prune_by_cluster_and_extremes] NN distance pool is empty or degenerate; skipping.");
+            return PruningResult{
+                .splats_before = N,
+                .splats_after = N,
+                .splats_removed = 0,
+                .success = true};
+        }
+
+        const float median_nn = median_inplace(nn_pool);
+        if (!std::isfinite(median_nn) || median_nn <= 0.0f) {
+            LOG_WARN("[prune_by_cluster_and_extremes] Invalid median nearest-neighbor distance = {}; skipping.", median_nn);
+            return PruningResult{
+                .splats_before = N,
+                .splats_after = N,
+                .splats_removed = 0,
+                .success = true};
+        }
+
+        const float eps_cluster = config.cluster_eps_multiplier * median_nn;
+        const float eps_extreme = config.extreme_eps_multiplier * median_nn;
+        const float eps_cluster_sq = eps_cluster * eps_cluster;
+
+        LOG_INFO("[prune_by_cluster_and_extremes] median_nn={:.6f} m, cluster_eps={:.6f} m (x{:.2f}), extreme_eps={:.6f} m (x{:.2f}), min_cluster_size={}",
+                 median_nn,
+                 eps_cluster, config.cluster_eps_multiplier,
+                 eps_extreme, config.extreme_eps_multiplier,
+                 config.min_cluster_size);
+
+        // -------------------------------------------------------------------------
+        // Step 2: epsilon-connected components on centers
+        // -------------------------------------------------------------------------
+        std::vector<uint8_t> visited(static_cast<size_t>(N), 0);
+        std::vector<uint8_t> removed_by_cluster(static_cast<size_t>(N), 0);
+
+        int removed_small_clusters = 0;
+        int num_clusters = 0;
+
+        std::vector<int> stack;
+        stack.reserve(1024);
+        std::vector<int> component;
+        component.reserve(1024);
+        std::vector<RadiusItem> radius_matches;
+        radius_matches.reserve(128);
+
+        for (int seed = 0; seed < N; ++seed) {
+            if (visited[static_cast<size_t>(seed)]) {
+                continue;
+            }
+
+            ++num_clusters;
+            component.clear();
+            stack.clear();
+
+            visited[static_cast<size_t>(seed)] = 1;
+            stack.push_back(seed);
+
+            while (!stack.empty()) {
+                const int u = stack.back();
+                stack.pop_back();
+                component.push_back(u);
+
+                radius_matches.clear();
+                tree_all.radiusSearch(
+                    pts + static_cast<size_t>(u) * 3ULL,
+                    eps_cluster_sq,
+                    radius_matches,
+                    nanoflann::SearchParameters());
+
+                for (const auto& item : radius_matches) {
+                    const int v = static_cast<int>(item.first);
+                    if (!visited[static_cast<size_t>(v)]) {
+                        visited[static_cast<size_t>(v)] = 1;
+                        stack.push_back(v);
+                    }
+                }
+            }
+
+            if (static_cast<int>(component.size()) < config.min_cluster_size) {
+                removed_small_clusters += static_cast<int>(component.size());
+                for (int idx : component) {
+                    removed_by_cluster[static_cast<size_t>(idx)] = 1;
+                }
+            }
+        }
+
+        LOG_INFO("[prune_by_cluster_and_extremes] Found {} connected components. Removed {} splats in small clusters (<{}).",
+                 num_clusters, removed_small_clusters, config.min_cluster_size);
+
+        int survivors_after_cluster = 0;
+        for (int i = 0; i < N; ++i) {
+            if (!removed_by_cluster[static_cast<size_t>(i)]) {
+                ++survivors_after_cluster;
+            }
+        }
+
+        if (survivors_after_cluster == 0) {
+            LOG_WARN("[prune_by_cluster_and_extremes] Cluster phase would remove all splats; skipping prune.");
+            return PruningResult{
+                .splats_before = N,
+                .splats_after = N,
+                .splats_removed = 0,
+                .success = true};
+        }
+
+        // -------------------------------------------------------------------------
+        // Step 3: rebuild KD-tree on survivors
+        // -------------------------------------------------------------------------
+        std::vector<float> survivor_pts;
+        survivor_pts.reserve(static_cast<size_t>(survivors_after_cluster) * 3ULL);
+
+        for (int i = 0; i < N; ++i) {
+            if (removed_by_cluster[static_cast<size_t>(i)]) {
+                continue;
+            }
+            survivor_pts.push_back(means_acc(i, 0));
+            survivor_pts.push_back(means_acc(i, 1));
+            survivor_pts.push_back(means_acc(i, 2));
+        }
+
+        TensorPointCloud survivor_cloud;
+        survivor_cloud.pts = survivor_pts.data();
+        survivor_cloud.N = static_cast<size_t>(survivors_after_cluster);
+
+        KDTree tree_survivors(3, survivor_cloud, nanoflann::KDTreeSingleIndexAdaptorParams(10));
+        tree_survivors.buildIndex();
+
+        // -------------------------------------------------------------------------
+        // Step 4: extreme-point validation
+        // -------------------------------------------------------------------------
+        std::vector<uint8_t> removed_by_extremes(static_cast<size_t>(N), 0);
+
+        int removed_extreme = 0;
+        int skipped_extreme_all_buried = 0;
+
+        std::vector<size_t> nn_idx(1);
+        std::vector<float> nn_dist_sq(1);
+        nanoflann::KNNResultSet<float> nn_result(1);
+
+        auto test_extreme = [&](const glm::vec3& extreme_world) -> bool {
+            float query_pt[3] = {extreme_world.x, extreme_world.y, extreme_world.z};
+            nn_result.init(nn_idx.data(), nn_dist_sq.data());
+            tree_survivors.findNeighbors(nn_result, query_pt, nanoflann::SearchParameters());
+            const float d = std::sqrt(std::max(0.0f, nn_dist_sq[0]));
+            return d > eps_extreme;
+        };
+
+        for (int i = 0; i < N; ++i) {
+            if (removed_by_cluster[static_cast<size_t>(i)]) {
+                continue;
+            }
+
+            const float cx = means_acc(i, 0);
+            const float cy = means_acc(i, 1);
+            const float cz = means_acc(i, 2);
+
+            const float sx = scales_acc(i, 0) * config.extreme_axis_multiplier;
+            const float sy = scales_acc(i, 1) * config.extreme_axis_multiplier;
+            const float sz = scales_acc(i, 2) * config.extreme_axis_multiplier;
+
+            const float qw = rots_acc(i, 0);
+            const float qx = rots_acc(i, 1);
+            const float qy = rots_acc(i, 2);
+            const float qz = rots_acc(i, 3);
+
+            glm::quat q(qw, qx, qy, qz);
+            const float qnorm = glm::length(q);
+            if (!std::isfinite(qnorm) || qnorm <= 1e-12f) {
+                q = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+            } else {
+                q = glm::normalize(q);
+            }
+
+            const glm::mat3 R = glm::mat3_cast(q);
+            const glm::vec3 c(cx, cy, cz);
+
+            const glm::vec3 ex = R * glm::vec3(sx, 0.0f, 0.0f);
+            const glm::vec3 ey = R * glm::vec3(0.0f, sy, 0.0f);
+            const glm::vec3 ez = R * glm::vec3(0.0f, 0.0f, sz);
+
+            const glm::vec3 extremes[6] = {
+                c + ex, c - ex,
+                c + ey, c - ey,
+                c + ez, c - ez};
+
+            bool any_checked = false;
+            bool remove_this = false;
+
+            for (const glm::vec3& p : extremes) {
+                if (p.y < config.burial_y_ignore_threshold) {
+                    continue;
+                }
+
+                any_checked = true;
+
+                if (test_extreme(p)) {
+                    remove_this = true;
+                    break;
+                }
+            }
+
+            if (!any_checked) {
+                ++skipped_extreme_all_buried;
+                continue;
+            }
+
+            if (remove_this) {
+                removed_by_extremes[static_cast<size_t>(i)] = 1;
+                ++removed_extreme;
+            }
+        }
+
+        LOG_INFO("[prune_by_cluster_and_extremes] Removed {} splats by extreme validation. {} splats had all 6 extremes below y<{:.3f} and were ignored in this phase.",
+                 removed_extreme, skipped_extreme_all_buried, config.burial_y_ignore_threshold);
+
+        // -------------------------------------------------------------------------
+        // Final removal mask
+        // -------------------------------------------------------------------------
+        Tensor remove_mask_cpu = Tensor::zeros({static_cast<size_t>(N)}, Device::CPU, DataType::Bool);
+        auto rm_acc = remove_mask_cpu.accessor<uint8_t, 1>();
+
+        int n_remove = 0;
+        int n_keep = 0;
+
+        for (int i = 0; i < N; ++i) {
+            const bool remove =
+                (removed_by_cluster[static_cast<size_t>(i)] != 0) ||
+                (removed_by_extremes[static_cast<size_t>(i)] != 0);
+
+            rm_acc(i) = remove ? 1 : 0;
+            n_remove += remove ? 1 : 0;
+            n_keep += remove ? 0 : 1;
+        }
+
+        LOG_INFO("[prune_by_cluster_and_extremes] Removal breakdown:");
+        LOG_INFO("[prune_by_cluster_and_extremes]   Removed by small cluster: {:6d}", removed_small_clusters);
+        LOG_INFO("[prune_by_cluster_and_extremes]   Removed by extremes:      {:6d}", removed_extreme);
+        LOG_INFO("[prune_by_cluster_and_extremes]   Total to remove:          {:6d} ({:5.1f}%)",
+                 n_remove, 100.0 * static_cast<double>(n_remove) / std::max(1, N));
+
+        if (n_remove == 0) {
+            LOG_INFO("[prune_by_cluster_and_extremes] Removed 0 splats (0.000%)");
+            return PruningResult{
+                .splats_before = N,
+                .splats_after = N,
+                .splats_removed = 0,
+                .success = true};
+        }
+
+        if (n_keep == 0) {
+            LOG_WARN("[prune_by_cluster_and_extremes] Would remove all splats; skipping prune.");
+            return PruningResult{
+                .splats_before = N,
+                .splats_after = N,
+                .splats_removed = 0,
+                .success = true};
+        }
+
+        Tensor remove_mask = remove_mask_cpu.to(Device::CUDA).contiguous();
+        strategy.remove_gaussians(remove_mask);
+
+        const int after = static_cast<int>(strategy.get_model().size());
+        const int removed = N - after;
+        const double pct = (N > 0) ? (100.0 * static_cast<double>(removed) / static_cast<double>(N)) : 0.0;
+
+        LOG_INFO("[prune_by_cluster_and_extremes] Requested removal: {}, actually removed: {} ({:.3f}%)",
+                 n_remove, removed, pct);
+
+        return PruningResult{
+            .splats_before = N,
+            .splats_after = after,
+            .splats_removed = removed,
+            .success = true};
+    }
+
     std::expected<PruningResult, std::string> prune_by_isolation_distance(
         IStrategy& strategy,
         const IsolationPruningConfig& config) {
@@ -2188,7 +2575,7 @@ namespace lfs::training::mask_pruning {
             }
         }
         
-        if (leakage_config.enabled) {
+        /*if (leakage_config.enabled) {
             auto leak = prune_by_mask_leakage(strategy, dataset, leakage_config);
             if (!leak) {
                 return std::unexpected(leak.error());
@@ -2200,7 +2587,14 @@ namespace lfs::training::mask_pruning {
             auto consensus = prune_by_alpha_consensus(strategy, dataset, consensus_config);
             if (!consensus) {
                 return std::unexpected(consensus.error());
-            }*/
+            }* /
+        }*/
+
+    
+        ClusterExtremePruningConfig cluster_config;
+        auto cluster = prune_by_cluster_and_extremes(strategy, cluster_config);
+        if (!cluster) {
+            return std::unexpected(cluster.error());
         }
 
         if (isolation_config.enabled) {

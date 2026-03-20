@@ -140,10 +140,10 @@ namespace lfs::training {
             bool enable_depth_filtering = true;
 
             /// Number of robust standard deviations (MAD-based) for acceptable depth range
-            float depth_filter_sigma_multiplier = 2.5f;
+            float depth_filter_sigma_multiplier = 5.0f;
 
             /// Minimum number of inside-mask splats required to compute depth statistics
-            int min_splats_for_depth_stats = 10;
+            int min_splats_for_depth_stats = 7;
         };
 
         /// Default configuration
@@ -228,6 +228,59 @@ namespace lfs::training {
             float scaling_modifier = 1.0f;
 
             bool invert_masks = false;
+        };
+
+        /**
+         * @brief Configuration for 3D cluster + extreme-point pruning.
+         *
+         * Pass 1:
+         *   Compute the median nearest-neighbor distance between Gaussian centers.
+         *   Build epsilon-connected 3D clusters with:
+         *
+         *     eps_cluster = cluster_eps_multiplier * median_nn_distance
+         *
+         *   Then remove clusters whose size is smaller than min_cluster_size.
+         *
+         * Pass 2:
+         *   For the surviving splats, compute the 6 oriented extremes of the splat
+         *   from its center, scaling and rotation:
+         *
+         *     center ± R * (sx, 0, 0)
+         *     center ± R * (0, sy, 0)
+         *     center ± R * (0, 0, sz)
+         *
+         *   Any extreme with world Y < burial_y_ignore_threshold is ignored
+         *   (not penalized), because buried geometry is often useful for legs/feet.
+         *
+         *   For every remaining extreme, find the nearest surviving center
+         *   (including the splat's own center). If any evaluated extreme is farther than:
+         *
+         *     eps_extreme = extreme_eps_multiplier * median_nn_distance
+         *
+         *   the entire splat is removed.
+         */
+        struct ClusterExtremePruningConfig {
+            /// Enable / disable this pass
+            bool enabled = true;
+
+            /// Epsilon multiplier for 3D center clustering
+            /// multiplier over the mean distance to separate in clusters
+            float cluster_eps_multiplier = 25.0f;
+
+            /// Minimum connected-component size to keep
+            int min_cluster_size = 25;
+
+            /// Epsilon multiplier for extreme-point validation
+            /// splat extremes that are far from the main point cloud
+            float extreme_eps_multiplier = 25.0f;
+
+            /// Multiplier applied to splat scale when generating the 6 extremes.
+            /// Use 1.0f to use the scale exactly as stored in SplatData.
+            float extreme_axis_multiplier = 1.0f;
+
+            /// Extremes with y < burial_y_ignore_threshold are ignored (not penalized)
+            /// ie do not introduce penalty if they are under the floor.
+            float burial_y_ignore_threshold = -0.1f;
         };
 
         // =============================================================================
@@ -380,6 +433,14 @@ namespace lfs::training {
             IStrategy& strategy,
             const CameraDataset& dataset,
             const AlphaConsensusPruningConfig& config = {});
+
+        /**
+         * @brief Remove tiny 3D clusters and splats whose oriented 3D extremes are too far
+         *        from any surviving center.
+         */
+        std::expected<PruningResult, std::string> prune_by_cluster_and_extremes(
+            IStrategy& strategy,
+            const ClusterExtremePruningConfig& config = {});
         
         /**
          * @brief Isolation pruning in 3D space as neighbor outliers
