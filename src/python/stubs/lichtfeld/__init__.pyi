@@ -1,3 +1,5 @@
+"""LichtFeld Python control module for Gaussian splatting"""
+
 from collections.abc import Callable, Sequence
 import enum
 from typing import overload
@@ -267,6 +269,9 @@ def has_trainer() -> bool:
 
 def loss_buffer() -> list[float]:
     """Get the recent loss history as a list of floats"""
+
+def push_loss_to_element(arg0: ui.rml.RmlElement, arg1: Sequence[float], /) -> tuple:
+    """Push loss data to a loss-graph element, returns (data_min, data_max)"""
 
 def trainer_elapsed_seconds() -> float:
     """Get elapsed training time in seconds"""
@@ -968,10 +973,31 @@ def is_mesh2splat_active() -> bool:
 def get_mesh2splat_progress() -> float:
     """Get mesh-to-splat conversion progress (0.0 to 1.0)"""
 
+def get_mesh2splat_stage() -> str:
+    """Get mesh-to-splat conversion stage text"""
+
 def get_mesh2splat_error() -> str:
     """
     Get error message from last mesh-to-splat conversion (empty on success)
     """
+
+def simplify_splats(source_name: str, ratio: float = 0.1, knn_k: int = 16, merge_cap: float = 0.5) -> None:
+    """Simplify a splat node asynchronously and create a new output node."""
+
+def cancel_splat_simplify() -> None:
+    """Cancel the active splat simplification job"""
+
+def is_splat_simplify_active() -> bool:
+    """Check if a splat simplification job is currently running"""
+
+def get_splat_simplify_progress() -> float:
+    """Get splat simplification progress (0.0 to 1.0)"""
+
+def get_splat_simplify_stage() -> str:
+    """Get splat simplification stage text"""
+
+def get_splat_simplify_error() -> str:
+    """Get the last splat simplification error (empty on success)"""
 
 class ViewInfo:
     @property
@@ -1112,6 +1138,8 @@ def register_class(cls: object) -> None:
 
 def unregister_class(cls: object) -> None:
     """Unregister a class (Panel, Operator, or Menu)"""
+
+PLUGIN_API_VERSION: str = '1.0'
 
 class GizmoEventType(enum.Enum):
     PRESS = 0
@@ -1430,7 +1458,7 @@ class OptimizationParams:
         """Active optimization strategy name"""
 
     def set_strategy(self, strategy: str) -> None:
-        """Set active strategy ('mcmc' or 'adc')"""
+        """Set active strategy ('mcmc', 'adc', or 'igs+')"""
 
     @property
     def headless(self) -> bool:
@@ -1499,8 +1527,24 @@ class OptimizationParams:
     def ppisp_use_controller(self, arg: bool, /) -> None: ...
 
     @property
+    def ppisp_freeze_from_sidecar(self) -> bool:
+        """Freeze PPISP learning and reuse a PPISP sidecar during training"""
+
+    @ppisp_freeze_from_sidecar.setter
+    def ppisp_freeze_from_sidecar(self, arg: bool, /) -> None: ...
+
+    @property
+    def ppisp_sidecar_path(self) -> str:
+        """Path to a PPISP sidecar used for frozen PPISP training"""
+
+    @ppisp_sidecar_path.setter
+    def ppisp_sidecar_path(self, arg: str, /) -> None: ...
+
+    @property
     def ppisp_controller_activation_step(self) -> int:
-        """Iteration to start controller distillation (-1 = auto)"""
+        """
+        Iteration to start controller distillation (negative = default schedule)
+        """
 
     @ppisp_controller_activation_step.setter
     def ppisp_controller_activation_step(self, arg: int, /) -> None: ...
@@ -1574,6 +1618,13 @@ class OptimizationParams:
 
     @undistort.setter
     def undistort(self, arg: bool, /) -> None: ...
+
+    @property
+    def revised_opacity(self) -> bool:
+        """Use revised opacity calculation for ADC densification"""
+
+    @revised_opacity.setter
+    def revised_opacity(self, arg: bool, /) -> None: ...
 
     @property
     def save_steps(self) -> list[int]:
@@ -1688,6 +1739,12 @@ def get_scene() -> scene.Scene | None:
 def get_scene_generation() -> int:
     """Get current scene generation counter (for validity checking)"""
 
+def get_scene_mutation_flags() -> int:
+    """Get accumulated scene mutation flags"""
+
+def consume_scene_mutation_flags() -> int:
+    """Get and clear accumulated scene mutation flags"""
+
 def run(path: str) -> None:
     """Execute a Python script file"""
 
@@ -1778,4 +1835,4 @@ class CheckpointParams:
 def read_checkpoint_params(path: str) -> CheckpointParams | None:
     """Read training parameters from a checkpoint (None if failed)"""
 
-__all__: tuple = ('context', 'gaussians', 'session', 'get_scene', 'Tensor', 'Hook', 'ScopedHandler', 'on_training_start', 'on_iteration_start', 'on_post_step', 'on_pre_optimizer_step', 'on_training_end', 'mesh_to_splat', 'is_mesh2splat_active', 'get_mesh2splat_progress', 'get_mesh2splat_error', 'on_frame', 'stop_animation', 'run', 'list_scene', 'mat4', 'colormap', 'help', 'scene', 'io', 'packages', 'mcp')
+__all__: tuple = ('context', 'gaussians', 'session', 'get_scene', 'Tensor', 'Hook', 'ScopedHandler', 'on_training_start', 'on_iteration_start', 'on_post_step', 'on_pre_optimizer_step', 'on_training_end', 'mesh_to_splat', 'is_mesh2splat_active', 'get_mesh2splat_progress', 'get_mesh2splat_stage', 'get_mesh2splat_error', 'simplify_splats', 'cancel_splat_simplify', 'is_splat_simplify_active', 'get_splat_simplify_progress', 'get_splat_simplify_stage', 'get_splat_simplify_error', 'on_frame', 'stop_animation', 'run', 'list_scene', 'mat4', 'colormap', 'help', 'scene', 'io', 'packages', 'mcp')

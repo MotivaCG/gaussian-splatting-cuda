@@ -11,7 +11,6 @@
 #include "gui/gui_manager.hpp"
 #include "input/input_controller.hpp"
 #include "internal/viewport.hpp"
-#include "ipc/selection_server.hpp"
 #include "ipc/view_context.hpp"
 #include "rendering/rendering.hpp"
 #include "rendering/rendering_manager.hpp"
@@ -20,13 +19,20 @@
 #include "training/training_manager.hpp"
 #include "visualizer/visualizer.hpp"
 #include "window/window_manager.hpp"
-#include <condition_variable>
+#include <chrono>
+#include <functional>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <string>
+#include <string_view>
+#include <thread>
+#include <vector>
 
 struct SDL_Window;
+
+namespace lfs::python {
+    struct SequencerUIStateData;
+} // namespace lfs::python
 
 namespace lfs::vis {
     class SceneManager;
@@ -54,16 +60,26 @@ namespace lfs::vis {
         std::expected<void, std::string> loadCheckpointForTraining(const std::filesystem::path& path) override;
         void consolidateModels() override;
         void clearScene() override;
+        core::Scene& getScene() override { return scene_manager_->getScene(); }
+        bool postWork(WorkItem work) override;
+        [[nodiscard]] bool isOnViewerThread() const override {
+            return std::this_thread::get_id() == viewer_thread_id_;
+        }
+        [[nodiscard]] bool acceptsPostedWork() const override;
+        void setShutdownRequestedCallback(std::function<void()> callback) override;
+        std::expected<void, std::string> startTraining() override;
+        std::expected<std::filesystem::path, std::string> saveCheckpoint(
+            const std::optional<std::filesystem::path>& path = std::nullopt) override;
 
         // Getters for GUI (delegating to state manager)
         lfs::training::Trainer* getTrainer() const { return trainer_manager_->getTrainer(); }
 
         // Component access
         TrainerManager* getTrainerManager() { return trainer_manager_.get(); }
-        SceneManager* getSceneManager() { return scene_manager_.get(); }
+        SceneManager* getSceneManager() override { return scene_manager_.get(); }
         SDL_Window* getWindow() const { return window_manager_->getWindow(); }
         WindowManager* getWindowManager() { return window_manager_.get(); }
-        RenderingManager* getRenderingManager() { return rendering_manager_.get(); }
+        RenderingManager* getRenderingManager() override { return rendering_manager_.get(); }
         gui::GuiManager* getGuiManager() { return gui_manager_.get(); }
         const Viewport& getViewport() const { return viewport_; }
         Viewport& getViewport() { return viewport_; }
@@ -148,8 +164,26 @@ namespace lfs::vis {
         // Tool initialization
         void initializeTools();
 
-        // Plugin capability invocation (runs on main thread with scene context)
-        [[nodiscard]] CapabilityInvokeResult processCapabilityRequest(const std::string& name, const std::string& args);
+        // Subsystem wiring
+        void setupPythonBridge();
+        void setupViewContextBridge();
+        void beginShutdown(std::string_view reason = "Viewer is shutting down");
+
+        class CallbackCleanup {
+            std::vector<std::function<void()>> cleanups_;
+
+        public:
+            void add(std::function<void()> fn) { cleanups_.push_back(std::move(fn)); }
+            void clear() {
+                for (auto it = cleanups_.rbegin(); it != cleanups_.rend(); ++it)
+                    (*it)();
+                cleanups_.clear();
+            }
+            ~CallbackCleanup() { clear(); }
+            CallbackCleanup() = default;
+            CallbackCleanup(const CallbackCleanup&) = delete;
+            CallbackCleanup& operator=(const CallbackCleanup&) = delete;
+        };
 
         // Options
         ViewerOptions options_;
@@ -174,28 +208,29 @@ namespace lfs::vis {
         // Centralized editor state
         EditorContext editor_context_;
 
-        // IPC for MCP selection commands
-        std::unique_ptr<SelectionServer> selection_server_;
+        mutable std::mutex work_queue_mutex_;
+        std::vector<WorkItem> work_queue_;
+        std::thread::id viewer_thread_id_;
+        bool accepting_work_ = true;
+        bool shutdown_started_ = false;
 
-        // Capability request synchronization (IPC thread waits for main thread to process)
-        struct CapabilityRequest {
-            std::string name;
-            std::string args;
-            CapabilityInvokeResult* result = nullptr;
-            std::mutex* mtx = nullptr;
-            std::condition_variable* cv = nullptr;
-            bool* done = nullptr;
-        };
-        std::optional<CapabilityRequest> pending_capability_request_;
-        std::mutex capability_request_mutex_;
+        std::mutex shutdown_callback_mutex_;
+        std::function<void()> shutdown_requested_callback_;
+
+        CallbackCleanup callback_cleanup_;
 
         // State tracking
+        bool fully_initialized_ = false;
         bool window_initialized_ = false;
         bool gui_initialized_ = false;
         bool tools_initialized_ = false;
+        bool view_context_bridge_initialized_ = false;
         bool pending_auto_train_ = false;
         bool pending_reset_ = false;
         bool gui_frame_rendered_ = false;
+        std::chrono::high_resolution_clock::time_point last_frame_time_ = std::chrono::high_resolution_clock::now();
+        bool sequencer_ui_initialized_ = false;
+        std::unique_ptr<python::SequencerUIStateData> sequencer_ui_state_;
         std::vector<std::filesystem::path> pending_view_paths_;
         std::filesystem::path pending_dataset_path_;
     };

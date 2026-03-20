@@ -68,6 +68,8 @@ namespace lfs::vis::input {
         // Depth filter
         DEPTH_ADJUST_FAR,
         DEPTH_ADJUST_SIDE,
+        TOGGLE_SELECTION_DEPTH_FILTER,
+        TOGGLE_SELECTION_CROP_FILTER,
         // Tools
         BRUSH_RESIZE,
         CYCLE_BRUSH_MODE,
@@ -106,6 +108,8 @@ namespace lfs::vis::input {
         TOOL_ALIGN,
         // Pie menu
         PIE_MENU,
+        // Selection depth filter
+        DEPTH_ADJUST_NEAR,
     };
 
     enum Modifier : int {

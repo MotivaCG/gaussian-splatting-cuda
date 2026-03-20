@@ -18,8 +18,19 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
+
+namespace lfs::io {
+    struct LoadParams;
+    class PipelinedImageLoader;
+} // namespace lfs::io
+
+namespace lfs::core {
+    class Tensor;
+}
 
 namespace lfs::vis {
     class RenderPass;
@@ -44,7 +55,9 @@ namespace lfs::vis {
         GTTextureCache();
         ~GTTextureCache();
 
-        TextureInfo getGTTexture(int cam_id, const std::filesystem::path& image_path);
+        TextureInfo getGTTexture(int cam_id, const std::filesystem::path& image_path,
+                                 lfs::io::PipelinedImageLoader* pipeline_loader = nullptr,
+                                 const lfs::io::LoadParams* load_params = nullptr);
         void clear();
 
     private:
@@ -54,6 +67,7 @@ namespace lfs::vis {
             int width = 0;
             int height = 0;
             bool needs_flip = false;
+            std::string load_signature;
             std::chrono::steady_clock::time_point last_access;
         };
 
@@ -62,6 +76,11 @@ namespace lfs::vis {
         static constexpr size_t MAX_CACHE_SIZE = 20;
 
         void evictOldest();
+        TextureInfo loadTextureFromLoader(lfs::io::PipelinedImageLoader& loader,
+                                          const std::filesystem::path& path,
+                                          const lfs::io::LoadParams& params,
+                                          CacheEntry& entry);
+        TextureInfo loadTextureFromTensor(const lfs::core::Tensor& tensor, CacheEntry& entry);
         TextureInfo loadTexture(const std::filesystem::path& path);
         TextureInfo loadTextureGPU(const std::filesystem::path& path, CacheEntry& entry);
     };
@@ -208,8 +227,10 @@ namespace lfs::vis {
         // Brush selection on GPU - mouse_x/y in image coords (not window coords!)
         void brushSelect(float mouse_x, float mouse_y, float radius, lfs::core::Tensor& selection_out);
 
-        // Apply crop filter to selection - filters out selections outside crop box/ellipsoid
+        // Apply crop/selection filters to a boolean preview or selection mask.
         void applyCropFilter(lfs::core::Tensor& selection);
+        void applyDepthFilter(lfs::core::Tensor& selection);
+        void applySelectionFilters(lfs::core::Tensor& selection, bool use_crop_filter, bool use_depth_filter);
 
         void setBrushState(bool active, float x, float y, float radius, bool add_mode = true,
                            lfs::core::Tensor* selection_tensor = nullptr,
@@ -235,13 +256,18 @@ namespace lfs::vis {
             add_mode = rect_add_mode_;
         }
 
-        // Polygon preview
+        // Polygon preview (render-space points, same coordinate system as screen_positions output)
         void setPolygonPreview(const std::vector<std::pair<float, float>>& points, bool closed, bool add_mode = true);
+        // Interactive polygon preview in world-space coordinates.
+        void setPolygonPreviewWorldSpace(const std::vector<glm::vec3>& world_points, bool closed,
+                                         bool add_mode = true);
         void clearPolygonPreview();
         [[nodiscard]] bool isPolygonPreviewActive() const { return polygon_preview_active_; }
         [[nodiscard]] const std::vector<std::pair<float, float>>& getPolygonPoints() const { return polygon_points_; }
+        [[nodiscard]] const std::vector<glm::vec3>& getPolygonWorldPoints() const { return polygon_world_points_; }
         [[nodiscard]] bool isPolygonClosed() const { return polygon_closed_; }
         [[nodiscard]] bool isPolygonAddMode() const { return polygon_add_mode_; }
+        [[nodiscard]] bool isPolygonPreviewWorldSpace() const { return polygon_preview_world_space_; }
 
         // Lasso preview
         void setLassoPreview(const std::vector<std::pair<float, float>>& points, bool add_mode = true);
@@ -260,6 +286,7 @@ namespace lfs::vis {
             preview_selection_ = nullptr;
             markDirty(DirtyFlag::SELECTION);
         }
+        void clearSelectionPreviews();
 
         // Selection mode for brush tool
         void setSelectionMode(lfs::rendering::SelectionMode mode) { selection_mode_ = mode; }
@@ -292,6 +319,12 @@ namespace lfs::vis {
         void setCropboxGizmoActive(bool active) { cropbox_gizmo_active_ = active; }
         void setEllipsoidGizmoActive(bool active) { ellipsoid_gizmo_active_ = active; }
 
+        void setViewportResizeActive(bool active);
+        [[nodiscard]] bool isViewportResizeDeferring() const {
+            return viewport_resize_active_.load(std::memory_order_relaxed) || viewport_resize_debounce_ > 0;
+        }
+        bool consumeResizeCompleted() { return std::exchange(resize_completed_, false); }
+
     private:
         static int64_t to_ns(std::chrono::steady_clock::time_point tp) {
             return std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count();
@@ -300,7 +333,8 @@ namespace lfs::vis {
             return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(ns));
         }
 
-        void doFullRender(const RenderContext& context, SceneManager* scene_manager, const lfs::core::SplatData* model);
+        void doFullRender(const RenderContext& context, SceneManager* scene_manager,
+                          const lfs::core::SplatData* model);
         void setupEventHandlers();
 
         // Core components
@@ -309,7 +343,7 @@ namespace lfs::vis {
         SplatRasterPass* splat_raster_pass_ = nullptr;
         OverlayPass* overlay_pass_ = nullptr;
         PointCloudPass* point_cloud_pass_ = nullptr;
-        FramerateController framerate_controller_;
+        mutable FramerateController framerate_controller_;
 
         // GT texture cache
         GTTextureCache gt_texture_cache_;
@@ -352,10 +386,14 @@ namespace lfs::vis {
         // Camera picking state
         int hovered_camera_id_ = -1;
         int highlighted_camera_index_ = -1;
-        glm::vec2 pending_pick_pos_{-1, -1};
-        bool pick_requested_ = false;
         std::chrono::steady_clock::time_point last_pick_time_;
         static constexpr auto pick_throttle_interval_ = std::chrono::milliseconds(50);
+
+        // Cached from last renderFrame for direct picking
+        SceneManager* last_scene_manager_ = nullptr;
+        lfs::rendering::ViewportData last_viewport_data_{};
+        ViewportRegion last_viewport_region_{};
+        bool has_pick_context_ = false;
 
         // Debug tracking
         uint64_t render_count_ = 0;
@@ -383,8 +421,10 @@ namespace lfs::vis {
 
         bool polygon_preview_active_ = false;
         std::vector<std::pair<float, float>> polygon_points_;
+        std::vector<glm::vec3> polygon_world_points_;
         bool polygon_closed_ = false;
         bool polygon_add_mode_ = true;
+        bool polygon_preview_world_space_ = false;
 
         bool lasso_preview_active_ = false;
         std::vector<std::pair<float, float>> lasso_points_;
@@ -408,6 +448,10 @@ namespace lfs::vis {
         glm::mat4 pending_cropbox_transform_{1.0f};
         glm::vec3 pending_ellipsoid_radii_{1.0f};
         glm::mat4 pending_ellipsoid_transform_{1.0f};
+
+        std::atomic<bool> viewport_resize_active_{false};
+        int viewport_resize_debounce_{0};
+        bool resize_completed_{false};
     };
 
 } // namespace lfs::vis

@@ -25,6 +25,7 @@
 #include "rendering/rendering_pipeline.hpp"
 #include "scene/scene_manager.hpp"
 #include "scene/scene_render_state.hpp"
+#include "theme/theme.hpp"
 #include "training/components/ppisp.hpp"
 #include "training/components/ppisp_controller.hpp"
 #include "training/trainer.hpp"
@@ -35,8 +36,68 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <shared_mutex>
 #include <stdexcept>
+#include <string_view>
 
 namespace lfs::vis {
+
+    namespace {
+
+        template <typename TRenderable>
+        [[nodiscard]] const TRenderable* findRenderableByNodeId(const std::vector<TRenderable>& renderables,
+                                                                const core::NodeId node_id) {
+            const auto it = std::ranges::find_if(renderables, [node_id](const auto& item) {
+                return item.node_id == node_id;
+            });
+            return it != renderables.end() ? &(*it) : nullptr;
+        }
+
+        [[nodiscard]] std::string makePipelineLoadSignature(
+            const std::filesystem::path& image_path,
+            const lfs::io::LoadParams& load_params) {
+            auto signature = lfs::core::path_to_utf8(image_path) +
+                             ":rf" + std::to_string(std::max(1, load_params.resize_factor)) +
+                             "_mw" + std::to_string(load_params.max_width);
+            if (load_params.undistort) {
+                signature += "_ud";
+            }
+            return signature;
+        }
+
+        [[nodiscard]] std::string makeFallbackLoadSignature(
+            const std::filesystem::path& image_path,
+            const std::string_view loader_kind) {
+            return lfs::core::path_to_utf8(image_path) + ":" + std::string(loader_kind);
+        }
+
+        [[nodiscard]] lfs::io::LoadParams normalizeGTLoadParams(const lfs::io::LoadParams& load_params) {
+            auto effective_params = load_params;
+            effective_params.resize_factor = std::max(1, effective_params.resize_factor);
+            if (effective_params.max_width <= 0 || effective_params.max_width > GTTextureCache::MAX_TEXTURE_DIM) {
+                effective_params.max_width = GTTextureCache::MAX_TEXTURE_DIM;
+            }
+            return effective_params;
+        }
+
+        [[nodiscard]] glm::mat4 findVisiblePointCloudTransform(
+            const lfs::core::Scene& scene,
+            const lfs::core::PointCloud* point_cloud) {
+            if (!point_cloud)
+                return glm::mat4(1.0f);
+
+            for (const auto* node : scene.getNodes()) {
+                if (!node || node->type != lfs::core::NodeType::POINTCLOUD || !node->point_cloud)
+                    continue;
+                if (node->point_cloud.get() != point_cloud)
+                    continue;
+                if (!scene.isNodeEffectivelyVisible(node->id))
+                    continue;
+                return scene.getWorldTransform(node->id);
+            }
+
+            return glm::mat4(1.0f);
+        }
+
+    } // namespace
 
     using namespace lfs::core::events;
 
@@ -55,8 +116,21 @@ namespace lfs::vis {
         texture_cache_.clear();
     }
 
-    GTTextureCache::TextureInfo GTTextureCache::getGTTexture(const int cam_id, const std::filesystem::path& image_path) {
-        if (const auto it = texture_cache_.find(cam_id); it != texture_cache_.end()) {
+    GTTextureCache::TextureInfo GTTextureCache::getGTTexture(
+        const int cam_id,
+        const std::filesystem::path& image_path,
+        lfs::io::PipelinedImageLoader* const pipeline_loader,
+        const lfs::io::LoadParams* const load_params) {
+        const std::optional<lfs::io::LoadParams> effective_load_params =
+            (pipeline_loader && load_params) ? std::optional<lfs::io::LoadParams>(normalizeGTLoadParams(*load_params))
+                                             : std::nullopt;
+        const std::string requested_signature =
+            effective_load_params
+                ? makePipelineLoadSignature(image_path, *effective_load_params)
+                : makeFallbackLoadSignature(image_path, "fallback");
+
+        if (const auto it = texture_cache_.find(cam_id);
+            it != texture_cache_.end() && it->second.load_signature == requested_signature) {
             it->second.last_access = std::chrono::steady_clock::now();
             const auto& entry = it->second;
             const unsigned int tex_id = entry.interop_texture ? entry.interop_texture->getTextureID() : entry.texture_id;
@@ -67,13 +141,20 @@ namespace lfs::vis {
             return {tex_id, entry.width, entry.height, entry.needs_flip, tex_scale};
         }
 
+        if (const auto it = texture_cache_.find(cam_id); it != texture_cache_.end()) {
+            if (!it->second.interop_texture && it->second.texture_id > 0) {
+                glDeleteTextures(1, &it->second.texture_id);
+            }
+            texture_cache_.erase(it);
+        }
+
         if (texture_cache_.size() >= MAX_CACHE_SIZE)
             evictOldest();
 
         const auto ext = image_path.extension().string();
         const bool is_jpeg = (ext == ".jpg" || ext == ".jpeg" || ext == ".JPG" || ext == ".JPEG");
 
-        auto& entry = texture_cache_[cam_id];
+        CacheEntry entry;
         entry.last_access = std::chrono::steady_clock::now();
 
         if (!nvcodec_loader_ && is_jpeg) {
@@ -86,8 +167,13 @@ namespace lfs::vis {
         }
 
         TextureInfo info{};
+        if (pipeline_loader && effective_load_params) {
+            info = loadTextureFromLoader(*pipeline_loader, image_path, *effective_load_params, entry);
+        }
         if (nvcodec_loader_ && is_jpeg) {
-            info = loadTextureGPU(image_path, entry);
+            if (info.texture_id == 0) {
+                info = loadTextureGPU(image_path, entry);
+            }
         }
 
         if (info.texture_id == 0) {
@@ -101,10 +187,11 @@ namespace lfs::vis {
         }
 
         if (info.texture_id == 0) {
-            texture_cache_.erase(cam_id);
             return {};
         }
 
+        entry.load_signature = requested_signature;
+        texture_cache_[cam_id] = std::move(entry);
         return info;
     }
 
@@ -185,6 +272,131 @@ namespace lfs::vis {
 
             return {texture, out_width, out_height};
         } catch (...) {
+            return {};
+        }
+    }
+
+    GTTextureCache::TextureInfo GTTextureCache::loadTextureFromLoader(
+        lfs::io::PipelinedImageLoader& loader,
+        const std::filesystem::path& path,
+        const lfs::io::LoadParams& params,
+        CacheEntry& entry) {
+        if (!std::filesystem::exists(path))
+            return {};
+
+        try {
+            const auto tensor = loader.load_image_immediate(path, params);
+            if (tensor.numel() == 0)
+                return {};
+
+            const auto& shape = tensor.shape();
+            const int height = static_cast<int>(shape[1]);
+            const int width = static_cast<int>(shape[2]);
+            const auto hwc = tensor.permute({1, 2, 0}).contiguous();
+
+            entry.interop_texture = std::make_unique<lfs::rendering::CudaGLInteropTexture>();
+            if (auto result = entry.interop_texture->init(width, height); !result) {
+                LOG_WARN("Failed to init GT interop texture from loader: {}", result.error());
+                entry.interop_texture.reset();
+                return loadTextureFromTensor(tensor, entry);
+            }
+
+            if (auto result = entry.interop_texture->updateFromTensor(hwc); !result) {
+                LOG_WARN("Failed to upload GT texture from loader: {}", result.error());
+                entry.interop_texture.reset();
+                return loadTextureFromTensor(tensor, entry);
+            }
+
+            entry.width = width;
+            entry.height = height;
+            entry.needs_flip = true;
+
+            const glm::vec2 tex_scale(
+                entry.interop_texture->getTexcoordScaleX(),
+                entry.interop_texture->getTexcoordScaleY());
+
+            return {entry.interop_texture->getTextureID(), width, height, true, tex_scale};
+        } catch (const std::exception& e) {
+            LOG_WARN("GT loader path failed for {}: {}", lfs::core::path_to_utf8(path), e.what());
+            entry.interop_texture.reset();
+            return {};
+        }
+    }
+
+    GTTextureCache::TextureInfo GTTextureCache::loadTextureFromTensor(const lfs::core::Tensor& tensor, CacheEntry& entry) {
+        if (!tensor.is_valid() || tensor.ndim() != 3 || tensor.numel() == 0) {
+            return {};
+        }
+
+        try {
+            lfs::core::Tensor formatted = tensor;
+            int channels = 0;
+            int width = 0;
+            int height = 0;
+
+            const auto& shape = tensor.shape();
+            const int first_dim = static_cast<int>(shape[0]);
+            const int last_dim = static_cast<int>(shape[2]);
+
+            if (first_dim == 1 || first_dim == 3 || first_dim == 4) {
+                channels = first_dim;
+                height = static_cast<int>(shape[1]);
+                width = static_cast<int>(shape[2]);
+                formatted = tensor.permute({1, 2, 0}).contiguous();
+            } else if (last_dim == 1 || last_dim == 3 || last_dim == 4) {
+                channels = last_dim;
+                height = static_cast<int>(shape[0]);
+                width = static_cast<int>(shape[1]);
+                formatted = tensor.contiguous();
+            } else {
+                LOG_WARN("Unsupported GT tensor shape for CPU upload: [{}, {}, {}]",
+                         static_cast<int>(shape[0]), static_cast<int>(shape[1]), static_cast<int>(shape[2]));
+                return {};
+            }
+
+            if (formatted.device() == lfs::core::Device::CUDA) {
+                formatted = formatted.cpu();
+            }
+            formatted = formatted.contiguous();
+
+            if (formatted.dtype() != lfs::core::DataType::UInt8) {
+                formatted = (formatted.clamp(0.0f, 1.0f) * 255.0f).to(lfs::core::DataType::UInt8);
+            }
+
+            unsigned int texture = 0;
+            glGenTextures(1, &texture);
+            glBindTexture(GL_TEXTURE_2D, texture);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+            const GLenum format = (channels == 1) ? GL_RED : (channels == 4) ? GL_RGBA
+                                                                             : GL_RGB;
+            const GLenum internal = (channels == 1) ? GL_R8 : (channels == 4) ? GL_RGBA8
+                                                                              : GL_RGB8;
+
+            glTexImage2D(GL_TEXTURE_2D, 0, internal, width, height, 0,
+                         format, GL_UNSIGNED_BYTE, formatted.ptr<unsigned char>());
+
+            if (const GLenum gl_err = glGetError(); gl_err != GL_NO_ERROR) {
+                glBindTexture(GL_TEXTURE_2D, 0);
+                glDeleteTextures(1, &texture);
+                LOG_WARN("Failed to upload GT texture through CPU path: {}", static_cast<int>(gl_err));
+                return {};
+            }
+            glBindTexture(GL_TEXTURE_2D, 0);
+
+            entry.interop_texture.reset();
+            entry.texture_id = texture;
+            entry.width = width;
+            entry.height = height;
+            entry.needs_flip = true;
+
+            return {texture, width, height, true};
+        } catch (const std::exception& e) {
+            LOG_WARN("GT tensor CPU upload failed: {}", e.what());
             return {};
         }
     }
@@ -309,13 +521,11 @@ namespace lfs::vis {
                     settings_.equirectangular = pre_gt_equirectangular_;
                     restore_equirectangular = pre_gt_equirectangular_;
                 } else {
-                    if (current_camera_id_ < 0)
-                        return;
                     pre_gt_equirectangular_ = settings_.equirectangular;
                     settings_.split_view_mode = SplitViewMode::GTComparison;
                     is_now_enabled = true;
                 }
-                markDirty(DirtyFlag::SPLIT_VIEW);
+                markDirty(DirtyFlag::SPLIT_VIEW | DirtyFlag::SPLATS);
             }
 
             // Emit events outside the lock to avoid deadlock
@@ -504,6 +714,17 @@ namespace lfs::vis {
         LOG_TRACE("Render marked dirty (flags: 0x{:x})", flags);
     }
 
+    void RenderingManager::setViewportResizeActive(bool active) {
+        const bool was_active = viewport_resize_active_.exchange(active);
+        if (!was_active || active)
+            return;
+
+        if (viewport_resize_debounce_ == 0)
+            viewport_resize_debounce_ = 1;
+
+        markDirty(DirtyFlag::VIEWPORT | DirtyFlag::CAMERA | DirtyFlag::OVERLAY);
+    }
+
     void RenderingManager::updateSettings(const RenderSettings& new_settings) {
         std::lock_guard<std::mutex> lock(settings_mutex_);
 
@@ -630,21 +851,45 @@ namespace lfs::vis {
     }
 
     int RenderingManager::pickCameraFrustum(const glm::vec2& mouse_pos) {
-        // Throttle picking to avoid excessive calls
+        if (!settings_.show_camera_frustums)
+            return -1;
+
         auto now = std::chrono::steady_clock::now();
-        if (now - last_pick_time_ < pick_throttle_interval_) {
-            return hovered_camera_id_; // Return cached value
-        }
+        if (now - last_pick_time_ < pick_throttle_interval_)
+            return hovered_camera_id_;
         last_pick_time_ = now;
 
-        pending_pick_pos_ = mouse_pos;
-        pick_requested_ = true;
+        if (!engine_ || !last_scene_manager_ || !has_pick_context_)
+            return hovered_camera_id_;
 
-        pick_count_++;
-        LOG_TRACE("Pick #{} requested at ({}, {}), current hover: {}",
-                  pick_count_, mouse_pos.x, mouse_pos.y, hovered_camera_id_);
+        auto cameras = last_scene_manager_->getScene().getVisibleCameras();
+        if (cameras.empty())
+            return -1;
 
-        return hovered_camera_id_; // Return current value
+        glm::mat4 scene_transform(1.0f);
+        auto transforms = last_scene_manager_->getScene().getVisibleNodeTransforms();
+        if (!transforms.empty())
+            scene_transform = transforms[0];
+
+        auto pick_result = engine_->pickCameraFrustum(
+            cameras, mouse_pos,
+            glm::vec2(last_viewport_region_.x, last_viewport_region_.y),
+            glm::vec2(last_viewport_region_.width, last_viewport_region_.height),
+            last_viewport_data_,
+            settings_.camera_frustum_scale,
+            scene_transform);
+
+        int cam_id = -1;
+        if (pick_result)
+            cam_id = *pick_result;
+
+        if (cam_id != hovered_camera_id_) {
+            LOG_DEBUG("Camera hover changed: {} -> {}", hovered_camera_id_, cam_id);
+            hovered_camera_id_ = cam_id;
+            markDirty(DirtyFlag::OVERLAY);
+        }
+
+        return hovered_camera_id_;
     }
 
     bool RenderingManager::renderPreviewFrame(SceneManager* const scene_manager,
@@ -658,7 +903,11 @@ namespace lfs::vis {
             return false;
 
         const auto* const model = scene_manager ? scene_manager->getModelForRendering() : nullptr;
-        if (!model || model->size() == 0)
+        const auto* const point_cloud =
+            (scene_manager && (!model || model->size() == 0))
+                ? scene_manager->getScene().getVisiblePointCloud()
+                : nullptr;
+        if ((!model || model->size() == 0) && (!point_cloud || point_cloud->size() == 0))
             return false;
 
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
@@ -682,10 +931,24 @@ namespace lfs::vis {
             .ring_width = 0.0f,
             .show_center_markers = false};
 
-        if (const auto result = engine_->renderGaussians(*model, request)) {
-            engine_->presentToScreen(*result, {0, 0}, {width, height});
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
-            return true;
+        if (model && model->size() > 0) {
+            if (const auto result = engine_->renderGaussians(*model, request)) {
+                engine_->presentToScreen(*result, {0, 0}, {width, height});
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                return true;
+            }
+        } else if (point_cloud && point_cloud->size() > 0) {
+            const auto point_cloud_transform =
+                findVisiblePointCloudTransform(scene_manager->getScene(), point_cloud);
+            const std::vector<glm::mat4> point_cloud_transforms = {point_cloud_transform};
+            auto point_cloud_request = request;
+            point_cloud_request.model_transforms = &point_cloud_transforms;
+
+            if (const auto result = engine_->renderPointCloud(*point_cloud, point_cloud_request)) {
+                engine_->presentToScreen(*result, {0, 0}, {width, height});
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                return true;
+            }
         }
 
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -715,20 +978,37 @@ namespace lfs::vis {
         // SAFETY CHECK: Don't render with invalid viewport dimensions
         if (current_size.x <= 0 || current_size.y <= 0) {
             LOG_TRACE("Skipping render - invalid viewport size: {}x{}", current_size.x, current_size.y);
-            // Still clear to prevent trails
-            glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+            const auto& shell_bg = theme().menu_background();
+            glClearColor(shell_bg.x, shell_bg.y, shell_bg.z, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             return;
         }
 
+        constexpr int kResizeDebounceFrames = 3;
+        bool resize_completed = false;
+        const bool resize_active = viewport_resize_active_.load(std::memory_order_relaxed);
+
         if (current_size != last_viewport_size_) {
-            LOG_DEBUG("Viewport resize: {}x{} -> {}x{}", last_viewport_size_.x, last_viewport_size_.y,
-                      current_size.x, current_size.y);
-            markDirty(DirtyFlag::VIEWPORT | DirtyFlag::CAMERA);
             last_viewport_size_ = current_size;
+            if (resize_active) {
+                markDirty(DirtyFlag::OVERLAY);
+                viewport_resize_debounce_ = kResizeDebounceFrames;
+            } else {
+                markDirty(DirtyFlag::VIEWPORT | DirtyFlag::CAMERA | DirtyFlag::OVERLAY);
+            }
+        } else if (viewport_resize_debounce_ > 0 && !resize_active) {
+            if (--viewport_resize_debounce_ == 0) {
+                markDirty(DirtyFlag::VIEWPORT | DirtyFlag::CAMERA);
+                resize_completed = true;
+            } else {
+                markDirty(DirtyFlag::OVERLAY);
+            }
         }
 
         const lfs::core::SplatData* const model = scene_manager ? scene_manager->getModelForRendering() : nullptr;
+        const auto* const visible_point_cloud =
+            (scene_manager && !model) ? scene_manager->getScene().getVisiblePointCloud() : nullptr;
+        const bool has_visible_point_cloud = visible_point_cloud && visible_point_cloud->size() > 0;
         const size_t model_ptr = reinterpret_cast<size_t>(model);
 
         if (model_ptr != last_model_ptr_) {
@@ -753,33 +1033,49 @@ namespace lfs::vis {
         }
 
         if (settings_.split_view_mode == SplitViewMode::GTComparison) {
-            if (current_camera_id_ < 0) {
+            if (current_camera_id_ < 0 || (!model && !has_visible_point_cloud)) {
                 gt_context_.reset();
                 gt_context_camera_id_ = -1;
-            } else if (model) {
-                if (gt_context_camera_id_ != current_camera_id_ || !gt_context_) {
-                    gt_context_.reset();
-                    gt_context_camera_id_ = -1;
+            } else {
+                gt_context_.reset();
+                gt_context_camera_id_ = -1;
 
-                    if (auto* trainer_manager = scene_manager->getTrainerManager()) {
-                        if (trainer_manager->hasTrainer()) {
-                            if (const auto cam = trainer_manager->getCamById(current_camera_id_)) {
-                                const auto gt_info = gt_texture_cache_.getGTTexture(current_camera_id_, cam->image_path());
-                                if (gt_info.texture_id != 0) {
-                                    const glm::ivec2 dims(gt_info.width, gt_info.height);
-                                    const glm::ivec2 aligned(
-                                        ((dims.x + GPU_ALIGNMENT - 1) / GPU_ALIGNMENT) * GPU_ALIGNMENT,
-                                        ((dims.y + GPU_ALIGNMENT - 1) / GPU_ALIGNMENT) * GPU_ALIGNMENT);
-
-                                    gt_context_ = GTComparisonContext{
-                                        .gt_texture_id = gt_info.texture_id,
-                                        .dimensions = dims,
-                                        .gpu_aligned_dims = aligned,
-                                        .render_texcoord_scale = glm::vec2(dims) / glm::vec2(aligned),
-                                        .gt_texcoord_scale = gt_info.texcoord_scale,
-                                        .gt_needs_flip = gt_info.needs_flip};
-                                    gt_context_camera_id_ = current_camera_id_;
+                if (auto* trainer_manager = scene_manager->getTrainerManager();
+                    trainer_manager && trainer_manager->hasTrainer()) {
+                    if (const auto* trainer = trainer_manager->getTrainer()) {
+                        const auto loader_owner = trainer->getActiveImageLoader();
+                        if (const auto cam = trainer_manager->getCamById(current_camera_id_)) {
+                            lfs::io::LoadParams gt_load_params;
+                            const lfs::io::LoadParams* gt_load_params_ptr = nullptr;
+                            if (loader_owner) {
+                                const auto gt_load_config = trainer->getGTLoadConfigSnapshot();
+                                gt_load_params.resize_factor = gt_load_config.resize_factor;
+                                gt_load_params.max_width = gt_load_config.max_width;
+                                if (gt_load_config.undistort && cam->is_undistort_prepared()) {
+                                    gt_load_params.undistort = &cam->undistort_params();
                                 }
+                                gt_load_params_ptr = &gt_load_params;
+                            }
+
+                            const auto gt_info = gt_texture_cache_.getGTTexture(
+                                current_camera_id_,
+                                cam->image_path(),
+                                loader_owner.get(),
+                                gt_load_params_ptr);
+                            if (gt_info.texture_id != 0) {
+                                const glm::ivec2 dims(gt_info.width, gt_info.height);
+                                const glm::ivec2 aligned(
+                                    ((dims.x + GPU_ALIGNMENT - 1) / GPU_ALIGNMENT) * GPU_ALIGNMENT,
+                                    ((dims.y + GPU_ALIGNMENT - 1) / GPU_ALIGNMENT) * GPU_ALIGNMENT);
+
+                                gt_context_ = GTComparisonContext{
+                                    .gt_texture_id = gt_info.texture_id,
+                                    .dimensions = dims,
+                                    .gpu_aligned_dims = aligned,
+                                    .render_texcoord_scale = glm::vec2(dims) / glm::vec2(aligned),
+                                    .gt_texcoord_scale = gt_info.texcoord_scale,
+                                    .gt_needs_flip = gt_info.needs_flip};
+                                gt_context_camera_id_ = current_camera_id_;
                             }
                         }
                     }
@@ -796,14 +1092,16 @@ namespace lfs::vis {
             }
         }
 
-        if (!cached_result_.image)
+        if (!cached_result_.image &&
+            (model || has_visible_point_cloud || settings_.split_view_mode != SplitViewMode::Disabled))
             dirty_mask_.fetch_or(DirtyFlag::ALL, std::memory_order_relaxed);
         if (settings_.split_view_mode != SplitViewMode::Disabled)
             dirty_mask_.fetch_or(DirtyFlag::SPLIT_VIEW, std::memory_order_relaxed);
 
         glViewport(0, 0, context.viewport.frameBufferSize.x, context.viewport.frameBufferSize.y);
 
-        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        const auto& shell_bg = theme().menu_background();
+        glClearColor(shell_bg.x, shell_bg.y, shell_bg.z, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
         if (context.viewport_region) {
@@ -818,20 +1116,28 @@ namespace lfs::vis {
 
         doFullRender(context, scene_manager, model);
 
+        if (resize_completed) {
+            resize_completed_ = true;
+            lfs::core::Tensor::trim_memory_pool();
+        }
+
         if (context.viewport_region) {
             glDisable(GL_SCISSOR_TEST);
         }
+
+        last_scene_manager_ = scene_manager;
+        if (context.viewport_region) {
+            last_viewport_region_ = *context.viewport_region;
+            has_pick_context_ = true;
+        }
     }
 
-    void RenderingManager::doFullRender(const RenderContext& context, SceneManager* scene_manager, const lfs::core::SplatData* model) {
-        const bool count_frame = model != nullptr;
-        if (count_frame) {
-            framerate_controller_.beginFrame();
-        }
+    void RenderingManager::doFullRender(const RenderContext& context, SceneManager* scene_manager,
+                                        const lfs::core::SplatData* model) {
         LOG_TIMER_TRACE("RenderingManager::doFullRender");
 
         render_count_++;
-        LOG_TRACE("Render #{}, pick_requested: {}", render_count_, pick_requested_);
+        LOG_TRACE("Render #{}", render_count_);
 
         glm::ivec2 render_size = context.viewport.windowSize;
         glm::ivec2 viewport_pos(0, 0);
@@ -850,11 +1156,29 @@ namespace lfs::vis {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         const DirtyMask frame_dirty = dirty_mask_.exchange(0);
+        const bool count_frame = frame_dirty != 0;
+        if (count_frame) {
+            framerate_controller_.beginFrame();
+        }
 
         SceneRenderState scene_state;
         if (scene_manager) {
             scene_state = scene_manager->buildRenderState();
         }
+
+        const bool has_splats = model && model->size() > 0;
+        const bool has_point_cloud = scene_state.point_cloud && scene_state.point_cloud->size() > 0;
+        if (!has_point_cloud && point_cloud_pass_) {
+            point_cloud_pass_->resetCache();
+        }
+
+        last_viewport_data_ = lfs::rendering::ViewportData{
+            .rotation = context.viewport.getRotationMatrix(),
+            .translation = context.viewport.getTranslation(),
+            .size = render_size,
+            .focal_length_mm = settings_.focal_length_mm,
+            .orthographic = settings_.orthographic,
+            .ortho_scale = settings_.ortho_scale};
 
         const FrameContext frame_ctx{
             .viewport = context.viewport,
@@ -884,9 +1208,7 @@ namespace lfs::vis {
                       .ellipsoid_active = ellipsoid_gizmo_active_,
                       .ellipsoid_radii = pending_ellipsoid_radii_,
                       .ellipsoid_transform = pending_ellipsoid_transform_},
-            .pick = {.requested = pick_requested_,
-                     .pos = pending_pick_pos_,
-                     .hovered_camera_id = hovered_camera_id_},
+            .hovered_camera_id = hovered_camera_id_,
             .current_camera_id = current_camera_id_,
             .hovered_gaussian_id = hovered_gaussian_id_,
             .selection_flash_intensity = getSelectionFlashIntensity(),
@@ -897,19 +1219,46 @@ namespace lfs::vis {
             .cached_result_size = cached_result_size_,
             .render_texture_valid = render_texture_valid_.load(std::memory_order_relaxed),
             .gt_context = gt_context_,
-            .hovered_gaussian_id = hovered_gaussian_id_,
-            .hovered_camera_id = hovered_camera_id_};
+            .hovered_gaussian_id = hovered_gaussian_id_};
+
+        if (!has_splats && !has_point_cloud) {
+            const bool had_cached_output =
+                resources.cached_result.image ||
+                resources.cached_result.depth ||
+                resources.cached_result.depth_right ||
+                resources.cached_result.screen_positions ||
+                resources.cached_result_size.x > 0 ||
+                resources.cached_result_size.y > 0 ||
+                resources.render_texture_valid;
+            if (had_cached_output) {
+                resources.cached_result = {};
+                resources.cached_result_size = {0, 0};
+                resources.render_texture_valid = false;
+                resources.hovered_gaussian_id = -1;
+                lfs::core::Tensor::trim_memory_pool();
+            }
+        }
 
         if (frame_ctx.settings.split_view_mode == SplitViewMode::GTComparison &&
-            resources.gt_context && resources.gt_context->valid() &&
-            (!resources.render_texture_valid || (frame_dirty & splat_raster_pass_->sensitivity()))) {
-            splat_raster_pass_->execute(*engine_, frame_ctx, resources);
-            resources.splat_pre_rendered = true;
+            resources.gt_context && resources.gt_context->valid()) {
+            const bool needs_gt_pre_render =
+                !resources.render_texture_valid ||
+                (has_splats && (frame_dirty & splat_raster_pass_->sensitivity())) ||
+                (has_point_cloud && point_cloud_pass_ && (frame_dirty & point_cloud_pass_->sensitivity()));
+
+            if (needs_gt_pre_render) {
+                if (has_splats) {
+                    splat_raster_pass_->execute(*engine_, frame_ctx, resources);
+                    resources.splat_pre_rendered = true;
+                } else if (has_point_cloud && point_cloud_pass_) {
+                    point_cloud_pass_->execute(*engine_, frame_ctx, resources);
+                    resources.splat_pre_rendered = true;
+                }
+            }
         }
 
         for (auto& pass : passes_) {
             if (pass->shouldExecute(frame_dirty, frame_ctx)) {
-                LOG_TRACE("Executing pass: {}", pass->name());
                 pass->execute(*engine_, frame_ctx, resources);
             }
         }
@@ -925,9 +1274,6 @@ namespace lfs::vis {
         cached_result_size_ = resources.cached_result_size;
         render_texture_valid_.store(resources.render_texture_valid, std::memory_order_relaxed);
         hovered_gaussian_id_ = resources.hovered_gaussian_id;
-        hovered_camera_id_ = resources.hovered_camera_id;
-        if (resources.pick_consumed)
-            pick_requested_ = false;
 
         {
             std::lock_guard<std::mutex> lock(split_info_mutex_);
@@ -1050,27 +1396,27 @@ namespace lfs::vis {
         bool crop_inverse = false;
 
         const auto& cropboxes = sm->getScene().getVisibleCropBoxes();
-        if (!cropboxes.empty() && cropboxes[0].data) {
-            const auto& cb = cropboxes[0];
-            const glm::mat4 inv_transform = glm::inverse(cb.world_transform);
+        if (const auto* const cb = findRenderableByNodeId(cropboxes, sm->getActiveSelectionCropBoxId());
+            cb && cb->data) {
+            const glm::mat4 inv_transform = glm::inverse(cb->world_transform);
             const float* const t_ptr = glm::value_ptr(inv_transform);
             crop_t = lfs::core::Tensor::from_vector(std::vector<float>(t_ptr, t_ptr + 16), {4, 4});
-            crop_min = lfs::core::Tensor::from_vector({cb.data->min.x, cb.data->min.y, cb.data->min.z}, {3});
-            crop_max = lfs::core::Tensor::from_vector({cb.data->max.x, cb.data->max.y, cb.data->max.z}, {3});
-            crop_inverse = cb.data->inverse;
+            crop_min = lfs::core::Tensor::from_vector({cb->data->min.x, cb->data->min.y, cb->data->min.z}, {3});
+            crop_max = lfs::core::Tensor::from_vector({cb->data->max.x, cb->data->max.y, cb->data->max.z}, {3});
+            crop_inverse = cb->data->inverse;
         }
 
         lfs::core::Tensor ellip_t, ellip_radii;
         bool ellipsoid_inverse = false;
 
         const auto& ellipsoids = sm->getScene().getVisibleEllipsoids();
-        if (!ellipsoids.empty() && ellipsoids[0].data) {
-            const auto& el = ellipsoids[0];
-            const glm::mat4 inv_transform = glm::inverse(el.world_transform);
+        if (const auto* const el = findRenderableByNodeId(ellipsoids, sm->getActiveSelectionEllipsoidId());
+            el && el->data) {
+            const glm::mat4 inv_transform = glm::inverse(el->world_transform);
             const float* const t_ptr = glm::value_ptr(inv_transform);
             ellip_t = lfs::core::Tensor::from_vector(std::vector<float>(t_ptr, t_ptr + 16), {4, 4});
-            ellip_radii = lfs::core::Tensor::from_vector({el.data->radii.x, el.data->radii.y, el.data->radii.z}, {3});
-            ellipsoid_inverse = el.data->inverse;
+            ellip_radii = lfs::core::Tensor::from_vector({el->data->radii.x, el->data->radii.y, el->data->radii.z}, {3});
+            ellipsoid_inverse = el->data->inverse;
         }
 
         lfs::rendering::filter_selection_by_crop(
@@ -1082,6 +1428,51 @@ namespace lfs::vis {
             ellip_t.is_valid() ? &ellip_t : nullptr,
             ellip_radii.is_valid() ? &ellip_radii : nullptr,
             ellipsoid_inverse);
+    }
+
+    void RenderingManager::applyDepthFilter(lfs::core::Tensor& selection) {
+        if (!selection.is_valid())
+            return;
+
+        auto* const sm = services().sceneOrNull();
+        if (!sm)
+            return;
+
+        const auto* const model = sm->getModelForRendering();
+        if (!model || model->size() == 0)
+            return;
+
+        const auto settings = getSettings();
+        if (!settings.depth_filter_enabled)
+            return;
+
+        const auto& means = model->means();
+        if (!means.is_valid() || means.size(0) != selection.size(0))
+            return;
+
+        const glm::mat4 world_to_filter = settings.depth_filter_transform.inv().toMat4();
+        const float* const t_ptr = glm::value_ptr(world_to_filter);
+        const auto depth_t = lfs::core::Tensor::from_vector(std::vector<float>(t_ptr, t_ptr + 16), {4, 4});
+        const auto depth_min = lfs::core::Tensor::from_vector(
+            {settings.depth_filter_min.x, settings.depth_filter_min.y, settings.depth_filter_min.z}, {3});
+        const auto depth_max = lfs::core::Tensor::from_vector(
+            {settings.depth_filter_max.x, settings.depth_filter_max.y, settings.depth_filter_max.z}, {3});
+
+        lfs::rendering::filter_selection_by_crop(
+            selection, means,
+            &depth_t, &depth_min, &depth_max, false,
+            nullptr, nullptr, false);
+    }
+
+    void RenderingManager::applySelectionFilters(lfs::core::Tensor& selection,
+                                                 const bool use_crop_filter,
+                                                 const bool use_depth_filter) {
+        if (use_crop_filter) {
+            applyCropFilter(selection);
+        }
+        if (use_depth_filter) {
+            applyDepthFilter(selection);
+        }
     }
 
     void RenderingManager::setBrushState(const bool active, const float x, const float y, const float radius,
@@ -1127,14 +1518,28 @@ namespace lfs::vis {
     void RenderingManager::setPolygonPreview(const std::vector<std::pair<float, float>>& points, bool closed, bool add_mode) {
         polygon_preview_active_ = true;
         polygon_points_ = points;
+        polygon_world_points_.clear();
         polygon_closed_ = closed;
         polygon_add_mode_ = add_mode;
+        polygon_preview_world_space_ = false;
+    }
+
+    void RenderingManager::setPolygonPreviewWorldSpace(const std::vector<glm::vec3>& world_points,
+                                                       const bool closed, const bool add_mode) {
+        polygon_preview_active_ = true;
+        polygon_points_.clear();
+        polygon_world_points_ = world_points;
+        polygon_closed_ = closed;
+        polygon_add_mode_ = add_mode;
+        polygon_preview_world_space_ = true;
     }
 
     void RenderingManager::clearPolygonPreview() {
         polygon_preview_active_ = false;
         polygon_points_.clear();
+        polygon_world_points_.clear();
         polygon_closed_ = false;
+        polygon_preview_world_space_ = false;
     }
 
     void RenderingManager::setLassoPreview(const std::vector<std::pair<float, float>>& points, bool add_mode) {
@@ -1146,6 +1551,14 @@ namespace lfs::vis {
     void RenderingManager::clearLassoPreview() {
         lasso_preview_active_ = false;
         lasso_points_.clear();
+    }
+
+    void RenderingManager::clearSelectionPreviews() {
+        clearPreviewSelection();
+        clearBrushState();
+        clearRectPreview();
+        clearPolygonPreview();
+        clearLassoPreview();
     }
 
     void RenderingManager::adjustSaturation(const float mouse_x, const float mouse_y, const float radius,

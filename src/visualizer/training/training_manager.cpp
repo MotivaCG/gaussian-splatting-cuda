@@ -158,7 +158,7 @@ namespace lfs::vis {
         // Transition to Idle
         updateResourceTracking();
 
-        if (!state_machine_.transitionTo(TrainingState::Idle)) {
+        if (getState() != TrainingState::Idle && !state_machine_.transitionTo(TrainingState::Idle)) {
             LOG_WARN("Failed to transition to Idle");
         }
 
@@ -182,7 +182,7 @@ namespace lfs::vis {
 
         applyPendingParams();
 
-        if (auto error = trainer_->getParams().optimization.validate(); !error.empty()) {
+        if (auto error = trainer_->getParams().validate(); !error.empty()) {
             LOG_ERROR("Cannot start training: {}", error);
             last_error_ = error;
             state::TrainingCompleted{
@@ -623,6 +623,14 @@ namespace lfs::vis {
     void TrainerManager::applyPendingParams() {
         if (!trainer_)
             return;
+
+        if (trainer_->isInitialized() && trainer_->getParams().resume_checkpoint.has_value()) {
+            if (auto* const param_mgr = services().paramsOrNull()) {
+                param_mgr->importTrainingParams(trainer_->getParams());
+            }
+            LOG_DEBUG("Ignoring parameter updates for checkpoint-backed trainer");
+            return;
+        }
 
         auto params = trainer_->getParams();
         params.dataset = pending_dataset_params_;

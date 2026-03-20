@@ -151,7 +151,7 @@ namespace lfs::training {
             ratios = ratios.index_select(0, sampled_idxs).contiguous();
 
             // Clamp ratios to [1, n_max]
-            const int n_max = static_cast<int>(_binoms.shape()[0]);
+            const int n_max = _n_max;
             ratios = ratios.clamp(1, n_max);
         }
 
@@ -159,7 +159,6 @@ namespace lfs::training {
         Tensor new_opacities, new_scales;
         {
             LOG_TIMER("relocate_cuda_kernel");
-            const int n_max = static_cast<int>(_binoms.shape()[0]);
             new_opacities = Tensor::empty(sampled_opacities.shape(), Device::CUDA);
             new_scales = Tensor::empty(sampled_scales.shape(), Device::CUDA);
 
@@ -167,8 +166,6 @@ namespace lfs::training {
                 sampled_opacities.ptr<float>(),
                 sampled_scales.ptr<float>(),
                 ratios.ptr<int32_t>(),
-                _binoms.ptr<float>(),
-                n_max,
                 new_opacities.ptr<float>(),
                 new_scales.ptr<float>(),
                 sampled_opacities.numel());
@@ -309,7 +306,7 @@ namespace lfs::training {
             ratios = ratios.index_select(0, sampled_idxs);
 
             // Clamp in int32 domain
-            const int n_max = static_cast<int>(_binoms.shape()[0]);
+            const int n_max = _n_max;
             ratios = ratios.clamp(1, n_max);
             ratios = ratios.contiguous();
         }
@@ -318,7 +315,6 @@ namespace lfs::training {
         Tensor new_opacities, new_scales;
         {
             LOG_TIMER("add_new_relocation_kernel");
-            const int n_max = static_cast<int>(_binoms.shape()[0]);
             new_opacities = Tensor::empty(sampled_opacities.shape(), Device::CUDA);
             new_scales = Tensor::empty(sampled_scales.shape(), Device::CUDA);
 
@@ -326,8 +322,6 @@ namespace lfs::training {
                 sampled_opacities.ptr<float>(),
                 sampled_scales.ptr<float>(),
                 ratios.ptr<int32_t>(),
-                _binoms.ptr<float>(),
-                n_max,
                 new_opacities.ptr<float>(),
                 new_scales.ptr<float>(),
                 sampled_opacities.numel());
@@ -415,7 +409,7 @@ namespace lfs::training {
         ratios = ratios.index_select(0, sampled_idxs_i64);
 
         // Clamp in int32 domain
-        const int n_max = static_cast<int>(_binoms.shape()[0]);
+        const int n_max = _n_max;
         ratios = ratios.clamp(1, n_max);
         ratios = ratios.contiguous();
 
@@ -430,8 +424,6 @@ namespace lfs::training {
                 sampled_opacities.ptr<float>(),
                 sampled_scales.ptr<float>(),
                 ratios.ptr<int32_t>(),
-                _binoms.ptr<float>(),
-                n_max,
                 new_opacities.ptr<float>(),
                 new_scales.ptr<float>(),
                 sampled_opacities.numel());
@@ -540,7 +532,11 @@ namespace lfs::training {
                 info.ndim() == 2 &&
                 info.shape()[0] >= 2 &&
                 info.shape()[1] == _error_score_max.numel()) {
-                _error_score_max = _error_score_max.maximum(info[1]);
+                const float* error_row = info.ptr<float>() + info.shape()[1];
+                lfs::training::mcmc::launch_elementwise_max_inplace(
+                    _error_score_max.ptr<float>(),
+                    error_row,
+                    _error_score_max.numel());
             }
 
             // Clear per-view accumulators; they are rebuilt by the next backward pass.
@@ -697,19 +693,8 @@ namespace lfs::training {
             }
         }
 
-        // Initialize binomial coefficients (same as original)
-        const int n_max = 51;
-        std::vector<float> binoms_data(n_max * n_max, 0.0f);
-        for (int n = 0; n < n_max; ++n) {
-            for (int k = 0; k <= n; ++k) {
-                float binom = 1.0f;
-                for (int i = 0; i < k; ++i) {
-                    binom *= static_cast<float>(n - i) / static_cast<float>(i + 1);
-                }
-                binoms_data[n * n_max + k] = binom;
-            }
-        }
-        _binoms = Tensor::from_vector(binoms_data, TensorShape({static_cast<size_t>(n_max), static_cast<size_t>(n_max)}), Device::CUDA);
+        _n_max = 51;
+        mcmc::init_relocation_coefficients(_n_max);
 
         if (_params->max_cap > 0) {
             _ones_int32 = Tensor::ones({static_cast<size_t>(_params->max_cap)}, Device::CUDA, DataType::Int32);

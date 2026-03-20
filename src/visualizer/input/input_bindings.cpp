@@ -18,6 +18,16 @@
 
 namespace lfs::vis::input {
 
+    namespace {
+
+        constexpr int PROFILE_VERSION = 4; // Version 4 adds selection depth near-plane control to the default profile.
+
+        bool isDefaultProfile(const std::filesystem::path& path, const std::string& profile_name) {
+            return profile_name == "Default" || lfs::core::path_to_utf8(path.stem()) == "Default";
+        }
+
+    } // namespace
+
     InputBindings::InputBindings() {
         const auto config_dir = getConfigDir();
         const auto saved_path = config_dir / "Default.json";
@@ -86,8 +96,6 @@ namespace lfs::vis::input {
     bool InputBindings::saveProfileToFile(const std::filesystem::path& path) const {
         using json = nlohmann::json;
 
-        constexpr int PROFILE_VERSION = 2; // Version 2 adds tool mode
-
         json j;
         j["name"] = current_profile_name_;
         j["version"] = PROFILE_VERSION;
@@ -152,11 +160,23 @@ namespace lfs::vis::input {
 
             const json j = json::parse(file);
             const int version = j.value("version", 0);
-            if (version < 1 || version > 2) {
+            const std::string profile_name = j.value("name", "Custom");
+
+            if (version < PROFILE_VERSION && isDefaultProfile(path, profile_name)) {
+                auto profile = createDefaultProfile();
+                current_profile_name_ = profile.name;
+                bindings_ = std::move(profile.bindings);
+                rebuildLookupMaps();
+                LOG_INFO("Reloaded legacy default input profile from {} with current version {} defaults",
+                         lfs::core::path_to_utf8(path), PROFILE_VERSION);
+                return true;
+            }
+
+            if (version < 1 || version > PROFILE_VERSION) {
                 LOG_WARN("Unknown profile version: {}", version);
             }
 
-            current_profile_name_ = j.value("name", "Custom");
+            current_profile_name_ = profile_name;
             bindings_.clear();
 
             for (const auto& b : j["bindings"]) {
@@ -393,6 +413,7 @@ namespace lfs::vis::input {
             {KeyTrigger{KEY_T, MODIFIER_NONE}, Action::CYCLE_PLY, "Cycle PLY"},
             // Depth
             {KeyTrigger{KEY_F, MODIFIER_CTRL}, Action::TOGGLE_DEPTH_MODE, "Depth filter"},
+            {MouseScrollTrigger{MODIFIER_ALT | MODIFIER_SHIFT}, Action::DEPTH_ADJUST_NEAR, "Depth near"},
             {MouseScrollTrigger{MODIFIER_ALT}, Action::DEPTH_ADJUST_FAR, "Depth far"},
             {MouseScrollTrigger{MODIFIER_ALT | MODIFIER_CTRL}, Action::DEPTH_ADJUST_SIDE, "Depth side"},
             // Editing (Delete is mode-specific, added below)
@@ -404,6 +425,8 @@ namespace lfs::vis::input {
             {KeyTrigger{KEY_C, MODIFIER_CTRL}, Action::COPY_SELECTION, "Copy"},
             {KeyTrigger{KEY_V, MODIFIER_CTRL}, Action::PASTE_SELECTION, "Paste"},
             // Tools
+            {KeyTrigger{KEY_D, MODIFIER_CTRL | MODIFIER_ALT}, Action::TOGGLE_SELECTION_DEPTH_FILTER, "Depth filter"},
+            {KeyTrigger{KEY_C, MODIFIER_CTRL | MODIFIER_ALT}, Action::TOGGLE_SELECTION_CROP_FILTER, "Crop filter"},
             {KeyTrigger{KEY_B, MODIFIER_NONE}, Action::CYCLE_BRUSH_MODE, "Brush mode"},
             {KeyTrigger{KEY_T, MODIFIER_CTRL}, Action::CYCLE_SELECTION_VIS, "Sel vis"},
             {KeyTrigger{KEY_ENTER, MODIFIER_NONE}, Action::APPLY_CROP_BOX, "Apply/confirm"},
@@ -477,14 +500,16 @@ namespace lfs::vis::input {
             profile.bindings.push_back({mode, KeyTrigger{KEY_DELETE, MODIFIER_NONE}, Action::DELETE_SELECTED, "Delete Gaussians"});
         }
 
-        // Tool shortcuts (GLOBAL mode only, number keys 1-7)
-        profile.bindings.push_back({ToolMode::GLOBAL, KeyTrigger{KEY_1}, Action::TOOL_SELECT, "Select"});
-        profile.bindings.push_back({ToolMode::GLOBAL, KeyTrigger{KEY_2}, Action::TOOL_TRANSLATE, "Translate"});
-        profile.bindings.push_back({ToolMode::GLOBAL, KeyTrigger{KEY_3}, Action::TOOL_ROTATE, "Rotate"});
-        profile.bindings.push_back({ToolMode::GLOBAL, KeyTrigger{KEY_4}, Action::TOOL_SCALE, "Scale"});
-        profile.bindings.push_back({ToolMode::GLOBAL, KeyTrigger{KEY_5}, Action::TOOL_MIRROR, "Mirror"});
-        profile.bindings.push_back({ToolMode::GLOBAL, KeyTrigger{KEY_6}, Action::TOOL_BRUSH, "Brush"});
-        profile.bindings.push_back({ToolMode::GLOBAL, KeyTrigger{KEY_7}, Action::TOOL_ALIGN, "Align"});
+        // Tool shortcuts (all modes, number keys 1-7)
+        for (const auto mode : ALL_MODES) {
+            profile.bindings.push_back({mode, KeyTrigger{KEY_1}, Action::TOOL_SELECT, "Select"});
+            profile.bindings.push_back({mode, KeyTrigger{KEY_2}, Action::TOOL_TRANSLATE, "Translate"});
+            profile.bindings.push_back({mode, KeyTrigger{KEY_3}, Action::TOOL_ROTATE, "Rotate"});
+            profile.bindings.push_back({mode, KeyTrigger{KEY_4}, Action::TOOL_SCALE, "Scale"});
+            profile.bindings.push_back({mode, KeyTrigger{KEY_5}, Action::TOOL_MIRROR, "Mirror"});
+            profile.bindings.push_back({mode, KeyTrigger{KEY_6}, Action::TOOL_BRUSH, "Brush"});
+            profile.bindings.push_back({mode, KeyTrigger{KEY_7}, Action::TOOL_ALIGN, "Align"});
+        }
 
         // Pie menu (all modes)
         for (const auto mode : ALL_MODES) {
@@ -528,8 +553,11 @@ namespace lfs::vis::input {
         case Action::DESELECT_ALL: return "Deselect All";
         case Action::COPY_SELECTION: return "Copy Selection";
         case Action::PASTE_SELECTION: return "Paste Selection";
+        case Action::DEPTH_ADJUST_NEAR: return "Adjust Depth Near";
         case Action::DEPTH_ADJUST_FAR: return "Adjust Depth Far";
         case Action::DEPTH_ADJUST_SIDE: return "Adjust Depth Side";
+        case Action::TOGGLE_SELECTION_DEPTH_FILTER: return "Toggle Selection Depth Filter";
+        case Action::TOGGLE_SELECTION_CROP_FILTER: return "Toggle Selection Crop Filter";
         case Action::BRUSH_RESIZE: return "Resize Brush";
         case Action::CYCLE_BRUSH_MODE: return "Cycle Brush Mode";
         case Action::CONFIRM_POLYGON: return "Confirm Polygon";

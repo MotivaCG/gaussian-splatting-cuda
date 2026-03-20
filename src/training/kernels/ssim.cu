@@ -1302,6 +1302,51 @@ namespace lfs::training::kernels {
                 .apply_valid_padding = apply_valid_padding}};
     }
 
+    void ssim_error_map_forward(
+        const lfs::core::Tensor& img1_input,
+        const lfs::core::Tensor& img2_input,
+        SSIMMapWorkspace& workspace,
+        lfs::core::Tensor& error_map) {
+
+        constexpr float C1 = 0.01f * 0.01f;
+        constexpr float C2 = 0.03f * 0.03f;
+
+        auto img1 = img1_input.contiguous();
+        auto img2 = img2_input.contiguous();
+        if (img1.ndim() == 3)
+            img1 = img1.unsqueeze(0);
+        if (img2.ndim() == 3)
+            img2 = img2.unsqueeze(0);
+
+        assert(img1.shape() == img2.shape());
+
+        const int N = static_cast<int>(img1.shape()[0]);
+        const int C = static_cast<int>(img1.shape()[1]);
+        const int H = static_cast<int>(img1.shape()[2]);
+        const int W = static_cast<int>(img1.shape()[3]);
+
+        workspace.ensure_size(img1.shape().dims());
+
+        const dim3 grid((W + BLOCK_X - 1) / BLOCK_X, (H + BLOCK_Y - 1) / BLOCK_Y, N);
+        const dim3 block(BLOCK_X, BLOCK_Y);
+
+        fusedssimCUDA<<<grid, block>>>(
+            H, W, C, C1, C2,
+            img1.ptr<float>(), img2.ptr<float>(),
+            workspace.ssim_map.ptr<float>(),
+            nullptr, nullptr, nullptr);
+
+        if (!error_map.is_valid() ||
+            error_map.ndim() != 2 ||
+            error_map.shape()[0] != static_cast<size_t>(H) ||
+            error_map.shape()[1] != static_cast<size_t>(W)) {
+            error_map = lfs::core::Tensor::empty({static_cast<size_t>(H), static_cast<size_t>(W)},
+                                                 lfs::core::Device::CUDA);
+        }
+
+        launch_ssim_to_error_map(workspace.ssim_map, error_map);
+    }
+
     lfs::core::Tensor ssim_backward(
         const SSIMContext& ctx,
         float grad_loss) {
@@ -1742,6 +1787,55 @@ namespace lfs::training::kernels {
             ctx.dm_dsigma12.ptr<float>());
 
         return workspace.grad_img;
+    }
+
+    // Fused SSIM map [1, C, H, W] → error map [H, W]
+    // error_map[i] = max(0, 1 - mean_c(ssim_map[c, i]))
+    namespace {
+        __global__ void ssim_to_error_map_kernel(
+            const float* __restrict__ ssim_map,
+            float* __restrict__ error_map,
+            int C, int H, int W) {
+
+            int idx = blockIdx.x * blockDim.x + threadIdx.x;
+            int HW = H * W;
+            if (idx >= HW)
+                return;
+
+            float sum = 0.0f;
+            for (int c = 0; c < C; ++c) {
+                sum += ssim_map[c * HW + idx];
+            }
+            float inv_c = 1.0f / static_cast<float>(C);
+            float err = 1.0f - sum * inv_c;
+            error_map[idx] = fmaxf(err, 0.0f);
+        }
+    } // namespace
+
+    void launch_ssim_to_error_map(
+        const lfs::core::Tensor& ssim_map,
+        lfs::core::Tensor& error_map) {
+
+        assert(ssim_map.ndim() == 4);
+        assert(ssim_map.shape()[0] == 1);
+
+        const int C = static_cast<int>(ssim_map.shape()[1]);
+        const int H = static_cast<int>(ssim_map.shape()[2]);
+        const int W = static_cast<int>(ssim_map.shape()[3]);
+        const int HW = H * W;
+
+        assert(error_map.ndim() == 2);
+        assert(error_map.shape()[0] == static_cast<size_t>(H));
+        assert(error_map.shape()[1] == static_cast<size_t>(W));
+
+        constexpr int THREADS = 256;
+        dim3 grid((HW + THREADS - 1) / THREADS);
+        dim3 block(THREADS);
+
+        ssim_to_error_map_kernel<<<grid, block>>>(
+            ssim_map.ptr<float>(),
+            error_map.ptr<float>(),
+            C, H, W);
     }
 
 } // namespace lfs::training::kernels

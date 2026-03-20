@@ -91,6 +91,7 @@ set(BENCHMARK_FILES
     benchmark_scheduler.cpp
     benchmark_losses.cpp
     benchmark_ppisp_controller.cpp
+    benchmark_selection_modes.cpp
     # profile_adam_optimizer.cpp  # Disabled - missing header
     test_tensor_benchmark.cpp
     test_memory_pool_benchmark.cpp
@@ -200,8 +201,14 @@ set(TEST_FILES
     test_tensor_zero_dimension.cpp
     test_mask_loss.cpp
     test_checkpoint_resume.cpp
+    test_parameter_manager.cpp
+    test_mcp_protocol.cpp
+    test_mcp_app_utils.cpp
+    test_mcp_sequencer_tools.cpp
+    test_video_export_utils.cpp
     test_video_color_convert.cpp
     test_python_integration.cpp
+    test_python_lsp_client.cpp
     test_uv_runner.cpp
     test_uv_runner_proof.cpp
     test_pytorch_install_proof.cpp
@@ -233,9 +240,19 @@ set(TEST_FILES
     test_extended_unary_ops_vs_torch.cpp
     # test_property_system.cpp  # Disabled: needs API update after merge
     test_scene_validity.cpp
+    test_render_settings_defaults.cpp
+    test_selection_rasterization_ops.cpp
+    test_viewport.cpp
+    test_selection_service_interactions.cpp
+    test_undo_history.cpp
+    test_selection_command_dispatch.cpp
+    test_selection_operator_modal.cpp
+    test_operator_registry_props.cpp
     test_fastgs_analytical_gradients.cpp
     test_background_image.cpp
     test_operator_return_value.cpp
+    test_sdl_rml_key_mapping.cpp
+    test_sequencer_regressions.cpp
     test_tensor_storage_version.cpp
     test_modal_registry_regression.cpp
     # test_property_schema_thread_safety.cpp  # Disabled: API mismatch after merge
@@ -243,12 +260,16 @@ set(TEST_FILES
     test_tensor_nn_ops.cpp
     test_ppisp_controller.cpp
     test_ppisp_regularization.cpp
+    test_ppisp_sidecar.cpp
     test_ppisp_cuda_vs_torch.cpp
     test_controller_memory.cpp
     test_undistort.cpp
     test_mesh_data.cpp
     test_openmesh_bridge.cpp
     test_mesh_loader.cpp
+    test_colmap_image_layout.cpp
+    test_splat_simplify.cpp
+    test_rml_text_input_handler.cpp
     test_rotated_sh_correctness.cpp
     test_tensor_stream.cpp
     test_tensor_memory_planner.cpp
@@ -265,6 +286,7 @@ endforeach()
 # PyModalRegistry data layer (no ImGui) for lock-order regression tests.
 list(APPEND TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/src/python/lfs/py_modal_registry.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/mcp_sequencer_tools.cpp
 )
 
 # Build benchmark sources list
@@ -310,7 +332,9 @@ target_compile_definitions(lichtfeld_tests PRIVATE
 # Link libraries
 target_link_libraries(lichtfeld_tests PRIVATE
     # LFS modules
+    lfs_mcp
     lfs_visualizer
+    lfs_sequencer
     lfs_rendering
     lfs_training
     lfs_core

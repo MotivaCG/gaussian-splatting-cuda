@@ -80,6 +80,7 @@ namespace lfs::vis {
                                      drag_mode_ == DragMode::Rotate;
             return movement_active || camera_drag;
         }
+        [[nodiscard]] bool hasViewportKeyboardFocus() const { return viewport_keyboard_focus_; }
 
         // Node rectangle selection state (for rendering)
         [[nodiscard]] bool isNodeRectDragging() const { return is_node_rect_dragging_; }
@@ -103,6 +104,7 @@ namespace lfs::vis {
 
         // Helpers
         bool isInViewport(double x, double y) const;
+        bool isPointerOverBlockingUi(double x, double y) const;
         bool shouldCameraHandleInput() const;
         void selectCameraByUid(int uid);
         void updateCameraSpeed(bool increase);
@@ -159,6 +161,7 @@ namespace lfs::vis {
         bool key_r_pressed_ = false;
         bool key_ctrl_pressed_ = false;
         bool key_alt_pressed_ = false;
+        bool viewport_keyboard_focus_ = false;
         bool keys_movement_[6] = {false, false, false, false, false, false}; // fwd, left, back, right, down, up
 
         // Cached movement key bindings (refreshed when bindings change)

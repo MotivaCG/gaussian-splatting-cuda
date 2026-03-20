@@ -50,6 +50,9 @@ namespace lfs::training {
 
         // Reserve optimizer capacity for future growth (e.g., after checkpoint load)
         void reserve_optimizer_capacity(size_t capacity) override;
+        void set_optimization_params(const lfs::core::param::OptimizationParameters& params) override {
+            _params = std::make_unique<const lfs::core::param::OptimizationParameters>(params);
+        }
 
         // Exposed for testing
         int add_new_gs_test() { return add_new_gs(); }
@@ -77,7 +80,7 @@ namespace lfs::training {
         static constexpr float NOISE_LR = 5e5f;
 
         // State variables
-        lfs::core::Tensor _binoms;       // [n_max, n_max] binomial coefficients
+        int _n_max = 0;                  // max relocation ratio
         lfs::core::Tensor _noise_buffer; // Reusable buffer for noise injection
         lfs::core::Tensor _ones_int32;   // [max_cap] cached ones for ratio counting
         lfs::core::Tensor _error_score_max;

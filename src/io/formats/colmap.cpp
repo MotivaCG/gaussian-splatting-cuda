@@ -602,44 +602,6 @@ namespace lfs::io {
     // -----------------------------------------------------------------------------
     //  Assemble cameras with dimension verification
     // -----------------------------------------------------------------------------
-    namespace {
-        constexpr std::array MASK_FOLDERS = {"masks", "mask", "segmentation"};
-        constexpr std::array MASK_EXTENSIONS = {".png", ".jpg", ".jpeg", ".mask.png"};
-    } // namespace
-
-    static std::filesystem::path find_mask_path(const std::filesystem::path& base_path,
-                                                const std::string& image_name) {
-        const std::filesystem::path img_path = lfs::core::utf8_to_path(image_name);
-        const std::filesystem::path stem_path = img_path.parent_path() / img_path.stem();
-
-        for (const auto& folder : MASK_FOLDERS) {
-            const std::filesystem::path mask_dir = base_path / folder;
-            if (!safe_exists(mask_dir))
-                continue;
-
-            if (const auto exact = mask_dir / img_path; safe_exists(exact))
-                return exact;
-
-            if (auto found = find_path_ci(mask_dir, img_path); !found.empty())
-                return found;
-
-            for (const auto& ext : MASK_EXTENSIONS) {
-                std::filesystem::path target_path = stem_path;
-                target_path += ext;
-                if (auto found = find_path_ci(mask_dir, target_path); !found.empty())
-                    return found;
-            }
-
-            for (const auto& ext : MASK_EXTENSIONS) {
-                std::filesystem::path target_path = img_path;
-                target_path += ext;
-                if (auto found = find_path_ci(mask_dir, target_path); !found.empty())
-                    return found;
-            }
-        }
-        return {};
-    }
-
     Result<std::tuple<std::vector<std::shared_ptr<Camera>>, Tensor>>
     assemble_colmap_cameras(const std::filesystem::path& base_path,
                             const std::unordered_map<uint32_t, CameraDataIntermediate>& cam_map,
@@ -648,7 +610,7 @@ namespace lfs::io {
 
         LOG_TIMER_TRACE("Assemble COLMAP cameras");
 
-        std::filesystem::path images_path = base_path / images_folder;
+        std::filesystem::path images_path = base_path / lfs::core::utf8_to_path(images_folder);
 
         if (!std::filesystem::exists(images_path)) {
             return make_error(ErrorCode::PATH_NOT_FOUND,
@@ -658,18 +620,43 @@ namespace lfs::io {
         std::vector<std::shared_ptr<Camera>> cameras;
         cameras.reserve(images.size());
 
+        RecursiveFileCache image_cache(images_path);
+        MaskDirCache mask_cache(base_path);
+        bool used_recursive_image_lookup = false;
+
         // Accumulate camera positions for scene center
         std::vector<float> camera_positions;
         camera_positions.reserve(images.size() * 3);
 
         for (size_t i = 0; i < images.size(); ++i) {
             const ImageData& img = images[i];
+            const std::filesystem::path image_rel_path = lfs::core::utf8_to_path(img.name);
+            std::filesystem::path image_path = images_path / image_rel_path;
+
+            if (!safe_exists(image_path)) {
+                if (auto resolved_path = image_cache.find(image_rel_path);
+                    !resolved_path.empty()) {
+                    if (!used_recursive_image_lookup) {
+                        LOG_WARN("COLMAP images are not in the expected flat layout under '{}'; "
+                                 "falling back to recursive image lookup",
+                                 lfs::core::path_to_utf8(images_path));
+                        used_recursive_image_lookup = true;
+                    }
+                    image_path = std::move(resolved_path);
+                } else {
+                    return make_error(ErrorCode::PATH_NOT_FOUND,
+                                      std::format("Image '{}' was not found under '{}'",
+                                                  img.name,
+                                                  lfs::core::path_to_utf8(images_path)),
+                                      image_path);
+                }
+            }
 
             auto it = cam_map.find(img.camera_id);
             if (it == cam_map.end()) {
                 return make_error(ErrorCode::CORRUPTED_DATA,
                                   std::format("Camera ID {} not found for image '{}'", img.camera_id, img.name),
-                                  images_path / img.name);
+                                  image_path);
             }
 
             const auto& cam_data = it->second;
@@ -707,7 +694,7 @@ namespace lfs::io {
             if (model_it == camera_model_ids.end()) {
                 return make_error(ErrorCode::UNSUPPORTED_FORMAT,
                                   std::format("Invalid camera model ID {} for image '{}'", cam_data.model_id, img.name),
-                                  images_path / img.name);
+                                  image_path);
             }
 
             CAMERA_MODEL model = model_it->second.first;
@@ -816,19 +803,19 @@ namespace lfs::io {
             case CAMERA_MODEL::FOV:
                 return make_error(ErrorCode::UNSUPPORTED_FORMAT,
                                   std::format("FOV camera model not supported for image '{}'", img.name),
-                                  images_path / img.name);
+                                  image_path);
 
             default:
                 return make_error(ErrorCode::UNSUPPORTED_FORMAT,
                                   std::format("Unsupported camera model for image '{}'", img.name),
-                                  images_path / img.name);
+                                  image_path);
             }
 
-            std::filesystem::path mask_path = find_mask_path(base_path, img.name);
+            std::filesystem::path mask_path = mask_cache.find(img.name);
 
             // Validate mask dimensions match image dimensions
             if (!mask_path.empty()) {
-                auto [img_w, img_h, img_c] = lfs::core::get_image_info(images_path / img.name);
+                auto [img_w, img_h, img_c] = lfs::core::get_image_info(image_path);
                 auto [mask_w, mask_h, mask_c] = lfs::core::get_image_info(mask_path);
                 if (img_w != mask_w || img_h != mask_h) {
                     return make_error(ErrorCode::MASK_SIZE_MISMATCH,
@@ -849,7 +836,7 @@ namespace lfs::io {
                 tangential_dist,
                 camera_model_type,
                 img.name,
-                images_path / img.name,
+                image_path,
                 mask_path,
                 cam_data.width,
                 cam_data.height,

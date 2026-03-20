@@ -33,6 +33,8 @@ namespace lfs::vis {
         mcmc_current_ = mcmc_session_;
         adc_session_ = lfs::core::param::OptimizationParameters::adc_defaults();
         adc_current_ = adc_session_;
+        igs_session_ = lfs::core::param::OptimizationParameters::igs_plus_defaults();
+        igs_current_ = igs_session_;
         dataset_config_.loading_params = lfs::core::param::LoadingParams{};
 
         loaded_ = true;
@@ -40,11 +42,19 @@ namespace lfs::vis {
     }
 
     lfs::core::param::OptimizationParameters& ParameterManager::getCurrentParams(const std::string_view strategy) {
-        return (strategy == "mcmc") ? mcmc_current_ : adc_current_;
+        if (strategy == "mcmc")
+            return mcmc_current_;
+        if (strategy == "igs+")
+            return igs_current_;
+        return adc_current_;
     }
 
     const lfs::core::param::OptimizationParameters& ParameterManager::getCurrentParams(const std::string_view strategy) const {
-        return (strategy == "mcmc") ? mcmc_current_ : adc_current_;
+        if (strategy == "mcmc")
+            return mcmc_current_;
+        if (strategy == "igs+")
+            return igs_current_;
+        return adc_current_;
     }
 
     void ParameterManager::resetToDefaults(const std::string_view strategy) {
@@ -55,6 +65,9 @@ namespace lfs::vis {
         if (strategy.empty() || strategy == "adc") {
             adc_current_ = adc_session_;
         }
+        if (strategy.empty() || strategy == "igs+") {
+            igs_current_ = igs_session_;
+        }
     }
 
     void ParameterManager::setSessionDefaults(const lfs::core::param::TrainingParameters& params) {
@@ -62,15 +75,16 @@ namespace lfs::vis {
             LOG_ERROR("Failed to load params: {}", result.error());
             return;
         }
-        if (session_defaults_set_)
-            return;
-
         const auto& opt = params.optimization;
         if (!opt.strategy.empty())
             setActiveStrategy(opt.strategy);
 
-        auto& session = (active_strategy_ == "mcmc") ? mcmc_session_ : adc_session_;
-        auto& current = (active_strategy_ == "mcmc") ? mcmc_current_ : adc_current_;
+        auto& session = (active_strategy_ == "mcmc")   ? mcmc_session_
+                        : (active_strategy_ == "igs+") ? igs_session_
+                                                       : adc_session_;
+        auto& current = (active_strategy_ == "mcmc")   ? mcmc_current_
+                        : (active_strategy_ == "igs+") ? igs_current_
+                                                       : adc_current_;
         session = opt;
         current = opt;
 
@@ -90,7 +104,6 @@ namespace lfs::vis {
         dataset_config_.invert_masks = ds.invert_masks;
         dataset_config_.mask_threshold = ds.mask_threshold;
 
-        session_defaults_set_ = true;
         LOG_INFO("Session: strategy={}, iter={}, resize={}", opt.strategy, opt.iterations, dataset_config_.resize_factor);
     }
 
@@ -101,6 +114,8 @@ namespace lfs::vis {
         }
         if (active_strategy_ == "mcmc") {
             mcmc_current_ = params;
+        } else if (active_strategy_ == "igs+") {
+            igs_current_ = params;
         } else {
             adc_current_ = params;
         }
@@ -115,6 +130,9 @@ namespace lfs::vis {
         if (active_strategy_ == "mcmc") {
             mcmc_session_ = params;
             mcmc_current_ = params;
+        } else if (active_strategy_ == "igs+") {
+            igs_session_ = params;
+            igs_current_ = params;
         } else {
             adc_session_ = params;
             adc_current_ = params;
@@ -122,8 +140,40 @@ namespace lfs::vis {
         LOG_INFO("Imported params: strategy={}, iter={}, sh={}", params.strategy, params.iterations, params.sh_degree);
     }
 
+    void ParameterManager::importTrainingParams(const lfs::core::param::TrainingParameters& params) {
+        if (const auto result = ensureLoaded(); !result) {
+            LOG_ERROR("Failed to load params: {}", result.error());
+            return;
+        }
+
+        std::lock_guard lock(params_mutex_);
+        if (!params.optimization.strategy.empty()) {
+            setActiveStrategy(params.optimization.strategy);
+        }
+
+        if (active_strategy_ == "mcmc") {
+            mcmc_session_ = params.optimization;
+            mcmc_current_ = params.optimization;
+        } else if (active_strategy_ == "igs+") {
+            igs_session_ = params.optimization;
+            igs_current_ = params.optimization;
+        } else {
+            adc_session_ = params.optimization;
+            adc_current_ = params.optimization;
+        }
+
+        dataset_config_ = params.dataset;
+        dirty_.store(false, std::memory_order_release);
+
+        LOG_INFO("Imported training params: strategy={}, iter={}, images={}, resize={}",
+                 params.optimization.strategy,
+                 params.optimization.iterations,
+                 dataset_config_.images,
+                 dataset_config_.resize_factor);
+    }
+
     void ParameterManager::setActiveStrategy(const std::string_view strategy) {
-        if (strategy == "mcmc" || strategy == "adc") {
+        if (strategy == "mcmc" || strategy == "adc" || strategy == "igs+") {
             active_strategy_ = std::string(strategy);
         }
     }
@@ -145,6 +195,7 @@ namespace lfs::vis {
         std::lock_guard lock(params_mutex_);
         apply_scaler_to_params(mcmc_current_, new_scaler);
         apply_scaler_to_params(adc_current_, new_scaler);
+        apply_scaler_to_params(igs_current_, new_scaler);
         dirty_.store(true, std::memory_order_release);
         LOG_INFO("Auto-scaled steps for {} images: scaler={:.2f}", image_count, new_scaler);
     }
