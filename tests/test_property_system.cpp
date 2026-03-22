@@ -1084,7 +1084,8 @@ namespace {
                        {{"None", MaskMode::None},
                         {"Segment", MaskMode::Segment},
                         {"Ignore", MaskMode::Ignore},
-                        {"AlphaConsistent", MaskMode::AlphaConsistent}},
+                        {"AlphaConsistent", MaskMode::AlphaConsistent},
+                        {"FocusedSegment", MaskMode::FocusedSegment}},
                        "Attention mask behavior during training")
             .category("mask")
             .bool_prop(&OptimizationParameters::invert_masks,
@@ -1191,13 +1192,14 @@ TEST_F(OptimizationParamsTest, EnumMaskMode) {
     EXPECT_EQ(meta->type, PropType::Enum);
     EXPECT_EQ(meta->ui_hint, PropUIHint::Combo);
     EXPECT_EQ(meta->group, "mask");
-    ASSERT_EQ(meta->enum_items.size(), 4);
+    ASSERT_EQ(meta->enum_items.size(), 5);
 
     // Check enum items
     EXPECT_EQ(meta->enum_items[0].name, "None");
     EXPECT_EQ(meta->enum_items[1].name, "Segment");
     EXPECT_EQ(meta->enum_items[2].name, "Ignore");
     EXPECT_EQ(meta->enum_items[3].name, "AlphaConsistent");
+    EXPECT_EQ(meta->enum_items[4].name, "FocusedSegment");
 
     // Test getter/setter
     lfs::core::param::OptimizationParameters params;

@@ -22,9 +22,7 @@ namespace lfs::core {
             Segment,         // Soft penalty to enforce alpha→0 in masked areas
             Ignore,          // Completely ignore masked regions in loss
             AlphaConsistent, // Enforce exact alpha values from mask
-            HardMatting,
-            SoftMatting,
-            FocusedSegment
+            FocusedSegment   // SMN mode
         };
 
         // Background mode for training - only one can be active at a time

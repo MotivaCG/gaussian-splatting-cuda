@@ -153,15 +153,13 @@ namespace {
             ::args::Group mask_sep(parser, " ");
             ::args::Group mask_group(parser, "MASK OPTIONS:");
             ::args::MapFlag<std::string, lfs::core::param::MaskMode> mask_mode(mask_group, "mask_mode",
-                                                                               "Mask mode: none, segment, ignore, alpha_consistent (default: none)",
+                                                                               "Mask mode: none, segment, ignore, alpha_consistent, focused_segment (default: none)",
                                                                                {"mask-mode"},
                                                                                std::unordered_map<std::string, lfs::core::param::MaskMode>{
                                                                                    {"none", lfs::core::param::MaskMode::None},
                                                                                    {"segment", lfs::core::param::MaskMode::Segment},
                                                                                    {"ignore", lfs::core::param::MaskMode::Ignore},
                                                                                    {"alpha_consistent", lfs::core::param::MaskMode::AlphaConsistent},
-                                                                                   {"hardmatting", lfs::core::param::MaskMode::HardMatting},
-                                                                                   {"softmatting", lfs::core::param::MaskMode::SoftMatting},
                                                                                    {"focused_segment", lfs::core::param::MaskMode::FocusedSegment}});
                                                                                    
             ::args::Flag invert_masks(mask_group, "invert_masks", "Invert mask values (swap object/background)", {"invert-masks"});

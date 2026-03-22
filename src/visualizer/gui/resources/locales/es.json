@@ -258,6 +258,7 @@
     "options.mask.segment": "Segmento",
     "options.mask.ignore": "Ignorar",
     "options.mask.alpha_consistent": "Consistente con alfa",
+    "options.mask.focused_segment": "Segmentación enfocada",
     "options.bg.color": "Color",
     "options.bg.modulation": "Modulacion",
     "options.bg.image": "Imagen",

@@ -250,9 +250,7 @@ namespace lfs::training {
             const lfs::core::Tensor& gt_image,
             const lfs::core::Tensor& mask,
             const lfs::core::Tensor& alpha,
-            const lfs::core::param::OptimizationParameters& opt_params,
-            const lfs::core::Tensor* fg_core_2d = nullptr,
-            const lfs::core::Tensor* bg_core_2d = nullptr);
+            const lfs::core::param::OptimizationParameters& opt_params);
 
         // Validate masks exist for all cameras when mask mode is enabled
         std::expected<void, std::string> validate_masks();

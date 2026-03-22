@@ -122,7 +122,7 @@ namespace lfs::core {
                     {"bg_noise", defaults.bg_noise, "Enable per-pixel noise background (overrides bg-modulation)"},
                     {"high_confidence_count", defaults.high_confidence_count, "Number of points comming from actual SfM"},
                     {"gut", defaults.gut, "Enable GUT mode"},
-                    {"mask_mode", std::string("none"), "Mask mode: none, segment, ignore, alpha_consistent, matting"},
+                    {"mask_mode", std::string("none"), "Mask mode: none, segment, ignore, alpha_consistent, focused_segment"},
                     {"invert_masks", defaults.invert_masks, "Invert mask values"},
                     {"mask_opacity_penalty_weight", defaults.mask_opacity_penalty_weight, "Opacity penalty weight for segment mode"},
                     {"mask_opacity_penalty_power", defaults.mask_opacity_penalty_power, "Penalty falloff power"},
@@ -329,7 +329,7 @@ namespace lfs::core {
             }
 
             // Mask parameters
-            static constexpr const char* MASK_MODE_NAMES[] = {"none", "segment", "ignore", "alpha_consistent", "hardmatting", "softmatting", "focused_segment"};
+            static constexpr const char* MASK_MODE_NAMES[] = {"none", "segment", "ignore", "alpha_consistent", "focused_segment"};
             opt_json["mask_mode"] = MASK_MODE_NAMES[static_cast<int>(mask_mode)];
             opt_json["invert_masks"] = invert_masks;
             opt_json["mask_opacity_penalty_weight"] = mask_opacity_penalty_weight;
@@ -628,10 +628,6 @@ namespace lfs::core {
                     params.mask_mode = MaskMode::Ignore;
                 } else if (mode == "alpha_consistent") {
                     params.mask_mode = MaskMode::AlphaConsistent;
-                } else if (mode == "hardmatting") {
-                    params.mask_mode = MaskMode::HardMatting;
-                } else if (mode == "softmatting") {
-                    params.mask_mode = MaskMode::SoftMatting;
                 } else if (mode == "focused_segment") {
                     params.mask_mode = MaskMode::FocusedSegment;
                 }

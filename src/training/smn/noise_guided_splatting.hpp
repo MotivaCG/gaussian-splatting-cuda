@@ -13,7 +13,7 @@
  * NGS injects opaque noise Gaussians inside object volumes to block line-of-sight
  * between front and back surfaces, forcing the optimizer to make surfaces opaque.
  *
- * Simplified training phases (no freeze needed with softmatting/hardmatting):
+ * Simplified training phases (no freeze needed with focused mode):
  * 1. Standard training: [0%, 15%) - normal training without noise
  * 2. With noise: [15%, 80%) - surface + noise train together
  * 3. Cleanup: [80%, 100%] - noise removed, surface continues alone

@@ -956,7 +956,8 @@ namespace lfs::python {
             .value("NONE", MaskMode::None)
             .value("SEGMENT", MaskMode::Segment)
             .value("IGNORE", MaskMode::Ignore)
-            .value("ALPHA_CONSISTENT", MaskMode::AlphaConsistent);
+            .value("ALPHA_CONSISTENT", MaskMode::AlphaConsistent)
+            .value("FOCUSED_SEGMENT", MaskMode::FocusedSegment);
 
         nb::enum_<BackgroundMode>(m, "BackgroundMode")
             .value("SOLID_COLOR", BackgroundMode::SolidColor)

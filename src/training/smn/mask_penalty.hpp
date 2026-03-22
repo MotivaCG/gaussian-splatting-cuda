@@ -380,7 +380,7 @@ struct FullPenaltyResult {
  * @note Post-training pruning functions are not yet implemented.
  *
  * The following pruning methods should be called after training completes
- * when using HardMatting or SoftMatting modes:
+ * when using FocusedSegment mode:
  *
  * - prune_by_center_vote(): Removes splats whose center does not consistently
  *   fall inside the mask across multiple views.
@@ -392,7 +392,7 @@ struct FullPenaltyResult {
  *
  * These should be called in Trainer::train() before the final save:
  * @code
- * if (mask_mode == MaskMode::HardMatting || mask_mode == MaskMode::SoftMatting) {
+ * if (mask_mode == MaskMode::FocusedSegment) {
  *     prune_after_training(vote_ratio_threshold, leak_keep_threshold);
  * }
  * @endcode

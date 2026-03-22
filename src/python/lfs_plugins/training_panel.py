@@ -148,6 +148,7 @@ LOCALE_KEYS = {
     "mask_segment": "training.options.mask.segment",
     "mask_ignore": "training.options.mask.ignore",
     "mask_alpha_consistent": "training.options.mask.alpha_consistent",
+    "mask_focused_segment": "training.options.mask.focused_segment",
     "bg_option_color": "training.options.bg.color",
     "bg_option_modulation": "training.options.bg.modulation",
     "bg_option_image": "training.options.bg.image",

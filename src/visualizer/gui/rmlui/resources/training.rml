@@ -118,6 +118,7 @@
           <option value="1">{{label_mask_segment}}</option>
           <option value="2">{{label_mask_ignore}}</option>
           <option value="3">{{label_mask_alpha_consistent}}</option>
+          <option value="4">{{label_mask_focused_segment}}</option>
         </select>
       </div>
       <div class="mask-settings-group" data-if="dep_mask_mode">
