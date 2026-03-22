@@ -3418,24 +3418,25 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
 
             // Save checkpoint alongside PLY for training resumption
             auto ckpt_result = lfs::training::save_checkpoint(save_path, iter_num, *strategy_, params_,
-                                                            bilateral_grid_.get(), ppisp_.get(), controller_to_save);
+                                                              bilateral_grid_.get(), ppisp_.get(), controller_to_save);
             if (!ckpt_result) {
                 LOG_WARN("Failed to save checkpoint: {}", ckpt_result.error());
             }
 
-        if (ppisp_) {
-            const auto ppisp_path = get_ppisp_companion_path(ply_options.output_path);
-            std::optional<PPISPFileMetadata> metadata;
-            if (auto metadata_result = build_ppisp_sidecar_metadata(); metadata_result) {
-                metadata = std::move(*metadata_result);
-            } else {
-                LOG_WARN("Failed to build PPISP sidecar metadata for '{}': {}. Saving sidecar without metadata.",
-                         lfs::core::path_to_utf8(ppisp_path), metadata_result.error());
-            }
-            const auto ppisp_result = save_ppisp_file(ppisp_path, *ppisp_, controller_to_save,
-                                                      metadata ? &*metadata : nullptr);
-            if (!ppisp_result) {
-                LOG_WARN("Failed to save PPISP file: {}", ppisp_result.error());
+            if (ppisp_) {
+                const auto ppisp_path = get_ppisp_companion_path(ply_options.output_path);
+                std::optional<PPISPFileMetadata> metadata;
+                if (auto metadata_result = build_ppisp_sidecar_metadata(); metadata_result) {
+                    metadata = std::move(*metadata_result);
+                } else {
+                    LOG_WARN("Failed to build PPISP sidecar metadata for '{}': {}. Saving sidecar without metadata.",
+                             lfs::core::path_to_utf8(ppisp_path), metadata_result.error());
+                }
+                const auto ppisp_result = save_ppisp_file(ppisp_path, *ppisp_, controller_to_save,
+                                                          metadata ? &*metadata : nullptr);
+                if (!ppisp_result) {
+                    LOG_WARN("Failed to save PPISP file: {}", ppisp_result.error());
+                }
             }
         }
 
