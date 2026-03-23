@@ -1613,6 +1613,107 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
         return random_bg_buffer_;
     }
 
+
+    void SMNprune(const lfs::core::param::MaskMode mask_mode,
+               const bool invert_masks,
+               std::unique_ptr<lfs::training::IStrategy> &strategy_,
+               std::shared_ptr<lfs::training::CameraDataset> &train_dataset_
+        )
+    {
+
+        // -----------------------------------------------------------------
+        // Post-training mask-based pruning
+        //
+        // For matting modes, remove splats that don't align with masks:
+        // - Center-vote: splats whose center is outside mask in most views
+        // - Leakage: splats whose footprint extends outside mask boundary
+        // -----------------------------------------------------------------
+        if (mask_mode == lfs::core::param::MaskMode::FocusedSegment) {
+            mask_pruning::GeometricDomePruningConfig geomdome_cfg;
+            // default values are ok
+
+            mask_pruning::CenterVotePruningConfig center_cfg;
+            center_cfg.enabled = true;
+
+            // Conservative threshold — protects legitimate border splats (feet, arms).
+            // Only removes Gaussians clearly outside the mask in a large majority of views.
+            // In a dome with 104 cameras, a splat visible in 30 views can afford 8 bad-mask
+            // views and still pass (73% good > 0.72).
+            center_cfg.vote_ratio_threshold = 0.75f;
+            // Moderate margin — avoids penalizing splats near frustum edges without
+            // being as permissive as the original 0.25 that missed lateral floaters.
+            center_cfg.border_safe_margin = 0.33f;
+            center_cfg.enable_depth_filtering = true;
+            center_cfg.min_visibility_count = 3;
+            center_cfg.invert_masks = invert_masks;
+
+            mask_pruning::LeakagePruningConfig leak_cfg;
+            leak_cfg.enabled = true;
+            // Main tool for halos — removes elongated Gaussians whose footprint
+            // extends outside the mask. Center vote is too permissive for these.
+            leak_cfg.leak_keep_threshold = 0.70f;
+            // 2 of 8 sample points outside counts as a leak per view.
+            // Catches elongated splats extending above heads without being too strict
+            // on border splats that legitimately straddle the mask edge.
+            leak_cfg.per_view_leak_fraction = 0.25f;
+            leak_cfg.min_visibility_count = 3;
+            // Low radius — evaluate small/thin elongated splats that caused halos.
+            // Original 2.0f missed these entirely.
+            leak_cfg.min_pixel_radius = 1.0f;
+            leak_cfg.sample_points = 8;
+            // Small dilation — tolerates 3px at mask boundary to protect
+            // extremities that straddle the mask edge in some views.
+            leak_cfg.dilate_px = 2;
+            leak_cfg.invert_masks = invert_masks;
+
+            mask_pruning::IsolationPruningConfig iso_cfg;
+            iso_cfg.enabled = true;
+
+#ifdef NeedsPruningDiagnostics
+            std::filesystem::path diag_dir = params_.dataset.output_path / "pruning_diagnostics";
+
+            LOG_INFO("===== MASK-BASED PRUNING WITH VISUALIZATION =====");
+            bool viz_success = mask_pruning::visualizer::generate_pruning_diagnostics(
+                *strategy_,
+                *train_dataset_,
+                center_cfg,
+                diag_dir,
+                25 // Max 25 cámaras
+            );
+
+            if (viz_success) {
+                LOG_INFO("✓ Diagnostic images saved to: {}", diag_dir.string());
+                LOG_INFO("  Generated 6 layers per camera:");
+                LOG_INFO("    01_mask.jpg          - Mask only");
+                LOG_INFO("    02_centers_all.jpg   - All splat centers");
+                LOG_INFO("    03_centers_classified.jpg - Green=inside, Red=outside");
+                LOG_INFO("    04_footprints.jpg    - Splat ellipses");
+                LOG_INFO("    05_problem_splats.jpg - Outside + large radius");
+                LOG_INFO("    06_summary.jpg       - Summary overlay");
+            } else {
+                LOG_WARN("Failed to generate diagnostic visualizations");
+            }
+#endif
+            LOG_INFO("Running post-training mask-based pruning...");
+
+            auto pruning_result = mask_pruning::prune_after_training(
+                *strategy_,
+                *train_dataset_,
+                geomdome_cfg,
+                center_cfg,
+                leak_cfg,
+                iso_cfg);
+
+            if (!pruning_result) {
+                LOG_WARN("Post-training pruning failed: {}", pruning_result.error());
+            } else if (pruning_result->splats_removed > 0) {
+                LOG_INFO("Pruning complete: removed {} splats ({:.1f}%)",
+                         pruning_result->splats_removed,
+                         pruning_result->removal_ratio() * 100.0f);
+            }
+        }
+    }
+
     std::expected<Trainer::StepResult, std::string> Trainer::train_step(
         int iter,
         lfs::core::Camera* cam,
@@ -2000,6 +2101,8 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                             }
                         }*/
 
+                        /* if (iter == int(0.25 * params_.optimization.iterations))
+                            SMNprune(params_.optimization.mask_mode, params_.optimization.invert_masks, strategy_, train_dataset_);*/
                         // Modo Orig
                         if (progress < 0.25f) {
                             step_params.mask_mode = lfs::core::param::MaskMode::None;
@@ -2667,99 +2770,8 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
 
             // -----------------------------------------------------------------
             // Post-training mask-based pruning
-            //
-            // For matting modes, remove splats that don't align with masks:
-            // - Center-vote: splats whose center is outside mask in most views
-            // - Leakage: splats whose footprint extends outside mask boundary
             // -----------------------------------------------------------------
-            if (params_.optimization.mask_mode == lfs::core::param::MaskMode::FocusedSegment)
-            {
-                mask_pruning::GeometricDomePruningConfig geomdome_cfg;
-                //default values are ok
-
-                mask_pruning::CenterVotePruningConfig center_cfg;
-                center_cfg.enabled = true;
-
-                // Conservative threshold — protects legitimate border splats (feet, arms).
-                // Only removes Gaussians clearly outside the mask in a large majority of views.
-                // In a dome with 104 cameras, a splat visible in 30 views can afford 8 bad-mask
-                // views and still pass (73% good > 0.72).
-                center_cfg.vote_ratio_threshold = 0.75f;
-                // Moderate margin — avoids penalizing splats near frustum edges without
-                // being as permissive as the original 0.25 that missed lateral floaters.
-                center_cfg.border_safe_margin = 0.33f;
-                center_cfg.enable_depth_filtering = true;
-                center_cfg.min_visibility_count = 3;
-                center_cfg.invert_masks = params_.optimization.invert_masks;
-
-                mask_pruning::LeakagePruningConfig leak_cfg;
-                leak_cfg.enabled = true;
-                // Main tool for halos — removes elongated Gaussians whose footprint
-                // extends outside the mask. Center vote is too permissive for these.
-                leak_cfg.leak_keep_threshold = 0.70f;
-                // 2 of 8 sample points outside counts as a leak per view.
-                // Catches elongated splats extending above heads without being too strict
-                // on border splats that legitimately straddle the mask edge.
-                leak_cfg.per_view_leak_fraction = 0.25f;
-                leak_cfg.min_visibility_count = 3;
-                // Low radius — evaluate small/thin elongated splats that caused halos.
-                // Original 2.0f missed these entirely.
-                leak_cfg.min_pixel_radius = 1.0f;
-                leak_cfg.sample_points = 8;
-                // Small dilation — tolerates 3px at mask boundary to protect
-                // extremities that straddle the mask edge in some views.
-                leak_cfg.dilate_px = 2;
-                leak_cfg.invert_masks = params_.optimization.invert_masks;
-
-                
-                mask_pruning::IsolationPruningConfig iso_cfg;
-                iso_cfg.enabled = true;
-
-                #ifdef NeedsPruningDiagnostics
-                    std::filesystem::path diag_dir = params_.dataset.output_path / "pruning_diagnostics";
-
-                    LOG_INFO("===== MASK-BASED PRUNING WITH VISUALIZATION =====");
-                    bool viz_success = mask_pruning::visualizer::generate_pruning_diagnostics(
-                        *strategy_,
-                        *train_dataset_,
-                        center_cfg,
-                        diag_dir,
-                        25 // Max 25 cámaras
-                    );
-
-                    if (viz_success) {
-                        LOG_INFO("✓ Diagnostic images saved to: {}", diag_dir.string());
-                        LOG_INFO("  Generated 6 layers per camera:");
-                        LOG_INFO("    01_mask.jpg          - Mask only");
-                        LOG_INFO("    02_centers_all.jpg   - All splat centers");
-                        LOG_INFO("    03_centers_classified.jpg - Green=inside, Red=outside");
-                        LOG_INFO("    04_footprints.jpg    - Splat ellipses");
-                        LOG_INFO("    05_problem_splats.jpg - Outside + large radius");
-                        LOG_INFO("    06_summary.jpg       - Summary overlay");
-                    } else {
-                        LOG_WARN("Failed to generate diagnostic visualizations");
-                    }
-                #endif
-                LOG_INFO("Running post-training mask-based pruning...");
-
-
-                auto pruning_result = mask_pruning::prune_after_training(
-                    *strategy_,
-                    *train_dataset_,
-                    geomdome_cfg,
-                    center_cfg,
-                    leak_cfg,
-                    iso_cfg);
-
-
-                if (!pruning_result) {
-                    LOG_WARN("Post-training pruning failed: {}", pruning_result.error());
-                } else if (pruning_result->splats_removed > 0) {
-                    LOG_INFO("Pruning complete: removed {} splats ({:.1f}%)",
-                             pruning_result->splats_removed,
-                             pruning_result->removal_ratio() * 100.0f);
-                }
-            }
+            SMNprune(params_.optimization.mask_mode, params_.optimization.invert_masks, strategy_, train_dataset_);
 
             // Final save if not already saved by stop request
             if (!stop_requested_.load() && !stop_token.stop_requested()) {
