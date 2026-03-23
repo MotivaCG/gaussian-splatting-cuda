@@ -1677,8 +1677,7 @@ namespace lfs::vis {
                 dataset_path_ = path;
             }
 
-            const auto* training_model = scene_.getTrainingModel();
-            const size_t num_gaussians = training_model ? training_model->size() : 0;
+            const size_t num_gaussians = scene_.getTrainingModelGaussianCount();
             const auto* point_cloud = scene_.getVisiblePointCloud();
             const size_t num_points = point_cloud ? point_cloud->size() : 0;
 
@@ -1776,8 +1775,7 @@ namespace lfs::vis {
             }
 
             // Get info from scene
-            const auto* training_model = scene_.getTrainingModel();
-            const size_t num_gaussians = training_model ? training_model->size() : 0;
+            const size_t num_gaussians = scene_.getTrainingModelGaussianCount();
             const auto* point_cloud = scene_.getVisiblePointCloud();
             const size_t num_points = point_cloud ? point_cloud->size() : 0;
             const size_t num_cameras = scene_.getAllCameras().size();
@@ -2236,8 +2234,7 @@ namespace lfs::vis {
             // For dataset mode, get info from scene directly (Scene owns the model)
             info.has_model = scene_.hasNodes();
             if (info.has_model) {
-                const auto* training_model = scene_.getTrainingModel();
-                info.num_gaussians = training_model ? training_model->size() : 0;
+                info.num_gaussians = scene_.getTrainingModelGaussianCount();
             }
             info.num_nodes = scene_.getNodeCount();
             info.source_type = "Dataset";
@@ -2358,7 +2355,7 @@ namespace lfs::vis {
             if (filtered_count > 0 && filtered_count < num_points) {
                 node->point_cloud = std::make_shared<lfs::core::PointCloud>(
                     means.index_select(0, indices), colors.index_select(0, indices));
-                node->gaussian_count = filtered_count;
+                node->gaussian_count.store(filtered_count, std::memory_order_release);
 
                 LOG_INFO("Cropped PointCloud '{}': {} -> {} points", node_name, num_points, filtered_count);
 
@@ -2519,7 +2516,7 @@ namespace lfs::vis {
             if (filtered_count > 0 && filtered_count < num_points) {
                 node->point_cloud = std::make_shared<lfs::core::PointCloud>(
                     means.index_select(0, indices), colors.index_select(0, indices));
-                node->gaussian_count = filtered_count;
+                node->gaussian_count.store(filtered_count, std::memory_order_release);
                 LOG_INFO("Ellipsoid cropped PointCloud '{}': {} -> {} points", node_name, num_points, filtered_count);
             }
         }
@@ -2744,7 +2741,7 @@ namespace lfs::vis {
         if (const auto* added = scene_.getNode(unique_name)) {
             state::PLYAdded{
                 .name = unique_name,
-                .node_gaussians = added->gaussian_count,
+                .node_gaussians = added->gaussian_count.load(std::memory_order_acquire),
                 .total_gaussians = scene_.getTotalGaussianCount(),
                 .is_visible = added->visible,
                 .parent_name = parent_name,
@@ -2785,7 +2782,7 @@ namespace lfs::vis {
 
                 state::PLYAdded{
                     .name = node->name,
-                    .node_gaussians = node->gaussian_count,
+                    .node_gaussians = node->gaussian_count.load(std::memory_order_acquire),
                     .total_gaussians = scene_.getTotalGaussianCount(),
                     .is_visible = node->visible,
                     .parent_name = pn,
@@ -2873,7 +2870,7 @@ namespace lfs::vis {
         if (merged) {
             state::PLYAdded{
                 .name = merged->name,
-                .node_gaussians = merged->gaussian_count,
+                .node_gaussians = merged->gaussian_count.load(std::memory_order_acquire),
                 .total_gaussians = scene_.getTotalGaussianCount(),
                 .is_visible = merged->visible,
                 .parent_name = parent_name,
@@ -3439,7 +3436,7 @@ namespace lfs::vis {
 
             state::PLYAdded{
                 .name = name,
-                .node_gaussians = pasted_node ? pasted_node->gaussian_count : 0,
+                .node_gaussians = pasted_node ? pasted_node->gaussian_count.load(std::memory_order_acquire) : 0,
                 .total_gaussians = scene_.getTotalGaussianCount(),
                 .is_visible = true,
                 .parent_name = "",

@@ -5,8 +5,19 @@
 #include "gs_rasterizer_tensor.hpp"
 #include "core/logger.hpp"
 #include "rasterization_api_tensor.h"
+#include <algorithm>
 
 namespace lfs::rendering {
+
+    namespace {
+        [[nodiscard]] int resolve_render_sh_degree(
+            const lfs::core::SplatData& gaussian_model,
+            const int requested_sh_degree) {
+            const int fallback_sh_degree = gaussian_model.get_active_sh_degree();
+            const int target_sh_degree = requested_sh_degree >= 0 ? requested_sh_degree : fallback_sh_degree;
+            return std::clamp(target_sh_degree, 0, gaussian_model.get_max_sh_degree());
+        }
+    } // namespace
 
     std::tuple<Tensor, Tensor> rasterize_tensor(
         const lfs::core::Camera& viewpoint_camera,
@@ -52,7 +63,8 @@ namespace lfs::rendering {
         float selection_flash_intensity,
         bool orthographic,
         float ortho_scale,
-        bool mip_filter) {
+        bool mip_filter,
+        const int render_sh_degree) {
 
         // Get camera parameters
         const float fx = viewpoint_camera.focal_x();
@@ -60,7 +72,7 @@ namespace lfs::rendering {
         const float cx = viewpoint_camera.center_x();
         const float cy = viewpoint_camera.center_y();
 
-        const int sh_degree = gaussian_model.get_active_sh_degree();
+        const int sh_degree = resolve_render_sh_degree(gaussian_model, render_sh_degree);
         const int active_sh_bases = (sh_degree + 1) * (sh_degree + 1);
 
         constexpr float NEAR_PLANE = 0.01f;
@@ -188,11 +200,12 @@ namespace lfs::rendering {
         const GutCameraModel camera_model,
         const Tensor* model_transforms,
         const Tensor* transform_indices,
-        const std::vector<bool>& node_visibility_mask) {
+        const std::vector<bool>& node_visibility_mask,
+        const int render_sh_degree) {
 
         const int width = camera.camera_width();
         const int height = camera.camera_height();
-        const int sh_degree = model.get_active_sh_degree();
+        const int sh_degree = resolve_render_sh_degree(model, render_sh_degree);
 
         const auto& w2c = camera.world_view_transform();
 

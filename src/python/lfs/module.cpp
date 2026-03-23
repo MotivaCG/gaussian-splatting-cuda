@@ -1493,8 +1493,9 @@ NB_MODULE(lichtfeld, m) {
                     std::string info = std::format("[{}{}] {} ({}, id={})",
                                                    vis, lock, node->name, type_name, node->id);
 
-                    if (node->gaussian_count > 0) {
-                        info += std::format(" [{} splats]", node->gaussian_count);
+                    const size_t gaussian_count = node->gaussian_count.load(std::memory_order_acquire);
+                    if (gaussian_count > 0) {
+                        info += std::format(" [{} splats]", gaussian_count);
                     }
 
                     nb::print(nb::str("{}{}").format(indent, info));

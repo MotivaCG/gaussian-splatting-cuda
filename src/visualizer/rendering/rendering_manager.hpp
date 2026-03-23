@@ -71,18 +71,17 @@ namespace lfs::vis {
             std::chrono::steady_clock::time_point last_access;
         };
 
+        lfs::io::PipelinedImageLoader& get_fallback_loader();
+        TextureInfo loadFromPipeline(lfs::io::PipelinedImageLoader& loader,
+                                     const std::filesystem::path& path,
+                                     const lfs::io::LoadParams& params,
+                                     CacheEntry& entry);
+
         std::unordered_map<int, CacheEntry> texture_cache_;
-        std::unique_ptr<lfs::io::NvCodecImageLoader> nvcodec_loader_;
+        std::unique_ptr<lfs::io::PipelinedImageLoader> fallback_loader_;
         static constexpr size_t MAX_CACHE_SIZE = 20;
 
         void evictOldest();
-        TextureInfo loadTextureFromLoader(lfs::io::PipelinedImageLoader& loader,
-                                          const std::filesystem::path& path,
-                                          const lfs::io::LoadParams& params,
-                                          CacheEntry& entry);
-        TextureInfo loadTextureFromTensor(const lfs::core::Tensor& tensor, CacheEntry& entry);
-        TextureInfo loadTexture(const std::filesystem::path& path);
-        TextureInfo loadTextureGPU(const std::filesystem::path& path, CacheEntry& entry);
     };
 
     class LFS_VIS_API RenderingManager {
@@ -334,7 +333,8 @@ namespace lfs::vis {
         }
 
         void doFullRender(const RenderContext& context, SceneManager* scene_manager,
-                          const lfs::core::SplatData* model);
+                          const lfs::core::SplatData* model,
+                          bool render_lock_held);
         void setupEventHandlers();
 
         // Core components

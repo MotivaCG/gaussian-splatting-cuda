@@ -5,12 +5,12 @@
 #include "rendering_manager.hpp"
 #include "core/camera.hpp"
 #include "core/cuda_debug.hpp"
-#include "core/image_io.hpp"
 #include "core/logger.hpp"
 #include "core/mesh_data.hpp"
 #include "core/path_utils.hpp"
 #include "core/splat_data.hpp"
 #include "geometry/euclidean_transform.hpp"
+#include "io/pipelined_image_loader.hpp"
 #include "passes/mesh_pass.hpp"
 #include "passes/overlay_pass.hpp"
 #include "passes/point_cloud_pass.hpp"
@@ -19,6 +19,7 @@
 #include "passes/split_view_pass.hpp"
 #include "render_pass.hpp"
 #include "rendering/cuda_kernels.hpp"
+#include "rendering/image_texture_loader.hpp"
 #include "rendering/rasterizer/rasterization/include/rasterization_api_tensor.h"
 #include "rendering/rasterizer/rasterization/include/rasterization_config.h"
 #include "rendering/rendering.hpp"
@@ -41,6 +42,16 @@
 namespace lfs::vis {
 
     namespace {
+        [[nodiscard]] std::optional<std::shared_lock<std::shared_mutex>> acquireLiveModelRenderLock(
+            const SceneManager* const scene_manager) {
+            std::optional<std::shared_lock<std::shared_mutex>> lock;
+            if (const auto* tm = scene_manager ? scene_manager->getTrainerManager() : nullptr) {
+                if (const auto* trainer = tm->getTrainer()) {
+                    lock.emplace(trainer->getRenderMutex());
+                }
+            }
+            return lock;
+        }
 
         template <typename TRenderable>
         [[nodiscard]] const TRenderable* findRenderableByNodeId(const std::vector<TRenderable>& renderables,
@@ -61,12 +72,6 @@ namespace lfs::vis {
                 signature += "_ud";
             }
             return signature;
-        }
-
-        [[nodiscard]] std::string makeFallbackLoadSignature(
-            const std::filesystem::path& image_path,
-            const std::string_view loader_kind) {
-            return lfs::core::path_to_utf8(image_path) + ":" + std::string(loader_kind);
         }
 
         [[nodiscard]] lfs::io::LoadParams normalizeGTLoadParams(const lfs::io::LoadParams& load_params) {
@@ -116,21 +121,28 @@ namespace lfs::vis {
         texture_cache_.clear();
     }
 
+    lfs::io::PipelinedImageLoader& GTTextureCache::get_fallback_loader() {
+        if (!fallback_loader_) {
+            lfs::io::PipelinedLoaderConfig config;
+            config.io_threads = 0;
+            config.cold_process_threads = 0;
+            config.max_cache_bytes = 512ULL * 1024 * 1024;
+            fallback_loader_ = std::make_unique<lfs::io::PipelinedImageLoader>(config);
+        }
+        return *fallback_loader_;
+    }
+
     GTTextureCache::TextureInfo GTTextureCache::getGTTexture(
         const int cam_id,
         const std::filesystem::path& image_path,
         lfs::io::PipelinedImageLoader* const pipeline_loader,
         const lfs::io::LoadParams* const load_params) {
-        const std::optional<lfs::io::LoadParams> effective_load_params =
-            (pipeline_loader && load_params) ? std::optional<lfs::io::LoadParams>(normalizeGTLoadParams(*load_params))
-                                             : std::nullopt;
-        const std::string requested_signature =
-            effective_load_params
-                ? makePipelineLoadSignature(image_path, *effective_load_params)
-                : makeFallbackLoadSignature(image_path, "fallback");
+        auto& loader = pipeline_loader ? *pipeline_loader : get_fallback_loader();
+        const auto effective_params = load_params ? normalizeGTLoadParams(*load_params) : normalizeGTLoadParams({});
+        const auto signature = makePipelineLoadSignature(image_path, effective_params);
 
         if (const auto it = texture_cache_.find(cam_id);
-            it != texture_cache_.end() && it->second.load_signature == requested_signature) {
+            it != texture_cache_.end() && it->second.load_signature == signature) {
             it->second.last_access = std::chrono::steady_clock::now();
             const auto& entry = it->second;
             const unsigned int tex_id = entry.interop_texture ? entry.interop_texture->getTextureID() : entry.texture_id;
@@ -142,307 +154,57 @@ namespace lfs::vis {
         }
 
         if (const auto it = texture_cache_.find(cam_id); it != texture_cache_.end()) {
-            if (!it->second.interop_texture && it->second.texture_id > 0) {
+            if (!it->second.interop_texture && it->second.texture_id > 0)
                 glDeleteTextures(1, &it->second.texture_id);
-            }
             texture_cache_.erase(it);
         }
 
         if (texture_cache_.size() >= MAX_CACHE_SIZE)
             evictOldest();
 
-        const auto ext = image_path.extension().string();
-        const bool is_jpeg = (ext == ".jpg" || ext == ".jpeg" || ext == ".JPG" || ext == ".JPEG");
-
         CacheEntry entry;
         entry.last_access = std::chrono::steady_clock::now();
 
-        if (!nvcodec_loader_ && is_jpeg) {
-            try {
-                constexpr lfs::io::NvCodecImageLoader::Options OPTS{.device_id = 0, .decoder_pool_size = 2};
-                nvcodec_loader_ = std::make_unique<lfs::io::NvCodecImageLoader>(OPTS);
-            } catch (...) {
-                nvcodec_loader_ = nullptr;
-            }
-        }
-
-        TextureInfo info{};
-        if (pipeline_loader && effective_load_params) {
-            info = loadTextureFromLoader(*pipeline_loader, image_path, *effective_load_params, entry);
-        }
-        if (nvcodec_loader_ && is_jpeg) {
-            if (info.texture_id == 0) {
-                info = loadTextureGPU(image_path, entry);
-            }
-        }
-
-        if (info.texture_id == 0) {
-            info = loadTexture(image_path);
-            if (info.texture_id != 0) {
-                entry.texture_id = info.texture_id;
-                entry.width = info.width;
-                entry.height = info.height;
-                entry.needs_flip = false;
-            }
-        }
-
-        if (info.texture_id == 0) {
+        auto info = loadFromPipeline(loader, image_path, effective_params, entry);
+        if (info.texture_id == 0)
             return {};
-        }
 
-        entry.load_signature = requested_signature;
+        entry.load_signature = signature;
         texture_cache_[cam_id] = std::move(entry);
         return info;
     }
 
     void GTTextureCache::evictOldest() {
-        if (texture_cache_.empty()) {
+        if (texture_cache_.empty())
             return;
-        }
 
-        const auto oldest = std::min_element(texture_cache_.begin(), texture_cache_.end(),
-                                             [](const auto& a, const auto& b) { return a.second.last_access < b.second.last_access; });
+        const auto oldest = std::min_element(
+            texture_cache_.begin(), texture_cache_.end(),
+            [](const auto& a, const auto& b) { return a.second.last_access < b.second.last_access; });
 
-        if (!oldest->second.interop_texture && oldest->second.texture_id != 0) {
+        if (!oldest->second.interop_texture && oldest->second.texture_id != 0)
             glDeleteTextures(1, &oldest->second.texture_id);
-        }
         texture_cache_.erase(oldest);
     }
 
-    GTTextureCache::TextureInfo GTTextureCache::loadTexture(const std::filesystem::path& path) {
-        if (!std::filesystem::exists(path))
-            return {};
-
-        try {
-            auto [data, width, height, channels] = lfs::core::load_image(path);
-            if (!data)
-                return {};
-
-            int out_width = width;
-            int out_height = height;
-            int scale = 1;
-            while (out_width > MAX_TEXTURE_DIM || out_height > MAX_TEXTURE_DIM) {
-                out_width /= 2;
-                out_height /= 2;
-                scale *= 2;
-            }
-
-            std::vector<unsigned char> final_data(out_width * out_height * channels);
-            const int scale_sq = scale * scale;
-
-            if (scale > 1) {
-                for (int y = 0; y < out_height; ++y) {
-                    const int src_y = (out_height - 1 - y) * scale;
-                    for (int x = 0; x < out_width; ++x) {
-                        const int src_x = x * scale;
-                        for (int c = 0; c < channels; ++c) {
-                            int sum = 0;
-                            for (int sy = 0; sy < scale; ++sy)
-                                for (int sx = 0; sx < scale; ++sx)
-                                    sum += data[((src_y + sy) * width + src_x + sx) * channels + c];
-                            final_data[(y * out_width + x) * channels + c] =
-                                static_cast<unsigned char>(sum / scale_sq);
-                        }
-                    }
-                }
-            } else {
-                const size_t row_size = width * channels;
-                for (int y = 0; y < height; ++y)
-                    std::memcpy(final_data.data() + y * row_size,
-                                data + (height - 1 - y) * row_size, row_size);
-            }
-
-            lfs::core::free_image(data);
-
-            unsigned int texture;
-            glGenTextures(1, &texture);
-            glBindTexture(GL_TEXTURE_2D, texture);
-
-            const GLenum format = (channels == 1) ? GL_RED : (channels == 4) ? GL_RGBA
-                                                                             : GL_RGB;
-            const GLenum internal = (channels == 1) ? GL_R8 : (channels == 4) ? GL_RGBA8
-                                                                              : GL_RGB8;
-
-            glTexImage2D(GL_TEXTURE_2D, 0, internal, out_width, out_height, 0,
-                         format, GL_UNSIGNED_BYTE, final_data.data());
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-            return {texture, out_width, out_height};
-        } catch (...) {
-            return {};
-        }
-    }
-
-    GTTextureCache::TextureInfo GTTextureCache::loadTextureFromLoader(
+    GTTextureCache::TextureInfo GTTextureCache::loadFromPipeline(
         lfs::io::PipelinedImageLoader& loader,
         const std::filesystem::path& path,
         const lfs::io::LoadParams& params,
         CacheEntry& entry) {
-        if (!std::filesystem::exists(path))
-            return {};
-
-        try {
-            const auto tensor = loader.load_image_immediate(path, params);
-            if (tensor.numel() == 0)
-                return {};
-
-            const auto& shape = tensor.shape();
-            const int height = static_cast<int>(shape[1]);
-            const int width = static_cast<int>(shape[2]);
-            const auto hwc = tensor.permute({1, 2, 0}).contiguous();
-
-            entry.interop_texture = std::make_unique<lfs::rendering::CudaGLInteropTexture>();
-            if (auto result = entry.interop_texture->init(width, height); !result) {
-                LOG_WARN("Failed to init GT interop texture from loader: {}", result.error());
-                entry.interop_texture.reset();
-                return loadTextureFromTensor(tensor, entry);
-            }
-
-            if (auto result = entry.interop_texture->updateFromTensor(hwc); !result) {
-                LOG_WARN("Failed to upload GT texture from loader: {}", result.error());
-                entry.interop_texture.reset();
-                return loadTextureFromTensor(tensor, entry);
-            }
-
-            entry.width = width;
-            entry.height = height;
-            entry.needs_flip = true;
-
-            const glm::vec2 tex_scale(
-                entry.interop_texture->getTexcoordScaleX(),
-                entry.interop_texture->getTexcoordScaleY());
-
-            return {entry.interop_texture->getTextureID(), width, height, true, tex_scale};
-        } catch (const std::exception& e) {
-            LOG_WARN("GT loader path failed for {}: {}", lfs::core::path_to_utf8(path), e.what());
+        auto loaded = image_texture::load_texture_from_loader(loader, path, params, "GT");
+        if (!loaded) {
             entry.interop_texture.reset();
             return {};
         }
-    }
 
-    GTTextureCache::TextureInfo GTTextureCache::loadTextureFromTensor(const lfs::core::Tensor& tensor, CacheEntry& entry) {
-        if (!tensor.is_valid() || tensor.ndim() != 3 || tensor.numel() == 0) {
-            return {};
-        }
+        entry.interop_texture = std::move(loaded->interop_texture);
+        entry.texture_id = loaded->texture_id;
+        entry.width = loaded->width;
+        entry.height = loaded->height;
+        entry.needs_flip = true;
 
-        try {
-            lfs::core::Tensor formatted = tensor;
-            int channels = 0;
-            int width = 0;
-            int height = 0;
-
-            const auto& shape = tensor.shape();
-            const int first_dim = static_cast<int>(shape[0]);
-            const int last_dim = static_cast<int>(shape[2]);
-
-            if (first_dim == 1 || first_dim == 3 || first_dim == 4) {
-                channels = first_dim;
-                height = static_cast<int>(shape[1]);
-                width = static_cast<int>(shape[2]);
-                formatted = tensor.permute({1, 2, 0}).contiguous();
-            } else if (last_dim == 1 || last_dim == 3 || last_dim == 4) {
-                channels = last_dim;
-                height = static_cast<int>(shape[0]);
-                width = static_cast<int>(shape[1]);
-                formatted = tensor.contiguous();
-            } else {
-                LOG_WARN("Unsupported GT tensor shape for CPU upload: [{}, {}, {}]",
-                         static_cast<int>(shape[0]), static_cast<int>(shape[1]), static_cast<int>(shape[2]));
-                return {};
-            }
-
-            if (formatted.device() == lfs::core::Device::CUDA) {
-                formatted = formatted.cpu();
-            }
-            formatted = formatted.contiguous();
-
-            if (formatted.dtype() != lfs::core::DataType::UInt8) {
-                formatted = (formatted.clamp(0.0f, 1.0f) * 255.0f).to(lfs::core::DataType::UInt8);
-            }
-
-            unsigned int texture = 0;
-            glGenTextures(1, &texture);
-            glBindTexture(GL_TEXTURE_2D, texture);
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-            const GLenum format = (channels == 1) ? GL_RED : (channels == 4) ? GL_RGBA
-                                                                             : GL_RGB;
-            const GLenum internal = (channels == 1) ? GL_R8 : (channels == 4) ? GL_RGBA8
-                                                                              : GL_RGB8;
-
-            glTexImage2D(GL_TEXTURE_2D, 0, internal, width, height, 0,
-                         format, GL_UNSIGNED_BYTE, formatted.ptr<unsigned char>());
-
-            if (const GLenum gl_err = glGetError(); gl_err != GL_NO_ERROR) {
-                glBindTexture(GL_TEXTURE_2D, 0);
-                glDeleteTextures(1, &texture);
-                LOG_WARN("Failed to upload GT texture through CPU path: {}", static_cast<int>(gl_err));
-                return {};
-            }
-            glBindTexture(GL_TEXTURE_2D, 0);
-
-            entry.interop_texture.reset();
-            entry.texture_id = texture;
-            entry.width = width;
-            entry.height = height;
-            entry.needs_flip = true;
-
-            return {texture, width, height, true};
-        } catch (const std::exception& e) {
-            LOG_WARN("GT tensor CPU upload failed: {}", e.what());
-            return {};
-        }
-    }
-
-    GTTextureCache::TextureInfo GTTextureCache::loadTextureGPU(const std::filesystem::path& path, CacheEntry& entry) {
-        if (!nvcodec_loader_)
-            return {};
-
-        try {
-            const auto tensor = nvcodec_loader_->load_image_gpu(path, 1, MAX_TEXTURE_DIM);
-            if (tensor.numel() == 0)
-                return {};
-
-            const auto& shape = tensor.shape();
-            const int height = static_cast<int>(shape[1]);
-            const int width = static_cast<int>(shape[2]);
-
-            const auto hwc = tensor.permute({1, 2, 0}).contiguous();
-
-            entry.interop_texture = std::make_unique<lfs::rendering::CudaGLInteropTexture>();
-            if (auto result = entry.interop_texture->init(width, height); !result) {
-                LOG_WARN("Failed to init interop texture: {}", result.error());
-                entry.interop_texture.reset();
-                return {};
-            }
-
-            if (auto result = entry.interop_texture->updateFromTensor(hwc); !result) {
-                LOG_WARN("Failed to upload to interop texture: {}", result.error());
-                entry.interop_texture.reset();
-                return {};
-            }
-
-            entry.width = width;
-            entry.height = height;
-            entry.needs_flip = true;
-
-            const glm::vec2 tex_scale(
-                entry.interop_texture->getTexcoordScaleX(),
-                entry.interop_texture->getTexcoordScaleY());
-
-            return {entry.interop_texture->getTextureID(), width, height, true, tex_scale};
-        } catch (const std::exception& e) {
-            LOG_WARN("GPU texture load failed: {}", e.what());
-            entry.interop_texture.reset();
-            return {};
-        }
+        return {loaded->texture_id, loaded->width, loaded->height, true, loaded->texcoord_scale};
     }
 
     // RenderingManager Implementation
@@ -606,19 +368,34 @@ namespace lfs::vis {
         ui::NodeSelected::when([this](const auto&) { triggerSelectionFlash(); });
 
         // Scene changes
-        state::SceneLoaded::when([this](const auto&) {
+        state::SceneLoaded::when([this](const auto& event) {
             LOG_DEBUG("Scene loaded, marking render dirty");
-            markDirty();
             gt_texture_cache_.clear(); // Clear GT cache when scene changes
+            if (engine_) {
+                engine_->clearFrustumCache();
+            }
 
             // Reset current camera ID when loading a new scene
             current_camera_id_ = -1;
+            hovered_camera_id_ = -1;
+            highlighted_camera_index_ = -1;
 
-            // If GT comparison is enabled but we lost the camera, disable it
+            std::lock_guard<std::mutex> lock(settings_mutex_);
+
+            // Training-data loads should start with frustums enabled so dataset cameras
+            // are immediately visible and the frustum thumbnail path becomes active.
+            if (event.type == state::SceneLoaded::Type::Dataset ||
+                event.type == state::SceneLoaded::Type::Checkpoint) {
+                settings_.show_camera_frustums = true;
+            }
+
+            // If GT comparison is enabled but we lost the camera, disable it.
             if (settings_.split_view_mode == SplitViewMode::GTComparison) {
                 LOG_INFO("Scene loaded, disabling GT comparison (camera selection reset)");
                 settings_.split_view_mode = SplitViewMode::Disabled;
             }
+
+            markDirty();
         });
 
         state::SceneChanged::when([this](const auto&) {
@@ -637,6 +414,8 @@ namespace lfs::vis {
                 engine_->clearFrustumCache();
             }
             current_camera_id_ = -1;
+            hovered_camera_id_ = -1;
+            highlighted_camera_index_ = -1;
             last_model_ptr_ = 0;
             markDirty();
         });
@@ -902,6 +681,7 @@ namespace lfs::vis {
         if (!initialized_ || !engine_)
             return false;
 
+        auto render_lock = acquireLiveModelRenderLock(scene_manager);
         const auto* const model = scene_manager ? scene_manager->getModelForRendering() : nullptr;
         const auto* const point_cloud =
             (scene_manager && (!model || model->size() == 0))
@@ -1005,19 +785,6 @@ namespace lfs::vis {
             }
         }
 
-        const lfs::core::SplatData* const model = scene_manager ? scene_manager->getModelForRendering() : nullptr;
-        const auto* const visible_point_cloud =
-            (scene_manager && !model) ? scene_manager->getScene().getVisiblePointCloud() : nullptr;
-        const bool has_visible_point_cloud = visible_point_cloud && visible_point_cloud->size() > 0;
-        const size_t model_ptr = reinterpret_cast<size_t>(model);
-
-        if (model_ptr != last_model_ptr_) {
-            LOG_DEBUG("Model ptr changed: {} -> {}, size={}", last_model_ptr_, model_ptr, model ? model->size() : 0);
-            markDirty(DirtyFlag::ALL);
-            last_model_ptr_ = model_ptr;
-            cached_result_ = {};
-        }
-
         const bool is_training = scene_manager && scene_manager->hasDataset() &&
                                  scene_manager->getTrainerManager() &&
                                  scene_manager->getTrainerManager()->isRunning();
@@ -1033,14 +800,14 @@ namespace lfs::vis {
         }
 
         if (settings_.split_view_mode == SplitViewMode::GTComparison) {
-            if (current_camera_id_ < 0 || (!model && !has_visible_point_cloud)) {
+            if (current_camera_id_ < 0) {
                 gt_context_.reset();
                 gt_context_camera_id_ = -1;
             } else {
                 gt_context_.reset();
                 gt_context_camera_id_ = -1;
 
-                if (auto* trainer_manager = scene_manager->getTrainerManager();
+                if (auto* trainer_manager = scene_manager ? scene_manager->getTrainerManager() : nullptr;
                     trainer_manager && trainer_manager->hasTrainer()) {
                     if (const auto* trainer = trainer_manager->getTrainer()) {
                         const auto loader_owner = trainer->getActiveImageLoader();
@@ -1092,6 +859,28 @@ namespace lfs::vis {
             }
         }
 
+        auto render_lock = acquireLiveModelRenderLock(scene_manager);
+        const lfs::core::SplatData* const model = scene_manager ? scene_manager->getModelForRendering() : nullptr;
+        const auto* const visible_point_cloud =
+            (scene_manager && !model) ? scene_manager->getScene().getVisiblePointCloud() : nullptr;
+        const bool has_visible_point_cloud = visible_point_cloud && visible_point_cloud->size() > 0;
+        const size_t model_ptr = reinterpret_cast<size_t>(model);
+
+        if (settings_.split_view_mode == SplitViewMode::GTComparison &&
+            current_camera_id_ >= 0 &&
+            !model &&
+            !has_visible_point_cloud) {
+            gt_context_.reset();
+            gt_context_camera_id_ = -1;
+        }
+
+        if (model_ptr != last_model_ptr_) {
+            LOG_DEBUG("Model ptr changed: {} -> {}, size={}", last_model_ptr_, model_ptr, model ? model->size() : 0);
+            markDirty(DirtyFlag::ALL);
+            last_model_ptr_ = model_ptr;
+            cached_result_ = {};
+        }
+
         if (!cached_result_.image &&
             (model || has_visible_point_cloud || settings_.split_view_mode != SplitViewMode::Disabled))
             dirty_mask_.fetch_or(DirtyFlag::ALL, std::memory_order_relaxed);
@@ -1114,7 +903,7 @@ namespace lfs::vis {
             glEnable(GL_SCISSOR_TEST);
         }
 
-        doFullRender(context, scene_manager, model);
+        doFullRender(context, scene_manager, model, render_lock.has_value());
 
         if (resize_completed) {
             resize_completed_ = true;
@@ -1133,8 +922,17 @@ namespace lfs::vis {
     }
 
     void RenderingManager::doFullRender(const RenderContext& context, SceneManager* scene_manager,
-                                        const lfs::core::SplatData* model) {
+                                        const lfs::core::SplatData* model,
+                                        const bool render_lock_held) {
         LOG_TIMER_TRACE("RenderingManager::doFullRender");
+
+        std::shared_ptr<lfs::io::PipelinedImageLoader> frustum_loader;
+        if (auto* tm = scene_manager ? scene_manager->getTrainerManager() : nullptr;
+            tm && tm->hasTrainer()) {
+            if (const auto* trainer = tm->getTrainer())
+                frustum_loader = trainer->getActiveImageLoader();
+        }
+        engine_->setFrustumImageLoader(std::move(frustum_loader));
 
         render_count_++;
         LOG_TRACE("Render #{}", render_count_);
@@ -1183,6 +981,7 @@ namespace lfs::vis {
         const FrameContext frame_ctx{
             .viewport = context.viewport,
             .viewport_region = context.viewport_region,
+            .render_lock_held = render_lock_held,
             .scene_manager = scene_manager,
             .model = model,
             .scene_state = std::move(scene_state),

@@ -79,7 +79,7 @@ namespace lfs::mcp {
                 if (!node)
                     continue;
                 has_model = true;
-                total += static_cast<int64_t>(node->gaussian_count);
+                total += static_cast<int64_t>(node->gaussian_count.load(std::memory_order_acquire));
             }
 
             if (!has_model)

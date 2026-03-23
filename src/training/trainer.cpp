@@ -55,6 +55,14 @@
 namespace lfs::training {
 
     namespace {
+        void syncTrainingSceneTopology(lfs::core::Scene* const scene,
+                                       const lfs::core::SplatData& model) {
+            if (!scene) {
+                return;
+            }
+            scene->syncTrainingModelTopology(static_cast<size_t>(model.size()));
+        }
+
         template <typename Fn>
         class ScopeGuard {
         public:
@@ -2410,6 +2418,8 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                 DeferredEvents deferred;
                 {
                     std::unique_lock<std::shared_mutex> lock(render_mutex_);
+                    auto& model = strategy_->get_model();
+                    const size_t model_size_before = static_cast<size_t>(model.size());
 
                     // Python hook: pre-optimizer-step (post-backward, pre-step)
                     {
@@ -2482,15 +2492,20 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                     if (!freeze_gaussians) {
                         strategy_->step(iter);
                     }
-                }
                 
-                // During NGS noise phase we keep ordering/size stable (no pruning/densification).
-                if (ngs_current_phase_ != NGSPhase::WithNoise) {
-                    if (auto result = handle_sparsity_update(iter, strategy_->get_model()); !result) {
-                        LOG_ERROR("Sparsity update: {}", result.error());
-                    }
-                    if (auto result = apply_sparsity_pruning(iter, strategy_->get_model()); !result) {
-                        LOG_ERROR("Sparsity pruning: {}", result.error());
+                    // During NGS noise phase we keep ordering/size stable (no pruning/densification).
+                    if (ngs_current_phase_ != NGSPhase::WithNoise) {
+
+                        if (auto result = handle_sparsity_update(iter, model); !result) {
+                            LOG_ERROR("Sparsity update: {}", result.error());
+                        }
+                        if (auto result = apply_sparsity_pruning(iter, model); !result) {
+                            LOG_ERROR("Sparsity pruning: {}", result.error());
+                        }
+
+                        if (static_cast<size_t>(model.size()) != model_size_before) {
+                            syncTrainingSceneTopology(scene_, model);
+                        }
                     }
                 }
 

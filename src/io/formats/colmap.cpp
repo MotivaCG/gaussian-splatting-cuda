@@ -157,6 +157,22 @@ namespace lfs::io {
         {"RADIAL_FISHEYE", CAMERA_MODEL::RADIAL_FISHEYE},
         {"THIN_PRISM_FISHEYE", CAMERA_MODEL::THIN_PRISM_FISHEYE}};
 
+    constexpr float DISTORTION_ZERO_EPSILON = 1e-8f;
+
+    static bool is_effectively_zero(const float value) {
+        return std::abs(value) <= DISTORTION_ZERO_EPSILON;
+    }
+
+    static Tensor make_distortion_tensor(std::initializer_list<float> values) {
+        const bool all_zero = std::all_of(values.begin(), values.end(), [](const float value) {
+            return is_effectively_zero(value);
+        });
+        if (all_zero) {
+            return Tensor::empty({0}, Device::CPU);
+        }
+        return Tensor::from_vector(std::vector<float>(values), {values.size()}, Device::CPU);
+    }
+
     // -----------------------------------------------------------------------------
     //  Binary-file loader
     // -----------------------------------------------------------------------------
@@ -739,7 +755,7 @@ namespace lfs::io {
                 focal_x = focal_y = params[0];
                 center_x = params[1];
                 center_y = params[2];
-                radial_dist = Tensor::from_vector({params[3], params[4]}, {2}, Device::CPU);
+                radial_dist = make_distortion_tensor({params[3], params[4]});
                 tangential_dist = Tensor::empty({0}, Device::CPU);
                 break;
 
@@ -748,8 +764,8 @@ namespace lfs::io {
                 focal_y = params[1];
                 center_x = params[2];
                 center_y = params[3];
-                radial_dist = Tensor::from_vector({params[4], params[5]}, {2}, Device::CPU);
-                tangential_dist = Tensor::from_vector({params[6], params[7]}, {2}, Device::CPU);
+                radial_dist = make_distortion_tensor({params[4], params[5]});
+                tangential_dist = make_distortion_tensor({params[6], params[7]});
                 break;
 
             case CAMERA_MODEL::FULL_OPENCV:
@@ -757,8 +773,8 @@ namespace lfs::io {
                 focal_y = params[1];
                 center_x = params[2];
                 center_y = params[3];
-                radial_dist = Tensor::from_vector({params[4], params[5], params[8], params[9], params[10], params[11]}, {6}, Device::CPU);
-                tangential_dist = Tensor::from_vector({params[6], params[7]}, {2}, Device::CPU);
+                radial_dist = make_distortion_tensor({params[4], params[5], params[8], params[9], params[10], params[11]});
+                tangential_dist = make_distortion_tensor({params[6], params[7]});
                 break;
 
             case CAMERA_MODEL::OPENCV_FISHEYE:
@@ -1041,7 +1057,7 @@ namespace lfs::io {
                 focal_x = focal_y = params[0];
                 center_x = params[1];
                 center_y = params[2];
-                radial_dist = Tensor::from_vector({params[3], params[4]}, {2}, Device::CPU);
+                radial_dist = make_distortion_tensor({params[3], params[4]});
                 tangential_dist = Tensor::empty({0}, Device::CPU);
                 break;
 
@@ -1050,8 +1066,8 @@ namespace lfs::io {
                 focal_y = params[1];
                 center_x = params[2];
                 center_y = params[3];
-                radial_dist = Tensor::from_vector({params[4], params[5]}, {2}, Device::CPU);
-                tangential_dist = Tensor::from_vector({params[6], params[7]}, {2}, Device::CPU);
+                radial_dist = make_distortion_tensor({params[4], params[5]});
+                tangential_dist = make_distortion_tensor({params[6], params[7]});
                 break;
 
             case CAMERA_MODEL::FULL_OPENCV:
@@ -1059,8 +1075,8 @@ namespace lfs::io {
                 focal_y = params[1];
                 center_x = params[2];
                 center_y = params[3];
-                radial_dist = Tensor::from_vector({params[4], params[5], params[8], params[9], params[10], params[11]}, {6}, Device::CPU);
-                tangential_dist = Tensor::from_vector({params[6], params[7]}, {2}, Device::CPU);
+                radial_dist = make_distortion_tensor({params[4], params[5], params[8], params[9], params[10], params[11]});
+                tangential_dist = make_distortion_tensor({params[6], params[7]});
                 break;
 
             case CAMERA_MODEL::OPENCV_FISHEYE:

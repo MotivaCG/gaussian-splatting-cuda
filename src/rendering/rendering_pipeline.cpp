@@ -16,7 +16,12 @@ namespace lfs::rendering {
 
     namespace {
         constexpr int GPU_ALIGNMENT = 16; // 16-pixel alignment for GPU texture efficiency
-    }
+
+        [[nodiscard]] bool tensorMatchesGaussianCount(const Tensor* const tensor,
+                                                      const size_t gaussian_count) {
+            return tensor == nullptr || !tensor->is_valid() || tensor->numel() == gaussian_count;
+        }
+    } // namespace
 
     RenderingPipeline::RenderingPipeline()
         : background_(Tensor::zeros({3}, lfs::core::Device::CUDA, lfs::core::DataType::Float32)) {
@@ -50,6 +55,7 @@ namespace lfs::rendering {
 
         // Regular gaussian splatting rendering
         LOG_TRACE("Using gaussian splatting rendering mode");
+        const size_t gaussian_count = static_cast<size_t>(model.size());
 
         // Update background tensor in-place to avoid allocation
         // Access the tensor data directly
@@ -114,6 +120,12 @@ namespace lfs::rendering {
                 transform_indices_ptr = transform_indices_cuda.get();
             }
         }
+        if (!tensorMatchesGaussianCount(transform_indices_ptr, gaussian_count)) {
+            LOG_WARN("Ignoring transform_indices with stale size: model has {}, tensor has {}",
+                     gaussian_count, transform_indices_ptr->numel());
+            transform_indices_ptr = nullptr;
+            transform_indices_cuda.reset();
+        }
 
         // Get selection mask pointer (already a tensor, just need to ensure it's on CUDA)
         std::unique_ptr<Tensor> selection_mask_cuda;
@@ -126,75 +138,28 @@ namespace lfs::rendering {
                 selection_mask_ptr = selection_mask_cuda.get();
             }
         }
+        if (!tensorMatchesGaussianCount(selection_mask_ptr, gaussian_count)) {
+            LOG_WARN("Ignoring selection_mask with stale size: model has {}, tensor has {}",
+                     gaussian_count, selection_mask_ptr->numel());
+            selection_mask_ptr = nullptr;
+            selection_mask_cuda.reset();
+        }
+
+        Tensor* brush_selection_ptr = request.brush_selection_tensor;
+        if (!tensorMatchesGaussianCount(brush_selection_ptr, gaussian_count)) {
+            LOG_WARN("Ignoring brush_selection_tensor with stale size: model has {}, tensor has {}",
+                     gaussian_count, brush_selection_ptr->numel());
+            brush_selection_ptr = nullptr;
+        }
+
+        const Tensor* deleted_mask_ptr = request.deleted_mask;
+        if (!tensorMatchesGaussianCount(deleted_mask_ptr, gaussian_count)) {
+            LOG_WARN("Ignoring deleted_mask with stale size: model has {}, tensor has {}",
+                     gaussian_count, deleted_mask_ptr->numel());
+            deleted_mask_ptr = nullptr;
+        }
 
         try {
-            if (request.sh_degree != model.get_active_sh_degree()) {
-                auto& mutable_sh = const_cast<lfs::core::SplatData&>(model);
-                const int original_sh_degree = model.get_active_sh_degree();
-                mutable_sh.set_active_sh_degree(request.sh_degree);
-                const struct ShDegreeGuard {
-                    lfs::core::SplatData& m;
-                    int original;
-                    ~ShDegreeGuard() { m.set_active_sh_degree(original); }
-                } sh_guard{mutable_sh, original_sh_degree};
-
-                RenderResult result;
-
-                if (request.gut || request.equirectangular) {
-                    const auto camera_model = request.equirectangular
-                                                  ? GutCameraModel::EQUIRECTANGULAR
-                                                  : GutCameraModel::PINHOLE;
-                    auto render_output = gut_rasterize_tensor(
-                        cam, const_cast<lfs::core::SplatData&>(model), background_,
-                        request.scaling_modifier, camera_model, model_transforms_tensor.get(),
-                        transform_indices_ptr, request.node_visibility_mask);
-                    result.image = std::move(render_output.image);
-                    result.depth = std::move(render_output.depth);
-                } else {
-                    LOG_TRACE("Using TENSOR_NATIVE backend (sh_degree temporarily changed from {} to {})",
-                              original_sh_degree, request.sh_degree);
-                    Tensor screen_positions;
-                    auto [image, depth] = rasterize_tensor(cam, const_cast<lfs::core::SplatData&>(model), background_,
-                                                           request.show_rings, request.ring_width,
-                                                           model_transforms_tensor.get(), transform_indices_ptr,
-                                                           selection_mask_ptr,
-                                                           request.output_screen_positions ? &screen_positions : nullptr,
-                                                           request.brush_active, request.brush_x, request.brush_y, request.brush_radius,
-                                                           request.brush_add_mode, request.brush_selection_tensor,
-                                                           request.brush_saturation_mode, request.brush_saturation_amount,
-                                                           request.selection_mode_rings,
-                                                           request.show_center_markers,
-                                                           request.crop_box_transform, request.crop_box_min, request.crop_box_max,
-                                                           request.crop_inverse, request.crop_desaturate, request.crop_parent_node_index,
-                                                           request.ellipsoid_transform, request.ellipsoid_radii,
-                                                           request.ellipsoid_inverse, request.ellipsoid_desaturate, request.ellipsoid_parent_node_index,
-                                                           request.depth_filter_transform, request.depth_filter_min, request.depth_filter_max,
-                                                           request.deleted_mask,
-                                                           request.hovered_depth_id,
-                                                           request.highlight_gaussian_id,
-                                                           request.far_plane,
-                                                           request.selected_node_mask,
-                                                           request.desaturate_unselected,
-                                                           request.node_visibility_mask,
-                                                           request.selection_flash_intensity,
-                                                           request.orthographic,
-                                                           request.ortho_scale,
-                                                           request.mip_filter);
-                    result.image = std::move(image);
-                    result.depth = std::move(depth);
-                    if (request.output_screen_positions) {
-                        result.screen_positions = std::move(screen_positions);
-                    }
-                }
-
-                result.valid = true;
-                result.orthographic = request.orthographic;
-                result.far_plane = request.far_plane;
-                return result;
-            }
-
-            // No sh_degree change needed - safe to use model as-is
-            lfs::core::SplatData& mutable_model = const_cast<lfs::core::SplatData&>(model);
             RenderResult result;
 
             if (request.gut || request.equirectangular) {
@@ -202,8 +167,9 @@ namespace lfs::rendering {
                                               ? GutCameraModel::EQUIRECTANGULAR
                                               : GutCameraModel::PINHOLE;
                 auto render_output = gut_rasterize_tensor(
-                    cam, mutable_model, background_, request.scaling_modifier, camera_model,
-                    model_transforms_tensor.get(), transform_indices_ptr, request.node_visibility_mask);
+                    cam, model, background_, request.scaling_modifier, camera_model,
+                    model_transforms_tensor.get(), transform_indices_ptr, request.node_visibility_mask,
+                    request.sh_degree);
                 return RenderResult{
                     .image = std::move(render_output.image),
                     .depth = std::move(render_output.depth),
@@ -214,13 +180,13 @@ namespace lfs::rendering {
 
             // Use libtorch-free tensor-based rasterizer
             Tensor screen_positions;
-            auto [image, depth] = rasterize_tensor(cam, mutable_model, background_,
+            auto [image, depth] = rasterize_tensor(cam, model, background_,
                                                    request.show_rings, request.ring_width,
                                                    model_transforms_tensor.get(), transform_indices_ptr,
                                                    selection_mask_ptr,
                                                    request.output_screen_positions ? &screen_positions : nullptr,
                                                    request.brush_active, request.brush_x, request.brush_y, request.brush_radius,
-                                                   request.brush_add_mode, request.brush_selection_tensor,
+                                                   request.brush_add_mode, brush_selection_ptr,
                                                    request.brush_saturation_mode, request.brush_saturation_amount,
                                                    request.selection_mode_rings,
                                                    request.show_center_markers,
@@ -229,7 +195,7 @@ namespace lfs::rendering {
                                                    request.ellipsoid_transform, request.ellipsoid_radii,
                                                    request.ellipsoid_inverse, request.ellipsoid_desaturate, request.ellipsoid_parent_node_index,
                                                    request.depth_filter_transform, request.depth_filter_min, request.depth_filter_max,
-                                                   request.deleted_mask,
+                                                   deleted_mask_ptr,
                                                    request.hovered_depth_id,
                                                    request.highlight_gaussian_id,
                                                    request.far_plane,
@@ -239,7 +205,8 @@ namespace lfs::rendering {
                                                    request.selection_flash_intensity,
                                                    request.orthographic,
                                                    request.ortho_scale,
-                                                   request.mip_filter);
+                                                   request.mip_filter,
+                                                   request.sh_degree);
             result.image = std::move(image);
             result.depth = std::move(depth);
             if (request.output_screen_positions) {

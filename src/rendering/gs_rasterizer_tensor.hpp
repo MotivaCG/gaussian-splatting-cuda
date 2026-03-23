@@ -59,7 +59,8 @@ namespace lfs::rendering {
         float selection_flash_intensity = 0.0f,
         bool orthographic = false,
         float ortho_scale = 1.0f,
-        bool mip_filter = false);
+        bool mip_filter = false,
+        int render_sh_degree = -1);
 
     // GUT rasterization for viewer (forward-only, no training dependency)
     struct GutRenderOutput {
@@ -75,6 +76,7 @@ namespace lfs::rendering {
         GutCameraModel camera_model = GutCameraModel::PINHOLE,
         const Tensor* model_transforms = nullptr,
         const Tensor* transform_indices = nullptr,
-        const std::vector<bool>& node_visibility_mask = {});
+        const std::vector<bool>& node_visibility_mask = {},
+        int render_sh_degree = -1);
 
 } // namespace lfs::rendering

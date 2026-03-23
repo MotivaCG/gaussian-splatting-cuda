@@ -869,7 +869,8 @@ namespace lfs::vis::gui {
     void GuiManager::render() {
         if (auto* ri = rmlui_manager_.getRenderInterface()) {
             auto* sm = viewer_->getSceneManager();
-            ri->set_scene(sm ? &sm->getScene() : nullptr);
+            ri->set_scene_manager(sm);
+            ri->process_pending_preview_uploads();
         }
 
         if (pending_cuda_warning_) {

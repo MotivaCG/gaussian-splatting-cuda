@@ -128,6 +128,7 @@ namespace lfs::rendering {
             const glm::mat4& scene_transform = glm::mat4(1.0f)) override;
 
         void clearFrustumCache() override;
+        void setFrustumImageLoader(std::shared_ptr<lfs::io::PipelinedImageLoader> loader) override;
 
     private:
         Result<void> initializeShaders();
