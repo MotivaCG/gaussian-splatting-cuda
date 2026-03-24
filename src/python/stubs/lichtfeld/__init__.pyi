@@ -1031,12 +1031,12 @@ class ViewportRender:
 
 def get_viewport_render() -> ViewportRender | None:
     """
-    Get the current viewport's rendered image and screen positions (None if not available)
+    Get the most recently captured CPU-visible viewport render if available (does not force GPU readback)
     """
 
 def capture_viewport() -> ViewportRender | None:
     """
-    Capture viewport render for async processing (clones data, safe to use from background threads)
+    Capture viewport render explicitly (may read back from GPU; clones data, safe to use from background threads)
     """
 
 def render_view(rotation: Tensor, translation: Tensor, width: int, height: int, fov: float = 60.0, bg_color: Tensor | None = None) -> Tensor | None:

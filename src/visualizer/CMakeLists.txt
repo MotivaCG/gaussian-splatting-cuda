@@ -26,9 +26,21 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         window/window_manager.cpp
 
         # Rendering
-        rendering/rendering_manager.cpp
+        rendering/camera_interaction_service.cpp
+        rendering/gt_texture_cache.cpp
         rendering/image_texture_loader.cpp
+        rendering/render_frame_coordinator.cpp
+        rendering/render_pass_graph.cpp
+        rendering/rendering_manager.cpp
+        rendering/rendering_manager_events.cpp
+        rendering/rendering_manager_frame.cpp
+        rendering/rendering_manager_viewport.cpp
+        rendering/split_view_service.cpp
+        rendering/viewport_artifact_service.cpp
+        rendering/viewport_frame_lifecycle_service.cpp
         rendering/render_pass.cpp
+        rendering/viewport_appearance_correction.cpp
+        rendering/viewport_request_builder.cpp
         rendering/framerate_controller.cpp
         rendering/passes/overlay_pass.cpp
         rendering/passes/splat_raster_pass.cpp
@@ -89,6 +101,7 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
 
         # Input handling
         input/input_controller.cpp
+        input/input_router.cpp
         input/input_bindings.cpp
         input/sdl_key_mapping.cpp
 

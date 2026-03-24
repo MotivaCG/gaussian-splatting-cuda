@@ -598,9 +598,6 @@ namespace lfs::vis {
             return;
 
         view_context_bridge_initialized_ = true;
-        if (rendering_manager_) {
-            rendering_manager_->setOutputScreenPositions(true);
-        }
 
         vis::set_view_callback([this]() -> std::optional<vis::ViewInfo> {
             if (!rendering_manager_)
@@ -650,17 +647,37 @@ namespace lfs::vis {
         });
         callback_cleanup_.add([] { vis::set_set_fov_callback(nullptr); });
 
-        vis::set_viewport_render_callback([this]() -> std::optional<vis::ViewportRender> {
+        const auto get_screen_positions = [this]() -> std::shared_ptr<lfs::core::Tensor> {
+            if (!scene_manager_) {
+                return nullptr;
+            }
+            auto* const selection_service = scene_manager_->getSelectionService();
+            return selection_service ? selection_service->getScreenPositions() : nullptr;
+        };
+
+        vis::set_viewport_render_callback([this, get_screen_positions]() -> std::optional<vis::ViewportRender> {
             if (!rendering_manager_)
                 return std::nullopt;
 
-            const auto& result = rendering_manager_->getCachedResult();
-            if (!result.valid || !result.image)
+            auto image = rendering_manager_->getViewportImageIfAvailable();
+            if (!image)
                 return std::nullopt;
 
-            return vis::ViewportRender{result.image, result.screen_positions};
+            return vis::ViewportRender{std::move(image), get_screen_positions()};
         });
         callback_cleanup_.add([] { vis::set_viewport_render_callback(nullptr); });
+
+        vis::set_capture_viewport_render_callback([this, get_screen_positions]() -> std::optional<vis::ViewportRender> {
+            if (!rendering_manager_)
+                return std::nullopt;
+
+            auto image = rendering_manager_->captureViewportImage();
+            if (!image)
+                return std::nullopt;
+
+            return vis::ViewportRender{std::move(image), get_screen_positions()};
+        });
+        callback_cleanup_.add([] { vis::set_capture_viewport_render_callback(nullptr); });
 
         vis::set_render_settings_callbacks(
             [this]() -> std::optional<vis::RenderSettingsProxy> {
@@ -898,9 +915,8 @@ namespace lfs::vis {
                 .viewport = viewport_,
                 .settings = rendering_manager_->getSettings(),
                 .viewport_region = nullptr,
-                .has_focus = false,
                 .scene_manager = scene_manager_.get()};
-            rendering_manager_->renderFrame(ctx, scene_manager_.get());
+            rendering_manager_->renderFrame(ctx);
             window_manager_->swapBuffers();
         }
 
@@ -1072,7 +1088,6 @@ namespace lfs::vis {
             .viewport = viewport_,
             .settings = rendering_manager_->getSettings(),
             .viewport_region = has_viewport_region ? &viewport_region : nullptr,
-            .has_focus = gui_manager_ && gui_manager_->isViewportFocused(),
             .scene_manager = scene_manager_.get()};
 
         if (gui_manager_) {
@@ -1080,7 +1095,7 @@ namespace lfs::vis {
             rendering_manager_->setEllipsoidGizmoActive(gui_manager_->gizmo().isEllipsoidGizmoActive());
         }
 
-        rendering_manager_->renderFrame(context, scene_manager_.get());
+        rendering_manager_->renderFrame(context);
 
         gui_manager_->render();
 

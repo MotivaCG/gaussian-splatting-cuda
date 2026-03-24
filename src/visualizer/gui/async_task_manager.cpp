@@ -160,46 +160,89 @@ namespace lfs::vis::gui {
         return viewport;
     }
 
-    void applyVideoExportCropState(rendering::RenderRequest& request,
-                                   const VideoExportSceneSnapshot& snapshot,
-                                   const RenderSettings& render_settings) {
+    rendering::FrameView makeVideoExportFrameView(const lfs::sequencer::CameraState& cam_state,
+                                                  const RenderSettings& render_settings,
+                                                  const int width,
+                                                  const int height) {
+        return rendering::FrameView{
+            .rotation = glm::mat3_cast(cam_state.rotation),
+            .translation = cam_state.position,
+            .size = {width, height},
+            .focal_length_mm = cam_state.focal_length_mm,
+            .far_plane = render_settings.depth_clip_enabled ? render_settings.depth_clip_far
+                                                            : rendering::DEFAULT_FAR_PLANE,
+            .orthographic = render_settings.orthographic,
+            .ortho_scale = render_settings.ortho_scale,
+            .background_color = render_settings.background_color};
+    }
+
+    void applyVideoExportGaussianFilters(rendering::GaussianFilterState& filters,
+                                         const VideoExportSceneSnapshot& snapshot,
+                                         const RenderSettings& render_settings) {
         if ((render_settings.use_crop_box || render_settings.show_crop_box) && !snapshot.cropboxes.empty()) {
             const size_t idx = (snapshot.selected_cropbox_index >= 0)
                                    ? static_cast<size_t>(snapshot.selected_cropbox_index)
                                    : 0;
             if (idx < snapshot.cropboxes.size() && snapshot.cropboxes[idx].has_data) {
                 const auto& cb = snapshot.cropboxes[idx];
-                request.crop_box = rendering::BoundingBox{
-                    .min = cb.data.min,
-                    .max = cb.data.max,
-                    .transform = glm::inverse(cb.world_transform)};
-                request.crop_inverse = cb.data.inverse;
-                request.crop_desaturate = render_settings.show_crop_box &&
-                                          !render_settings.use_crop_box &&
-                                          render_settings.desaturate_cropping;
-                request.crop_parent_node_index = cb.parent_node_index;
+                filters.crop_region = rendering::GaussianScopedBoxFilter{
+                    .bounds =
+                        {.min = cb.data.min,
+                         .max = cb.data.max,
+                         .transform = glm::inverse(cb.world_transform)},
+                    .inverse = cb.data.inverse,
+                    .desaturate = render_settings.show_crop_box &&
+                                  !render_settings.use_crop_box &&
+                                  render_settings.desaturate_cropping,
+                    .parent_node_index = cb.parent_node_index};
             }
         }
 
         if ((render_settings.use_ellipsoid || render_settings.show_ellipsoid) &&
             snapshot.active_ellipsoid.has_value()) {
             const auto& ellipsoid = *snapshot.active_ellipsoid;
-            request.ellipsoid = rendering::Ellipsoid{
-                .radii = ellipsoid.data.radii,
-                .transform = glm::inverse(ellipsoid.world_transform)};
-            request.ellipsoid_inverse = ellipsoid.data.inverse;
-            request.ellipsoid_desaturate = render_settings.show_ellipsoid &&
-                                           !render_settings.use_ellipsoid &&
-                                           render_settings.desaturate_cropping;
-            request.ellipsoid_parent_node_index = ellipsoid.parent_node_index;
+            filters.ellipsoid_region = rendering::GaussianScopedEllipsoidFilter{
+                .bounds =
+                    {.radii = ellipsoid.data.radii,
+                     .transform = glm::inverse(ellipsoid.world_transform)},
+                .inverse = ellipsoid.data.inverse,
+                .desaturate = render_settings.show_ellipsoid &&
+                              !render_settings.use_ellipsoid &&
+                              render_settings.desaturate_cropping,
+                .parent_node_index = ellipsoid.parent_node_index};
         }
 
         if (render_settings.depth_filter_enabled) {
-            request.depth_filter = rendering::BoundingBox{
+            filters.view_volume = rendering::BoundingBox{
                 .min = render_settings.depth_filter_min,
                 .max = render_settings.depth_filter_max,
                 .transform = render_settings.depth_filter_transform.inv().toMat4()};
         }
+    }
+
+    void applyVideoExportPointCloudFilters(rendering::PointCloudFilterState& filters,
+                                           const VideoExportSceneSnapshot& snapshot,
+                                           const RenderSettings& render_settings) {
+        if (!(render_settings.use_crop_box || render_settings.show_crop_box) || snapshot.cropboxes.empty()) {
+            return;
+        }
+
+        const size_t idx = (snapshot.selected_cropbox_index >= 0)
+                               ? static_cast<size_t>(snapshot.selected_cropbox_index)
+                               : 0;
+        if (idx >= snapshot.cropboxes.size() || !snapshot.cropboxes[idx].has_data) {
+            return;
+        }
+
+        const auto& cb = snapshot.cropboxes[idx];
+        filters.crop_box = rendering::BoundingBox{
+            .min = cb.data.min,
+            .max = cb.data.max,
+            .transform = glm::inverse(cb.world_transform)};
+        filters.crop_inverse = cb.data.inverse;
+        filters.crop_desaturate = render_settings.show_crop_box &&
+                                  !render_settings.use_crop_box &&
+                                  render_settings.desaturate_cropping;
     }
 
     rendering::MeshRenderOptions makeVideoExportMeshOptions(const RenderSettings& render_settings,
@@ -215,9 +258,9 @@ namespace lfs::vis::gui {
             .backface_culling = render_settings.mesh_backface_culling,
             .shadow_enabled = render_settings.mesh_shadow_enabled,
             .shadow_map_resolution = render_settings.mesh_shadow_resolution,
-            .is_selected = is_selected,
-            .desaturate_unselected = render_settings.desaturate_unselected && any_selected,
-            .selection_flash_intensity = 0.0f,
+            .is_emphasized = is_selected,
+            .dim_non_emphasized = render_settings.desaturate_unselected && any_selected,
+            .flash_intensity = 0.0f,
             .background_color = render_settings.background_color};
     }
 
@@ -229,77 +272,119 @@ namespace lfs::vis::gui {
         const int width,
         const int height) {
         const auto viewport = makeVideoExportViewport(cam_state, render_settings, width, height);
+        const auto frame_view = makeVideoExportFrameView(cam_state, render_settings, width, height);
 
-        std::optional<rendering::RenderResult> primary_result;
+        std::optional<rendering::GpuFrame> primary_frame;
 
         if (snapshot.combined_model && snapshot.combined_model->size() > 0) {
-            rendering::RenderRequest request;
-            request.viewport = viewport;
-            request.scaling_modifier = render_settings.scaling_modifier;
-            request.antialiasing = render_settings.antialiasing;
-            request.mip_filter = render_settings.mip_filter;
-            request.sh_degree = render_settings.sh_degree;
-            request.background_color = render_settings.background_color;
-            request.point_cloud_mode = render_settings.point_cloud_mode;
-            request.voxel_size = render_settings.voxel_size;
-            request.gut = render_settings.gut;
-            request.equirectangular = render_settings.equirectangular;
-            request.show_rings = render_settings.show_rings;
-            request.ring_width = render_settings.ring_width;
-            request.show_center_markers = render_settings.show_center_markers;
-            request.model_transforms = &snapshot.model_transforms;
-            request.transform_indices = snapshot.transform_indices;
-            request.selection_mask = snapshot.selection_mask;
-            request.selected_node_mask = render_settings.desaturate_unselected
-                                             ? snapshot.selected_node_mask
-                                             : std::vector<bool>{};
-            request.node_visibility_mask = snapshot.node_visibility_mask;
-            request.desaturate_unselected = render_settings.desaturate_unselected;
-            request.selection_flash_intensity = 0.0f;
-            request.far_plane = render_settings.depth_clip_enabled
-                                    ? render_settings.depth_clip_far
-                                    : rendering::DEFAULT_FAR_PLANE;
-            request.orthographic = render_settings.orthographic;
-            request.ortho_scale = render_settings.ortho_scale;
-            applyVideoExportCropState(request, snapshot, render_settings);
+            if (render_settings.point_cloud_mode) {
+                rendering::PointCloudRenderRequest request{
+                    .frame_view = frame_view,
+                    .render =
+                        {.scaling_modifier = render_settings.scaling_modifier,
+                         .voxel_size = render_settings.voxel_size,
+                         .equirectangular = render_settings.equirectangular},
+                    .scene =
+                        {.model_transforms = &snapshot.model_transforms,
+                         .transform_indices = snapshot.transform_indices},
+                    .filters = {}};
+                applyVideoExportPointCloudFilters(request.filters, snapshot, render_settings);
 
-            auto render_result = engine.renderGaussians(*snapshot.combined_model, request);
-            if (!render_result || !render_result->valid || !render_result->image) {
-                return std::unexpected(render_result ? "Rendered frame is invalid"
-                                                     : render_result.error());
+                if (snapshot.meshes.empty()) {
+                    auto render_result = engine.renderPointCloudImage(*snapshot.combined_model, request);
+                    if (!render_result || !render_result->image) {
+                        return std::unexpected(render_result ? "Rendered point cloud frame is invalid"
+                                                             : render_result.error());
+                    }
+                    return *render_result->image;
+                }
+
+                auto render_result = engine.renderPointCloudGpuFrame(*snapshot.combined_model, request);
+                if (!render_result || !render_result->valid()) {
+                    return std::unexpected(render_result ? "Rendered point cloud frame is invalid"
+                                                         : render_result.error());
+                }
+                primary_frame = std::move(*render_result);
+            } else {
+                rendering::ViewportRenderRequest request{
+                    .frame_view = frame_view,
+                    .scaling_modifier = render_settings.scaling_modifier,
+                    .antialiasing = render_settings.antialiasing,
+                    .mip_filter = render_settings.mip_filter,
+                    .sh_degree = render_settings.sh_degree,
+                    .gut = render_settings.gut,
+                    .equirectangular = render_settings.equirectangular,
+                    .scene =
+                        {.model_transforms = &snapshot.model_transforms,
+                         .transform_indices = snapshot.transform_indices,
+                         .node_visibility_mask = snapshot.node_visibility_mask},
+                    .filters = {},
+                    .overlay =
+                        {.markers =
+                             {.show_rings = render_settings.show_rings,
+                              .ring_width = render_settings.ring_width,
+                              .show_center_markers = render_settings.show_center_markers},
+                         .cursor = {},
+                         .emphasis =
+                             {.mask = snapshot.selection_mask,
+                              .transient_mask = {},
+                              .emphasized_node_mask = render_settings.desaturate_unselected
+                                                          ? snapshot.selected_node_mask
+                                                          : std::vector<bool>{},
+                              .dim_non_emphasized = render_settings.desaturate_unselected,
+                              .flash_intensity = 0.0f,
+                              .focused_gaussian_id = -1}}};
+                applyVideoExportGaussianFilters(request.filters, snapshot, render_settings);
+
+                if (snapshot.meshes.empty()) {
+                    auto render_result = engine.renderGaussiansImage(*snapshot.combined_model, request);
+                    if (!render_result || !render_result->image) {
+                        return std::unexpected(render_result ? "Rendered frame is invalid"
+                                                             : render_result.error());
+                    }
+                    return *render_result->image;
+                }
+
+                auto render_result = engine.renderGaussiansGpuFrame(*snapshot.combined_model, request);
+                if (!render_result || !render_result->frame.valid()) {
+                    return std::unexpected(render_result ? "Rendered frame is invalid"
+                                                         : render_result.error());
+                }
+                primary_frame = std::move(render_result->frame);
             }
-            primary_result = std::move(*render_result);
         } else if (snapshot.point_cloud && snapshot.point_cloud->size() > 0) {
             const std::vector<glm::mat4> point_cloud_transforms = {snapshot.point_cloud_transform};
-            rendering::RenderRequest request;
-            request.viewport = viewport;
-            request.scaling_modifier = render_settings.scaling_modifier;
-            request.mip_filter = render_settings.mip_filter;
-            request.sh_degree = 0;
-            request.background_color = render_settings.background_color;
-            request.point_cloud_mode = true;
-            request.voxel_size = render_settings.voxel_size;
-            request.equirectangular = render_settings.equirectangular;
-            request.model_transforms = &point_cloud_transforms;
-            request.far_plane = render_settings.depth_clip_enabled
-                                    ? render_settings.depth_clip_far
-                                    : rendering::DEFAULT_FAR_PLANE;
-            request.orthographic = render_settings.orthographic;
-            request.ortho_scale = render_settings.ortho_scale;
-            applyVideoExportCropState(request, snapshot, render_settings);
+            rendering::PointCloudRenderRequest request{
+                .frame_view = frame_view,
+                .render =
+                    {.scaling_modifier = render_settings.scaling_modifier,
+                     .voxel_size = render_settings.voxel_size,
+                     .equirectangular = render_settings.equirectangular},
+                .scene =
+                    {.model_transforms = &point_cloud_transforms,
+                     .transform_indices = nullptr},
+                .filters = {}};
+            applyVideoExportPointCloudFilters(request.filters, snapshot, render_settings);
 
-            auto render_result = engine.renderPointCloud(*snapshot.point_cloud, request);
-            if (!render_result || !render_result->valid || !render_result->image) {
+            auto render_result = engine.renderPointCloudGpuFrame(*snapshot.point_cloud, request);
+            if (!render_result || !render_result->valid()) {
                 return std::unexpected(render_result ? "Rendered point cloud frame is invalid"
                                                      : render_result.error());
             }
-            primary_result = std::move(*render_result);
+
+            if (snapshot.meshes.empty()) {
+                auto readback_result = engine.readbackGpuFrameColor(*render_result);
+                if (!readback_result || !*readback_result) {
+                    return std::unexpected(readback_result ? "Rendered point cloud frame is invalid"
+                                                           : readback_result.error());
+                }
+                return *(*readback_result);
+            }
+
+            primary_frame = std::move(*render_result);
         }
 
         if (snapshot.meshes.empty()) {
-            if (primary_result && primary_result->image) {
-                return *primary_result->image;
-            }
             return std::unexpected("No rendered image produced for video export");
         }
 
@@ -333,14 +418,6 @@ namespace lfs::vis::gui {
             }
         };
 
-        if (primary_result.has_value()) {
-            if (auto present_result = engine.presentToScreen(*primary_result, {0, 0}, {width, height});
-                !present_result) {
-                restore_state();
-                return std::unexpected(present_result.error());
-            }
-        }
-
         const bool any_selected = std::any_of(snapshot.meshes.begin(), snapshot.meshes.end(),
                                               [](const auto& mesh) { return mesh.is_selected; }) ||
                                   std::any_of(snapshot.selected_node_mask.begin(),
@@ -358,7 +435,7 @@ namespace lfs::vis::gui {
                 viewport,
                 mesh_snapshot.transform,
                 mesh_options,
-                primary_result.has_value());
+                primary_frame.has_value());
             if (!mesh_result) {
                 restore_state();
                 return std::unexpected(mesh_result.error());
@@ -366,8 +443,8 @@ namespace lfs::vis::gui {
         }
 
         if (engine.hasMeshRender()) {
-            if (primary_result.has_value()) {
-                if (auto composite_result = engine.compositeMeshAndSplat(*primary_result, {width, height});
+            if (primary_frame.has_value()) {
+                if (auto composite_result = engine.compositeMeshAndGpuFrame(*primary_frame, {width, height});
                     !composite_result) {
                     restore_state();
                     return std::unexpected(composite_result.error());
@@ -377,6 +454,12 @@ namespace lfs::vis::gui {
                     restore_state();
                     return std::unexpected(present_result.error());
                 }
+            }
+        } else if (primary_frame.has_value()) {
+            if (auto present_result = engine.presentGpuFrame(*primary_frame, {0, 0}, {width, height});
+                !present_result) {
+                restore_state();
+                return std::unexpected(present_result.error());
             }
         }
 

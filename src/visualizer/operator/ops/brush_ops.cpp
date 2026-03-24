@@ -10,8 +10,10 @@
 #include "operation/undo_entry.hpp"
 #include "operation/undo_history.hpp"
 #include "operator/operator_registry.hpp"
+#include "rendering/cuda_kernels.hpp"
 #include "rendering/rendering_manager.hpp"
 #include "scene/scene_manager.hpp"
+#include "selection/selection_service.hpp"
 #include "visualizer_impl.hpp"
 
 namespace lfs::vis::op {
@@ -221,12 +223,12 @@ namespace lfs::vis::op {
             return;
         }
 
-        const auto& viewport = gm->getViewer()->getViewport();
         const auto bounds = getViewportBounds();
-        const auto& cached = rm->getCachedResult();
+        const auto& viewport = gm->getViewer()->getViewport();
+        const glm::ivec2 rendered_size = rm->getRenderedSize();
 
-        const int render_w = cached.image ? static_cast<int>(cached.image->size(2)) : static_cast<int>(viewport.windowSize.x);
-        const int render_h = cached.image ? static_cast<int>(cached.image->size(1)) : static_cast<int>(viewport.windowSize.y);
+        const int render_w = rendered_size.x > 0 ? rendered_size.x : static_cast<int>(viewport.windowSize.x);
+        const int render_h = rendered_size.y > 0 ? rendered_size.y : static_cast<int>(viewport.windowSize.y);
 
         if (bounds.width <= 0 || bounds.height <= 0) {
             return;
@@ -241,13 +243,14 @@ namespace lfs::vis::op {
         const float scaled_radius = brush_radius_ * scale_x;
         const bool add_mode = (action_ == BrushAction::Add);
 
-        rm->setBrushState(true, image_x, image_y, scaled_radius, add_mode, &cumulative_selection_);
+        rm->setCursorPreviewState(true, image_x, image_y, scaled_radius, add_mode, &cumulative_selection_);
     }
 
     void BrushStrokeOperator::updateSaturationAtPoint(double x, double y, OperatorContext& ctx) {
         auto* rm = services().renderingOrNull();
         auto* gm = services().guiOrNull();
-        if (!rm || !gm || !gm->getViewer()) {
+        auto* selection_service = ctx.scene().getSelectionService();
+        if (!rm || !gm || !gm->getViewer() || !selection_service) {
             return;
         }
 
@@ -265,12 +268,12 @@ namespace lfs::vis::op {
             return;
         }
 
-        const auto& viewport = gm->getViewer()->getViewport();
         const auto bounds = getViewportBounds();
-        const auto& cached = rm->getCachedResult();
+        const auto& viewport = gm->getViewer()->getViewport();
+        const glm::ivec2 rendered_size = rm->getRenderedSize();
 
-        const int render_w = cached.image ? static_cast<int>(cached.image->size(2)) : static_cast<int>(viewport.windowSize.x);
-        const int render_h = cached.image ? static_cast<int>(cached.image->size(1)) : static_cast<int>(viewport.windowSize.y);
+        const int render_w = rendered_size.x > 0 ? rendered_size.x : static_cast<int>(viewport.windowSize.x);
+        const int render_h = rendered_size.y > 0 ? rendered_size.y : static_cast<int>(viewport.windowSize.y);
 
         if (bounds.width <= 0 || bounds.height <= 0) {
             return;
@@ -288,8 +291,28 @@ namespace lfs::vis::op {
         // Reshape SH0 from [N, 1, 3] to [N, 3] for the kernel
         auto sh0_reshaped = sh0.reshape({static_cast<int>(sh0.size(0)), 3});
 
-        rm->adjustSaturation(image_x, image_y, scaled_radius, saturation_amount_, sh0_reshaped);
-        rm->setBrushState(true, image_x, image_y, scaled_radius, true, nullptr, true, saturation_amount_);
+        const auto screen_positions = selection_service->getScreenPositions();
+        if (!screen_positions || !screen_positions->is_valid()) {
+            return;
+        }
+
+        const int num_gaussians = static_cast<int>(screen_positions->size(0));
+        if (num_gaussians == 0) {
+            return;
+        }
+
+        lfs::launchAdjustSaturation(
+            sh0_reshaped.ptr<float>(),
+            screen_positions->ptr<float>(),
+            image_x,
+            image_y,
+            scaled_radius,
+            saturation_amount_,
+            num_gaussians,
+            nullptr);
+
+        rm->markDirty(DirtyFlag::SPLATS);
+        rm->setCursorPreviewState(true, image_x, image_y, scaled_radius, true, nullptr, true, saturation_amount_);
     }
 
     void BrushStrokeOperator::finalizeSelectionStroke(OperatorContext& ctx) {
@@ -342,7 +365,7 @@ namespace lfs::vis::op {
 
     void BrushStrokeOperator::clearBrushState() {
         if (auto* rm = services().renderingOrNull()) {
-            rm->clearBrushState();
+            rm->clearCursorPreviewState();
             rm->markDirty(DirtyFlag::SELECTION);
         }
     }

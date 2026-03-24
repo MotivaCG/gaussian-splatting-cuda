@@ -997,8 +997,8 @@ namespace lfs::vis::gui {
 
         PanelInputState frame_input = buildPanelInputFromSDL(sdl_input);
         updateInputOverrides(frame_input, mouse_in_viewport);
-        if (auto* const ic = viewer_->getInputController()) {
-            frame_input.viewport_keyboard_focus = ic->hasViewportKeyboardFocus();
+        if (auto* const wm = viewer_->getWindowManager()) {
+            frame_input.viewport_keyboard_focus = wm->inputRouter().isViewportKeyboardFocused();
         }
 
         auto& reg = PanelRegistry::instance();
@@ -1345,11 +1345,11 @@ namespace lfs::vis::gui {
                               viewport_layout_.pos.y + y * render_to_screen_y);
             };
 
-            if (rm && rm->isBrushActive()) {
+            if (rm && rm->isCursorPreviewActive()) {
                 const auto& t = theme();
                 float bx, by, br;
                 bool add_mode;
-                rm->getBrushState(bx, by, br, add_mode);
+                rm->getCursorPreviewState(bx, by, br, add_mode);
 
                 const ImVec2 screen_pos = render_to_screen(bx, by);
                 const float screen_radius = br * render_to_screen_x;
@@ -1603,6 +1603,33 @@ namespace lfs::vis::gui {
                 }
             }
         }
+
+        auto* const rendering = viewer_ ? viewer_->getRenderingManager() : nullptr;
+        if (!rendering || viewport_layout_.size.x <= 0.0f || viewport_layout_.size.y <= 0.0f) {
+            return;
+        }
+
+        const auto& settings = rendering->getSettings();
+        if (settings.split_view_mode == SplitViewMode::Disabled) {
+            return;
+        }
+
+        auto* const draw_list = ImGui::GetForegroundDrawList(ImGui::GetMainViewport());
+        const float divider_x = viewport_layout_.pos.x + settings.split_position * viewport_layout_.size.x;
+        constexpr float divider_width = 3.0f;
+        const ImU32 divider_color = IM_COL32(255, 217, 0, 255);
+
+        draw_list->PushClipRect(
+            ImVec2(viewport_layout_.pos.x, viewport_layout_.pos.y),
+            ImVec2(viewport_layout_.pos.x + viewport_layout_.size.x,
+                   viewport_layout_.pos.y + viewport_layout_.size.y),
+            true);
+        draw_list->AddRectFilled(
+            ImVec2(std::round(divider_x - divider_width * 0.5f), viewport_layout_.pos.y),
+            ImVec2(std::round(divider_x + divider_width * 0.5f),
+                   viewport_layout_.pos.y + viewport_layout_.size.y),
+            divider_color);
+        draw_list->PopClipRect();
     }
 
     void GuiManager::updateInputOverrides(const PanelInputState& input,
@@ -1673,6 +1700,43 @@ namespace lfs::vis::gui {
 
     bool GuiManager::isPositionOverFloatingPanel(const double x, const double y) const {
         return PanelRegistry::instance().isPositionOverFloatingPanel(x, y);
+    }
+
+    GuiHitTestResult GuiManager::hitTestPointer(const double x, const double y) const {
+        if (isCapturingInput() || isModalWindowOpen() || startup_overlay_.isVisible() ||
+            (global_context_menu_ && global_context_menu_->isOpen())) {
+            return {.blocks_pointer = true, .takes_keyboard_focus = true};
+        }
+
+        if (panel_layout_.isResizingPanel() || isPositionOverFloatingPanel(x, y)) {
+            return {.blocks_pointer = true, .takes_keyboard_focus = true};
+        }
+
+        if (sequencer_ui_.blocksPointer(x, y) || rml_viewport_overlay_.blocksPointer(x, y)) {
+            return {.blocks_pointer = true, .takes_keyboard_focus = true};
+        }
+
+        if (ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow)) {
+            return {.blocks_pointer = true, .takes_keyboard_focus = true};
+        }
+
+        return {};
+    }
+
+    GuiInputState GuiManager::inputState() const {
+        const auto& focus = guiFocusState();
+        const bool modal_open =
+            isCapturingInput() ||
+            isModalWindowOpen() ||
+            startup_overlay_.isVisible() ||
+            (global_context_menu_ && global_context_menu_->isOpen()) ||
+            sequencer_ui_.blocksKeyboard();
+
+        return {
+            .has_keyboard_focus = focus.any_item_active || focus.want_capture_keyboard,
+            .text_input_active = focus.want_text_input,
+            .modal_open = modal_open,
+        };
     }
 
     void GuiManager::setupEventHandlers() {

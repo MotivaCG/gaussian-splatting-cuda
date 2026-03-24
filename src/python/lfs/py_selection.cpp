@@ -147,14 +147,14 @@ namespace lfs::python {
 
         sel.def(
             "brush_select", [](float x, float y, float radius) {
-                auto* rm = get_rm();
                 auto* ss = get_ss();
-                if (!rm || !ss)
+                if (!ss)
                     return;
+                auto screen_pos = ss->getScreenPositions();
                 auto* stroke = ss->getStrokeSelection();
-                if (!stroke || !stroke->is_valid())
+                if (!screen_pos || !stroke || !stroke->is_valid())
                     return;
-                rm->brushSelect(x, y, radius, *stroke);
+                rendering::brush_select_tensor(*screen_pos, x, y, radius, *stroke);
             },
             nb::arg("x"), nb::arg("y"), nb::arg("radius"), "Brush select at (x, y) with given radius. Accumulates into stroke selection.");
 
@@ -262,14 +262,14 @@ namespace lfs::python {
                 if (!rm)
                     return;
                 core::Tensor* stroke = ss ? ss->getStrokeSelection() : nullptr;
-                rm->setBrushState(true, x, y, radius, add_mode, stroke);
+                rm->setCursorPreviewState(true, x, y, radius, add_mode, stroke);
             },
             nb::arg("x"), nb::arg("y"), nb::arg("radius"), nb::arg("add_mode") = true, "Draw brush circle overlay at (x, y)");
 
         sel.def(
             "clear_brush_state", []() {
                 if (auto* rm = get_rm()) {
-                    rm->clearBrushState();
+                    rm->clearCursorPreviewState();
                 }
             },
             "Clear brush circle overlay");
@@ -326,17 +326,8 @@ namespace lfs::python {
             "Clear lasso selection preview");
 
         // ─────────────────────────────────────────────────────────────────────
-        // SCREEN POSITIONS OUTPUT
+        // SCREEN POSITIONS
         // ─────────────────────────────────────────────────────────────────────
-
-        sel.def(
-            "set_output_screen_positions", [](bool enable) {
-                if (auto* rm = get_rm()) {
-                    rm->setOutputScreenPositions(enable);
-                    rm->markDirty(vis::DirtyFlag::SELECTION);
-                }
-            },
-            nb::arg("enable"), "Enable/disable screen positions output during rendering");
 
         sel.def(
             "has_screen_positions", []() -> bool {
@@ -370,7 +361,7 @@ namespace lfs::python {
                 configure_depth_filter(settings, enabled, depth_near, depth_far, frustum_half_width);
                 rm->updateSettings(settings);
             },
-            nb::arg("enabled"), nb::arg("depth_far") = 100.0f, nb::arg("frustum_half_width") = 50.0f, nb::arg("depth_near") = 0.0f, "Set selection depth filter in camera space. The first three positional arguments remain backward-compatible.");
+            nb::arg("enabled"), nb::arg("depth_far") = 100.0f, nb::arg("frustum_half_width") = 50.0f, nb::arg("depth_near") = 0.0f, "Set selection depth filter in camera space.");
 
         sel.def(
             "set_depth_filter_range", [](bool enabled, float depth_near, float depth_far, float frustum_half_width) {
@@ -424,14 +415,10 @@ namespace lfs::python {
 
         sel.def(
             "apply_crop_filter", []() {
-                auto* rm = get_rm();
                 auto* ss = get_ss();
-                if (!rm || !ss)
+                if (!ss)
                     return;
-                auto* stroke = ss->getStrokeSelection();
-                if (stroke && stroke->is_valid()) {
-                    rm->applyCropFilter(*stroke);
-                }
+                ss->applyCropFilterToStroke();
             },
             "Apply crop box filter to current stroke selection");
 
