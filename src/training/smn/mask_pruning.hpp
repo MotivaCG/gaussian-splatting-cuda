@@ -231,6 +231,56 @@ namespace lfs::training {
         };
 
         /**
+         * @brief Configuration for ellipse boundary pruning.
+         *
+         * For each surviving Gaussian (center already validated by center-vote),
+         * projects the 2D ellipse boundary into every camera and samples 8 points
+         * (4 cardinal + 4 diagonal). Each point is checked against a slightly
+         * expanded version of the mask. If any in-frame boundary point falls
+         * outside the expanded mask, that camera votes negative for the splat.
+         * Splats accumulating negative votes in enough cameras are removed.
+         *
+         * Advantages over alpha-consensus and leakage pruning:
+         * - No Gaussian weighting or mass estimation: a simple binary per-point
+         *   check that is faster, easier to reason about, and has fewer parameters.
+         * - Frame-border safe by design: points that fall outside the image are
+         *   individually ignored, not penalized. A camera only votes if at least
+         *   one boundary point is in-frame.
+         * - The expanded mask provides uniform tolerance for minor mask
+         *   imperfections and natural Gaussian bleed at the object silhouette.
+         * - The low negative-vote threshold (10%) combined with the generous
+         *   mask expansion means only splats with clearly excessive leakage
+         *   across multiple cameras are removed.
+         */
+        struct EllipseBoundaryPruningConfig {
+            /// Enable/disable this pass
+            bool enabled = true;
+            /// Mask expansion as a fraction of the longest image side in pixels.
+            /// The binary mask is dilated by this many pixels before checking
+            /// boundary points, providing tolerance for minor mask errors and
+            /// natural Gaussian bleed at the object silhouette.
+            /// 0.05 = expand by 1% of max(W, H). At 2K this is ~20px.
+            float mask_expansion_fraction = 0.05f;
+            /// Fraction of evaluating cameras that must vote negative to remove.
+            /// A camera votes negative if any of the 8 in-frame boundary points
+            /// falls outside the expanded mask.
+            /// 0.05 = remove if >= 5% of evaluating cameras flagged leakage.
+            float negative_vote_threshold = 0.1f;
+            /// Minimum number of cameras that could evaluate the splat (had at
+            /// least one boundary point in-frame). Splats evaluated by fewer
+            /// cameras are kept — not enough evidence to judge.
+            int min_evaluating_cameras = 3;
+            /// Projection parameters (match CenterVotePruningConfig for consistency)
+            float eps2d = 0.3f;
+            float near_plane = 0.01f;
+            float far_plane = 10000.0f;
+            float radius_clip = 0.0f;
+            float scaling_modifier = 1.0f;
+            bool invert_masks = false;
+        };
+
+
+        /**
          * @brief Configuration for 3D cluster + extreme-point pruning.
          *
          * Pass 1:
@@ -426,6 +476,7 @@ namespace lfs::training {
             IStrategy& strategy,
             const CameraDataset& dataset,
             const LeakagePruningConfig& config);
+
         /**
          * @brief Remove splats whose Gaussian mass is predominantly outside the mask.
          */
@@ -433,6 +484,14 @@ namespace lfs::training {
             IStrategy& strategy,
             const CameraDataset& dataset,
             const AlphaConsensusPruningConfig& config = {});
+
+        /**
+         * @brief Remove splats whose Gaussian boundary goes out of the extended mask.
+         */
+        std::expected<PruningResult, std::string> prune_by_ellipse_boundary(
+            IStrategy& strategy,
+            const CameraDataset& dataset,
+            const EllipseBoundaryPruningConfig& config = {});
 
         /**
          * @brief Remove tiny 3D clusters and splats whose oriented 3D extremes are too far

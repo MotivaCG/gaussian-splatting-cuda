@@ -1982,6 +1982,389 @@ namespace lfs::training::mask_pruning {
 
         return PruningResult{.splats_before = N, .splats_after = after, .splats_removed = removed, .success = true};
     } 
+
+    
+    std::expected<PruningResult, std::string> prune_by_ellipse_boundary(
+        IStrategy& strategy,
+        const CameraDataset& dataset,
+        const EllipseBoundaryPruningConfig& config) {
+
+        using namespace lfs::core;
+
+        if (!config.enabled) {
+            const int n = static_cast<int>(strategy.get_model().size());
+            return PruningResult{.splats_before = n, .splats_after = n, .splats_removed = 0, .success = true};
+        }
+
+        auto& model = strategy.get_model();
+        const int N = static_cast<int>(model.size());
+        if (N <= 0) {
+            return PruningResult{.splats_before = 0, .splats_after = 0, .splats_removed = 0, .success = true};
+        }
+
+        auto sizing = get_dataset_sizing_or_error(dataset);
+        if (!sizing) {
+            return std::unexpected(sizing.error());
+        }
+
+        // Per-splat vote accumulators
+        std::vector<int> negative_votes(static_cast<size_t>(N), 0);
+        std::vector<int> evaluating_cameras(static_cast<size_t>(N), 0);
+
+        int skipped_no_mask = 0;
+        int skipped_size_mismatch = 0;
+        int skipped_proj_error = 0;
+
+        const auto& cams = dataset.get_cameras();
+        const int n_cams = static_cast<int>(cams.size());
+
+        LOG_INFO("[prune_by_ellipse_boundary] Starting: {} splats, {} cameras, "
+                 "mask_expansion={:.1f}%, negative_threshold={:.0f}%",
+                 N, n_cams,
+                 100.0f * config.mask_expansion_fraction,
+                 100.0f * config.negative_vote_threshold);
+
+        CenterVotePruningConfig proj_cfg;
+        proj_cfg.eps2d = config.eps2d;
+        proj_cfg.near_plane = config.near_plane;
+        proj_cfg.far_plane = config.far_plane;
+        proj_cfg.radius_clip = config.radius_clip;
+        proj_cfg.scaling_modifier = config.scaling_modifier;
+
+        // 8 sample directions on the ellipse boundary:
+        //   4 cardinal:  (+-1, 0), (0, +-1)
+        //   4 diagonal:  (+-s, +-s) where s = 1/sqrt(2)
+        constexpr float S = 0.70710678f;
+        struct Dir {
+            float dx;
+            float dy;
+        };
+        constexpr Dir dirs[8] = {
+            {1.0f, 0.0f},
+            {-1.0f, 0.0f}, // right, left
+            {0.0f, 1.0f},
+            {0.0f, -1.0f}, // down, up
+            {S, S},
+            {-S, S}, // diagonal
+            {S, -S},
+            {-S, -S}};
+
+        const int num_threads = std::min(n_cams, omp_get_max_threads());
+        LOG_INFO("[prune_by_ellipse_boundary] Using {} OpenMP threads", num_threads);
+
+#pragma omp parallel num_threads(num_threads)
+        {
+            std::vector<int> local_negative(static_cast<size_t>(N), 0);
+            std::vector<int> local_evaluating(static_cast<size_t>(N), 0);
+
+            // Thread-local buffers for expanded mask
+            std::vector<uint8_t> expanded_mask;
+
+#pragma omp for schedule(dynamic, 1)
+            for (int ci = 0; ci < n_cams; ++ci) {
+                const auto& cam_ptr = cams[static_cast<size_t>(ci)];
+                if (!cam_ptr || !cam_ptr->has_mask()) {
+#pragma omp atomic
+                    skipped_no_mask++;
+                    continue;
+                }
+
+                auto& cam = *cam_ptr;
+
+                Tensor mask = cam.load_and_get_mask(
+                    sizing->resize_factor, sizing->max_width, config.invert_masks, 0.5f);
+                if (!mask.is_valid() || mask.numel() == 0) {
+#pragma omp atomic
+                    skipped_no_mask++;
+                    continue;
+                }
+                if (mask.ndim() == 3 && mask.shape()[0] == 1) {
+                    mask = mask.squeeze(0);
+                }
+
+                const int H = static_cast<int>(cam.image_height());
+                const int W = static_cast<int>(cam.image_width());
+                if (mask.ndim() != 2 ||
+                    static_cast<int>(mask.shape()[0]) != H ||
+                    static_cast<int>(mask.shape()[1]) != W) {
+#pragma omp atomic
+                    skipped_size_mismatch++;
+                    continue;
+                }
+
+                // ---------------------------------------------------------
+                // Build expanded mask via dilation.
+                // Expansion radius = mask_expansion_fraction * max(W, H)
+                // Use integral image for O(1) box queries.
+                // ---------------------------------------------------------
+                Tensor mask_cpu = mask.cpu().contiguous();
+                auto mask_acc = mask_cpu.accessor<float, 2>();
+
+                const int expand_px = static_cast<int>(
+                    config.mask_expansion_fraction * static_cast<float>(std::max(W, H)));
+
+                // Build binary mask
+                const size_t img_size = static_cast<size_t>(H) * static_cast<size_t>(W);
+                expanded_mask.resize(img_size);
+
+                if (expand_px <= 0) {
+                    // No expansion: direct binary copy
+                    for (int y = 0; y < H; ++y) {
+                        uint8_t* row = expanded_mask.data() + static_cast<size_t>(y) * static_cast<size_t>(W);
+                        for (int x = 0; x < W; ++x) {
+                            row[x] = (mask_acc(y, x) >= 0.5f) ? uint8_t(1) : uint8_t(0);
+                        }
+                    }
+                } else {
+                    // Build SAT for dilation
+                    // First pass: binary mask
+                    std::vector<uint8_t> raw_mask(img_size);
+                    for (int y = 0; y < H; ++y) {
+                        uint8_t* row = raw_mask.data() + static_cast<size_t>(y) * static_cast<size_t>(W);
+                        for (int x = 0; x < W; ++x) {
+                            row[x] = (mask_acc(y, x) >= 0.5f) ? uint8_t(1) : uint8_t(0);
+                        }
+                    }
+
+                    // Build integral image (SAT)
+                    const int sat_stride = W + 1;
+                    std::vector<int> sat(static_cast<size_t>((H + 1) * sat_stride), 0);
+
+                    for (int y = 0; y < H; ++y) {
+                        int row_sum = 0;
+                        const uint8_t* row = raw_mask.data() + static_cast<size_t>(y) * static_cast<size_t>(W);
+                        for (int x = 0; x < W; ++x) {
+                            row_sum += (row[x] != 0) ? 1 : 0;
+                            sat[static_cast<size_t>((y + 1) * sat_stride + (x + 1))] =
+                                sat[static_cast<size_t>(y * sat_stride + (x + 1))] + row_sum;
+                        }
+                    }
+
+                    // Dilate: pixel is 1 if any pixel in [x-r, x+r] x [y-r, y+r] is 1
+                    auto sat_sum = [&](int x0, int y0, int x1, int y1) -> int {
+                        x0 = std::max(0, x0);
+                        y0 = std::max(0, y0);
+                        x1 = std::min(W - 1, x1);
+                        y1 = std::min(H - 1, y1);
+                        if (x1 < x0 || y1 < y0)
+                            return 0;
+                        const int xa = x0, ya = y0;
+                        const int xb = x1 + 1, yb = y1 + 1;
+                        return sat[static_cast<size_t>(yb * sat_stride + xb)] - sat[static_cast<size_t>(ya * sat_stride + xb)] - sat[static_cast<size_t>(yb * sat_stride + xa)] + sat[static_cast<size_t>(ya * sat_stride + xa)];
+                    };
+
+                    for (int y = 0; y < H; ++y) {
+                        uint8_t* row = expanded_mask.data() + static_cast<size_t>(y) * static_cast<size_t>(W);
+                        for (int x = 0; x < W; ++x) {
+                            row[x] = (sat_sum(x - expand_px, y - expand_px,
+                                              x + expand_px, y + expand_px) > 0)
+                                         ? uint8_t(1)
+                                         : uint8_t(0);
+                        }
+                    }
+                }
+
+                // Expanded mask query (in-frame only)
+                auto inside_expanded = [&](int x, int y) -> bool {
+                    return expanded_mask[static_cast<size_t>(y) * static_cast<size_t>(W) +
+                                         static_cast<size_t>(x)] != 0;
+                };
+
+                auto in_frame = [&](int x, int y) -> bool {
+                    return x >= 0 && x < W && y >= 0 && y < H;
+                };
+
+                // ---------------------------------------------------------
+                // Project splats
+                // ---------------------------------------------------------
+                auto proj = project_splats(cam, model, proj_cfg);
+                if (!proj) {
+#pragma omp atomic
+                    skipped_proj_error++;
+                    continue;
+                }
+
+                Tensor radii_cpu = proj->radii.cpu().contiguous();     // [N, 2] int32
+                Tensor means2d_cpu = proj->means2d.cpu().contiguous(); // [N, 2] float
+
+                auto r_acc = radii_cpu.accessor<int32_t, 2>();
+                auto m_acc = means2d_cpu.accessor<float, 2>();
+
+                // ---------------------------------------------------------
+                // Evaluate each splat
+                // ---------------------------------------------------------
+                for (int i = 0; i < N; ++i) {
+                    const int rx = static_cast<int>(r_acc(i, 0));
+                    const int ry = static_cast<int>(r_acc(i, 1));
+
+                    // Not visible in this camera
+                    if (!is_visible_radii_strict(rx, ry))
+                        continue;
+
+                    const float mx = m_acc(i, 0);
+                    const float my = m_acc(i, 1);
+                    if (!std::isfinite(mx) || !std::isfinite(my))
+                        continue;
+
+                    const float frx = static_cast<float>(std::abs(rx));
+                    const float fry = static_cast<float>(std::abs(ry));
+
+                    // Splats with tiny projected radius: nothing to evaluate
+                    // (the boundary is essentially at the center, which center-vote
+                    // already validated).
+                    if (frx < 1.0f && fry < 1.0f)
+                        continue;
+
+                    // Evaluate 8 boundary points
+                    bool any_inframe = false;
+                    bool any_outside_expanded = false;
+
+                    for (int d = 0; d < 8; ++d) {
+                        const int px = round_to_int(mx + frx * dirs[d].dx);
+                        const int py = round_to_int(my + fry * dirs[d].dy);
+
+                        // Point outside image -> skip this point, don't penalize
+                        if (!in_frame(px, py))
+                            continue;
+
+                        any_inframe = true;
+
+                        if (!inside_expanded(px, py)) {
+                            any_outside_expanded = true;
+                            break; // one outside point is enough for a negative vote
+                        }
+                    }
+
+                    // Camera didn't have any boundary point in frame -> can't evaluate
+                    if (!any_inframe)
+                        continue;
+
+                    // This camera could evaluate the splat
+                    local_evaluating[static_cast<size_t>(i)]++;
+
+                    // At least one in-frame boundary point was outside expanded mask
+                    if (any_outside_expanded) {
+                        local_negative[static_cast<size_t>(i)]++;
+                    }
+                }
+
+                if ((ci + 1) % 25 == 0 || (ci + 1) == n_cams) {
+                    LOG_INFO("[prune_by_ellipse_boundary] Processing camera {}/{}", (ci + 1), n_cams);
+                }
+            }
+
+            // Merge thread-local into global
+            #pragma omp critical
+            {
+                for (int i = 0; i < N; ++i) {
+                    negative_votes[static_cast<size_t>(i)] += local_negative[static_cast<size_t>(i)];
+                    evaluating_cameras[static_cast<size_t>(i)] += local_evaluating[static_cast<size_t>(i)];
+                }
+            }
+        }
+
+        LOG_INFO("[prune_by_ellipse_boundary] Processed {} cameras, skipped: {} no mask, "
+                 "{} size mismatch, {} proj error",
+                 n_cams, skipped_no_mask, skipped_size_mismatch, skipped_proj_error);
+
+        // =====================================================================
+        // Build removal mask
+        // =====================================================================
+        Tensor remove_mask_cpu = Tensor::zeros({static_cast<size_t>(N)},
+                                               Device::CPU, DataType::Bool);
+        auto rm_acc = remove_mask_cpu.accessor<uint8_t, 1>();
+
+        int n_remove = 0;
+        int kept_low_eval = 0;
+        int kept_clean = 0;
+        int removed_leaking = 0;
+
+        // Diagnostic: distribution of negative ratios
+        int diag_0 = 0;      // exactly 0% negative
+        int diag_0_5 = 0;    // (0%, 5%)
+        int diag_5_10 = 0;   // [5%, 10%)
+        int diag_10_20 = 0;  // [10%, 20%)
+        int diag_20_50 = 0;  // [20%, 50%)
+        int diag_50_100 = 0; // [50%, 100%]
+
+        for (int i = 0; i < N; ++i) {
+            const int ev = evaluating_cameras[static_cast<size_t>(i)];
+            const int nv = negative_votes[static_cast<size_t>(i)];
+
+            if (ev < config.min_evaluating_cameras) {
+                rm_acc(i) = 0;
+                kept_low_eval++;
+                continue;
+            }
+
+            const float neg_ratio = static_cast<float>(nv) / static_cast<float>(ev);
+
+            // Diagnostic bucketing
+            if (nv == 0)
+                diag_0++;
+            else if (neg_ratio < 0.05f)
+                diag_0_5++;
+            else if (neg_ratio < 0.10f)
+                diag_5_10++;
+            else if (neg_ratio < 0.20f)
+                diag_10_20++;
+            else if (neg_ratio < 0.50f)
+                diag_20_50++;
+            else
+                diag_50_100++;
+
+            if (neg_ratio >= config.negative_vote_threshold) {
+                rm_acc(i) = 1;
+                n_remove++;
+                removed_leaking++;
+            } else {
+                rm_acc(i) = 0;
+                kept_clean++;
+            }
+        }
+
+        LOG_INFO("[prune_by_ellipse_boundary] === DECISION BREAKDOWN ===");
+        LOG_INFO("[prune_by_ellipse_boundary]   Kept (low evaluators):  {:6d} (< {} cameras)",
+                 kept_low_eval, config.min_evaluating_cameras);
+        LOG_INFO("[prune_by_ellipse_boundary]   Kept (clean boundary):  {:6d}",
+                 kept_clean);
+        LOG_INFO("[prune_by_ellipse_boundary]   Removed (leaking):      {:6d} (neg_ratio >= {:.0f}%)",
+                 removed_leaking, 100.0 * config.negative_vote_threshold);
+        LOG_INFO("[prune_by_ellipse_boundary]   TOTAL TO REMOVE:        {:6d} ({:.1f}%)",
+                 n_remove, 100.0 * static_cast<double>(n_remove) / std::max(1, N));
+
+        LOG_INFO("[prune_by_ellipse_boundary] === NEGATIVE RATIO DISTRIBUTION ===");
+        LOG_INFO("[prune_by_ellipse_boundary]     0%%: {:6d}  |  0-5%%: {:6d}  |  5-10%%: {:6d}",
+                 diag_0, diag_0_5, diag_5_10);
+        LOG_INFO("[prune_by_ellipse_boundary]   10-20%%: {:6d}  | 20-50%%: {:6d}  | 50-100%%: {:6d}",
+                 diag_10_20, diag_20_50, diag_50_100);
+
+        if (n_remove == 0) {
+            return PruningResult{.splats_before = N, .splats_after = N, .splats_removed = 0, .success = true};
+        }
+
+        const int n_keep = N - n_remove;
+        if (n_keep == 0) {
+            LOG_WARN("[prune_by_ellipse_boundary] Would remove all splats; skipping.");
+            return PruningResult{.splats_before = N, .splats_after = N, .splats_removed = 0, .success = true};
+        }
+
+        Tensor remove_mask = remove_mask_cpu.to(Device::CUDA).contiguous();
+        strategy.remove_gaussians(remove_mask);
+
+        const int after = static_cast<int>(strategy.get_model().size());
+        const int removed = N - after;
+        const double pct = (N > 0) ? (100.0 * static_cast<double>(removed) / static_cast<double>(N)) : 0.0;
+
+        LOG_INFO("[prune_by_ellipse_boundary] Requested: {}, actually removed: {} ({:.3f}%)",
+                 n_remove, removed, pct);
+
+        return PruningResult{
+            .splats_before = N,
+            .splats_after = after,
+            .splats_removed = removed,
+            .success = true};
+    }
     
     // -----------------------------------------------------------------------------
     // Isolation pruning (3D nearest-neighbor outliers)
@@ -2595,6 +2978,11 @@ namespace lfs::training::mask_pruning {
         auto cluster = prune_by_cluster_and_extremes(strategy, cluster_config);
         if (!cluster) {
             return std::unexpected(cluster.error());
+        }
+                
+        auto bound = prune_by_ellipse_boundary(strategy,dataset);
+        if (!bound) {
+            return std::unexpected(bound.error());
         }
 
         if (isolation_config.enabled) {

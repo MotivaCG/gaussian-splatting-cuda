@@ -604,6 +604,84 @@ namespace lfs::training {
         }
     }
 
+    /* void MCMC::invalidate_gaussians(const lfs::core::Tensor& mask) {
+        using namespace lfs::core;
+
+        Tensor remove_indices = mask.nonzero().squeeze(-1);
+        const int64_t n_remove = remove_indices.numel();
+
+        if (n_remove == 0) {
+            LOG_DEBUG("MCMC: No Gaussians to remove");
+            return;
+        }
+
+        LOG_INFO("MCMC::remove_gaussians: marking {} Gaussians as dead (soft delete)",
+                 n_remove);
+
+        // Set rotation to zero -> preprocessing kernel early-exit +
+        // relocate_gs() detects as dead via rotation magnitude near zero
+        auto zero_rotation = Tensor::zeros(
+            {static_cast<size_t>(n_remove), 4},
+            _splat_data->rotation_raw().device());
+        _splat_data->rotation_raw().index_put_(remove_indices, zero_rotation);
+
+        // Set opacity_raw to very negative -> sigmoid maps to ~0,
+        // which is below min_opacity -> relocate_gs() detects as dead
+        auto dead_opacity = Tensor::full(
+            {static_cast<size_t>(n_remove)},
+            -20.0f, // sigmoid(-20) ~= 2e-9, well below any min_opacity
+            _splat_data->opacity_raw().device());
+
+        if (_splat_data->opacity_raw().ndim() == 2) {
+            dead_opacity = dead_opacity.unsqueeze(-1);
+        }
+        _splat_data->opacity_raw().index_put_(remove_indices, dead_opacity);
+
+        // Zero optimizer states for these indices (avoids momentum ghosts)
+        if (_optimizer) {
+            auto zero_state = [&](ParamType param_type) {
+                auto* state = _optimizer->get_state_mutable(param_type);
+                if (!state)
+                    return;
+
+                const auto& shape = state->exp_avg.shape();
+                if (shape.rank() == 0)
+                    return;
+
+                std::vector<size_t> dims = {static_cast<size_t>(n_remove)};
+                for (size_t i = 1; i < shape.rank(); ++i) {
+                    dims.push_back(shape[i]);
+                }
+                auto zeros = Tensor::zeros(TensorShape(dims), state->exp_avg.device());
+
+                state->exp_avg.index_put_(remove_indices, zeros);
+                state->exp_avg_sq.index_put_(remove_indices, zeros);
+                if (state->grad.is_valid()) {
+                    state->grad.index_put_(remove_indices, zeros);
+                }
+            };
+
+            zero_state(ParamType::Means);
+            zero_state(ParamType::Rotation);
+            zero_state(ParamType::Scaling);
+            zero_state(ParamType::Sh0);
+            zero_state(ParamType::ShN);
+            zero_state(ParamType::Opacity);
+        }
+
+        // Zero error scores so dead splats don't get priority in densification
+        if (_error_score_max.is_valid() && _error_score_max.ndim() == 1 &&
+            _error_score_max.numel() >= static_cast<size_t>(_splat_data->size())) {
+            auto zeros = Tensor::zeros({static_cast<size_t>(n_remove)},
+                                       _error_score_max.device());
+            _error_score_max.index_put_(remove_indices, zeros);
+        }
+
+        LOG_INFO("MCMC::remove_gaussians: {} Gaussians marked as dead. "
+                 "They will be recycled by relocate_gs() on next refine step.",
+                 n_remove);
+    }*/
+
     void MCMC::remove_gaussians(const lfs::core::Tensor& mask) {
         using namespace lfs::core;
 

@@ -36,6 +36,7 @@ namespace lfs::training {
         const lfs::core::SplatData& get_model() const override { return *_splat_data; }
 
         void remove_gaussians(const lfs::core::Tensor& mask) override;
+        //void invalidate_gaussians(const lfs::core::Tensor& mask) override;
 
         // IStrategy interface - optimizer access
         AdamOptimizer& get_optimizer() override { return *_optimizer; }
