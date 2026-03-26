@@ -63,10 +63,9 @@
       <div class="setting-row" data-tooltip="training.tooltip.strategy">
         <span class="prop-label">{{label_strategy}}</span>
         <select data-value="strategy">
-          <option value="mcmc">{{label_strategy_mcmc}}</option>
-          <option value="adc">{{label_strategy_adc}}</option>
-          <option value="lfs">{{label_strategy_lfs}}</option>
+          <option value="mrnf">{{label_strategy_mrnf}}</option>
           <option value="igs+">{{label_strategy_igs_plus}}</option>
+          <option value="mcmc">{{label_strategy_mcmc}}</option>
         </select>
       </div>
       <div class="setting-row" data-tooltip="training.tooltip.iterations">
@@ -379,13 +378,13 @@
             <button class="num-step-btn" data-event-mousedown="num_step('sh_degree_interval', -1)">-</button>
             <button class="num-step-btn" data-event-mousedown="num_step('sh_degree_interval', 1)">+</button>
           </div>
-          <div class="setting-row" data-if="dep_adc_or_igs">
+          <div class="setting-row" data-if="dep_igs">
             <span class="prop-label">{{label_prune_opacity}}</span>
             <input type="text" class="number-input" data-value="prune_opacity_str" />
             <button class="num-step-btn" data-event-mousedown="num_step('prune_opacity', -1)">-</button>
             <button class="num-step-btn" data-event-mousedown="num_step('prune_opacity', 1)">+</button>
           </div>
-          <div class="setting-row" data-if="dep_adc_or_igs">
+          <div class="setting-row" data-if="dep_igs">
             <span class="prop-label">{{label_revised_opacity}}</span>
             <input type="checkbox" data-checked="revised_opacity" />
           </div>
@@ -500,9 +499,9 @@
       </div>
     </div>
 
-    <!-- ADC Pruning/Growing subsection (conditional) -->
-    <div class="training-subsection" data-if="dep_adc">
-      <div class="training-subsection-title">{{label_hdr_adc}}</div>
+    <!-- Pruning/Growing subsection (conditional) -->
+    <div class="training-subsection" data-if="dep_igs">
+      <div class="training-subsection-title">{{label_hdr_pruning_growing}}</div>
       <div data-class-disabled-overlay="adv_disabled">
         <div class="setting-row">
           <span class="prop-label">{{label_min_opacity}}</span>

@@ -595,7 +595,7 @@ namespace lichtfeld::Strings {
         inline constexpr const char* NO_SAVE_STEPS = "training_panel.no_save_steps";
         inline constexpr const char* SPARSITY = "training_panel.sparsity";
         inline constexpr const char* PRUNING_GROWING = "training_panel.pruning_growing";
-        inline constexpr const char* LFS_PARAMS = "training_panel.lfs_params";
+        inline constexpr const char* MRNF_PARAMS = "training_panel.mrnf_params";
     } // namespace TrainingPanel
 
     namespace Tooltip {

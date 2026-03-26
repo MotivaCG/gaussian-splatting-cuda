@@ -30,7 +30,7 @@ namespace {
         Help
     };
 
-    const std::set<std::string> VALID_STRATEGIES = {"mcmc", "adc", "lfs", "igs+"};
+    const std::set<std::string> VALID_STRATEGIES = {"mcmc", "mrnf", "mnrf", "lfs", "igs+"};
 
     // Parse log level from string
     lfs::core::LogLevel parse_log_level(const std::string& level_str) {
@@ -105,18 +105,20 @@ namespace {
             ::args::Group training_sep(parser, " ");
             ::args::Group training_group(parser, "TRAINING PARAMETERS:");
             ::args::ValueFlag<uint32_t> iterations(training_group, "iterations", "Number of iterations", {'i', "iter"});
-            ::args::ValueFlag<std::string> strategy(training_group, "strategy", "Optimization strategy: mcmc, adc, lfs, igs+", {"strategy"});
+            ::args::ValueFlag<std::string> strategy(training_group, "strategy", "Optimization strategy: mcmc, mrnf, igs+ (legacy aliases: mnrf, lfs)", {"strategy"});
             ::args::ValueFlag<int> sh_degree(training_group, "sh_degree", "Max SH degree [0-3]", {"sh-degree"});
             ::args::ValueFlag<int> sh_degree_interval(training_group, "sh_degree_interval", "SH degree interval", {"sh-degree-interval"});
             ::args::ValueFlag<int> max_cap(training_group, "max_cap", "Maximum number of Gaussians", {"max-cap"});
             ::args::ValueFlag<float> min_opacity(training_group, "min_opacity", "Minimum opacity threshold", {"min-opacity"});
             ::args::ValueFlag<float> steps_scaler(training_group, "steps_scaler", "Scale training steps by factor", {"steps-scaler"});
             ::args::ValueFlag<int> tile_mode(training_group, "tile_mode", "Tile mode for memory-efficient training: 1=1 tile, 2=2 tiles, 4=4 tiles (default: 1)", {"tile-mode"});
+
             ::args::ValueFlag<float> means_lr_mul_start(parser, "mul_start", "Multiply means_lr by this factor at the start (curved schedule over time)", {"means-lr-mul-start"});
             ::args::ValueFlag<float> means_lr_mul_end(parser, "mul_end", "Multiply means_lr by this factor at the end (curved schedule over time)", {"means-lr-mul-end"});
             ::args::ValueFlag<float> means_lr_mul_power(parser, "power", "Power (p) for the means_lr multiplier curve: M(t)=end+(start-end)*(1-t)^p", {"means-lr-mul-power"});
-            ::args::Flag use_error_map(training_group, "use_error_map", "Weight LFS refine signal by per-pixel SSIM error map", {"use-error-map"});
-            ::args::Flag use_edge_map(training_group, "use_edge_map", "Weight LFS refine signal by Sobel edge map on GT images", {"use-edge-map"});
+            ::args::Flag use_error_map(training_group, "use_error_map", "Weight MRNF refine signal by per-pixel SSIM error map", {"use-error-map"});
+            ::args::Flag use_edge_map(training_group, "use_edge_map", "Weight MRNF refine signal by Sobel edge map on GT images", {"use-edge-map"});
+
 
             // =============================================================================
             // INITIALIZATION
@@ -442,14 +444,14 @@ namespace {
                 const auto strat = ::args::get(strategy);
                 if (VALID_STRATEGIES.find(strat) == VALID_STRATEGIES.end()) {
                     return std::unexpected(std::format(
-                        "ERROR: Invalid optimization strategy '{}'. Valid strategies are: mcmc, adc, lfs, igs+",
+                        "ERROR: Invalid optimization strategy '{}'. Valid strategies are: mcmc, mrnf, igs+ (legacy aliases: mnrf, lfs)",
                         strat));
                 }
 
                 // Unlike other parameters that will be set later as overrides,
                 // strategy must be set immediately to ensure correct JSON loading
                 // in `read_optim_params_from_json()`
-                params.optimization.strategy = strat;
+                params.optimization.strategy = std::string(lfs::core::param::canonical_strategy_name(strat));
             }
 
             if (config_file) {
@@ -534,47 +536,65 @@ namespace {
                 }
             }
 
+            const auto cli_option_present = [&args](const std::initializer_list<std::string_view> names) {
+                for (size_t i = 1; i < args.size(); ++i) {
+                    const std::string_view arg = args[i];
+                    for (const std::string_view name : names) {
+                        if (arg == name) {
+                            return true;
+                        }
+                        if (name.starts_with("--") &&
+                            arg.size() > name.size() &&
+                            arg.starts_with(name) &&
+                            arg[name.size()] == '=') {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            };
+
             // Create lambda to apply command line overrides after JSON loading
             auto apply_cmd_overrides = [&params,
                                         // Capture values, not references
-                                        iterations_val = iterations ? std::optional<uint32_t>(::args::get(iterations)) : std::optional<uint32_t>(),
+                                        iterations_val = cli_option_present({"-i", "--iter"}) ? std::optional<uint32_t>(::args::get(iterations)) : std::optional<uint32_t>(),
                                         resize_factor_val = resize_factor ? std::optional<int>(::args::get(resize_factor)) : std::optional<int>(1), // default 1
                                         max_width_val = max_width ? std::optional<int>(::args::get(max_width)) : std::optional<int>(3840),          // default 3840
                                         no_cpu_cache_flag = static_cast<bool>(no_cpu_cache),
                                         no_fs_cache_flag = static_cast<bool>(no_fs_cache),
-                                        max_cap_val = max_cap ? std::optional<int>(::args::get(max_cap)) : std::optional<int>(),
-                                        config_file_val = config_file ? std::optional<std::string>(::args::get(config_file)) : std::optional<std::string>(),
-                                        images_folder_val = images_folder ? std::optional<std::string>(::args::get(images_folder)) : std::optional<std::string>(),
-                                        test_every_val = test_every ? std::optional<int>(::args::get(test_every)) : std::optional<int>(),
-                                        steps_scaler_val = steps_scaler ? std::optional<float>(::args::get(steps_scaler)) : std::optional<float>(),
+                                        max_cap_val = cli_option_present({"--max-cap"}) ? std::optional<int>(::args::get(max_cap)) : std::optional<int>(),
+                                        config_file_val = cli_option_present({"--config"}) ? std::optional<std::string>(::args::get(config_file)) : std::optional<std::string>(),
+                                        images_folder_val = cli_option_present({"--images"}) ? std::optional<std::string>(::args::get(images_folder)) : std::optional<std::string>(),
+                                        test_every_val = cli_option_present({"--test-every"}) ? std::optional<int>(::args::get(test_every)) : std::optional<int>(),
+                                        steps_scaler_val = cli_option_present({"--steps-scaler"}) ? std::optional<float>(::args::get(steps_scaler)) : std::optional<float>(),
                                         means_lr_mul_start_val = means_lr_mul_start ? std::optional<float>(::args::get(means_lr_mul_start)) : std::optional<float>(),
                                         means_lr_mul_end_val = means_lr_mul_end ? std::optional<float>(::args::get(means_lr_mul_end)) : std::optional<float>(),
                                         means_lr_mul_power_val = means_lr_mul_power ? std::optional<float>(::args::get(means_lr_mul_power)) : std::optional<float>(),
-                                        sh_degree_interval_val = sh_degree_interval ? std::optional<int>(::args::get(sh_degree_interval)) : std::optional<int>(),
-                                        sh_degree_val = sh_degree ? std::optional<int>(::args::get(sh_degree)) : std::optional<int>(),
-                                        min_opacity_val = min_opacity ? std::optional<float>(::args::get(min_opacity)) : std::optional<float>(),
-                                        init_num_pts_val = init_num_pts ? std::optional<int>(::args::get(init_num_pts)) : std::optional<int>(),
-                                        init_extent_val = init_extent ? std::optional<float>(::args::get(init_extent)) : std::optional<float>(),
-                                        strategy_val = strategy ? std::optional<std::string>(::args::get(strategy)) : std::optional<std::string>(),
-                                        timelapse_images_val = timelapse_images ? std::optional<std::vector<std::string>>(::args::get(timelapse_images)) : std::optional<std::vector<std::string>>(),
-                                        timelapse_every_val = timelapse_every ? std::optional<int>(::args::get(timelapse_every)) : std::optional<int>(),
-                                        tile_mode_val = tile_mode ? std::optional<int>(::args::get(tile_mode)) : std::optional<int>(),
+                                        sh_degree_interval_val = cli_option_present({"--sh-degree-interval"}) ? std::optional<int>(::args::get(sh_degree_interval)) : std::optional<int>(),
+                                        sh_degree_val = cli_option_present({"--sh-degree"}) ? std::optional<int>(::args::get(sh_degree)) : std::optional<int>(),
+                                        min_opacity_val = cli_option_present({"--min-opacity"}) ? std::optional<float>(::args::get(min_opacity)) : std::optional<float>(),
+                                        init_num_pts_val = cli_option_present({"--init-num-pts"}) ? std::optional<int>(::args::get(init_num_pts)) : std::optional<int>(),
+                                        init_extent_val = cli_option_present({"--init-extent"}) ? std::optional<float>(::args::get(init_extent)) : std::optional<float>(),
+                                        strategy_val = cli_option_present({"--strategy"}) ? std::optional<std::string>(::args::get(strategy)) : std::optional<std::string>(),
+                                        timelapse_images_val = cli_option_present({"--timelapse-images"}) ? std::optional<std::vector<std::string>>(::args::get(timelapse_images)) : std::optional<std::vector<std::string>>(),
+                                        timelapse_every_val = cli_option_present({"--timelapse-every"}) ? std::optional<int>(::args::get(timelapse_every)) : std::optional<int>(),
+                                        tile_mode_val = cli_option_present({"--tile-mode"}) ? std::optional<int>(::args::get(tile_mode)) : std::optional<int>(),
                                         high_confidence_count_val = high_confidence_count ? std::optional<int>(::args::get(high_confidence_count)) : std::optional<int>(),
                                         // Sparsity parameters
-                                        sparsify_steps_val = sparsify_steps ? std::optional<int>(::args::get(sparsify_steps)) : std::optional<int>(),
-                                        init_rho_val = init_rho ? std::optional<float>(::args::get(init_rho)) : std::optional<float>(),
-                                        prune_ratio_val = prune_ratio ? std::optional<float>(::args::get(prune_ratio)) : std::optional<float>(),
+                                        sparsify_steps_val = cli_option_present({"--sparsify-steps"}) ? std::optional<int>(::args::get(sparsify_steps)) : std::optional<int>(),
+                                        init_rho_val = cli_option_present({"--init-rho"}) ? std::optional<float>(::args::get(init_rho)) : std::optional<float>(),
+                                        prune_ratio_val = cli_option_present({"--prune-ratio"}) ? std::optional<float>(::args::get(prune_ratio)) : std::optional<float>(),
                                         // Mask parameters
-                                        mask_mode_val = mask_mode ? std::optional<lfs::core::param::MaskMode>(::args::get(mask_mode)) : std::optional<lfs::core::param::MaskMode>(),
+                                        mask_mode_val = cli_option_present({"--mask-mode"}) ? std::optional<lfs::core::param::MaskMode>(::args::get(mask_mode)) : std::optional<lfs::core::param::MaskMode>(),
                                         // Python scripts
-                                        python_scripts_val = python_scripts ? std::optional<std::vector<std::string>>(::args::get(python_scripts)) : std::optional<std::vector<std::string>>(),
+                                        python_scripts_val = cli_option_present({"--python-script"}) ? std::optional<std::vector<std::string>>(::args::get(python_scripts)) : std::optional<std::vector<std::string>>(),
                                         // Capture flag states
                                         enable_mip_flag = bool(enable_mip),
                                         use_bilateral_grid_flag = bool(use_bilateral_grid),
                                         use_ppisp_flag = bool(use_ppisp),
                                         ppisp_controller_flag = bool(ppisp_controller),
                                         ppisp_freeze_from_sidecar_flag = bool(ppisp_freeze_from_sidecar),
-                                        ppisp_sidecar_path_val = ppisp_sidecar_path ? std::optional<std::string>(::args::get(ppisp_sidecar_path)) : std::optional<std::string>(),
+                                        ppisp_sidecar_path_val = cli_option_present({"--ppisp-sidecar"}) ? std::optional<std::string>(::args::get(ppisp_sidecar_path)) : std::optional<std::string>(),
                                         enable_eval_flag = bool(enable_eval),
                                         headless_flag = bool(headless),
                                         auto_train_flag = bool(auto_train),
@@ -585,7 +605,7 @@ namespace {
 #endif
                                         no_interop_flag = bool(no_interop),
                                         debug_python_flag = bool(debug_python),
-                                        debug_python_port_val = debug_python_port ? std::optional<int>(::args::get(debug_python_port)) : std::optional<int>(),
+                                        debug_python_port_val = cli_option_present({"--debug-python-port"}) ? std::optional<int>(::args::get(debug_python_port)) : std::optional<int>(),
                                         enable_save_eval_images_flag = bool(enable_save_eval_images),
                                         bg_modulation_flag = bool(bg_modulation),
                                         bg_noise_flag = bool(bg_noise),
@@ -760,18 +780,17 @@ lfs::core::args::parse_args_and_params(int argc, const char* const argv[]) {
         }
         params->optimization = *opt_result;
 
-        if (!strategy.empty() && strategy != params->optimization.strategy) {
+        if (!strategy.empty() &&
+            !lfs::core::param::strategy_names_match(strategy, params->optimization.strategy)) {
             return std::unexpected("--strategy conflicts with config file");
         }
     } else {
-        if (strategy == "adc")
-            params->optimization = lfs::core::param::OptimizationParameters::adc_defaults();
-        else if (strategy == "lfs")
-            params->optimization = lfs::core::param::OptimizationParameters::lfs_defaults();
+        if (lfs::core::param::is_mrnf_strategy(strategy))
+            params->optimization = lfs::core::param::OptimizationParameters::mrnf_defaults();
         else if (strategy == "igs+")
             params->optimization = lfs::core::param::OptimizationParameters::igs_plus_defaults();
         else
-            params->optimization = lfs::core::param::OptimizationParameters::mcmc_defaults();
+            params->optimization = lfs::core::param::OptimizationParameters::mrnf_defaults();
     }
 
     params->dataset.loading_params = lfs::core::param::LoadingParams{};

@@ -343,10 +343,8 @@ namespace lfs::vis::gui {
             const std::string_view strategy = strategy_raw ? std::string_view(strategy_raw) : std::string_view{};
             if (strategy == "mcmc") {
                 strat_name = LOC("training.options.strategy.mcmc");
-            } else if (strategy == "adc") {
-                strat_name = LOC("training.options.strategy.adc");
-            } else if (strategy == "lfs") {
-                strat_name = LOC("training.options.strategy.lfs");
+            } else if (lfs::core::param::is_mrnf_strategy(strategy)) {
+                strat_name = LOC("training.options.strategy.mrnf");
             } else if (strategy == "igs+") {
                 strat_name = LOC("training.options.strategy.igs_plus");
             } else {

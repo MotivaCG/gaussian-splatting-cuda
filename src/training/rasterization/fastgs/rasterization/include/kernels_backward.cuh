@@ -491,7 +491,7 @@ namespace fast_lfs::rasterization::kernels::backward {
                                                                  conic.y * delta.x + conic.z * delta.y);
             dL_dmean2d_accum += dL_dmean2d;
 
-            if constexpr (DENSIFICATION_TYPE == DensificationType::LFS) {
+            if constexpr (DENSIFICATION_TYPE == DensificationType::MRNF) {
                 const uint pixel_idx = width * pixel_coords.y + pixel_coords.x;
                 const float pixel_error = (densification_error_map != nullptr)
                                               ? densification_error_map[pixel_idx]

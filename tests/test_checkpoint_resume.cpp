@@ -175,10 +175,7 @@ namespace {
             std::make_tuple("mcmc", 1),
             std::make_tuple("mcmc", 2),
             std::make_tuple("mcmc", 3),
-            std::make_tuple("adc", 0),
-            std::make_tuple("adc", 1),
-            std::make_tuple("adc", 2),
-            std::make_tuple("adc", 3),
+            std::make_tuple("mrnf", 3),
             std::make_tuple("igs+", 3)),
         TestName);
 

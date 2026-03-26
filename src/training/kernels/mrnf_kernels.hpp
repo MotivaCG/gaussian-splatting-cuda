@@ -7,9 +7,9 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace lfs::training::lfs_strategy {
+namespace lfs::training::mrnf_strategy {
 
-    struct LFSBounds {
+    struct MRNFBounds {
         float center[3];
         float extent[3];
         float median_size;
@@ -32,7 +32,7 @@ namespace lfs::training::lfs_strategy {
      * @param seed — RNG seed
      * @param stream — CUDA stream
      */
-    void launch_lfs_noise_injection(
+    void launch_mrnf_noise_injection(
         float* means,
         const float* raw_opacities,
         const float* vis_count,
@@ -57,7 +57,7 @@ namespace lfs::training::lfs_strategy {
      * @param N — number of splats
      * @param stream — CUDA stream
      */
-    void launch_lfs_decay(
+    void launch_mrnf_decay(
         float* raw_opacities,
         float* log_scales,
         float opacity_decay,
@@ -82,7 +82,7 @@ namespace lfs::training::lfs_strategy {
         const float* means,
         size_t N,
         float percentile,
-        LFSBounds* bounds,
+        MRNFBounds* bounds,
         void* stream = nullptr);
 
     /**
@@ -112,4 +112,4 @@ namespace lfs::training::lfs_strategy {
         size_t N,
         void* stream = nullptr);
 
-} // namespace lfs::training::lfs_strategy
+} // namespace lfs::training::mrnf_strategy

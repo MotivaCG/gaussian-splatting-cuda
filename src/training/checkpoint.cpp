@@ -264,7 +264,7 @@ namespace lfs::training {
             std::string saved_type(type_len, '\0');
             file.read(saved_type.data(), type_len);
 
-            if (saved_type != strategy.strategy_type()) {
+            if (!lfs::core::param::strategy_names_match(saved_type, strategy.strategy_type())) {
                 return std::unexpected("Strategy mismatch: '" + saved_type +
                                        "' vs '" + strategy.strategy_type() + "'");
             }

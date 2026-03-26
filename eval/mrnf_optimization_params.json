@@ -20,7 +20,7 @@
   "init_opacity": 0.5,
   "init_scaling": 0.1,
   "max_cap": 1000000,
-  "strategy": "lfs",
+  "strategy": "mrnf",
   "eval_steps": [7000, 30000],
   "save_steps": [7000, 30000],
   "enable_eval": false,

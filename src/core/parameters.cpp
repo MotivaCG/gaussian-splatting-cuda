@@ -279,7 +279,8 @@ namespace lfs::core {
             opt_json["enable_eval"] = enable_eval;
             opt_json["enable_save_eval_images"] = enable_save_eval_images;
             opt_json["headless"] = headless;
-            opt_json["strategy"] = strategy;
+            const auto canonical_strategy = canonical_strategy_name(strategy);
+            opt_json["strategy"] = canonical_strategy.empty() ? strategy : std::string(canonical_strategy);
             opt_json["mip_filter"] = mip_filter;
             opt_json["use_bilateral_grid"] = use_bilateral_grid;
             opt_json["bilateral_grid_X"] = bilateral_grid_X;
@@ -340,7 +341,7 @@ namespace lfs::core {
             opt_json["mask_threshold"] = mask_threshold;
             opt_json["use_alpha_as_mask"] = use_alpha_as_mask;
 
-            // LFS strategy parameters
+            // MRNF strategy parameters
             opt_json["growth_grad_threshold"] = growth_grad_threshold;
             opt_json["grow_fraction"] = grow_fraction;
             opt_json["grow_until_iter"] = grow_until_iter;
@@ -355,8 +356,8 @@ namespace lfs::core {
         }
 
         std::string OptimizationParameters::validate() const {
-            if (gut && (strategy == "adc" || strategy == "igs+"))
-                return "GUT and " + strategy + " strategy cannot be used together";
+            if (gut && canonical_strategy_name(strategy) == kStrategyIGSPlus)
+                return "GUT and igs+ strategy cannot be used together";
             if (ppisp_freeze_from_sidecar && !use_ppisp)
                 return "PPISP sidecar freeze requires PPISP enabled";
             return {};
@@ -379,25 +380,14 @@ namespace lfs::core {
         }
 
         OptimizationParameters OptimizationParameters::mcmc_defaults() {
-            return {};
-        }
-
-        OptimizationParameters OptimizationParameters::adc_defaults() {
             auto p = OptimizationParameters{};
-            p.strategy = "adc";
-            p.opacity_lr = 0.025f;
-            p.stop_refine = 15'000;
-            p.opacity_reg = 0.0f;
-            p.scale_reg = 0.0f;
-            p.init_opacity = 0.1f;
-            p.max_cap = 6'000'000;
-            p.tv_loss_weight = 5.0f;
+            p.strategy = std::string(kStrategyMCMC);
             return p;
         }
 
-        OptimizationParameters OptimizationParameters::lfs_defaults() {
+        OptimizationParameters OptimizationParameters::mrnf_defaults() {
             auto p = OptimizationParameters{};
-            p.strategy = "lfs";
+            p.strategy = std::string(kStrategyMRNF);
             p.refine_every = 200;
             p.start_refine = 0;
             p.stop_refine = 28'500;
@@ -488,9 +478,9 @@ namespace lfs::core {
             }
 
             if (json.contains("strategy")) {
-                std::string strategy = json["strategy"];
-                if (strategy == "mcmc" || strategy == "adc" || strategy == "lfs" || strategy == "igs+") {
-                    params.strategy = strategy;
+                const std::string strategy = json["strategy"];
+                if (const auto canonical_strategy = canonical_strategy_name(strategy); !canonical_strategy.empty()) {
+                    params.strategy = std::string(canonical_strategy);
                 } else {
                     LOG_WARN("Invalid strategy '{}' in JSON, using default", strategy);
                 }
@@ -693,7 +683,7 @@ namespace lfs::core {
                 params.use_alpha_as_mask = json["use_alpha_as_mask"];
             }
 
-            // LFS strategy parameters
+            // MRNF strategy parameters
             if (json.contains("growth_grad_threshold")) {
                 params.growth_grad_threshold = json["growth_grad_threshold"];
             }

@@ -31,10 +31,8 @@ namespace lfs::vis {
 
         mcmc_session_ = lfs::core::param::OptimizationParameters::mcmc_defaults();
         mcmc_current_ = mcmc_session_;
-        adc_session_ = lfs::core::param::OptimizationParameters::adc_defaults();
-        adc_current_ = adc_session_;
-        lfs_session_ = lfs::core::param::OptimizationParameters::lfs_defaults();
-        lfs_current_ = lfs_session_;
+        mrnf_session_ = lfs::core::param::OptimizationParameters::mrnf_defaults();
+        mrnf_current_ = mrnf_session_;
         igs_session_ = lfs::core::param::OptimizationParameters::igs_plus_defaults();
         igs_current_ = igs_session_;
         dataset_config_.loading_params = lfs::core::param::LoadingParams{};
@@ -46,21 +44,21 @@ namespace lfs::vis {
     lfs::core::param::OptimizationParameters& ParameterManager::getCurrentParams(const std::string_view strategy) {
         if (strategy == "mcmc")
             return mcmc_current_;
-        if (strategy == "lfs")
-            return lfs_current_;
+        if (lfs::core::param::is_mrnf_strategy(strategy))
+            return mrnf_current_;
         if (strategy == "igs+")
             return igs_current_;
-        return adc_current_;
+        return mrnf_current_;
     }
 
     const lfs::core::param::OptimizationParameters& ParameterManager::getCurrentParams(const std::string_view strategy) const {
         if (strategy == "mcmc")
             return mcmc_current_;
-        if (strategy == "lfs")
-            return lfs_current_;
+        if (lfs::core::param::is_mrnf_strategy(strategy))
+            return mrnf_current_;
         if (strategy == "igs+")
             return igs_current_;
-        return adc_current_;
+        return mrnf_current_;
     }
 
     void ParameterManager::resetToDefaults(const std::string_view strategy) {
@@ -68,11 +66,8 @@ namespace lfs::vis {
         if (strategy.empty() || strategy == "mcmc") {
             mcmc_current_ = mcmc_session_;
         }
-        if (strategy.empty() || strategy == "adc") {
-            adc_current_ = adc_session_;
-        }
-        if (strategy.empty() || strategy == "lfs") {
-            lfs_current_ = lfs_session_;
+        if (strategy.empty() || lfs::core::param::is_mrnf_strategy(strategy)) {
+            mrnf_current_ = mrnf_session_;
         }
         if (strategy.empty() || strategy == "igs+") {
             igs_current_ = igs_session_;
@@ -88,14 +83,11 @@ namespace lfs::vis {
         if (!opt.strategy.empty())
             setActiveStrategy(opt.strategy);
 
-        auto* session = &adc_session_;
-        auto* current = &adc_current_;
+        auto* session = &mrnf_session_;
+        auto* current = &mrnf_current_;
         if (active_strategy_ == "mcmc") {
             session = &mcmc_session_;
             current = &mcmc_current_;
-        } else if (active_strategy_ == "lfs") {
-            session = &lfs_session_;
-            current = &lfs_current_;
         } else if (active_strategy_ == "igs+") {
             session = &igs_session_;
             current = &igs_current_;
@@ -129,12 +121,10 @@ namespace lfs::vis {
         }
         if (active_strategy_ == "mcmc") {
             mcmc_current_ = params;
-        } else if (active_strategy_ == "lfs") {
-            lfs_current_ = params;
+        } else if (lfs::core::param::is_mrnf_strategy(active_strategy_)) {
+            mrnf_current_ = params;
         } else if (active_strategy_ == "igs+") {
             igs_current_ = params;
-        } else {
-            adc_current_ = params;
         }
         LOG_DEBUG("Current params updated: strategy={}, iter={}, sh={}", params.strategy, params.iterations, params.sh_degree);
     }
@@ -147,15 +137,12 @@ namespace lfs::vis {
         if (active_strategy_ == "mcmc") {
             mcmc_session_ = params;
             mcmc_current_ = params;
-        } else if (active_strategy_ == "lfs") {
-            lfs_session_ = params;
-            lfs_current_ = params;
+        } else if (lfs::core::param::is_mrnf_strategy(active_strategy_)) {
+            mrnf_session_ = params;
+            mrnf_current_ = params;
         } else if (active_strategy_ == "igs+") {
             igs_session_ = params;
             igs_current_ = params;
-        } else {
-            adc_session_ = params;
-            adc_current_ = params;
         }
         LOG_INFO("Imported params: strategy={}, iter={}, sh={}", params.strategy, params.iterations, params.sh_degree);
     }
@@ -174,15 +161,12 @@ namespace lfs::vis {
         if (active_strategy_ == "mcmc") {
             mcmc_session_ = params.optimization;
             mcmc_current_ = params.optimization;
-        } else if (active_strategy_ == "lfs") {
-            lfs_session_ = params.optimization;
-            lfs_current_ = params.optimization;
+        } else if (lfs::core::param::is_mrnf_strategy(active_strategy_)) {
+            mrnf_session_ = params.optimization;
+            mrnf_current_ = params.optimization;
         } else if (active_strategy_ == "igs+") {
             igs_session_ = params.optimization;
             igs_current_ = params.optimization;
-        } else {
-            adc_session_ = params.optimization;
-            adc_current_ = params.optimization;
         }
 
         dataset_config_ = params.dataset;
@@ -196,8 +180,9 @@ namespace lfs::vis {
     }
 
     void ParameterManager::setActiveStrategy(const std::string_view strategy) {
-        if (strategy == "mcmc" || strategy == "adc" || strategy == "lfs" || strategy == "igs+") {
-            active_strategy_ = std::string(strategy);
+        if (const auto canonical_strategy = lfs::core::param::canonical_strategy_name(strategy);
+            !canonical_strategy.empty()) {
+            active_strategy_ = std::string(canonical_strategy);
         }
     }
 
@@ -217,8 +202,7 @@ namespace lfs::vis {
 
         std::lock_guard lock(params_mutex_);
         apply_scaler_to_params(mcmc_current_, new_scaler);
-        apply_scaler_to_params(adc_current_, new_scaler);
-        apply_scaler_to_params(lfs_current_, new_scaler);
+        apply_scaler_to_params(mrnf_current_, new_scaler);
         apply_scaler_to_params(igs_current_, new_scaler);
         dirty_.store(true, std::memory_order_release);
         LOG_INFO("Auto-scaled steps for {} images: scaler={:.2f}", image_count, new_scaler);

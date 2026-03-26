@@ -10,6 +10,7 @@
 #include <expected>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <nlohmann/json_fwd.hpp>
@@ -32,6 +33,40 @@ namespace lfs::core {
             Image,      // Use custom background image
             Random      // Random per-pixel colors each iteration
         };
+
+        inline constexpr std::string_view kStrategyMCMC = "mcmc";
+        inline constexpr std::string_view kStrategyMRNF = "mrnf";
+        inline constexpr std::string_view kStrategyMNRFLegacy = "mnrf";
+        inline constexpr std::string_view kStrategyLFSLegacy = "lfs";
+        inline constexpr std::string_view kStrategyIGSPlus = "igs+";
+
+        [[nodiscard]] inline constexpr std::string_view canonical_strategy_name(const std::string_view strategy) noexcept {
+            if (strategy == kStrategyMCMC)
+                return kStrategyMCMC;
+            if (strategy == kStrategyMRNF || strategy == kStrategyMNRFLegacy || strategy == kStrategyLFSLegacy)
+                return kStrategyMRNF;
+            if (strategy == kStrategyIGSPlus)
+                return kStrategyIGSPlus;
+            return {};
+        }
+
+        [[nodiscard]] inline constexpr bool is_valid_strategy_name(const std::string_view strategy) noexcept {
+            return !canonical_strategy_name(strategy).empty();
+        }
+
+        [[nodiscard]] inline constexpr bool is_mrnf_strategy(const std::string_view strategy) noexcept {
+            return canonical_strategy_name(strategy) == kStrategyMRNF;
+        }
+
+        [[nodiscard]] inline constexpr bool strategy_names_match(
+            const std::string_view lhs,
+            const std::string_view rhs) noexcept {
+            const auto lhs_canonical = canonical_strategy_name(lhs);
+            const auto rhs_canonical = canonical_strategy_name(rhs);
+            if (!lhs_canonical.empty() && !rhs_canonical.empty())
+                return lhs_canonical == rhs_canonical;
+            return lhs == rhs;
+        }
 
         struct LFS_CORE_API OptimizationParameters {
             size_t iterations = 30'000;
@@ -67,20 +102,20 @@ namespace lfs::core {
             float init_opacity = 0.5f;
             float init_scaling = 0.1f;
             int max_cap = 1000000;
-            std::vector<size_t> eval_steps = {7'000, 30'000}; // Steps to evaluate the model
-            std::vector<size_t> save_steps = {7'000, 30'000}; // Steps to save the model
-            bool bg_modulation = false;                       // Enable sinusoidal background modulation
+            std::vector<size_t> eval_steps = {7'000, 30'000};  // Steps to evaluate the model
+            std::vector<size_t> save_steps = {7'000, 30'000};  // Steps to save the model
+            bool bg_modulation = false;                        // Enable sinusoidal background modulation
             bool bg_noise = false;                            // Enable per-pixel noise background (overrides bg_modulation)
-            bool enable_eval = false;                         // Only evaluate when explicitly enabled
-            bool enable_save_eval_images = true;              // Save during evaluation images
-            bool headless = false;                            // Disable visualization during training
+            bool enable_eval = false;                          // Only evaluate when explicitly enabled
+            bool enable_save_eval_images = true;               // Save during evaluation images
             bool skip_intermediate = false;                   // Skip intermediate PLY/checkpoint saves (only save final)
-            bool auto_train = false;                          // Start training immediately on startup
-            bool no_splash = false;                           // Skip splash screen on startup
-            bool no_interop = false;                          // Disable CUDA-GL interop (use CPU fallback)
-            bool debug_python = false;                        // Start debugpy listener for plugin debugging
-            int debug_python_port = 5678;                     // Port for debugpy listener
-            std::string strategy = "mcmc";                    // Optimization strategy: mcmc, adc, lfs, igs+.
+            bool headless = false;                             // Disable visualization during training
+            bool auto_train = false;                           // Start training immediately on startup
+            bool no_splash = false;                            // Skip splash screen on startup
+            bool no_interop = false;                           // Disable CUDA-GL interop (use CPU fallback)
+            bool debug_python = false;                         // Start debugpy listener for plugin debugging
+            int debug_python_port = 5678;                      // Port for debugpy listener
+            std::string strategy = std::string(kStrategyMRNF); // Optimization strategy: mcmc, mrnf, igs+.
 
             // Mask parameters
             MaskMode mask_mode = MaskMode::None;      // Attention mask mode
@@ -122,7 +157,7 @@ namespace lfs::core {
             int ppisp_controller_activation_step = -1; // Negative values use the default tail schedule
             float ppisp_controller_lr = 2e-3f;
 
-            // adc strategy specific parameters
+            // Shared densification thresholds and reset controls
             float prune_opacity = 0.005f;
             float grow_scale3d = 0.01f;
             float grow_scale2d = 0.05f;
@@ -135,7 +170,7 @@ namespace lfs::core {
             bool undistort = false;
             float steps_scaler = 1.f; // Scales training step counts; values <= 0 disable scaling
 
-            // LFS strategy specific parameters
+            // MRNF strategy specific parameters
             float growth_grad_threshold = 0.003f;
             float grow_fraction = 0.07f;
             size_t grow_until_iter = 15000;
@@ -175,8 +210,7 @@ namespace lfs::core {
 
             // Factory methods for strategy presets
             static OptimizationParameters mcmc_defaults();
-            static OptimizationParameters adc_defaults();
-            static OptimizationParameters lfs_defaults();
+            static OptimizationParameters mrnf_defaults();
             static OptimizationParameters igs_plus_defaults();
         };
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 SCENE_DIR="data"
-RESULT_DIR="results/lfs"
+RESULT_DIR="results/mrnf"
 SCENE_LIST="garden bicycle stump bonsai counter kitchen room" # treehill flowers
 
 # Check if results directory exists and prompt for deletion
@@ -40,7 +40,7 @@ do
         --eval \
         --headless \
         --save-eval-images \
-        --config eval/lfs_optimization_params.json
+        --config eval/mrnf_optimization_params.json
 
     echo "Completed $SCENE"
     echo

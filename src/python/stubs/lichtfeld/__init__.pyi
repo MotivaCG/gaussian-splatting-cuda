@@ -1474,7 +1474,7 @@ class OptimizationParams:
         """Active optimization strategy name"""
 
     def set_strategy(self, strategy: str) -> None:
-        """Set active strategy ('mcmc', 'adc', 'lfs', or 'igs+')"""
+        """Set active strategy ('mcmc', 'mrnf', or 'igs+')"""
 
     @property
     def headless(self) -> bool:
@@ -1637,7 +1637,7 @@ class OptimizationParams:
 
     @property
     def revised_opacity(self) -> bool:
-        """Use revised opacity calculation for ADC densification"""
+        """Use revised opacity calculation during densification"""
 
     @revised_opacity.setter
     def revised_opacity(self, arg: bool, /) -> None: ...

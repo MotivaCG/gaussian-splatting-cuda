@@ -149,7 +149,7 @@ namespace {
         return result.to(points.device());
     }
 
-    lfs::core::Tensor compute_lfs_knn_log_scales(const lfs::core::Tensor& points) {
+    lfs::core::Tensor compute_mrnf_knn_log_scales(const lfs::core::Tensor& points) {
         auto cpu_points = points.cpu();
         const int num_points = cpu_points.size(0);
 
@@ -163,7 +163,7 @@ namespace {
             return lfs::core::Tensor();
         }
 
-        // Match LFS: if there are too few points, use log_scale=0.
+        // Match MRNF: if there are too few points, use log_scale=0.
         if (num_points < 3) {
             auto zeros = lfs::core::Tensor::zeros(
                 {static_cast<size_t>(num_points), 3},
@@ -780,8 +780,8 @@ namespace lfs::core {
 
                 // Compute scaling on CPU
                 LOG_DEBUG("  Computing neighbor distances...");
-                if (params.optimization.strategy == "lfs") {
-                    scaling_cpu = compute_lfs_knn_log_scales(means_cpu);
+                if (lfs::core::param::is_mrnf_strategy(params.optimization.strategy)) {
+                    scaling_cpu = compute_mrnf_knn_log_scales(means_cpu);
                 } else {
                     auto nn_dist = compute_mean_neighbor_distances(means_cpu).clamp_min(1e-7f);
                     LOG_DEBUG("  nn_dist computed: is_valid={}, shape={}, numel={}",
@@ -993,8 +993,8 @@ namespace lfs::core {
                 }
 
                 Tensor scaling_temp;
-                if (params.optimization.strategy == "lfs") {
-                    scaling_temp = compute_lfs_knn_log_scales(means_temp).cuda();
+                if (lfs::core::param::is_mrnf_strategy(params.optimization.strategy)) {
+                    scaling_temp = compute_mrnf_knn_log_scales(means_temp).cuda();
                 } else {
                     auto nn_dist = compute_mean_neighbor_distances(means_temp).clamp_min(1e-7f);
                     std::vector<int> scale_expand_shape = {static_cast<int>(num_points), 3};

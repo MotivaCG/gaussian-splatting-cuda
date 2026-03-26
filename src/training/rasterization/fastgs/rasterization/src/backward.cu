@@ -102,8 +102,8 @@ void fast_lfs::rasterization::backward(
             grid.x,
             mip_filter);
     };
-    if (densification_type == DensificationType::LFS && densification_info != nullptr) {
-        launch_blend_backward.template operator()<DensificationType::LFS>();
+    if (densification_type == DensificationType::MRNF && densification_info != nullptr) {
+        launch_blend_backward.template operator()<DensificationType::MRNF>();
     } else if (densification_info != nullptr && densification_error_map != nullptr) {
         launch_blend_backward.template operator()<DensificationType::MCMC>();
     } else {

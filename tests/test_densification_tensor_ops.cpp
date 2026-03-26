@@ -1,7 +1,7 @@
 /* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
-// Exhaustive tests for tensor operations used in default_strategy.cpp
+// Exhaustive tests for tensor operations used in densification strategies
 // Verified against LibTorch reference implementations
 
 #include "core/tensor.hpp"
@@ -140,7 +140,7 @@ namespace {
 
 // ============= Test Fixture =============
 
-class DefaultStrategyTensorOpsTest : public ::testing::Test {
+class DensificationTensorOpsTest : public ::testing::Test {
 protected:
     void SetUp() override {
         ASSERT_TRUE(torch::cuda::is_available()) << "CUDA required";
@@ -151,10 +151,10 @@ protected:
 
 // =============================================================================
 // CREATION OPERATIONS
-// Used in default_strategy.cpp for initializing tensors
+// Used in densification strategy code for initializing tensors
 // =============================================================================
 
-TEST_F(DefaultStrategyTensorOpsTest, Zeros_Basic) {
+TEST_F(DensificationTensorOpsTest, Zeros_Basic) {
     // Usage: _splat_data->_densification_info = Tensor::zeros({2, N}, device)
     auto lfs_zeros = Tensor::zeros({2, 100}, Device::CUDA);
     auto torch_zeros = torch::zeros({2, 100}, torch::kCUDA);
@@ -162,7 +162,7 @@ TEST_F(DefaultStrategyTensorOpsTest, Zeros_Basic) {
     EXPECT_TRUE(tensors_close(lfs_zeros, torch_zeros, 0, 0, "Zeros_Basic"));
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, ZerosBool_Basic) {
+TEST_F(DensificationTensorOpsTest, ZerosBool_Basic) {
     // Usage: _free_mask = Tensor::zeros_bool({capacity}, device)
     auto lfs_zeros = Tensor::zeros_bool({100}, Device::CUDA);
     auto torch_zeros = torch::zeros({100}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
@@ -170,7 +170,7 @@ TEST_F(DefaultStrategyTensorOpsTest, ZerosBool_Basic) {
     EXPECT_TRUE(tensors_close(lfs_zeros, torch_zeros, 0, 0, "ZerosBool_Basic"));
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, OnesBool_Basic) {
+TEST_F(DensificationTensorOpsTest, OnesBool_Basic) {
     // Usage: true_vals = Tensor::ones_bool({n}, device)
     auto lfs_ones = Tensor::ones_bool({50}, Device::CUDA);
     auto torch_ones = torch::ones({50}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
@@ -178,7 +178,7 @@ TEST_F(DefaultStrategyTensorOpsTest, OnesBool_Basic) {
     EXPECT_TRUE(tensors_close(lfs_ones, torch_ones, 0, 0, "OnesBool_Basic"));
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, Empty_Basic) {
+TEST_F(DensificationTensorOpsTest, Empty_Basic) {
     // Usage: second_positions = Tensor::empty({num_split, 3}, device)
     auto lfs_empty = Tensor::empty({10, 3}, Device::CUDA);
     auto torch_empty = torch::empty({10, 3}, torch::kCUDA);
@@ -189,7 +189,7 @@ TEST_F(DefaultStrategyTensorOpsTest, Empty_Basic) {
     EXPECT_EQ(lfs_empty.numel(), 30);
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, Randn_ShapeMatch) {
+TEST_F(DensificationTensorOpsTest, Randn_ShapeMatch) {
     // Usage: random_noise = Tensor::randn({2, num_split, 3}, device)
     // Note: Can't compare values since random, but shape and stats should match
     torch::manual_seed(123);
@@ -209,7 +209,7 @@ TEST_F(DefaultStrategyTensorOpsTest, Randn_ShapeMatch) {
     EXPECT_NEAR(lfs_std, 1.0f, 0.3f);
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, FromVector_Int) {
+TEST_F(DensificationTensorOpsTest, FromVector_Int) {
     // Usage: new_indices = Tensor::from_vector(new_indices_vec, shape, device)
     std::vector<int> data = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
     auto lfs_tensor = Tensor::from_vector(data, TensorShape({10}), Device::CUDA);
@@ -225,7 +225,7 @@ TEST_F(DefaultStrategyTensorOpsTest, FromVector_Int) {
 // Critical for densification (grow_gs, prune_gs, duplicate, split)
 // =============================================================================
 
-TEST_F(DefaultStrategyTensorOpsTest, NonzeroSqueeze_BasicPattern) {
+TEST_F(DensificationTensorOpsTest, NonzeroSqueeze_BasicPattern) {
     // Usage: sampled_idxs = is_duplicated.nonzero().squeeze(-1)
     // This is the key pattern for converting a mask to indices
 
@@ -244,7 +244,7 @@ TEST_F(DefaultStrategyTensorOpsTest, NonzeroSqueeze_BasicPattern) {
     EXPECT_EQ(lfs_indices.numel(), 4);
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, NonzeroSqueeze_AllTrue) {
+TEST_F(DensificationTensorOpsTest, NonzeroSqueeze_AllTrue) {
     auto torch_mask = torch::ones({10}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
     auto lfs_mask = from_torch(torch_mask);
 
@@ -255,7 +255,7 @@ TEST_F(DefaultStrategyTensorOpsTest, NonzeroSqueeze_AllTrue) {
     EXPECT_EQ(lfs_indices.numel(), 10);
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, NonzeroSqueeze_AllFalse) {
+TEST_F(DensificationTensorOpsTest, NonzeroSqueeze_AllFalse) {
     auto torch_mask = torch::zeros({10}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
     auto lfs_mask = from_torch(torch_mask);
 
@@ -267,7 +267,7 @@ TEST_F(DefaultStrategyTensorOpsTest, NonzeroSqueeze_AllFalse) {
     EXPECT_EQ(torch_indices.numel(), 0);
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, Slice_Basic) {
+TEST_F(DensificationTensorOpsTest, Slice_Basic) {
     // Usage: append_src_indices = sampled_idxs.slice(0, num_filled, num_duplicated)
     auto torch_tensor = torch::arange(0, 100, torch::kCUDA).to(torch::kInt64);
     auto lfs_tensor = from_torch(torch_tensor);
@@ -279,7 +279,7 @@ TEST_F(DefaultStrategyTensorOpsTest, Slice_Basic) {
     EXPECT_EQ(lfs_slice.numel(), 20);
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, Slice_2D) {
+TEST_F(DensificationTensorOpsTest, Slice_2D) {
     // Usage: slicing 2D tensors for positions, rotations, etc.
     auto torch_tensor = torch::randn({50, 3}, torch::kCUDA);
     auto lfs_tensor = from_torch(torch_tensor);
@@ -292,7 +292,7 @@ TEST_F(DefaultStrategyTensorOpsTest, Slice_2D) {
     EXPECT_EQ(lfs_slice.shape()[1], 3);
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, IndexSelect_Basic) {
+TEST_F(DensificationTensorOpsTest, IndexSelect_Basic) {
     // Usage: _splat_data->means().index_select(0, src_indices)
     auto torch_data = torch::randn({100, 3}, torch::kCUDA);
     auto torch_indices = torch::tensor({5, 10, 15, 20, 25}, torch::kCUDA).to(torch::kInt64);
@@ -308,7 +308,7 @@ TEST_F(DefaultStrategyTensorOpsTest, IndexSelect_Basic) {
     EXPECT_EQ(lfs_result.shape()[1], 3);
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, IndexSelect_1D) {
+TEST_F(DensificationTensorOpsTest, IndexSelect_1D) {
     // Usage: for 1D tensors like opacity
     auto torch_data = torch::randn({100}, torch::kCUDA);
     auto torch_indices = torch::tensor({0, 50, 99}, torch::kCUDA).to(torch::kInt64);
@@ -322,7 +322,7 @@ TEST_F(DefaultStrategyTensorOpsTest, IndexSelect_1D) {
     EXPECT_TRUE(tensors_close(lfs_result, torch_result, 1e-5f, 1e-6f, "IndexSelect_1D"));
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, IndexPut_Basic) {
+TEST_F(DensificationTensorOpsTest, IndexPut_Basic) {
     // Usage: state->exp_avg.index_put_(split_idxs, zeros)
     auto torch_data = torch::randn({100, 3}, torch::kCUDA);
     auto torch_indices = torch::tensor({5, 10, 15}, torch::kCUDA).to(torch::kInt64);
@@ -342,7 +342,7 @@ TEST_F(DefaultStrategyTensorOpsTest, IndexPut_Basic) {
     EXPECT_TRUE((lfs_torch.index({torch_indices}) == torch::zeros({3, 3}, torch::kCUDA)).all().item<bool>());
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, IndexPut_Bool) {
+TEST_F(DensificationTensorOpsTest, IndexPut_Bool) {
     // Usage: _free_mask.index_put_(target_indices, false_vals)
     auto torch_mask = torch::ones({50}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
     auto torch_indices = torch::tensor({0, 10, 20, 30, 40}, torch::kCUDA).to(torch::kInt64);
@@ -363,7 +363,7 @@ TEST_F(DefaultStrategyTensorOpsTest, IndexPut_Bool) {
 // Used for mask manipulation in grow_gs, prune_gs
 // =============================================================================
 
-TEST_F(DefaultStrategyTensorOpsTest, LogicalAnd_Basic) {
+TEST_F(DensificationTensorOpsTest, LogicalAnd_Basic) {
     // Usage: is_duplicated = is_grad_high.logical_and(is_small)
     auto torch_a = torch::tensor({true, true, false, false}, torch::kCUDA).to(torch::kBool);
     auto torch_b = torch::tensor({true, false, true, false}, torch::kCUDA).to(torch::kBool);
@@ -377,7 +377,7 @@ TEST_F(DefaultStrategyTensorOpsTest, LogicalAnd_Basic) {
     EXPECT_TRUE(tensors_close(lfs_result, torch_result, 0, 0, "LogicalAnd_Basic"));
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, LogicalAnd_Large) {
+TEST_F(DensificationTensorOpsTest, LogicalAnd_Large) {
     // Test with realistic size
     torch::manual_seed(42);
     auto torch_a = torch::randint(0, 2, {10000}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
@@ -392,7 +392,7 @@ TEST_F(DefaultStrategyTensorOpsTest, LogicalAnd_Large) {
     EXPECT_TRUE(tensors_close(lfs_result, torch_result, 0, 0, "LogicalAnd_Large"));
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, LogicalOr_Basic) {
+TEST_F(DensificationTensorOpsTest, LogicalOr_Basic) {
     // Usage: is_prune = is_prune.logical_or(is_too_big)
     auto torch_a = torch::tensor({true, true, false, false}, torch::kCUDA).to(torch::kBool);
     auto torch_b = torch::tensor({true, false, true, false}, torch::kCUDA).to(torch::kBool);
@@ -406,7 +406,7 @@ TEST_F(DefaultStrategyTensorOpsTest, LogicalOr_Basic) {
     EXPECT_TRUE(tensors_close(lfs_result, torch_result, 0, 0, "LogicalOr_Basic"));
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, LogicalNot_Basic) {
+TEST_F(DensificationTensorOpsTest, LogicalNot_Basic) {
     // Usage: is_active = active_free_mask.logical_not()
     auto torch_mask = torch::tensor({true, false, true, false, true}, torch::kCUDA).to(torch::kBool);
     auto lfs_mask = from_torch(torch_mask);
@@ -417,7 +417,7 @@ TEST_F(DefaultStrategyTensorOpsTest, LogicalNot_Basic) {
     EXPECT_TRUE(tensors_close(lfs_result, torch_result, 0, 0, "LogicalNot_Basic"));
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, LogicalChain_GrowGsPattern) {
+TEST_F(DensificationTensorOpsTest, LogicalChain_GrowGsPattern) {
     // Simulate the exact pattern from grow_gs:
     // is_grad_high = grads > threshold
     // is_small = max_values <= threshold * scale
@@ -458,7 +458,7 @@ TEST_F(DefaultStrategyTensorOpsTest, LogicalChain_GrowGsPattern) {
 // Used for counting, thresholding, gradient computation
 // =============================================================================
 
-TEST_F(DefaultStrategyTensorOpsTest, Sum_Scalar) {
+TEST_F(DensificationTensorOpsTest, Sum_Scalar) {
     // Usage: num_duplicates = is_duplicated.sum_scalar()
     auto torch_tensor = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f}, torch::kCUDA);
     auto lfs_tensor = from_torch(torch_tensor);
@@ -470,7 +470,7 @@ TEST_F(DefaultStrategyTensorOpsTest, Sum_Scalar) {
     EXPECT_NEAR(lfs_sum, 15.0f, 1e-5f);
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, Sum_BoolToInt) {
+TEST_F(DensificationTensorOpsTest, Sum_BoolToInt) {
     // Usage: mask.to(Int32).sum() for counting true values
     auto torch_mask = torch::tensor({true, false, true, true, false}, torch::kCUDA).to(torch::kBool);
     auto lfs_mask = from_torch(torch_mask);
@@ -482,7 +482,7 @@ TEST_F(DefaultStrategyTensorOpsTest, Sum_BoolToInt) {
     EXPECT_EQ(lfs_sum, 3);
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, Sum_AlongDim) {
+TEST_F(DensificationTensorOpsTest, Sum_AlongDim) {
     // Usage: (rotation_raw * rotation_raw).sum(-1, false)
     auto torch_tensor = torch::randn({100, 4}, torch::kCUDA);
     auto lfs_tensor = from_torch(torch_tensor);
@@ -498,7 +498,7 @@ TEST_F(DefaultStrategyTensorOpsTest, Sum_AlongDim) {
     EXPECT_EQ(lfs_sum.shape()[0], 100);
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, Max_AlongDim) {
+TEST_F(DensificationTensorOpsTest, Max_AlongDim) {
     // Usage: max_values = _splat_data->get_scaling().max(-1, false)
     auto torch_tensor = torch::randn({100, 3}, torch::kCUDA);
     auto lfs_tensor = from_torch(torch_tensor);
@@ -511,7 +511,7 @@ TEST_F(DefaultStrategyTensorOpsTest, Max_AlongDim) {
     EXPECT_EQ(lfs_max.shape()[0], 100);
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, ClampMin_Basic) {
+TEST_F(DensificationTensorOpsTest, ClampMin_Basic) {
     // Usage: grads = numer / denom.clamp_min(1.0f)
     auto torch_tensor = torch::tensor({-2.0f, -1.0f, 0.0f, 0.5f, 1.0f, 2.0f}, torch::kCUDA);
     auto lfs_tensor = from_torch(torch_tensor);
@@ -522,7 +522,7 @@ TEST_F(DefaultStrategyTensorOpsTest, ClampMin_Basic) {
     EXPECT_TRUE(tensors_close(lfs_clamped, torch_clamped, 1e-6f, 1e-7f, "ClampMin_Basic"));
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, ClampMaxInplace_Basic) {
+TEST_F(DensificationTensorOpsTest, ClampMaxInplace_Basic) {
     // Usage: _splat_data->opacity_raw().clamp_max_(logit_threshold)
     auto torch_tensor = torch::tensor({-2.0f, -1.0f, 0.0f, 1.0f, 2.0f, 5.0f}, torch::kCUDA);
     auto lfs_tensor = from_torch(torch_tensor);
@@ -533,7 +533,7 @@ TEST_F(DefaultStrategyTensorOpsTest, ClampMaxInplace_Basic) {
     EXPECT_TRUE(tensors_close(lfs_tensor, torch_tensor, 1e-6f, 1e-7f, "ClampMaxInplace_Basic"));
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, DivisionWithClamp_GradPattern) {
+TEST_F(DensificationTensorOpsTest, DivisionWithClamp_GradPattern) {
     // Full pattern: grads = numer / denom.clamp_min(1.0f)
     auto torch_numer = torch::randn({100}, torch::kCUDA).abs();
     auto torch_denom = torch::randint(0, 10, {100}, torch::kCUDA).to(torch::kFloat32);
@@ -552,7 +552,7 @@ TEST_F(DefaultStrategyTensorOpsTest, DivisionWithClamp_GradPattern) {
 // Used for concatenation and reshaping
 // =============================================================================
 
-TEST_F(DefaultStrategyTensorOpsTest, Cat_1D) {
+TEST_F(DensificationTensorOpsTest, Cat_1D) {
     // Usage: is_split = is_split.cat(zeros_to_concat, 0)
     auto torch_a = torch::randn({50}, torch::kCUDA);
     auto torch_b = torch::zeros({20}, torch::kCUDA);
@@ -567,7 +567,7 @@ TEST_F(DefaultStrategyTensorOpsTest, Cat_1D) {
     EXPECT_EQ(lfs_cat.numel(), 70);
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, Cat_2D) {
+TEST_F(DensificationTensorOpsTest, Cat_2D) {
     // Usage: concatenating 2D parameter tensors
     auto torch_a = torch::randn({50, 3}, torch::kCUDA);
     auto torch_b = torch::randn({20, 3}, torch::kCUDA);
@@ -583,7 +583,7 @@ TEST_F(DefaultStrategyTensorOpsTest, Cat_2D) {
     EXPECT_EQ(lfs_cat.shape()[1], 3);
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, Cat_Bool) {
+TEST_F(DensificationTensorOpsTest, Cat_Bool) {
     // Usage: is_split = is_split.cat(zeros_to_concat, 0) where both are bool
     auto torch_a = torch::randint(0, 2, {50}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
     auto torch_b = torch::zeros({20}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
@@ -597,7 +597,7 @@ TEST_F(DefaultStrategyTensorOpsTest, Cat_Bool) {
     EXPECT_TRUE(tensors_close(lfs_cat, torch_cat, 0, 0, "Cat_Bool"));
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, Reshape_Basic) {
+TEST_F(DensificationTensorOpsTest, Reshape_Basic) {
     // Usage: append_sh0_reshaped = append_sh0_flat.reshape({n_remaining, 1, 3})
     auto torch_tensor = torch::randn({30}, torch::kCUDA);
     auto lfs_tensor = from_torch(torch_tensor);
@@ -608,7 +608,7 @@ TEST_F(DefaultStrategyTensorOpsTest, Reshape_Basic) {
     EXPECT_TRUE(tensors_close(lfs_reshaped, torch_reshaped, 1e-5f, 1e-6f, "Reshape_Basic"));
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, Reshape_SH0Pattern) {
+TEST_F(DensificationTensorOpsTest, Reshape_SH0Pattern) {
     // Usage: sh0_reshaped = sh0.slice(0, 0, slots_to_fill).reshape({slots_to_fill, 1, 3})
     auto torch_tensor = torch::randn({20, 3}, torch::kCUDA);
     auto lfs_tensor = from_torch(torch_tensor);
@@ -628,7 +628,7 @@ TEST_F(DefaultStrategyTensorOpsTest, Reshape_SH0Pattern) {
 // Critical for memory-efficient training without reallocations
 // =============================================================================
 
-TEST_F(DefaultStrategyTensorOpsTest, AppendGather_Basic) {
+TEST_F(DensificationTensorOpsTest, AppendGather_Basic) {
     // Usage: _splat_data->means().append_gather(append_src_indices)
     // This appends gathered rows from itself to the end
     // Note: In-place append ops require pre-allocated capacity via reserve()
@@ -652,7 +652,7 @@ TEST_F(DefaultStrategyTensorOpsTest, AppendGather_Basic) {
     EXPECT_EQ(lfs_data.shape()[0], 13); // 10 + 3
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, AppendZeros_Basic) {
+TEST_F(DensificationTensorOpsTest, AppendZeros_Basic) {
     // Usage: _splat_data->means().append_zeros(n_remaining)
     // Note: In-place append ops require pre-allocated capacity via reserve()
     auto torch_data = torch::randn({50, 3}, torch::kCUDA);
@@ -670,7 +670,7 @@ TEST_F(DefaultStrategyTensorOpsTest, AppendZeros_Basic) {
     EXPECT_EQ(lfs_data.shape()[0], 60);
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, AppendZeros_1D) {
+TEST_F(DensificationTensorOpsTest, AppendZeros_1D) {
     // Usage: for 1D tensors like opacity_raw
     // Note: In-place append ops require pre-allocated capacity via reserve()
     auto torch_data = torch::randn({50}, torch::kCUDA);
@@ -688,7 +688,7 @@ TEST_F(DefaultStrategyTensorOpsTest, AppendZeros_1D) {
     EXPECT_EQ(lfs_data.numel(), 60);
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, ZeroInplace_Basic) {
+TEST_F(DensificationTensorOpsTest, ZeroInplace_Basic) {
     // Usage: state->exp_avg.zero_()
     auto torch_data = torch::randn({50, 3}, torch::kCUDA);
     auto lfs_data = from_torch(torch_data);
@@ -705,8 +705,8 @@ TEST_F(DefaultStrategyTensorOpsTest, ZeroInplace_Basic) {
 // Test exact sequences of operations used in densification
 // =============================================================================
 
-TEST_F(DefaultStrategyTensorOpsTest, DuplicatePattern_Full) {
-    // Full duplicate pattern from default_strategy.cpp:
+TEST_F(DensificationTensorOpsTest, DuplicatePattern_Full) {
+    // Full duplicate pattern from densification strategy code:
     // 1. sampled_idxs = is_duplicated.nonzero().squeeze(-1)
     // 2. new_param = param.index_select(0, sampled_idxs)
     // 3. result = param.cat(new_param, 0)
@@ -739,8 +739,8 @@ TEST_F(DefaultStrategyTensorOpsTest, DuplicatePattern_Full) {
     }
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, RemovePattern_Full) {
-    // Full remove pattern from default_strategy.cpp:
+TEST_F(DensificationTensorOpsTest, RemovePattern_Full) {
+    // Full remove pattern from densification strategy code:
     // 1. prune_indices = is_prune.nonzero().squeeze(-1)
     // 2. Zero out quaternions at prune_indices
     // 3. Zero out optimizer states at prune_indices
@@ -776,7 +776,7 @@ TEST_F(DefaultStrategyTensorOpsTest, RemovePattern_Full) {
     }
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, PruneGsPattern_Full) {
+TEST_F(DensificationTensorOpsTest, PruneGsPattern_Full) {
     // Full prune_gs pattern:
     // 1. is_prune = get_opacity() < threshold
     // 2. is_prune = is_prune.logical_or((rot * rot).sum(-1) < 1e-8)
@@ -820,7 +820,7 @@ TEST_F(DefaultStrategyTensorOpsTest, PruneGsPattern_Full) {
     EXPECT_TRUE(tensors_close(lfs_is_prune, torch_is_prune, 0, 0, "Prune_Final"));
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, GrowGsCapEnforcement_Full) {
+TEST_F(DensificationTensorOpsTest, GrowGsCapEnforcement_Full) {
     // Test the max_cap enforcement pattern:
     // 1. indices = is_duplicated.nonzero().squeeze(-1)
     // 2. keep_indices = indices.slice(0, 0, available)
@@ -862,7 +862,7 @@ TEST_F(DefaultStrategyTensorOpsTest, GrowGsCapEnforcement_Full) {
     }
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, FillFreeSlotsPattern) {
+TEST_F(DensificationTensorOpsTest, FillFreeSlotsPattern) {
     // Test the fill_free_slots pattern:
     // 1. free_indices = free_mask.slice(0, 0, current_size).nonzero().squeeze(-1)
     // 2. target_indices = free_indices.slice(0, 0, slots_to_fill)
@@ -918,7 +918,7 @@ TEST_F(DefaultStrategyTensorOpsTest, FillFreeSlotsPattern) {
     }
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, ActiveCountPattern) {
+TEST_F(DensificationTensorOpsTest, ActiveCountPattern) {
     // Test the active_count pattern:
     // active_region = free_mask.slice(0, 0, current_size)
     // free_count = active_region.sum_scalar()
@@ -946,7 +946,7 @@ TEST_F(DefaultStrategyTensorOpsTest, ActiveCountPattern) {
     EXPECT_EQ(lfs_active_count, torch_active_count);
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, GetActiveIndicesPattern) {
+TEST_F(DensificationTensorOpsTest, GetActiveIndicesPattern) {
     // Test get_active_indices pattern:
     // is_active = free_mask.slice(0, 0, current_size).logical_not()
     // return is_active.nonzero().squeeze(-1)
@@ -972,7 +972,7 @@ TEST_F(DefaultStrategyTensorOpsTest, GetActiveIndicesPattern) {
 // Test the [2, N] tensor operations for gradient tracking
 // =============================================================================
 
-TEST_F(DefaultStrategyTensorOpsTest, DensificationInfo_SubscriptOperator) {
+TEST_F(DensificationTensorOpsTest, DensificationInfo_SubscriptOperator) {
     // Pattern from grow_gs():
     // numer = _densification_info[1]  // Get row 1 (gradient norms)
     // denom = _densification_info[0]  // Get row 0 (counts)
@@ -1008,7 +1008,7 @@ TEST_F(DefaultStrategyTensorOpsTest, DensificationInfo_SubscriptOperator) {
     EXPECT_TRUE(tensors_close(lfs_grads, torch_grads, 1e-5f, 1e-6f, "DensInfo_Grads"));
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, DensificationInfo_FullGrowGsPattern) {
+TEST_F(DensificationTensorOpsTest, DensificationInfo_FullGrowGsPattern) {
     // Complete pattern from grow_gs using densification_info:
     // 1. numer = densification_info[1], denom = densification_info[0]
     // 2. grads = numer / denom.clamp_min(1.0f)
@@ -1074,7 +1074,7 @@ TEST_F(DefaultStrategyTensorOpsTest, DensificationInfo_FullGrowGsPattern) {
               torch_is_split.sum().item<int64_t>());
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, DensificationInfo_ResetAfterRefine) {
+TEST_F(DensificationTensorOpsTest, DensificationInfo_ResetAfterRefine) {
     // Pattern from post_backward():
     // densification_info = Tensor::zeros({2, N}, device)
     // This resets the accumulator after refinement
@@ -1095,7 +1095,7 @@ TEST_F(DefaultStrategyTensorOpsTest, DensificationInfo_ResetAfterRefine) {
 // Verifies the full prune_gs -> remove chain works correctly
 // =============================================================================
 
-TEST_F(DefaultStrategyTensorOpsTest, Pruning_CompletePruneGsChain) {
+TEST_F(DensificationTensorOpsTest, Pruning_CompletePruneGsChain) {
     // Complete prune_gs chain:
     // 1. is_prune = get_opacity() < prune_opacity
     // 2. is_prune = is_prune.logical_or((rotation * rotation).sum(-1) < 1e-8f)
@@ -1167,7 +1167,7 @@ TEST_F(DefaultStrategyTensorOpsTest, Pruning_CompletePruneGsChain) {
     EXPECT_GT(lfs_prune_count, 50) << "Should prune at least 50 Gaussians (100 zero rotations minus free)";
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, Pruning_RemoveAndZeroOptimizer) {
+TEST_F(DensificationTensorOpsTest, Pruning_RemoveAndZeroOptimizer) {
     // Complete remove() operation:
     // 1. prune_indices = is_prune.nonzero().squeeze(-1)
     // 2. mark_as_free(prune_indices)  // free_mask.index_put_(indices, true)
@@ -1251,7 +1251,7 @@ TEST_F(DefaultStrategyTensorOpsTest, Pruning_RemoveAndZeroOptimizer) {
     EXPECT_TRUE(pruned_free.all().item<bool>()) << "Pruned slots should be marked as free";
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, Pruning_LargeScale) {
+TEST_F(DensificationTensorOpsTest, Pruning_LargeScale) {
     // Large-scale pruning test with 1M Gaussians
     torch::manual_seed(42);
     const int N = 1000000;
@@ -1290,7 +1290,7 @@ TEST_F(DefaultStrategyTensorOpsTest, Pruning_LargeScale) {
 // These test the precise sequences used in actual training code
 // =============================================================================
 
-TEST_F(DefaultStrategyTensorOpsTest, FillFreeSlots_IndexPutIndexSelect) {
+TEST_F(DensificationTensorOpsTest, FillFreeSlots_IndexPutIndexSelect) {
     // Exact pattern from fill_free_slots():
     // means().index_put_(target_indices, means().index_select(0, src_indices))
     // This is a scatter operation where we gather from one set of indices
@@ -1321,7 +1321,7 @@ TEST_F(DefaultStrategyTensorOpsTest, FillFreeSlots_IndexPutIndexSelect) {
     EXPECT_TRUE(tensors_close(lfs_data, torch_data, 1e-5f, 1e-6f, "FillFreeSlots_IndexPutIndexSelect"));
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, Split_AppendZerosThenIndexPut) {
+TEST_F(DensificationTensorOpsTest, Split_AppendZerosThenIndexPut) {
     // Exact pattern from split():
     // means().append_zeros(n_remaining);
     // means().index_put_(new_indices, append_positions);
@@ -1363,7 +1363,7 @@ TEST_F(DefaultStrategyTensorOpsTest, Split_AppendZerosThenIndexPut) {
     EXPECT_TRUE(tensors_close(lfs_data, torch_extended, 1e-5f, 1e-6f, "Split_AppendZerosThenIndexPut"));
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, GrowGs_FullMaskCalculation) {
+TEST_F(DensificationTensorOpsTest, GrowGs_FullMaskCalculation) {
     // Full grow_gs mask calculation:
     // grads = numer / denom.clamp_min(1.0f)
     // is_grad_high = grads > threshold
@@ -1425,7 +1425,7 @@ TEST_F(DefaultStrategyTensorOpsTest, GrowGs_FullMaskCalculation) {
     EXPECT_EQ(lfs_split_count, torch_split_count);
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, PruneGs_FullMaskCalculation) {
+TEST_F(DensificationTensorOpsTest, PruneGs_FullMaskCalculation) {
     // Full prune_gs mask calculation:
     // is_prune = opacity < threshold
     // is_prune = is_prune.logical_or((rotation * rotation).sum(-1) < 1e-8f)
@@ -1474,7 +1474,7 @@ TEST_F(DefaultStrategyTensorOpsTest, PruneGs_FullMaskCalculation) {
     EXPECT_EQ(lfs_prune_count, torch_prune_count);
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, Remove_ZeroRotationAndOptimizerState) {
+TEST_F(DensificationTensorOpsTest, Remove_ZeroRotationAndOptimizerState) {
     // Pattern from remove():
     // prune_indices = is_prune.nonzero().squeeze(-1)
     // rotation_raw.index_put_(prune_indices, zeros)
@@ -1522,7 +1522,7 @@ TEST_F(DefaultStrategyTensorOpsTest, Remove_ZeroRotationAndOptimizerState) {
     }
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, ResetOpacity_ClampAndZero) {
+TEST_F(DensificationTensorOpsTest, ResetOpacity_ClampAndZero) {
     // Pattern from reset_opacity():
     // opacity_raw.clamp_max_(logit_threshold)
     // exp_avg.zero_()
@@ -1555,7 +1555,7 @@ TEST_F(DefaultStrategyTensorOpsTest, ResetOpacity_ClampAndZero) {
     EXPECT_TRUE(tensors_close(lfs_exp_avg_sq, torch_exp_avg_sq, 0, 0, "ResetOpacity_ZeroSq"));
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, MaxCapEnforcement_LimitMaskBySlice) {
+TEST_F(DensificationTensorOpsTest, MaxCapEnforcement_LimitMaskBySlice) {
     // Pattern from grow_gs max_cap enforcement:
     // indices = is_duplicated.nonzero().squeeze(-1)
     // keep_indices = indices.slice(0, 0, available)
@@ -1602,7 +1602,7 @@ TEST_F(DefaultStrategyTensorOpsTest, MaxCapEnforcement_LimitMaskBySlice) {
 // Test operations with large tensors (realistic training sizes)
 // =============================================================================
 
-TEST_F(DefaultStrategyTensorOpsTest, LargeScale_Densification) {
+TEST_F(DensificationTensorOpsTest, LargeScale_Densification) {
     // Test with 1M Gaussians (realistic training size)
     const int N = 1000000;
 
@@ -1637,7 +1637,7 @@ TEST_F(DefaultStrategyTensorOpsTest, LargeScale_Densification) {
     EXPECT_EQ(lfs_count, torch_count);
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, LargeScale_IndexSelect) {
+TEST_F(DensificationTensorOpsTest, LargeScale_IndexSelect) {
     // Test index_select with large tensors
     const int N = 500000;
     const int num_select = 50000;
@@ -1656,7 +1656,7 @@ TEST_F(DefaultStrategyTensorOpsTest, LargeScale_IndexSelect) {
     EXPECT_TRUE(tensors_close(lfs_result, torch_result, 1e-5f, 1e-6f, "LargeScale_IndexSelect"));
 }
 
-TEST_F(DefaultStrategyTensorOpsTest, LargeScale_IndexPut) {
+TEST_F(DensificationTensorOpsTest, LargeScale_IndexPut) {
     // Test index_put with large tensors (realistic training scale)
     const int N = 500000;
     const int num_put = 50000;
