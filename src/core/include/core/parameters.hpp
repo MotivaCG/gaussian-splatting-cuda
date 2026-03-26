@@ -36,7 +36,7 @@ namespace lfs::core {
         struct LFS_CORE_API OptimizationParameters {
             size_t iterations = 30'000;
             size_t sh_degree_interval = 1'000;
-            float means_lr = 0.00016f;
+            float means_lr = 0.000016f;
             //this is the original! float means_lr = 0.000016f;
             // Optional schedule: additional multiplicative factor applied on top of exponential decay
             // Effective means LR per iteration:
@@ -49,10 +49,11 @@ namespace lfs::core {
             float means_lr_mul_end = 1.0f;   // M1 (end multiplier)
             float means_lr_mul_power = 2.0f; // curve power (p), 2 = quadratic
             bool means_lr_mul_cli_override = false; // runtime-only: true if CLI set any of the above
-             
+            float means_lr_end = 0.00000016f;            
             float shs_lr = 0.0025f;
             float opacity_lr = 0.025f;
             float scaling_lr = 0.005f;
+            float scaling_lr_end = 0.005f;
             float rotation_lr = 0.001f;
             float lambda_dssim = 0.2f;
             float min_opacity = 0.005f;
@@ -79,7 +80,7 @@ namespace lfs::core {
             bool no_interop = false;                          // Disable CUDA-GL interop (use CPU fallback)
             bool debug_python = false;                        // Start debugpy listener for plugin debugging
             int debug_python_port = 5678;                     // Port for debugpy listener
-            std::string strategy = "mcmc";                    // Optimization strategy: mcmc, adc.
+            std::string strategy = "mcmc";                    // Optimization strategy: mcmc, adc, lfs, igs+.
 
             // Mask parameters
             MaskMode mask_mode = MaskMode::None;      // Attention mask mode
@@ -134,6 +135,17 @@ namespace lfs::core {
             bool undistort = false;
             float steps_scaler = 1.f; // Scales training step counts; values <= 0 disable scaling
 
+            // LFS strategy specific parameters
+            float growth_grad_threshold = 0.003f;
+            float grow_fraction = 0.07f;
+            size_t grow_until_iter = 15000;
+            float opacity_decay = 0.004f;
+            float scale_decay = 0.002f;
+            float means_noise_weight = 50.0f;
+            float bounds_percentile = 0.8f;
+            bool use_error_map = true;
+            bool use_edge_map = true;
+
             // Random initialization parameters
             bool random = false;        // Use random initialization instead of SfM
             int init_num_pts = 100'000; // Number of random points to initialize
@@ -164,6 +176,7 @@ namespace lfs::core {
             // Factory methods for strategy presets
             static OptimizationParameters mcmc_defaults();
             static OptimizationParameters adc_defaults();
+            static OptimizationParameters lfs_defaults();
             static OptimizationParameters igs_plus_defaults();
         };
 
@@ -202,13 +215,13 @@ namespace lfs::core {
             DatasetConfig dataset;
             OptimizationParameters optimization;
 
-            // Viewer mode: splat files to load (.ply, .sog, .resume)
+            // Viewer mode: splat files to load (.ply, .sog, .spz, .usd, .usda, .usdc, .usdz, .resume)
             std::vector<std::filesystem::path> view_paths;
 
             // COLMAP sparse folder for camera-only import (no images required)
             std::optional<std::filesystem::path> import_cameras_path = std::nullopt;
 
-            // Optional splat file for initialization (.ply, .sog, .spz, .resume)
+            // Optional splat file for initialization (.ply, .sog, .spz, .usd, .usda, .usdc, .usdz, .resume)
             std::optional<std::string> init_path = std::nullopt;
 
             // Checkpoint to resume training from
@@ -224,7 +237,10 @@ namespace lfs::core {
         enum class OutputFormat { PLY,
                                   SOG,
                                   SPZ,
-                                  HTML };
+                                  HTML,
+                                  USD,
+                                  USDA,
+                                  USDC };
 
         // Parameters for the convert command
         struct LFS_CORE_API ConvertParameters {

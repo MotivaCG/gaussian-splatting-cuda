@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "core/export.hpp"
 #include "dirty_flags.hpp"
 #include "rendering_types.hpp"
 #include <atomic>
@@ -14,7 +15,7 @@ namespace lfs::vis {
 
     class ViewportArtifactService;
 
-    class ViewportFrameLifecycleService {
+    class LFS_VIS_API ViewportFrameLifecycleService {
     public:
         struct ResizeResult {
             DirtyMask dirty = 0;

@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "core/export.hpp"
 #include "render_pass.hpp"
 #include <memory>
 #include <optional>
@@ -14,7 +15,7 @@ namespace lfs::rendering {
 
 namespace lfs::vis {
 
-    class ViewportArtifactService {
+    class LFS_VIS_API ViewportArtifactService {
     public:
         ViewportArtifactService() = default;
         ~ViewportArtifactService();

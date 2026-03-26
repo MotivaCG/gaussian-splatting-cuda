@@ -31,6 +31,7 @@
 #include "strategies/mcmc.hpp"
 #include "strategies/strategy_factory.hpp"
 #include "training/kernels/grad_alpha.hpp"
+#include "training/kernels/lfs_kernels.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -1852,9 +1853,16 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                                              ppisp_cam_idx >= 0 &&
                                              ppisp_cam_idx < ppisp_controller_pool_->num_cameras();
             const bool use_pixel_error_densification =
-                (params_.optimization.strategy == "mcmc" ||
-                 params_.optimization.strategy == "igs+");
+                (params_.optimization.strategy == "mcmc") ||
+                (params_.optimization.strategy == "igs+") ||
+                (params_.optimization.strategy == "lfs" &&
+                 params_.optimization.use_error_map);
             const bool use_ssim_error = use_pixel_error_densification;
+            DensificationType densification_type = DensificationType::None;
+            if (params_.optimization.strategy == "mcmc")
+                densification_type = DensificationType::MCMC;
+            else if (params_.optimization.strategy == "lfs")
+                densification_type = DensificationType::LFS;
 
             // Loop over tiles (row-major order)
             for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
@@ -2209,7 +2217,29 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
 
                     // 2) Extract error map from workspace's ssim_map
                     if (use_pixel_error_densification) {
-                        if (use_ssim_error) {
+                        if (use_ssim_error && params_.optimization.lambda_dssim > 0.0f) {
+                            lfs::core::Tensor ssim_map;
+                            if (used_masked_fused) {
+                                ssim_map = masked_fused_workspace_.ssim_map;
+                            } else if (params_.optimization.lambda_dssim < 1.0f) {
+                                ssim_map = photometric_loss_.fused_workspace().ssim_map;
+                            } else {
+                                ssim_map = photometric_loss_.ssim_workspace().ssim_map;
+                            }
+                            {
+                                const size_t H = ssim_map.shape()[2];
+                                const size_t W = ssim_map.shape()[3];
+                                if (!densification_error_map_.is_valid() ||
+                                    densification_error_map_.shape()[0] != H ||
+                                    densification_error_map_.shape()[1] != W) {
+                                    densification_error_map_ = core::Tensor::empty(
+                                        {static_cast<size_t>(H), static_cast<size_t>(W)},
+                                        core::Device::CUDA);
+                                }
+                                lfs::training::kernels::launch_ssim_to_error_map(ssim_map, densification_error_map_);
+                                tile_error_map = densification_error_map_;
+                            }
+                        } else if (use_ssim_error) {
                             // lambda_dssim == 0 but error-priority densification still needs SSIM error
                             lfs::core::Tensor pred_chw = corrected_image;
                             lfs::core::Tensor gt_chw = gt_tile;
@@ -2236,6 +2266,12 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                         if (use_mask && params_.optimization.mask_mode == lfs::core::param::MaskMode::FocusedSegment) {
                             tile_error_map = (tile_error_map * mask_tile).contiguous();
                         }
+                    }
+
+                    if (tile_error_map.is_valid() && params_.optimization.strategy == "lfs") {
+                        const float map_mean = tile_error_map.mean().item();
+                        if (map_mean > 1e-6f)
+                            tile_error_map = (tile_error_map / map_mean).contiguous();
                     }
 
                     loss_tensor_gpu = loss_tensor_gpu + tile_loss;
@@ -2273,7 +2309,8 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                     } else {
                         fast_rasterize_backward(*fast_ctx, raster_grad, strategy_->get_model(),
                                                 strategy_->get_optimizer(), tile_grad_alpha,
-                                                use_pixel_error_densification ? tile_error_map : lfs::core::Tensor{});
+                                                use_pixel_error_densification ? tile_error_map : lfs::core::Tensor{},
+                                                densification_type);
                     }
                     nvtxRangePop();
                 }

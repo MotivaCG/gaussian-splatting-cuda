@@ -30,7 +30,7 @@ namespace {
         Help
     };
 
-    const std::set<std::string> VALID_STRATEGIES = {"mcmc", "adc", "igs+"};
+    const std::set<std::string> VALID_STRATEGIES = {"mcmc", "adc", "lfs", "igs+"};
 
     // Parse log level from string
     lfs::core::LogLevel parse_log_level(const std::string& level_str) {
@@ -61,7 +61,7 @@ namespace {
             ::args::ArgumentParser parser(
                 "LichtFeld Studio: High-performance CUDA implementation of 3D Gaussian Splatting algorithm.\n",
                 "\nSUBCOMMANDS:\n"
-                "convert -- Convert between .ply, .sog, .spz, .html\n"
+                "convert -- Convert between .ply, .sog, .spz, .usd/.usda/.usdc, .html\n"
                 "plugin -- Manage plugins (create, check, list)\n"
                 "\n"
                 "Run '<subcommand> --help' for details.\n"
@@ -83,7 +83,7 @@ namespace {
             ::args::Group mode_group(parser, "MODE SELECTION:");
             ::args::HelpFlag help(mode_group, "help", "Display help menu", {'h', "help"});
             ::args::Flag version(mode_group, "version", "Display version information", {'V', "version"});
-            ::args::ValueFlag<std::string> view_ply(mode_group, "path", "View file(s). Supports splat (.ply, .sog, .spz) and mesh (.obj, .fbx, .gltf, .glb, .stl) formats. If directory, loads all.", {'v', "view"});
+            ::args::ValueFlag<std::string> view_ply(mode_group, "path", "View file(s). Supports splat (.ply, .sog, .spz, .usd, .usda, .usdc, .usdz) and mesh (.obj, .fbx, .gltf, .glb, .stl) formats. If directory, loads all.", {'v', "view"});
             ::args::ValueFlag<std::string> resume_checkpoint(mode_group, "checkpoint", "Resume training from checkpoint file", {"resume"});
             ::args::CompletionFlag completion(parser, {"complete"});
 
@@ -95,7 +95,7 @@ namespace {
             ::args::ValueFlag<std::string> data_path(paths_group, "data_path", "Path to training data", {'d', "data-path"});
             ::args::ValueFlag<std::string> output_path(paths_group, "output_path", "Path to output", {'o', "output-path"});
             ::args::ValueFlag<std::string> config_file(paths_group, "config_file", "LichtFeldStudio config file (json)", {"config"});
-            ::args::ValueFlag<std::string> init_path(paths_group, "path", "Initialize from splat file (.ply, .sog, .spz, .resume)", {"init"});
+            ::args::ValueFlag<std::string> init_path(paths_group, "path", "Initialize from splat file (.ply, .sog, .spz, .usd, .usda, .usdc, .usdz, .resume)", {"init"});
 
             ::args::ValueFlag<std::string> import_cameras(paths_group, "path", "Import COLMAP cameras from sparse folder (no images required)", {"import-cameras"});
 
@@ -105,16 +105,18 @@ namespace {
             ::args::Group training_sep(parser, " ");
             ::args::Group training_group(parser, "TRAINING PARAMETERS:");
             ::args::ValueFlag<uint32_t> iterations(training_group, "iterations", "Number of iterations", {'i', "iter"});
-            ::args::ValueFlag<std::string> strategy(training_group, "strategy", "Optimization strategy: mcmc, adc, igs+", {"strategy"});
+            ::args::ValueFlag<std::string> strategy(training_group, "strategy", "Optimization strategy: mcmc, adc, lfs, igs+", {"strategy"});
             ::args::ValueFlag<int> sh_degree(training_group, "sh_degree", "Max SH degree [0-3]", {"sh-degree"});
             ::args::ValueFlag<int> sh_degree_interval(training_group, "sh_degree_interval", "SH degree interval", {"sh-degree-interval"});
-            ::args::ValueFlag<int> max_cap(training_group, "max_cap", "Max Gaussians for MCMC or igs+", {"max-cap"});
+            ::args::ValueFlag<int> max_cap(training_group, "max_cap", "Maximum number of Gaussians", {"max-cap"});
             ::args::ValueFlag<float> min_opacity(training_group, "min_opacity", "Minimum opacity threshold", {"min-opacity"});
             ::args::ValueFlag<float> steps_scaler(training_group, "steps_scaler", "Scale training steps by factor", {"steps-scaler"});
             ::args::ValueFlag<int> tile_mode(training_group, "tile_mode", "Tile mode for memory-efficient training: 1=1 tile, 2=2 tiles, 4=4 tiles (default: 1)", {"tile-mode"});
             ::args::ValueFlag<float> means_lr_mul_start(parser, "mul_start", "Multiply means_lr by this factor at the start (curved schedule over time)", {"means-lr-mul-start"});
             ::args::ValueFlag<float> means_lr_mul_end(parser, "mul_end", "Multiply means_lr by this factor at the end (curved schedule over time)", {"means-lr-mul-end"});
             ::args::ValueFlag<float> means_lr_mul_power(parser, "power", "Power (p) for the means_lr multiplier curve: M(t)=end+(start-end)*(1-t)^p", {"means-lr-mul-power"});
+            ::args::Flag use_error_map(training_group, "use_error_map", "Weight LFS refine signal by per-pixel SSIM error map", {"use-error-map"});
+            ::args::Flag use_edge_map(training_group, "use_edge_map", "Weight LFS refine signal by Sobel edge map on GT images", {"use-edge-map"});
 
             // =============================================================================
             // INITIALIZATION
@@ -440,7 +442,7 @@ namespace {
                 const auto strat = ::args::get(strategy);
                 if (VALID_STRATEGIES.find(strat) == VALID_STRATEGIES.end()) {
                     return std::unexpected(std::format(
-                        "ERROR: Invalid optimization strategy '{}'. Valid strategies are: mcmc, adc, igs+",
+                        "ERROR: Invalid optimization strategy '{}'. Valid strategies are: mcmc, adc, lfs, igs+",
                         strat));
                 }
 
@@ -595,6 +597,8 @@ namespace {
                                         no_alpha_as_mask_flag = bool(no_alpha_as_mask),
                                         skip_intermediate_flag = bool(skip_intermediate),
                                         ngs_noise_val = ngs_noise ? std::optional(::args::get(ngs_noise)) : std::nullopt]() {
+                                        use_error_map_flag = bool(use_error_map),
+                                        use_edge_map_flag = bool(use_edge_map)]() {
                 auto& opt = params.optimization;
                 auto& ds = params.dataset;
 
@@ -670,6 +674,8 @@ namespace {
                 setFlag(undistort_flag, opt.undistort);
                 setFlag(enable_sparsity_flag, opt.enable_sparsity);
                 setFlag(skip_intermediate_flag, opt.skip_intermediate);
+                setFlag(use_error_map_flag, opt.use_error_map);
+                setFlag(use_edge_map_flag, opt.use_edge_map);
 
                 // Mask parameters
                 setVal(mask_mode_val, opt.mask_mode);
@@ -760,6 +766,8 @@ lfs::core::args::parse_args_and_params(int argc, const char* const argv[]) {
     } else {
         if (strategy == "adc")
             params->optimization = lfs::core::param::OptimizationParameters::adc_defaults();
+        else if (strategy == "lfs")
+            params->optimization = lfs::core::param::OptimizationParameters::lfs_defaults();
         else if (strategy == "igs+")
             params->optimization = lfs::core::param::OptimizationParameters::igs_plus_defaults();
         else
@@ -790,8 +798,8 @@ namespace {
         "  LichtFeld-Studio convert ./splats/ -f sog --sh-degree 2\n"
         "\n"
         "SUPPORTED FORMATS:\n"
-        "  Input:  .ply, .sog, .spz, .resume (checkpoint)\n"
-        "  Output: .ply, .sog, .spz, .html\n"
+        "  Input:  .ply, .sog, .spz, .usd, .usda, .usdc, .usdz, .resume (checkpoint)\n"
+        "  Output: .ply, .sog, .spz, .usd, .usda, .usdc, .html\n"
         "\n";
 
     std::optional<lfs::core::param::OutputFormat> parseFormat(const std::string& str) {
@@ -804,6 +812,12 @@ namespace {
             return OutputFormat::SPZ;
         if (str == "html" || str == ".html")
             return OutputFormat::HTML;
+        if (str == "usd" || str == ".usd")
+            return OutputFormat::USD;
+        if (str == "usda" || str == ".usda")
+            return OutputFormat::USDA;
+        if (str == "usdc" || str == ".usdc")
+            return OutputFormat::USDC;
         return std::nullopt;
     }
 } // namespace
@@ -878,7 +892,7 @@ Commands:
     ::args::Positional<std::string> input(parser, "input", "Input file or directory");
     ::args::Positional<std::string> output(parser, "output", "Output file (optional)");
     ::args::ValueFlag<int> sh_degree(parser, "degree", "SH degree [0-3], -1 to keep original (default: -1)", {"sh-degree"});
-    ::args::ValueFlag<std::string> format(parser, "format", "Output format: ply, sog, spz, html", {'f', "format"});
+    ::args::ValueFlag<std::string> format(parser, "format", "Output format: ply, sog, spz, html, usd, usda, usdc", {'f', "format"});
     ::args::ValueFlag<int> sog_iter(parser, "iterations", "K-means iterations for SOG (default: 10)", {"sog-iterations"});
     ::args::Flag overwrite(parser, "overwrite", "Overwrite existing files without prompting", {'y', "overwrite"});
 
@@ -921,7 +935,7 @@ Commands:
         if (const auto fmt = parseFormat(::args::get(format))) {
             params.format = *fmt;
         } else {
-            return std::unexpected(std::format("Invalid format '{}'. Use: ply, sog, html", ::args::get(format)));
+            return std::unexpected(std::format("Invalid format '{}'. Use: ply, sog, spz, html, usd, usda, usdc", ::args::get(format)));
         }
     } else if (!params.output_path.empty()) {
         if (const auto fmt = parseFormat(params.output_path.extension().string())) {
