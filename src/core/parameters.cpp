@@ -452,6 +452,7 @@ namespace lfs::core {
             }
             if (json.contains("means_lr_mul_power")) {
                 params.means_lr_mul_power = json["means_lr_mul_power"];
+            }
             if (json.contains("means_lr_end")) {
                 params.means_lr_end = json["means_lr_end"];
             }

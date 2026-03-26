@@ -787,13 +787,14 @@ namespace lfs::core {
                     LOG_DEBUG("  nn_dist computed: is_valid={}, shape={}, numel={}",
                               nn_dist.is_valid(), nn_dist.shape().str(), nn_dist.numel());
 
-                std::vector<int> scale_expand_shape = {static_cast<int>(num_points), 3};
-                scaling_cpu = nn_dist.sqrt()
-                                  .mul(params.optimization.init_scaling)
-                                  .log()
-                                  .unsqueeze(-1)
-                                  .expand(std::span<const int>(scale_expand_shape))
-                                  .contiguous();
+                    std::vector<int> scale_expand_shape = {static_cast<int>(num_points), 3};
+                    scaling_cpu = nn_dist.sqrt()
+                                      .mul(params.optimization.init_scaling)
+                                      .log()
+                                      .unsqueeze(-1)
+                                      .expand(std::span<const int>(scale_expand_shape))
+                                      .contiguous();
+                }
 
                 LOG_DEBUG("  scaling_cpu computed: is_valid={}, ptr={}, device={}, shape={}, numel={}",
                           scaling_cpu.is_valid(), static_cast<const void*>(scaling_cpu.ptr<float>()),

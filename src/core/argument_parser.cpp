@@ -596,7 +596,7 @@ namespace {
                                         invert_masks_flag = bool(invert_masks),
                                         no_alpha_as_mask_flag = bool(no_alpha_as_mask),
                                         skip_intermediate_flag = bool(skip_intermediate),
-                                        ngs_noise_val = ngs_noise ? std::optional(::args::get(ngs_noise)) : std::nullopt]() {
+                                        ngs_noise_val = ngs_noise ? std::optional(::args::get(ngs_noise)) : std::nullopt,
                                         use_error_map_flag = bool(use_error_map),
                                         use_edge_map_flag = bool(use_edge_map)]() {
                 auto& opt = params.optimization;
