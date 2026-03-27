@@ -167,64 +167,6 @@ namespace lfs::training {
                 splat_data.opacity_raw() = new_params[i];
             }
         }
-    }
-    
-    bool means_lr_multiplier_enabled(const lfs::core::param::OptimizationParameters& params) {
-        // Enabled if multipliers deviate from identity, or if CLI explicitly requested an override.
-        return params.means_lr_mul_cli_override ||
-               (params.means_lr_mul_start != 1.0f) ||
-               (params.means_lr_mul_end != 1.0f);
-    }
-
-    namespace {
-        inline double compute_means_lr_multiplier(const lfs::core::param::OptimizationParameters& params, const int iter) {
-            const double m0 = static_cast<double>(params.means_lr_mul_start);
-            const double m1 = static_cast<double>(params.means_lr_mul_end);
-            const double p = std::max(1e-8, static_cast<double>(params.means_lr_mul_power));
-
-            if (params.iterations <= 1) {
-                return m1;
-            }
-
-            const double t = std::clamp(static_cast<double>(iter) / static_cast<double>(params.iterations - 1), 0.0, 1.0);
-            const double one_minus_t = 1.0 - t;
-            return m1 + (m0 - m1) * std::pow(one_minus_t, p);
-        }
-
-        inline double compute_gamma(const lfs::core::param::OptimizationParameters& params) {
-            // Matches create_scheduler(): gamma = 0.01^(1/iterations)
-            return std::pow(0.01, 1.0 / static_cast<double>(params.iterations));
-        }
-    } // namespace
-
-    void apply_means_lr_schedule(
-        AdamOptimizer& optimizer,
-        const lfs::core::param::OptimizationParameters& params,
-        const lfs::core::SplatData& splat_data,
-        const int iter) {
-
-        // Base LR (same as create_optimizer)
-        const double base_lr0 = static_cast<double>(params.means_lr) * static_cast<double>(splat_data.get_scene_scale());
-
-        // Standard exponential decay to 1% over `iterations`
-        const double gamma = compute_gamma(params);
-        const double decay = std::pow(gamma, static_cast<double>(std::max(0, iter)));
-
-        // Optional multiplier curve
-        const double mult = compute_means_lr_multiplier(params, iter);
-
-        const double lr = base_lr0 * decay * mult;
-
-        // Means uses per-parameter LR, but keep global LR in sync for consistency/logging.
-        optimizer.set_lr(static_cast<float>(lr));
-        optimizer.set_param_lr(ParamType::Means, lr);
-        if (iter == 0 || iter == (params.iterations / 2) || iter == (params.iterations - 1) || (iter % 1000) == 0) {
-            LOG_INFO("[MeansLR] iter {}/{}  base_lr0={}  mult={}  effective_lr={}\n",
-                     iter, params.iterations,
-                     static_cast<float>(base_lr0),
-                     static_cast<float>(mult),
-                     static_cast<float>(lr));
-        }
-    }
+    }    
 
 } // namespace lfs::training

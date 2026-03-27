@@ -115,7 +115,6 @@ namespace {
 
             ::args::ValueFlag<float> means_lr_mul_start(parser, "mul_start", "Multiply means_lr by this factor at the start (curved schedule over time)", {"means-lr-mul-start"});
             ::args::ValueFlag<float> means_lr_mul_end(parser, "mul_end", "Multiply means_lr by this factor at the end (curved schedule over time)", {"means-lr-mul-end"});
-            ::args::ValueFlag<float> means_lr_mul_power(parser, "power", "Power (p) for the means_lr multiplier curve: M(t)=end+(start-end)*(1-t)^p", {"means-lr-mul-power"});
             ::args::Flag use_error_map(training_group, "use_error_map", "Weight MRNF refine signal by per-pixel SSIM error map", {"use-error-map"});
             ::args::Flag use_edge_map(training_group, "use_edge_map", "Weight MRNF refine signal by Sobel edge map on GT images", {"use-edge-map"});
 
@@ -497,12 +496,6 @@ namespace {
                     return std::unexpected("ERROR: --means-lr-mul-end must be > 0");
                 }
             }
-            if (means_lr_mul_power) {
-                const float v = ::args::get(means_lr_mul_power);
-                if (!(v > 0.0f)) {
-                    return std::unexpected("ERROR: --means-lr-mul-power must be > 0");
-                }
-            }
 
             // Validate sh_degree (0-3)
             if (sh_degree) {
@@ -569,7 +562,6 @@ namespace {
                                         steps_scaler_val = cli_option_present({"--steps-scaler"}) ? std::optional<float>(::args::get(steps_scaler)) : std::optional<float>(),
                                         means_lr_mul_start_val = means_lr_mul_start ? std::optional<float>(::args::get(means_lr_mul_start)) : std::optional<float>(),
                                         means_lr_mul_end_val = means_lr_mul_end ? std::optional<float>(::args::get(means_lr_mul_end)) : std::optional<float>(),
-                                        means_lr_mul_power_val = means_lr_mul_power ? std::optional<float>(::args::get(means_lr_mul_power)) : std::optional<float>(),
                                         sh_degree_interval_val = cli_option_present({"--sh-degree-interval"}) ? std::optional<int>(::args::get(sh_degree_interval)) : std::optional<int>(),
                                         sh_degree_val = cli_option_present({"--sh-degree"}) ? std::optional<int>(::args::get(sh_degree)) : std::optional<int>(),
                                         min_opacity_val = cli_option_present({"--min-opacity"}) ? std::optional<float>(::args::get(min_opacity)) : std::optional<float>(),
@@ -599,9 +591,9 @@ namespace {
                                         headless_flag = bool(headless),
                                         auto_train_flag = bool(auto_train),
 #ifdef LFS_BUILD_PORTABLE
-                                        no_splash_flag = false,
+                                        no_splash_flag = true, //false,
 #else
-                                        no_splash_flag = bool(no_splash),
+                                        no_splash_flag = true, //bool(no_splash),
 #endif
                                         no_interop_flag = bool(no_interop),
                                         debug_python_flag = bool(debug_python),
@@ -647,10 +639,6 @@ namespace {
                 setVal(steps_scaler_val, opt.steps_scaler);
                 setVal(means_lr_mul_start_val, opt.means_lr_mul_start);
                 setVal(means_lr_mul_end_val, opt.means_lr_mul_end);
-                setVal(means_lr_mul_power_val, opt.means_lr_mul_power);
-                if (means_lr_mul_start_val || means_lr_mul_end_val || means_lr_mul_power_val) {
-                    opt.means_lr_mul_cli_override = true;
-                }
                 setVal(sh_degree_interval_val, opt.sh_degree_interval);
                 setVal(sh_degree_val, opt.sh_degree);
                 setVal(min_opacity_val, opt.min_opacity);
@@ -740,6 +728,12 @@ namespace {
         }
     }
 
+    void apply_means_lr_multiplier(lfs::core::param::TrainingParameters& params) {
+        auto& opt = params.optimization;
+        opt.means_lr *= opt.means_lr_mul_start;
+        opt.means_lr_end *= opt.means_lr_mul_end;
+    }
+
     std::vector<std::string> convert_args(int argc, const char* const argv[]) {
         return std::vector<std::string>(argv, argv + argc);
     }
@@ -800,6 +794,7 @@ lfs::core::args::parse_args_and_params(int argc, const char* const argv[]) {
     }
     apply_step_scaling(*params);
     apply_ppisp_defaults(*params);
+    apply_means_lr_multiplier(*params);
 
     if (auto error = params->validate(); !error.empty())
         return std::unexpected("ERROR: " + error);

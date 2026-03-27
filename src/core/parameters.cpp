@@ -72,9 +72,8 @@ namespace lfs::core {
                 const std::vector<ParamInfo> expected_params = {
                     {"iterations", defaults.iterations, "Total number of training iterations"},
                     {"means_lr", defaults.means_lr, "Initial learning rate for position updates"},
-                    {"means_lr_mul_start", defaults.means_lr_mul_start, "Start multiplier for means_lr (additional schedule)"},
-                    {"means_lr_mul_end", defaults.means_lr_mul_end, "End multiplier for means_lr (additional schedule)"},
-                    {"means_lr_mul_power", defaults.means_lr_mul_power, "Power for means_lr multiplier curve (p)"}, 
+                    {"means_lr_mul_start", defaults.means_lr_mul_start, "Multiplier for means_lr"},
+                    {"means_lr_mul_end", defaults.means_lr_mul_end, "Multiplier for means_lr_end"},
                     {"shs_lr", defaults.shs_lr, "Learning rate for spherical harmonics updates"},
                     {"opacity_lr", defaults.opacity_lr, "Learning rate for opacity updates"},
                     {"scaling_lr", defaults.scaling_lr, "Learning rate for scaling updates"},
@@ -255,7 +254,6 @@ namespace lfs::core {
             opt_json["means_lr"] = means_lr;
             opt_json["means_lr_mul_start"] = means_lr_mul_start;
             opt_json["means_lr_mul_end"] = means_lr_mul_end;
-            opt_json["means_lr_mul_power"] = means_lr_mul_power;
             opt_json["means_lr_end"] = means_lr_end;
             opt_json["shs_lr"] = shs_lr;
             opt_json["opacity_lr"] = opacity_lr;
@@ -439,9 +437,6 @@ namespace lfs::core {
             }
             if (json.contains("means_lr_mul_end")) {
                 params.means_lr_mul_end = json["means_lr_mul_end"];
-            }
-            if (json.contains("means_lr_mul_power")) {
-                params.means_lr_mul_power = json["means_lr_mul_power"];
             }
             if (json.contains("means_lr_end")) {
                 params.means_lr_end = json["means_lr_end"];
