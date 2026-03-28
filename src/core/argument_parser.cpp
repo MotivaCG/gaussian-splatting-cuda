@@ -199,6 +199,7 @@ namespace {
             ::args::Flag bg_modulation(rendering_group, "bg_modulation", "Enable sinusoidal background modulation", {"bg-modulation"});
             ::args::Flag bg_noise(parser, "bg_noise", "Enable per-pixel noise background (overrides bg-modulation)", {"bg-noise"});
             ::args::Flag gut(rendering_group, "gut", "Enable GUT mode", {"gut"});
+            ::args::Flag progressive_ssim(rendering_group, "progressive_ssim", "Ramp lambda_dssim: ease-in 0.5x→1.25x until stop_refine, then linear 1.25x→2.0x", {"progressive-ssim"});
 
             // =============================================================================
             // OUTPUT OPTIONS
@@ -604,6 +605,7 @@ namespace {
                                         bg_noise_flag = bool(bg_noise),
                                         random_flag = bool(random),
                                         gut_flag = bool(gut),
+                                        progressive_ssim_flag = bool(progressive_ssim),
                                         undistort_flag = bool(undistort),
                                         enable_sparsity_flag = bool(enable_sparsity),
                                         invert_masks_flag = bool(invert_masks),
@@ -682,6 +684,7 @@ namespace {
                 setFlag(bg_noise_flag, opt.bg_noise);
                 setFlag(random_flag, opt.random);
                 setFlag(gut_flag, opt.gut);
+                setFlag(progressive_ssim_flag, opt.progressive_ssim);
                 setFlag(undistort_flag, opt.undistort);
                 setFlag(enable_sparsity_flag, opt.enable_sparsity);
                 setFlag(skip_intermediate_flag, opt.skip_intermediate);

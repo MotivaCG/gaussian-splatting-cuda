@@ -860,6 +860,27 @@ namespace lfs::training {
         }
     }
 
+    // Returns the effective lambda_dssim for the given iteration, applying a progressive ramp if enabled.
+    // Phase 1 [0, stop_refine]: ease-in (val²) from 0.5x to 1.25x of the base value.
+    // Phase 2 (stop_refine, iterations]: linear from 1.25x to 2.0x of the base value.
+    static float effective_lambda_dssim(const lfs::core::param::OptimizationParameters& opt, int iter) {
+        if (!opt.progressive_ssim)
+            return opt.lambda_dssim;
+
+        const float stop = static_cast<float>(opt.stop_refine);
+        const float total = static_cast<float>(opt.iterations);
+        float multiplier;
+        if (iter <= static_cast<int>(opt.stop_refine)) {
+            const float val = (stop > 0.0f) ? std::clamp(static_cast<float>(iter) / stop, 0.0f, 1.0f) : 1.0f;
+            multiplier = 0.5f + 0.75f * val * val; // 0.5x → 1.25x
+        } else {
+            const float remaining = total - stop;
+            const float val = (remaining > 0.0f) ? std::clamp(static_cast<float>(iter - opt.stop_refine) / remaining, 0.0f, 1.0f) : 1.0f;
+            multiplier = 1.25f + 0.75f * val; // 1.25x → 2.0x
+        }
+        return std::clamp(opt.lambda_dssim * multiplier, 0.0f, 1.0f);
+    }
+
     // Compute photometric loss AND gradient manually
     std::expected<std::pair<lfs::core::Tensor, lfs::core::Tensor>, std::string> Trainer::compute_photometric_loss_with_gradient(
         const lfs::core::Tensor& rendered,
@@ -2420,6 +2441,7 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
 
                         // Hybrid switch: we make a local copy to modify parameters just for this step
                         lfs::core::param::OptimizationParameters step_params = params_.optimization;
+                        step_params.lambda_dssim = effective_lambda_dssim(params_.optimization, iter);
 
                         const float progress = static_cast<float>(iter) / static_cast<float>(params_.optimization.iterations);
 
@@ -2475,6 +2497,7 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                 } else {
 
                     lfs::core::param::OptimizationParameters step_params = params_.optimization;
+                    step_params.lambda_dssim = effective_lambda_dssim(params_.optimization, iter);
 
                     if (step_params.mask_mode == lfs::core::param::MaskMode::FocusedSegment) {
                         const float progress = static_cast<float>(iter) /

@@ -305,6 +305,7 @@ namespace lfs::core {
             opt_json["pause_refine_after_reset"] = pause_refine_after_reset;
             opt_json["revised_opacity"] = revised_opacity;
             opt_json["gut"] = gut;
+            opt_json["progressive_ssim"] = progressive_ssim;
             opt_json["undistort"] = undistort;
             opt_json["steps_scaler"] = steps_scaler;
             opt_json["sh_degree_interval"] = sh_degree_interval;
@@ -620,6 +621,9 @@ namespace lfs::core {
             }
             if (json.contains("gut")) {
                 params.gut = json["gut"];
+            }
+            if (json.contains("progressive_ssim")) {
+                params.progressive_ssim = json["progressive_ssim"];
             }
             if (json.contains("undistort")) {
                 params.undistort = json["undistort"];

@@ -158,6 +158,7 @@ namespace lfs::core {
             bool revised_opacity = false;
             bool gut = false;
             bool undistort = false;
+            bool progressive_ssim = false; // Ramp lambda_dssim: 0.5x→1.25x (ease-in) until stop_refine, then 1.25x→2.0x (linear)
             float steps_scaler = 1.f; // Scales training step counts; values <= 0 disable scaling
 
             // MRNF strategy specific parameters
