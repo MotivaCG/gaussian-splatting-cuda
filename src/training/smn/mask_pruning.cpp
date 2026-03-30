@@ -621,7 +621,7 @@ namespace lfs::training::mask_pruning {
                 const int pad_w = static_cast<int>(W * config.border_safe_margin);
                 const int pad_h = static_cast<int>(H * config.border_safe_margin);
 
-                // Main voting loop
+                // Main voting loop (old-style: clamp to border, no relaxed band)
                 for (int i = 0; i < N; ++i) {
                     const int rx = static_cast<int>(r_acc(i, 0));
                     const int ry = static_cast<int>(r_acc(i, 1));
@@ -630,33 +630,15 @@ namespace lfs::training::mask_pruning {
                         continue;
                     }
 
-                    const int x = round_to_int(m_acc(i, 0));
-                    const int y = round_to_int(m_acc(i, 1));
+                    // Clamp to frame border: out-of-frame centers evaluate at border pixel
+                    const int x = std::clamp(round_to_int(m_acc(i, 0)), 0, W - 1);
+                    const int y = std::clamp(round_to_int(m_acc(i, 1)), 0, H - 1);
 
-                    // CASE 1: Strictly inside the image frame
-                    if (x >= 0 && x < W && y >= 0 && y < H) {
-                        if (mask_inside_strict_xy(x, y)) {
-                            // Clear positive evidence
-                            local_tot[static_cast<size_t>(i)]++;
-                            local_pos[static_cast<size_t>(i)]++;
-                        } else if (mask_inside_relaxed_xy(x, y)) {
-                            // Border band around the mask -> ignore this camera for this splat
-                            continue;
-                        } else {
-                            // Clear negative evidence
-                            local_tot[static_cast<size_t>(i)]++;
-                        }
-                        continue;
+                    // Every visible splat votes, no relaxed band
+                    local_tot[static_cast<size_t>(i)]++;
+                    if (mask_inside_strict_xy(x, y)) {
+                        local_pos[static_cast<size_t>(i)]++;
                     }
-
-                    // CASE 2: Outside but near the frame border -> ignore
-                    if (x >= -pad_w && x < W + pad_w &&
-                        y >= -pad_h && y < H + pad_h) {
-                        continue;
-                    }
-
-                    // CASE 3: Far outside -> ALSO ignore
-                    continue;
                 }
 
                 // ===== DEPTH FILTERING =====
@@ -1448,7 +1430,6 @@ namespace lfs::training::mask_pruning {
                     const int cy = round_to_int(my);
 
                     const bool center_strict = mask_inside_strict(cx, cy);
-                    const bool center_relaxed = mask_inside_relaxed(cx, cy);
 
                     // 4 cardinal extreme points
                     const int px = round_to_int(frx);
@@ -1464,22 +1445,11 @@ namespace lfs::training::mask_pruning {
                     const bool cardU_strict = mask_inside_strict(cx, yU);
                     const bool cardD_strict = mask_inside_strict(cx, yD);
 
-                    const bool cardR_relaxed = mask_inside_relaxed(xR, cy);
-                    const bool cardL_relaxed = mask_inside_relaxed(xL, cy);
-                    const bool cardU_relaxed = mask_inside_relaxed(cx, yU);
-                    const bool cardD_relaxed = mask_inside_relaxed(cx, yD);
-
                     const int strict_cardinals =
                         static_cast<int>(cardR_strict) +
                         static_cast<int>(cardL_strict) +
                         static_cast<int>(cardU_strict) +
                         static_cast<int>(cardD_strict);
-
-                    const int relaxed_cardinals =
-                        static_cast<int>(cardR_relaxed) +
-                        static_cast<int>(cardL_relaxed) +
-                        static_cast<int>(cardU_relaxed) +
-                        static_cast<int>(cardD_relaxed);
 
                     // -----------------------------------------------------------------
                     // STRONG GOOD fast-path:
@@ -1492,26 +1462,18 @@ namespace lfs::training::mask_pruning {
                     }
 
                     // -----------------------------------------------------------------
-                    // Candidate gate:
-                    // We mainly evaluate splats whose center is in/near the subject,
-                    // but also allow outside-center splats that clearly touch the mask band.
-                    // This avoids missing "intruders from outside".
+                    // Candidate gate: no relaxed band, strict mask only
                     // -----------------------------------------------------------------
-                    const bool near_subject = center_relaxed || (relaxed_cardinals > 0);
+                    const bool near_subject = center_strict || (strict_cardinals > 0);
                     if (!near_subject) {
                         continue;
                     }
 
                     // -----------------------------------------------------------------
-                    // Richer footprint inspection
-                    //   - strict inside  -> clear inside support
-                    //   - outside relaxed-> clear outside support
-                    //   - relaxed-only or off-frame -> uncertain
+                    // Footprint inspection: strict mask only, out-of-frame = outside
                     // -----------------------------------------------------------------
                     int strict_inside_samples = 0;
                     int clear_outside_samples = 0;
-                    int uncertain_samples = 0;
-                    int valid_inframe_samples = 0;
 
                     const int P = static_cast<int>(dirs.size());
                     for (const auto& d : dirs) {
@@ -1521,68 +1483,37 @@ namespace lfs::training::mask_pruning {
                         const int sx = cx + dx;
                         const int sy = cy + dy;
 
-                        // Off-frame does not count as "clear leak"; it is uncertain.
+                        // Out-of-frame = outside (penalize like old behavior)
                         if ((static_cast<unsigned>(sx) >= static_cast<unsigned>(W)) ||
                             (static_cast<unsigned>(sy) >= static_cast<unsigned>(H))) {
-                            uncertain_samples++;
+                            clear_outside_samples++;
                             continue;
                         }
 
-                        ++valid_inframe_samples;
-
-                        const bool s_strict = mask_inside_strict(sx, sy);
-                        const bool s_relaxed = mask_inside_relaxed(sx, sy);
-
-                        if (s_strict) {
+                        // Strict mask only, no relaxed band
+                        if (mask_inside_strict(sx, sy)) {
                             strict_inside_samples++;
-                        } else if (!s_relaxed) {
-                            clear_outside_samples++;
                         } else {
-                            uncertain_samples++;
+                            clear_outside_samples++;
                         }
                     }
 
-                    // If all rich samples are uncertain/off-frame, abstain in this view.
-                    if (valid_inframe_samples <= 0) {
-                        local_uncertain_counts[static_cast<size_t>(i)]++;
-                        continue;
-                    }
-
                     const float outside_ratio =
-                        static_cast<float>(clear_outside_samples) / static_cast<float>(valid_inframe_samples);
+                        static_cast<float>(clear_outside_samples) / static_cast<float>(P);
 
                     const float inside_ratio =
-                        static_cast<float>(strict_inside_samples) / static_cast<float>(valid_inframe_samples);
+                        static_cast<float>(strict_inside_samples) / static_cast<float>(P);
 
                     // -----------------------------------------------------------------
-                    // STRONG BAD logic:
-                    // Negative evidence should weigh more than positive evidence, but
-                    // one single camera should not force removal by itself.
-                    //
-                    // We declare this view "strong bad" only when leakage is clear.
+                    // STRONG BAD: no relaxed band, simple leakage check
                     // -----------------------------------------------------------------
-                    bool strong_bad = false;
-
-                    if (!center_relaxed) {
-                        // Center clearly outside the relaxed mask, but footprint touches
-                        // the relaxed band -> likely intruding from outside.
-                        // Require leakage evidence to be clearly non-trivial.
-                        strong_bad = (outside_ratio >= config.per_view_leak_fraction);
-                    } else {
-                        // Center is inside or near mask, but footprint spills clearly outside.
-                        // Demand both:
-                        //   1) enough outside evidence
-                        //   2) not enough strong-inside support to call it safe
-                        strong_bad =
-                            (outside_ratio >= config.per_view_leak_fraction) &&
-                            !(center_strict && inside_ratio >= 0.5f);
-                    }
+                    const bool strong_bad = (outside_ratio >= config.per_view_leak_fraction) &&
+                        !(center_strict && inside_ratio >= 0.5f);
 
                     if (strong_bad) {
                         local_bad_votes[static_cast<size_t>(i)]++;
                         local_decisive_counts[static_cast<size_t>(i)]++;
                     } else {
-                        // Not clearly good, not clearly bad -> uncertain
                         local_uncertain_counts[static_cast<size_t>(i)]++;
                     }
                 }
@@ -2958,20 +2889,12 @@ namespace lfs::training::mask_pruning {
             }
         }
         
-        /*if (leakage_config.enabled) {
+        if (leakage_config.enabled) {
             auto leak = prune_by_mask_leakage(strategy, dataset, leakage_config);
             if (!leak) {
                 return std::unexpected(leak.error());
             }
         }
-        else
-        {
-            /* AlphaConsensusPruningConfig consensus_config; 
-            auto consensus = prune_by_alpha_consensus(strategy, dataset, consensus_config);
-            if (!consensus) {
-                return std::unexpected(consensus.error());
-            }* /
-        }*/
 
     
         ClusterExtremePruningConfig cluster_config;
