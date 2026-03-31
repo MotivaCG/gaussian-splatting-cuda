@@ -1040,8 +1040,8 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
 
             const float kBgWeight = opt_params.focused_bg_weight; // BG gradient weight relative to FG (1.0)
             constexpr float kDarknessBoost = 2.0f; // extra FG weight on dark pixels; 0 = disabled
-            constexpr float kAlphaFgWeight = 3.0f; // grad_alpha pressure to push FG alpha -> 1
-            constexpr float kAlphaBgWeight = 2.0f; // grad_alpha pressure to push BG alpha -> 0
+            constexpr float kAlphaFgWeight = 1.5f; // grad_alpha pressure to push FG alpha -> 1
+            constexpr float kAlphaBgWeight = 1.0f; // grad_alpha pressure to push BG alpha -> 0
 
             const Tensor bg_mask = Tensor::full(mask_2d.shape(), 1.0f, mask_2d.device()) - mask_2d;
 
@@ -2504,57 +2504,48 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                         const float progress = static_cast<float>(iter) /
                                                static_cast<float>(params_.optimization.iterations);
 
-                        // FocusedSegment schedule constants.
+                        // FocusedSegment schedule.
                         //
-                        // Phase 1 [0, kNoneEnd): mode=None
-                        //   Full gradient everywhere, free densification. Geometry consolidates
-                        //   without any mask interference.
+                        // Spatial L1 weighting (FG=1.0, BG=kBgTarget) is always active from
+                        // Phase 2 onward. It never turns off. Only alpha penalty is scheduled.
                         //
-                        // Phase 2 [kNoneEnd, kBgRampEnd): FocusedSegment, BG spatial weight ramps down
-                        //   Spatial L1 weighting activates: BG gradient ramps from 1.0 to kBgTarget.
-                        //   This is safe during growth because L1 weighting is pixel-exact and
-                        //   the error_map dilation protects border splats.
-                        //   Opacity penalty stays OFF -- pushing transparency during active growth
-                        //   would starve border splats of blending weight for densification.
-                        //
-                        // Phase 3 [kFgPenaltyStart, kFgPenaltyEnd): FG opacity penalty ramps in
-                        //   Growth has stopped (grow_until_iter ~ 50%), so it is safe to push
-                        //   FG splats opaque. BG penalty stays OFF -- we solidify the subject
-                        //   first before removing background splats.
-                        //
-                        // Phase 4 [kBgPenaltyStart, kBgPenaltyEnd): BG opacity penalty ramps in
-                        //   FG penalty at full strength. Now BG splats are pushed transparent.
-                        //   Two-phase approach avoids competing pressures during consolidation.
-                        //
-                        // Phase 5 [kPenaltyDecayStart, 1.0]: penalty floor
-                        //   Both FG and BG penalties reduced to kPenaltyFloor of original weight.
-                        //   Never fully off, so border splats maintain opacity (like old trainer).
+                        //  Progress  | Phase              | Alpha penalty
+                        // -----------+--------------------+--------------------------------------
+                        //   0 - 15%  | None               | none
+                        //  15 - 25%  | BG spatial ramp    | none
+                        //  25 - 50%  | Spatial active     | none (growth still active)
+                        //  50 - 57%  | FG ramp 0->full    | FG only (fill holes)
+                        //  57 - 70%  | FG full + BG ramp  | FG + BG (trim silhouette)
+                        //  70 - 75%  | Both at full       | FG + BG
+                        //  75 - 85%  | Decay to 0         | both ramp down to 0
+                        //  85 - 100% | Free refinement    | none (natural border alpha)
 
                         constexpr float kNoneEnd           = 0.15f; // End of None phase
-                        constexpr float kBgRampEnd         = 0.30f; // BG spatial weight finishes ramping
+                        constexpr float kBgRampEnd         = 0.25f; // BG spatial weight finishes ramping
                         constexpr float kBgTarget          = 0.05f; // Final BG gradient weight
 
-                        constexpr float kFgPenaltyStart    = 0.30f; // FG opacity penalty starts (after growth stops)
-                        constexpr float kFgPenaltyEnd      = 0.50f; // FG opacity penalty reaches full
-                        constexpr float kBgPenaltyStart    = 0.50f; // BG opacity penalty starts (FG already full)
-                        constexpr float kBgPenaltyEnd      = 0.70f; // BG opacity penalty reaches full
-                        constexpr float kPenaltyDecayStart = 0.80f; // Both penalties begin reducing
-                        constexpr float kPenaltyFloor      = 0.20f; // Minimum penalty fraction
+                        constexpr float kFgPenaltyStart    = 0.50f; // FG-only alpha penalty starts (after growth stops)
+                        constexpr float kFgPenaltyEnd      = 0.57f; // FG-only alpha penalty reaches full
+                        constexpr float kBothPenaltyStart  = 0.57f; // BG alpha penalty joins FG (both active)
+                        constexpr float kBothPenaltyEnd    = 0.70f; // BG alpha penalty reaches full
+                        constexpr float kPenaltyDecayStart = 0.75f; // Both penalties begin decaying to 0
+                        constexpr float kPenaltyDecayEnd   = 0.85f; // Both penalties reach 0
 
-                        static_assert(kBgRampEnd <= kFgPenaltyStart, "BG spatial ramp must finish before FG penalty starts");
-                        static_assert(kFgPenaltyEnd <= kBgPenaltyStart, "FG penalty must reach full before BG penalty starts");
+                        static_assert(kBgRampEnd < kFgPenaltyStart, "BG spatial ramp must finish before FG penalty starts");
+                        static_assert(kFgPenaltyEnd <= kBothPenaltyStart, "FG penalty must reach full before BG joins");
+                        static_assert(kBothPenaltyEnd <= kPenaltyDecayStart, "Both at full before decay starts");
 
                         if (progress < kNoneEnd) {
                             // Phase 1: no mask
                             step_params.mask_mode = lfs::core::param::MaskMode::None;
                         } else if (progress < kBgRampEnd) {
-                            // Phase 2: BG spatial weight ramps 1.0 -> kBgTarget, no opacity penalty
+                            // Phase 2: BG spatial weight ramps 1.0 -> kBgTarget, no alpha penalty
                             const float t = (progress - kNoneEnd) / (kBgRampEnd - kNoneEnd);
                             step_params.focused_bg_weight = 1.0f - t * (1.0f - kBgTarget);
                             step_params.mask_opacity_penalty_weight = 0.0f;
                             step_params.mask_opacity_penalty_weight_bg = 0.0f;
                         } else if (progress < kFgPenaltyStart) {
-                            // Between BG ramp end and FG penalty start: spatial weight active, no penalty
+                            // Spatial weight active, no alpha penalty (growth still active)
                             step_params.mask_opacity_penalty_weight = 0.0f;
                             step_params.mask_opacity_penalty_weight_bg = 0.0f;
                         } else if (progress < kFgPenaltyEnd) {
@@ -2562,14 +2553,20 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                             const float t = (progress - kFgPenaltyStart) / (kFgPenaltyEnd - kFgPenaltyStart);
                             step_params.mask_opacity_penalty_weight *= t;
                             step_params.mask_opacity_penalty_weight_bg = 0.0f;
-                        } else if (progress < kBgPenaltyEnd) {
-                            // Phase 4: FG penalty full, BG penalty ramps 0 -> full
-                            const float t_bg = (progress - kBgPenaltyStart) / (kBgPenaltyEnd - kBgPenaltyStart);
+                        } else if (progress < kBothPenaltyEnd) {
+                            // Phase 4: FG at full, BG penalty ramps 0 -> full
+                            const float t_bg = (progress - kBothPenaltyStart) / (kBothPenaltyEnd - kBothPenaltyStart);
                             step_params.mask_opacity_penalty_weight_bg *= std::clamp(t_bg, 0.0f, 1.0f);
-                        } else if (progress > kPenaltyDecayStart) {
-                            // Phase 5: both penalties reduce to floor
-                            step_params.mask_opacity_penalty_weight *= kPenaltyFloor;
-                            step_params.mask_opacity_penalty_weight_bg *= kPenaltyFloor;
+                        } else if (progress < kPenaltyDecayEnd) {
+                            // Phase 5: both penalties decay to 0
+                            const float t_decay = 1.0f - (progress - kPenaltyDecayStart) / (kPenaltyDecayEnd - kPenaltyDecayStart);
+                            const float factor = std::clamp(t_decay, 0.0f, 1.0f);
+                            step_params.mask_opacity_penalty_weight *= factor;
+                            step_params.mask_opacity_penalty_weight_bg *= factor;
+                        } else {
+                            // Phase 6: free refinement -- no alpha penalty, only photometric + spatial
+                            step_params.mask_opacity_penalty_weight = 0.0f;
+                            step_params.mask_opacity_penalty_weight_bg = 0.0f;
                         }
                     }
 
