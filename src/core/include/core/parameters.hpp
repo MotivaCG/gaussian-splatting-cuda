@@ -111,8 +111,10 @@ namespace lfs::core {
             MaskMode mask_mode = MaskMode::None;      // Attention mask mode
             bool invert_masks = false;                // Invert mask values (swap object/background)
             float mask_threshold = 0.5f;              // Threshold: >= threshold → 1.0, < threshold → keep original
-            float mask_opacity_penalty_weight = 1.0f; // Opacity penalty weight for segment mode
+            float mask_opacity_penalty_weight = 1.0f;    // Opacity penalty weight (FG in FocusedSegment, all in Segment)
+            float mask_opacity_penalty_weight_bg = 1.0f; // FocusedSegment: BG opacity penalty weight (independent of FG)
             float mask_opacity_penalty_power = 2.0f;  // Penalty falloff (1=linear, 2=quadratic)
+            float focused_bg_weight = 0.05f;          // FocusedSegment: BG gradient weight (1.0 = no effect, 0.05 = full)
             bool use_alpha_as_mask = true;            // Auto-use alpha channel from RGBA images as mask
 
             // Mip filter (anti-aliasing)

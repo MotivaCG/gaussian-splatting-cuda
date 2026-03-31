@@ -1038,10 +1038,10 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
             //   15-80%: FocusedSegment active  — spatial weighting + alpha pressure
             //   80-100%: opacity_penalty = 0   — allow natural transparencies to emerge freely
 
-            constexpr float kBgWeight = 0.05f;     // BG gradient weight relative to FG (1.0)
+            const float kBgWeight = opt_params.focused_bg_weight; // BG gradient weight relative to FG (1.0)
             constexpr float kDarknessBoost = 2.0f; // extra FG weight on dark pixels; 0 = disabled
             constexpr float kAlphaFgWeight = 3.0f; // grad_alpha pressure to push FG alpha -> 1
-            constexpr float kAlphaBgWeight = 1.5f; // grad_alpha pressure to push BG alpha -> 0
+            constexpr float kAlphaBgWeight = 2.0f; // grad_alpha pressure to push BG alpha -> 0
 
             const Tensor bg_mask = Tensor::full(mask_2d.shape(), 1.0f, mask_2d.device()) - mask_2d;
 
@@ -1105,12 +1105,13 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
             // Sign convention (gradient descent: param -= lr * grad):
             //   FG: negative grad_alpha  -> alpha_raw increases -> rendered alpha approaches 1
             //   BG: positive grad_alpha  -> alpha_raw decreases -> rendered alpha approaches 0
-            if (alpha.is_valid() && opt_params.mask_opacity_penalty_weight > 0.0f) {
-                const float w = opt_params.mask_opacity_penalty_weight;
+            const float w_fg = opt_params.mask_opacity_penalty_weight;
+            const float w_bg = opt_params.mask_opacity_penalty_weight_bg;
+            if (alpha.is_valid() && (w_fg > 0.0f || w_bg > 0.0f)) {
                 const Tensor alpha_2d = alpha.ndim() == 3 ? alpha.squeeze(0) : alpha;
 
-                grad_alpha = bg_mask * (w * kAlphaBgWeight / bg_pixels)    // BG: push alpha -> 0
-                             - mask_2d * (w * kAlphaFgWeight / fg_pixels); // FG: push alpha -> 1
+                grad_alpha = bg_mask * (w_bg * kAlphaBgWeight / bg_pixels)    // BG: push alpha -> 0
+                             - mask_2d * (w_fg * kAlphaFgWeight / fg_pixels); // FG: push alpha -> 1
             }
         }        
         else {
@@ -2503,45 +2504,73 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                         const float progress = static_cast<float>(iter) /
                                                static_cast<float>(params_.optimization.iterations);
 
-                        // Modo chati
-                        /* if (step_params.mask_mode == lfs::core::param::MaskMode::FocusedSegment) {
-                            const float progress = static_cast<float>(iter) /
-                                                   static_cast<float>(params_.optimization.iterations);
+                        // FocusedSegment schedule constants.
+                        //
+                        // Phase 1 [0, kNoneEnd): mode=None
+                        //   Full gradient everywhere, free densification. Geometry consolidates
+                        //   without any mask interference.
+                        //
+                        // Phase 2 [kNoneEnd, kBgRampEnd): FocusedSegment, BG spatial weight ramps down
+                        //   Spatial L1 weighting activates: BG gradient ramps from 1.0 to kBgTarget.
+                        //   This is safe during growth because L1 weighting is pixel-exact and
+                        //   the error_map dilation protects border splats.
+                        //   Opacity penalty stays OFF -- pushing transparency during active growth
+                        //   would starve border splats of blending weight for densification.
+                        //
+                        // Phase 3 [kFgPenaltyStart, kFgPenaltyEnd): FG opacity penalty ramps in
+                        //   Growth has stopped (grow_until_iter ~ 50%), so it is safe to push
+                        //   FG splats opaque. BG penalty stays OFF -- we solidify the subject
+                        //   first before removing background splats.
+                        //
+                        // Phase 4 [kBgPenaltyStart, kBgPenaltyEnd): BG opacity penalty ramps in
+                        //   FG penalty at full strength. Now BG splats are pushed transparent.
+                        //   Two-phase approach avoids competing pressures during consolidation.
+                        //
+                        // Phase 5 [kPenaltyDecayStart, 1.0]: penalty floor
+                        //   Both FG and BG penalties reduced to kPenaltyFloor of original weight.
+                        //   Never fully off, so border splats maintain opacity (like old trainer).
 
-                            if (progress < 0.15f) {
-                                step_params.mask_mode = lfs::core::param::MaskMode::None;
-                            } else if (progress < 0.35f) {
-                                // Learn appearance/coverage first, without extra alpha pressure
-                                step_params.mask_opacity_penalty_weight = 0.0f;
-                            } else if (progress > 0.85f) {
-                                // Keep a little structural pressure at the end, but much softer
-                                //step_params.mask_opacity_penalty_weight *= 0.25f;
-                                step_params.mask_opacity_penalty_weight = 0.0f;
-                            }
-                        }*/
+                        constexpr float kNoneEnd           = 0.15f; // End of None phase
+                        constexpr float kBgRampEnd         = 0.30f; // BG spatial weight finishes ramping
+                        constexpr float kBgTarget          = 0.05f; // Final BG gradient weight
 
-                        /* if (iter == int(0.25 * params_.optimization.iterations))
-                            SMNprune(params_.optimization.mask_mode, params_.optimization.invert_masks, strategy_, train_dataset_);*/
-                        // Modo Orig
-                        if (progress < 0.25f) {
+                        constexpr float kFgPenaltyStart    = 0.30f; // FG opacity penalty starts (after growth stops)
+                        constexpr float kFgPenaltyEnd      = 0.50f; // FG opacity penalty reaches full
+                        constexpr float kBgPenaltyStart    = 0.50f; // BG opacity penalty starts (FG already full)
+                        constexpr float kBgPenaltyEnd      = 0.70f; // BG opacity penalty reaches full
+                        constexpr float kPenaltyDecayStart = 0.80f; // Both penalties begin reducing
+                        constexpr float kPenaltyFloor      = 0.20f; // Minimum penalty fraction
+
+                        static_assert(kBgRampEnd <= kFgPenaltyStart, "BG spatial ramp must finish before FG penalty starts");
+                        static_assert(kFgPenaltyEnd <= kBgPenaltyStart, "FG penalty must reach full before BG penalty starts");
+
+                        if (progress < kNoneEnd) {
+                            // Phase 1: no mask
                             step_params.mask_mode = lfs::core::param::MaskMode::None;
-                        } else if (progress > 0.80f) {
+                        } else if (progress < kBgRampEnd) {
+                            // Phase 2: BG spatial weight ramps 1.0 -> kBgTarget, no opacity penalty
+                            const float t = (progress - kNoneEnd) / (kBgRampEnd - kNoneEnd);
+                            step_params.focused_bg_weight = 1.0f - t * (1.0f - kBgTarget);
                             step_params.mask_opacity_penalty_weight = 0.0f;
+                            step_params.mask_opacity_penalty_weight_bg = 0.0f;
+                        } else if (progress < kFgPenaltyStart) {
+                            // Between BG ramp end and FG penalty start: spatial weight active, no penalty
+                            step_params.mask_opacity_penalty_weight = 0.0f;
+                            step_params.mask_opacity_penalty_weight_bg = 0.0f;
+                        } else if (progress < kFgPenaltyEnd) {
+                            // Phase 3: FG penalty ramps 0 -> full, BG penalty stays off
+                            const float t = (progress - kFgPenaltyStart) / (kFgPenaltyEnd - kFgPenaltyStart);
+                            step_params.mask_opacity_penalty_weight *= t;
+                            step_params.mask_opacity_penalty_weight_bg = 0.0f;
+                        } else if (progress < kBgPenaltyEnd) {
+                            // Phase 4: FG penalty full, BG penalty ramps 0 -> full
+                            const float t_bg = (progress - kBgPenaltyStart) / (kBgPenaltyEnd - kBgPenaltyStart);
+                            step_params.mask_opacity_penalty_weight_bg *= std::clamp(t_bg, 0.0f, 1.0f);
+                        } else if (progress > kPenaltyDecayStart) {
+                            // Phase 5: both penalties reduce to floor
+                            step_params.mask_opacity_penalty_weight *= kPenaltyFloor;
+                            step_params.mask_opacity_penalty_weight_bg *= kPenaltyFloor;
                         }
-
-                        // Modo B
-                        /* if (progress < 0.15f) {
-                            step_params.mask_mode = lfs::core::param::MaskMode::None;
-                        } else if (progress > 0.80f) {
-                            step_params.mask_opacity_penalty_weight = 0.0f;
-                        }*/
-                        
-                        // Modo C
-                        /* if (progress < 0.15f) {
-                            step_params.mask_opacity_penalty_weight = 0.0f;
-                        } else if (progress > 0.80f) {
-                            step_params.mask_opacity_penalty_weight = 0.0f;
-                        }*/
                     }
 
                     // Normal phase: full forward + backward through all components
@@ -2667,7 +2696,21 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                         }
 
                         if (use_mask && params_.optimization.mask_mode == lfs::core::param::MaskMode::FocusedSegment) {
-                            tile_error_map.mul_(mask_tile).contiguous();
+                            #ifdef DILATION_FOR_FOCUSED
+                                // Dilate the mask before multiplying so that splats straddling the mask
+                                // border still accumulate enough error for densification (clone/split).
+                                // Without dilation, a splat with 50% of its footprint outside the mask
+                                // sees its error halved, which suppresses cloning and creates holes at
+                                // the object boundary. 6px radius covers the SSIM 11x11 half-window.
+                                constexpr int kDensifyDilateRadius = 6;
+                                constexpr int kDensifyDilateKernel = 2 * kDensifyDilateRadius + 1;
+                                auto mask_4d = mask_tile.unsqueeze(0).unsqueeze(0); // [1,1,H,W]
+                                auto dilated = mask_4d.max_pool2d(kDensifyDilateKernel, 1, kDensifyDilateRadius);
+                                auto dilated_2d = dilated.squeeze(0).squeeze(0); // [H,W]
+                                tile_error_map.mul_(dilated_2d).contiguous();
+                            #else
+                                tile_error_map.mul_(mask_tile).contiguous();
+                            #endif // DILATION_FOR_FOCUSED
                         }
                         if (use_mask &&
                             (params_.optimization.mask_mode == lfs::core::param::MaskMode::Segment ||
@@ -3363,7 +3406,7 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
             // -----------------------------------------------------------------
             // Post-training mask-based pruning
             // -----------------------------------------------------------------
-            SMNprune(params_.optimization.mask_mode, params_.optimization.invert_masks, strategy_, train_dataset_);
+            //SMNprune(params_.optimization.mask_mode, params_.optimization.invert_masks, strategy_, train_dataset_);
 
             // Final save if not already saved by stop request
             if (!stop_requested_.load() && !stop_token.stop_requested()) {
