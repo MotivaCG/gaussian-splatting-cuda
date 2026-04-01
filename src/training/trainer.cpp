@@ -1032,11 +1032,6 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
             //                   Darkness bonus reinforces opacity on dark pixels where L1 is weak.
             //                   Alpha penalty directly pushes Gaussians toward opaque inside mask
             //                   and transparent outside, independent of photometric loss magnitude.
-            //
-            // Training schedule (applied in train_step before calling this function):
-            //   0-15%:  mask_mode = None       — geometry consolidation, no mask interference
-            //   15-80%: FocusedSegment active  — spatial weighting + alpha pressure
-            //   80-100%: opacity_penalty = 0   — allow natural transparencies to emerge freely
 
             const float kBgWeight = opt_params.focused_bg_weight; // BG gradient weight relative to FG (1.0)
             constexpr float kDarknessBoost = 2.0f; // extra FG weight on dark pixels; 0 = disabled
@@ -2524,10 +2519,12 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                         constexpr float kBgRampEnd         = 0.25f; // BG spatial weight finishes ramping
                         constexpr float kBgTarget          = 0.05f; // Final BG gradient weight
 
-                        constexpr float kFgPenaltyStart    = 0.50f; // FG-only alpha penalty starts (after growth stops)
-                        constexpr float kFgPenaltyEnd      = 0.57f; // FG-only alpha penalty reaches full
-                        constexpr float kBothPenaltyStart  = 0.57f; // BG alpha penalty joins FG (both active)
+                        constexpr float kFgPenaltyStart    = 0.40f; // FG-only alpha penalty starts (after growth stops)
+                        constexpr float kFgPenaltyEnd      = 0.50f; // FG-only alpha penalty reaches full
+
+                        constexpr float kBothPenaltyStart  = 0.60f; // BG alpha penalty joins FG (both active)
                         constexpr float kBothPenaltyEnd    = 0.70f; // BG alpha penalty reaches full
+
                         constexpr float kPenaltyDecayStart = 0.75f; // Both penalties begin decaying to 0
                         constexpr float kPenaltyDecayEnd   = 0.85f; // Both penalties reach 0
 
