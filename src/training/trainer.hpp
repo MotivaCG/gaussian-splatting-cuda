@@ -408,6 +408,7 @@ namespace lfs::training {
         bool ngs_enabled_ = false;
         std::expected<void, std::string> initialize_ngs();
         void handle_ngs_phase_transition(int iter);
+        static void apply_focused_segment_schedule(lfs::core::param::OptimizationParameters& step_params, float progress);
         void inject_noise_into_model();
         void remove_noise_from_model();
         // Python control scripts (file paths) to execute before training starts

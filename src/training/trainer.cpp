@@ -2441,20 +2441,10 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
 
                         const float progress = static_cast<float>(iter) / static_cast<float>(params_.optimization.iterations);
 
-                        if (step_params.mask_mode == lfs::core::param::MaskMode::FocusedSegment) {
-                            const float progress = static_cast<float>(iter) /
-                                                   static_cast<float>(params_.optimization.iterations);
-                            // NO SE LLAMA NUNCA SIN PPISP CONTROLLER                             
-                            // Modo Orig
-                            if (progress < 0.25f) {
-                                step_params.mask_mode = lfs::core::param::MaskMode::None;
-                            } else if (progress > 0.80f) {
-                                step_params.mask_opacity_penalty_weight = 0.0f;
-                            }
-                        }                                                
+                        apply_focused_segment_schedule(step_params, progress);
 
                         auto result = compute_photometric_loss_with_mask(
-                            corrected_image, gt_tile, mask_tile, output.alpha, params_.optimization);
+                            corrected_image, gt_tile, mask_tile, output.alpha, step_params);
                         if (!result) {
                             cleanup_controller_tile_context();
                             nvtxRangePop();
@@ -2495,77 +2485,9 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                     lfs::core::param::OptimizationParameters step_params = params_.optimization;
                     step_params.lambda_dssim = effective_lambda_dssim(params_.optimization, iter);
 
-                    if (step_params.mask_mode == lfs::core::param::MaskMode::FocusedSegment) {
-                        const float progress = static_cast<float>(iter) /
-                                               static_cast<float>(params_.optimization.iterations);
-
-                        // FocusedSegment schedule.
-                        //
-                        // Spatial L1 weighting (FG=1.0, BG=kBgTarget) is always active from
-                        // Phase 2 onward. It never turns off. Only alpha penalty is scheduled.
-                        //
-                        //  Progress  | Phase              | Alpha penalty
-                        // -----------+--------------------+--------------------------------------
-                        //   0 - 15%  | None               | none
-                        //  15 - 25%  | BG spatial ramp    | none
-                        //  25 - 50%  | Spatial active     | none (growth still active)
-                        //  50 - 57%  | FG ramp 0->full    | FG only (fill holes)
-                        //  57 - 70%  | FG full + BG ramp  | FG + BG (trim silhouette)
-                        //  70 - 75%  | Both at full       | FG + BG
-                        //  75 - 85%  | Decay to 0         | both ramp down to 0
-                        //  85 - 100% | Free refinement    | none (natural border alpha)
-
-                        constexpr float kNoneEnd           = 0.15f; // End of None phase
-                        constexpr float kBgRampEnd         = 0.25f; // BG spatial weight finishes ramping
-                        constexpr float kBgTarget          = 0.05f; // Final BG gradient weight
-
-                        constexpr float kFgPenaltyStart    = 0.40f; // FG-only alpha penalty starts (after growth stops)
-                        constexpr float kFgPenaltyEnd      = 0.50f; // FG-only alpha penalty reaches full
-
-                        constexpr float kBothPenaltyStart  = 0.60f; // BG alpha penalty joins FG (both active)
-                        constexpr float kBothPenaltyEnd    = 0.70f; // BG alpha penalty reaches full
-
-                        constexpr float kPenaltyDecayStart = 0.75f; // Both penalties begin decaying to 0
-                        constexpr float kPenaltyDecayEnd   = 0.85f; // Both penalties reach 0
-
-                        static_assert(kBgRampEnd < kFgPenaltyStart, "BG spatial ramp must finish before FG penalty starts");
-                        static_assert(kFgPenaltyEnd <= kBothPenaltyStart, "FG penalty must reach full before BG joins");
-                        static_assert(kBothPenaltyEnd <= kPenaltyDecayStart, "Both at full before decay starts");
-
-                        if (progress < kNoneEnd) {
-                            // Phase 1: no mask
-                            step_params.mask_mode = lfs::core::param::MaskMode::None;
-                        } else if (progress < kBgRampEnd) {
-                            // Phase 2: BG spatial weight ramps 1.0 -> kBgTarget, no alpha penalty
-                            const float t = (progress - kNoneEnd) / (kBgRampEnd - kNoneEnd);
-                            step_params.focused_bg_weight = 1.0f - t * (1.0f - kBgTarget);
-                            step_params.mask_opacity_penalty_weight = 0.0f;
-                            step_params.mask_opacity_penalty_weight_bg = 0.0f;
-                        } else if (progress < kFgPenaltyStart) {
-                            // Spatial weight active, no alpha penalty (growth still active)
-                            step_params.mask_opacity_penalty_weight = 0.0f;
-                            step_params.mask_opacity_penalty_weight_bg = 0.0f;
-                        } else if (progress < kFgPenaltyEnd) {
-                            // Phase 3: FG penalty ramps 0 -> full, BG penalty stays off
-                            const float t = (progress - kFgPenaltyStart) / (kFgPenaltyEnd - kFgPenaltyStart);
-                            step_params.mask_opacity_penalty_weight *= t;
-                            step_params.mask_opacity_penalty_weight_bg = 0.0f;
-                        } else if (progress < kBothPenaltyEnd) {
-                            // Phase 4: FG at full, BG penalty ramps 0 -> full
-                            const float t_bg = (progress - kBothPenaltyStart) / (kBothPenaltyEnd - kBothPenaltyStart);
-                            step_params.mask_opacity_penalty_weight_bg *= std::clamp(t_bg, 0.0f, 1.0f);
-                        } else if (progress < kPenaltyDecayEnd) {
-                            // Phase 5: both penalties decay to 0
-                            const float t_decay = 1.0f - (progress - kPenaltyDecayStart) / (kPenaltyDecayEnd - kPenaltyDecayStart);
-                            const float factor = std::clamp(t_decay, 0.0f, 1.0f);
-                            step_params.mask_opacity_penalty_weight *= factor;
-                            step_params.mask_opacity_penalty_weight_bg *= factor;
-                        } else {
-                            // Phase 6: free refinement -- no alpha penalty, only photometric + spatial
-                            step_params.mask_opacity_penalty_weight = 0.0f;
-                            step_params.mask_opacity_penalty_weight_bg = 0.0f;
-                        }
-                    }
+                    const float progress = static_cast<float>(iter) /
+                                           static_cast<float>(params_.optimization.iterations);
+                    apply_focused_segment_schedule(step_params, progress);
 
                     // Normal phase: full forward + backward through all components
                     lfs::core::Tensor corrected_image = output.image;
@@ -3694,6 +3616,84 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
     }
 
     // ----------------------------------------------------------------------------
+    // apply_focused_segment_schedule() - Shared FocusedSegment phase schedule
+    // ----------------------------------------------------------------------------
+
+    void Trainer::apply_focused_segment_schedule(
+        lfs::core::param::OptimizationParameters& step_params, float progress) {
+
+        if (step_params.mask_mode != lfs::core::param::MaskMode::FocusedSegment)
+            return;
+
+        // FocusedSegment schedule.
+        //
+        // Spatial L1 weighting (FG=1.0, BG=kBgTarget) is always active from
+        // Phase 2 onward. It never turns off. Only alpha penalty is scheduled.
+        //
+        //  Progress  | Phase              | Alpha penalty
+        // -----------+--------------------+--------------------------------------
+        //   0 - 15%  | None               | none
+        //  15 - 25%  | BG spatial ramp    | none
+        //  25 - 40%  | Spatial active     | none (growth still active)
+        //  40 - 50%  | FG ramp 0->full    | FG only (fill holes)
+        //  50 - 60%  | FG at full         | FG only
+        //  60 - 70%  | FG full + BG ramp  | FG + BG (trim silhouette)
+        //  70 - 85%  | Decay to 0         | both ramp down to 0
+        //  85 - 100% | Free refinement    | none (natural border alpha)
+
+        constexpr float kNoneEnd           = 0.15f;
+        constexpr float kBgRampEnd         = 0.25f;
+        constexpr float kBgTarget          = 0.05f; // Active-phase BG gradient weight (FG focused)
+        constexpr float kBgTargetFree      = 0.08f; // Free-refinement BG weight — slightly higher than
+                                                    // kBgTarget to allow gentle BG refinement without
+                                                    // reintroducing detail. Kept low to help fine
+                                                    // silhouettes (hair) stay sharp at the edge.
+        step_params.focused_bg_weight      = kBgTarget;
+
+        constexpr float kFgPenaltyStart    = 0.40f;
+        constexpr float kFgPenaltyEnd      = 0.50f;
+
+        constexpr float kBothPenaltyStart  = 0.60f;
+        constexpr float kBothPenaltyEnd    = 0.70f;
+
+        constexpr float kPenaltyDecayStart = 0.75f;
+        constexpr float kPenaltyDecayEnd   = 0.85f;
+
+        static_assert(kBgRampEnd < kFgPenaltyStart, "BG spatial ramp must finish before FG penalty starts");
+        static_assert(kFgPenaltyEnd <= kBothPenaltyStart, "FG penalty must reach full before BG joins");
+        static_assert(kBothPenaltyEnd <= kPenaltyDecayStart, "Both at full before decay starts");
+
+        if (progress < kNoneEnd) {
+            step_params.mask_mode = lfs::core::param::MaskMode::None;
+            step_params.focused_bg_weight = 1.0f;
+        } else if (progress < kBgRampEnd) {
+            const float t = (progress - kNoneEnd) / (kBgRampEnd - kNoneEnd);
+            step_params.focused_bg_weight = 1.0f - t * (1.0f - kBgTarget);
+            step_params.mask_opacity_penalty_weight = 0.0f;
+            step_params.mask_opacity_penalty_weight_bg = 0.0f;
+        } else if (progress < kFgPenaltyStart) {
+            step_params.mask_opacity_penalty_weight = 0.0f;
+            step_params.mask_opacity_penalty_weight_bg = 0.0f;
+        } else if (progress < kFgPenaltyEnd) {
+            const float t = (progress - kFgPenaltyStart) / (kFgPenaltyEnd - kFgPenaltyStart);
+            step_params.mask_opacity_penalty_weight *= t;
+            step_params.mask_opacity_penalty_weight_bg = 0.0f;
+        } else if (progress < kBothPenaltyEnd) {
+            const float t_bg = (progress - kBothPenaltyStart) / (kBothPenaltyEnd - kBothPenaltyStart);
+            step_params.mask_opacity_penalty_weight_bg *= std::clamp(t_bg, 0.0f, 1.0f);
+        } else if (progress < kPenaltyDecayEnd) {
+            const float t_decay = 1.0f - (progress - kPenaltyDecayStart) / (kPenaltyDecayEnd - kPenaltyDecayStart);
+            const float factor = std::clamp(t_decay, 0.0f, 1.0f);
+            step_params.mask_opacity_penalty_weight *= factor;
+            step_params.mask_opacity_penalty_weight_bg *= factor;
+            step_params.focused_bg_weight = kBgTarget * factor + kBgTargetFree * (1 - factor);
+        } else {
+            step_params.mask_opacity_penalty_weight = 0.0f;
+            step_params.mask_opacity_penalty_weight_bg = 0.0f;
+            step_params.focused_bg_weight = kBgTargetFree;
+        }
+    }
+
     // handle_ngs_phase_transition() - Call at START of train_step()
     // ----------------------------------------------------------------------------
 
