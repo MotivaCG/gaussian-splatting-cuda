@@ -57,6 +57,28 @@
 #include "smn/mask_pruning.hpp"
 #include "smn/mask_pruning_visualizer.hpp"
 
+// FocusedSegment densification mask dilation radius (in pixels).
+//
+// Controls how much the FG mask is dilated before multiplying it against the
+// densification error map in FocusedSegment mode. Affects ONLY densification
+// placement, not the loss or the image gradient.
+//
+//   0  : disabled — hard mask. Safest against halos, but pixels of fine
+//        structures (hair, eyelashes) that straddle the mask border see
+//        error=0 and are never densified there.
+//   2-3: recommended — covers thin fine structures without reintroducing
+//        large background regions. The final prune (leakage, centervote,
+//        ellipse boundary) removes anything that leaks into the background.
+//   6  : matches the SSIM 11x11 half-window. Maximum recovery of boundary
+//        detail but higher risk of creating splats in the near-background
+//        that the prune then has to clean up.
+//
+// Tune per scene: scenes with fine hair / fur benefit from 3; scenes with
+// clean silhouettes are fine at 0.
+#ifndef FOCUSED_DENSIFY_DILATE_RADIUS
+#define FOCUSED_DENSIFY_DILATE_RADIUS 3
+#endif
+
 namespace lfs::training {
 
     namespace {
@@ -2612,21 +2634,21 @@ std::expected<Trainer::MaskLossResult, std::string> Trainer::compute_photometric
                         }
 
                         if (use_mask && params_.optimization.mask_mode == lfs::core::param::MaskMode::FocusedSegment) {
-                            #ifdef DILATION_FOR_FOCUSED
-                                // Dilate the mask before multiplying so that splats straddling the mask
-                                // border still accumulate enough error for densification (clone/split).
-                                // Without dilation, a splat with 50% of its footprint outside the mask
-                                // sees its error halved, which suppresses cloning and creates holes at
-                                // the object boundary. 6px radius covers the SSIM 11x11 half-window.
-                                constexpr int kDensifyDilateRadius = 6;
+                            // Dilate the mask before multiplying so that splats straddling the mask
+                            // border still accumulate enough error for densification (clone/split).
+                            // Without dilation, a splat with 50% of its footprint outside the mask
+                            // sees its error halved, which suppresses cloning and creates holes at
+                            // the object boundary. See FOCUSED_DENSIFY_DILATE_RADIUS at file top.
+                            if constexpr (FOCUSED_DENSIFY_DILATE_RADIUS > 0) {
+                                constexpr int kDensifyDilateRadius = FOCUSED_DENSIFY_DILATE_RADIUS;
                                 constexpr int kDensifyDilateKernel = 2 * kDensifyDilateRadius + 1;
                                 auto mask_4d = mask_tile.unsqueeze(0).unsqueeze(0); // [1,1,H,W]
                                 auto dilated = mask_4d.max_pool2d(kDensifyDilateKernel, 1, kDensifyDilateRadius);
                                 auto dilated_2d = dilated.squeeze(0).squeeze(0); // [H,W]
                                 tile_error_map.mul_(dilated_2d).contiguous();
-                            #else
+                            } else {
                                 tile_error_map.mul_(mask_tile).contiguous();
-                            #endif // DILATION_FOR_FOCUSED
+                            }
                         }
                         if (use_mask &&
                             (params_.optimization.mask_mode == lfs::core::param::MaskMode::Segment ||
