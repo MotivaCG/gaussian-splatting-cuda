@@ -89,27 +89,49 @@ if(UNIX AND NOT APPLE)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -rdynamic")
 endif()
 
-# PTX-only: smaller binary (~66MB vs ~750MB), JIT compiles at runtime
-option(BUILD_CUDA_PTX_ONLY "Build PTX-only (JIT at runtime, ~5-15s first startup)" OFF)
+# CUDA code generation modes:
+#
+#   Native (default when both BUILD_CUDA_PTX_ONLY=OFF and BUILD_CUDA_FATBIN=OFF)
+#     Build only for the current GPU family detected on this machine.
+#     Fastest local build and smallest non-PTX build, but least portable.
+#
+#   PTX-only (BUILD_CUDA_PTX_ONLY=ON)
+#     Emit only virtual PTX for BUILD_CUDA_MIN_SM and let the driver JIT-compile
+#     it at runtime. Smallest binaries and most portable, but the first launch
+#     on a machine can take longer because kernels are compiled on demand.
+#
+#   Fatbin (BUILD_CUDA_FATBIN=ON)
+#     Emit native cubins for every SM supported by this toolkit starting at
+#     BUILD_CUDA_FATBIN_MIN_SM, plus PTX for the highest SM as forward-compatible
+#     fallback. Larger binaries than PTX-only, but avoids JIT on supported GPUs.
+#
+# PTX-only: smaller binary, JIT compiles at runtime, no native cubins embedded.
+option(BUILD_CUDA_PTX_ONLY
+    "CUDA mode: PTX-only. Emit only virtual PTX for BUILD_CUDA_MIN_SM; smallest binaries, slowest first startup, most portable. Mutually exclusive with BUILD_CUDA_FATBIN."
+    OFF)
 
-# Portable: PTX-only + bundled libs, no tests
-option(BUILD_PORTABLE "Build portable distribution" OFF)
-option(BUILD_CUDA_FATBIN "Build fatbin (multi-arch cubin + PTX fallback for future architectures)" OFF)
+# Portable: bundled runtime deps, no tests. CUDA mode can be PTX-only or fatbin.
+option(BUILD_PORTABLE
+    "Build portable distribution. Bundles runtime dependencies and disables tests. If BUILD_CUDA_FATBIN=OFF it forces PTX-only; if BUILD_CUDA_FATBIN=ON it keeps portable+fatbin."
+    OFF)
+option(BUILD_CUDA_FATBIN
+    "CUDA mode: fatbin. Emit native cubins for every SM supported by this toolkit >= BUILD_CUDA_FATBIN_MIN_SM plus PTX for the highest SM; larger binaries, faster startup than PTX-only."
+    ON)
 if(BUILD_PORTABLE)
     if(NOT BUILD_CUDA_FATBIN)
         set(BUILD_CUDA_PTX_ONLY ON CACHE BOOL "" FORCE)
         message(STATUS "Portable: PTX-only, tests disabled")
     else()
+        set(BUILD_CUDA_PTX_ONLY OFF CACHE BOOL "" FORCE)
         message(STATUS "Portable: fatbin, tests disabled")
     endif()
     set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    add_compile_definitions(LFS_BUILD_PORTABLE=1)
 endif()
 
 # PTX-only and fatbin are mutually exclusive
 if(BUILD_CUDA_PTX_ONLY AND BUILD_CUDA_FATBIN)
     message(FATAL_ERROR "BUILD_CUDA_PTX_ONLY and BUILD_CUDA_FATBIN are mutually exclusive")
-    add_compile_definitions(LFS_BUILD_PORTABLE=1)
-    message(STATUS "Portable: PTX-only, tests disabled")
 endif()
 
 # Compiler cache is opt-in. Auto-enabling a broken local launcher can silently
@@ -144,8 +166,14 @@ else()
     message(STATUS "Compiler cache: disabled")
 endif()
 
-# Minimum SM for PTX-only (75=Turing, 80=Ampere, 86=GA102, 89=Ada, 90=Hopper)
-set(BUILD_CUDA_MIN_SM "75" CACHE STRING "Minimum SM for PTX-only builds")
+# Minimum SM for PTX-only (75=Turing, 80=Ampere, 86=GA10x/RTX 30xx, 89=Ada, 90=Hopper)
+set(BUILD_CUDA_MIN_SM "75" CACHE STRING
+    "Minimum SM for PTX-only mode. Generates only <SM>-virtual PTX and relies on runtime JIT. Examples: 75, 80, 86, 89, 90.")
+
+# Minimum SM for fatbin auto-detection. Default 86 targets RTX 30xx/Ampere consumer
+# and newer while still auto-expanding to every newer SM supported by the toolkit.
+set(BUILD_CUDA_FATBIN_MIN_SM "86" CACHE STRING
+    "Minimum SM for fatbin mode. Generates real cubins for every toolkit-supported SM >= this value plus PTX for the highest SM. Default 86 targets RTX 30xx/Ampere consumer and newer.")
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CUDA_STANDARD 20)
@@ -215,6 +243,64 @@ if(DEFINED TORCH_CUDA_ARCH_LIST)
     unset(TORCH_CUDA_ARCH_LIST CACHE)
 endif()
 
+# Detect supported SMs by querying 'ptxas --help' and filter by a minimum SM.
+# We cannot use all or all-major since 5x and 6x versions are not supported
+# in the CUDA code.
+function(gs_detect_supported_sms OUT_VAR)
+    set(options)
+    set(oneValueArgs MIN_SM)
+    cmake_parse_arguments(GS "${options}" "${oneValueArgs}" "" ${ARGN})
+
+    # Use 'ptxas --help' to get the valid families
+    set(_sms_list "")
+    get_filename_component(_cuda_bin "${CMAKE_CUDA_COMPILER}" DIRECTORY)
+    find_program(PTXAS_EXECUTABLE NAMES ptxas
+            HINTS "${_cuda_bin}" "${_cuda_bin}/.." "${CUDAToolkit_BIN_DIR}"
+            PATHS ENV PATH)
+
+    if(PTXAS_EXECUTABLE)
+        execute_process(COMMAND "${PTXAS_EXECUTABLE}" --help
+                OUTPUT_VARIABLE _ptxas_help
+                ERROR_VARIABLE  _ptxas_err
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_STRIP_TRAILING_WHITESPACE)
+        set(_help "${_ptxas_help}\n${_ptxas_err}")
+
+        string(REGEX MATCHALL "sm_[0-9]+" _matches "${_help}")
+        if(_matches)
+            string(REPLACE "sm_" "" _nums "${_matches}")
+            string(REPLACE " "  ";" _nums "${_nums}")
+            separate_arguments(_nums)
+            list(REMOVE_DUPLICATES _nums)
+            list(SORT _nums COMPARE NATURAL)
+            foreach(n IN LISTS _nums)
+                if(GS_MIN_SM)
+                    if(n GREATER_EQUAL ${GS_MIN_SM})
+                        list(APPEND _sms_list ${n})
+                    endif()
+                else()
+                    list(APPEND _sms_list ${n})
+                endif()
+            endforeach()
+        endif()
+    endif()
+
+    if(NOT _sms_list)
+        set(_sms_list 75 80 86 87 89 90 100 101 120)
+        if(GS_MIN_SM)
+            set(_filtered "")
+            foreach(n IN LISTS _sms_list)
+                if(n GREATER_EQUAL ${GS_MIN_SM})
+                    list(APPEND _filtered ${n})
+                endif()
+            endforeach()
+            set(_sms_list "${_filtered}")
+        endif()
+    endif()
+
+    set(${OUT_VAR} "${_sms_list}" PARENT_SCOPE)
+endfunction()
+
 if(BUILD_CUDA_PTX_ONLY)
     # PTX-only: JIT compile at runtime, smaller binary
     if(NOT BUILD_CUDA_MIN_SM MATCHES "^[0-9]+$")
@@ -229,18 +315,55 @@ if(BUILD_CUDA_PTX_ONLY)
     math(EXPR _maj "${BUILD_CUDA_MIN_SM}/10")
     math(EXPR _min "${BUILD_CUDA_MIN_SM}%10")
     set(TORCH_CUDA_ARCH_LIST "${_maj}.${_min}+PTX" CACHE STRING "" FORCE)
+    set(LFS_CUDA_BUILD_MODE "PTX-only (SM >= ${BUILD_CUDA_MIN_SM}, JIT at runtime)")
 
     message(STATUS "CUDA: PTX-only (SM >= ${BUILD_CUDA_MIN_SM}, JIT at runtime)")
 
 elseif(BUILD_CUDA_FATBIN)
-    # Native cubins for all relevant generations + PTX fallback for Rubin and beyond
-    set(LichtFeld-Studio_CUDA_ARCH "75-real;80-real;86-real;89-real;90-real;100-real;100-virtual")
-    set(TORCH_CUDA_ARCH_LIST "7.5;8.0;8.6;8.9;9.0;10.0+PTX" CACHE STRING "" FORCE)
-    message(STATUS "CUDA: fatbin (Turing/Ampere/Ada/Hopper/Blackwell + PTX fallback)")
+    # Auto fatbin: real cubins for every SM supported by this toolkit >= minimum,
+    # plus PTX fallback for the highest one.
+    if(NOT BUILD_CUDA_FATBIN_MIN_SM MATCHES "^[0-9]+$")
+        message(FATAL_ERROR "BUILD_CUDA_FATBIN_MIN_SM must be an integer (75, 80, 86, 90, ...)")
+    endif()
+    if(BUILD_CUDA_FATBIN_MIN_SM LESS 70)
+        message(FATAL_ERROR "BUILD_CUDA_FATBIN_MIN_SM must be >= 70")
+    endif()
+
+    gs_detect_supported_sms(CUDA_SMS MIN_SM ${BUILD_CUDA_FATBIN_MIN_SM})
+    if(CUDA_SMS)
+        list(SORT CUDA_SMS COMPARE NATURAL)
+        list(GET CUDA_SMS -1 _max_sm)
+
+        set(_torch_list "")
+        set(_cmake_arch_list "")
+        foreach(sm IN LISTS CUDA_SMS)
+            math(EXPR _maj "${sm}/10")
+            math(EXPR _min "${sm}%10")
+            set(_ver "${_maj}.${_min}")
+
+            list(APPEND _torch_list "${_ver}")
+            list(APPEND _cmake_arch_list "${sm}-real")
+        endforeach()
+
+        list(REMOVE_AT _torch_list -1)
+        math(EXPR _max_maj "${_max_sm}/10")
+        math(EXPR _max_min "${_max_sm}%10")
+        list(APPEND _torch_list "${_max_maj}.${_max_min}+PTX")
+        list(APPEND _cmake_arch_list "${_max_sm}-virtual")
+
+        list(JOIN _torch_list ";" TORCH_CUDA_ARCH_LIST)
+        list(JOIN _cmake_arch_list ";" LichtFeld-Studio_CUDA_ARCH)
+        set(TORCH_CUDA_ARCH_LIST "${TORCH_CUDA_ARCH_LIST}" CACHE STRING "" FORCE)
+        set(LFS_CUDA_BUILD_MODE "fatbin auto (SM >= ${BUILD_CUDA_FATBIN_MIN_SM})")
+        message(STATUS "CUDA: fatbin auto (SM >= ${BUILD_CUDA_FATBIN_MIN_SM})")
+    else()
+        message(FATAL_ERROR "Failed to detect any CUDA architecture >= ${BUILD_CUDA_FATBIN_MIN_SM}. Please check your CUDA toolkit installation.")
+    endif()
 
 else()
     # Native GPU only
     set(TORCH_CUDA_ARCH_LIST "${DETECTED_COMPUTE_CAP}" CACHE STRING "" FORCE)
+    set(LFS_CUDA_BUILD_MODE "native (${LichtFeld-Studio_CUDA_ARCH})")
     message(STATUS "CUDA: native (${LichtFeld-Studio_CUDA_ARCH})")
 endif()
 
@@ -816,11 +939,12 @@ message(STATUS "  OpenImageIO Found: ${OpenImageIO_FOUND}")
 message(STATUS "  Tests: ${BUILD_TESTS}")
 message(STATUS "  Unicode Test Only: ${BUILD_UNICODE_TEST_ONLY}")
 message(STATUS "  Portable Build: ${BUILD_PORTABLE}")
+message(STATUS "  CUDA Mode: ${LFS_CUDA_BUILD_MODE}")
 if(BUILD_PORTABLE)
-    message(STATUS "  -> PTX-only: ON (SM >= ${BUILD_CUDA_MIN_SM}, JIT at runtime)")
     message(STATUS "  -> Use: cmake --install build --prefix ./dist")
 endif()
 message(STATUS "  Fatbin Build: ${BUILD_CUDA_FATBIN}")
+message(STATUS "  PTX-only Build: ${BUILD_CUDA_PTX_ONLY}")
 message(STATUS "===========================================")
 
 # =============================================================================
