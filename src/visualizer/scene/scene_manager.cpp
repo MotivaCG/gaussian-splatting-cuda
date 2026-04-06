@@ -19,6 +19,7 @@
 #include "operation/undo_entry.hpp"
 #include "operation/undo_history.hpp"
 #include "python/python_runtime.hpp"
+#include "rendering/coordinate_conventions.hpp"
 #include "rendering/rendering_manager.hpp"
 #include "training/checkpoint.hpp"
 #include "training/components/ppisp.hpp"
@@ -29,6 +30,7 @@
 #include "training/training_setup.hpp"
 #include "visualizer/gui_capabilities.hpp"
 #include "visualizer/rendering/model_renderability.hpp"
+#include "visualizer/scene_coordinate_utils.hpp"
 #include <algorithm>
 #include <format>
 #include <glm/gtc/quaternion.hpp>
@@ -77,6 +79,15 @@ namespace lfs::vis {
                                                            std::move(before), std::move(after)));
         }
 
+        [[nodiscard]] bool hasActiveSelectionFilter(const RenderingManager* const rendering_manager) {
+            if (!rendering_manager) {
+                return false;
+            }
+
+            const auto settings = rendering_manager->getSettings();
+            return settings.depth_filter_enabled || settings.crop_filter_for_selection;
+        }
+
         void pushSceneGraphMetadataHistoryEntry(
             SceneManager& scene_manager,
             std::string label,
@@ -96,6 +107,7 @@ namespace lfs::vis {
                     std::make_unique<op::SceneGraphMetadataEntry>(scene_manager, std::move(label), std::move(diffs)));
             }
         }
+
     } // namespace
 
     using namespace lfs::core::events;
@@ -172,7 +184,7 @@ namespace lfs::vis {
             // Check if rendering manager has split view enabled (in PLY comparison mode)
             if (services().renderingOrNull()) {
                 auto settings = services().renderingOrNull()->getSettings();
-                if (settings.split_view_mode == lfs::vis::SplitViewMode::PLYComparison) {
+                if (lfs::vis::splitViewUsesPLYComparison(settings.split_view_mode)) {
                     // In split mode: advance the offset
                     services().renderingOrNull()->advanceSplitOffset();
                     LOG_DEBUG("Advanced split view offset");
@@ -249,7 +261,6 @@ namespace lfs::vis {
         // Handle node selection from scene panel (both PLYs and Groups)
         ui::NodeSelected::when([this](const auto& event) {
             if (services().trainerOrNull() && services().trainerOrNull()->isRunning()) {
-                LOG_INFO("Selection blocked while training is active");
                 return;
             }
 
@@ -268,7 +279,6 @@ namespace lfs::vis {
         // Handle node deselection (but not during training)
         ui::NodeDeselected::when([this](const auto&) {
             if (services().trainerOrNull() && services().trainerOrNull()->isRunning()) {
-                LOG_INFO("Selection blocked while training is active");
                 return;
             }
             selection_.clearNodeSelection();
@@ -1078,7 +1088,7 @@ namespace lfs::vis {
             if (!scene_.isNodeEffectivelyVisible(node->id))
                 continue;
 
-            const glm::mat4 local_to_world = scene_.getWorldTransform(node->id);
+            const glm::mat4 local_to_world = scene_coords::nodeVisualizerWorldTransform(scene_, node->id);
             const glm::mat4 world_to_local = glm::inverse(local_to_world);
             const glm::vec3 local_origin = glm::vec3(world_to_local * glm::vec4(ray_origin, 1.0f));
             const glm::vec3 local_dir = glm::vec3(world_to_local * glm::vec4(ray_dir, 0.0f));
@@ -1160,7 +1170,7 @@ namespace lfs::vis {
             if (!scene_.isNodeEffectivelyVisible(node->id))
                 continue;
 
-            const glm::mat4 world_transform = scene_.getWorldTransform(node->id);
+            const glm::mat4 world_transform = scene_coords::nodeVisualizerWorldTransform(scene_, node->id);
 
             if (node->type == core::NodeType::MESH && node->mesh) {
                 auto accessor = CpuMeshAccessor::from(*node->mesh);
@@ -1232,11 +1242,6 @@ namespace lfs::vis {
             }
         }
 
-        glm::mat4 cam_scene_transform(1.0f);
-        auto visible_transforms = scene_.getVisibleNodeTransforms();
-        if (!visible_transforms.empty())
-            cam_scene_transform = visible_transforms[0];
-
         for (const auto* node : scene_.getNodes()) {
             if (node->type != core::NodeType::CAMERA || !node->camera)
                 continue;
@@ -1260,6 +1265,10 @@ namespace lfs::vis {
                 for (int j = 0; j < 3; ++j)
                     w2c[j][i] = R_acc(i, j);
                 w2c[3][i] = T_acc(i);
+            }
+            glm::mat4 cam_scene_transform(1.0f);
+            if (const auto transform = scene_.getCameraSceneTransformByUid(node->camera->uid())) {
+                cam_scene_transform = rendering::dataWorldTransformToVisualizerWorld(*transform);
             }
             const glm::vec3 cam_pos = glm::vec3((cam_scene_transform * glm::inverse(w2c))[3]);
 
@@ -1397,7 +1406,7 @@ namespace lfs::vis {
         return scene_.getNodeTransform(node_name);
     }
 
-    glm::mat4 SceneManager::getSelectedNodeWorldTransform() const {
+    glm::mat4 SceneManager::getSelectedNodeVisualizerWorldTransform() const {
         std::shared_lock slock(selection_.mutex());
         const auto& ids = selection_.selectedNodeIds();
         if (ids.empty())
@@ -1407,7 +1416,7 @@ namespace lfs::vis {
         if (!node)
             return glm::mat4(1.0f);
 
-        return scene_.getWorldTransform(node->id);
+        return scene_coords::nodeVisualizerWorldTransform(scene_, node->id);
     }
 
     glm::vec3 SceneManager::getSelectionCenter() const {
@@ -1462,7 +1471,48 @@ namespace lfs::vis {
             if (!scene_.getNodeBounds(node->id, local_min, local_max))
                 continue;
 
-            const glm::mat4 world_transform = scene_.getWorldTransform(node->id);
+            const glm::mat4 world_transform = scene_coords::nodeDataWorldTransform(scene_, node->id);
+            const glm::vec3 corners[8] = {
+                {local_min.x, local_min.y, local_min.z},
+                {local_max.x, local_min.y, local_min.z},
+                {local_min.x, local_max.y, local_min.z},
+                {local_max.x, local_max.y, local_min.z},
+                {local_min.x, local_min.y, local_max.z},
+                {local_max.x, local_min.y, local_max.z},
+                {local_min.x, local_max.y, local_max.z},
+                {local_max.x, local_max.y, local_max.z}};
+
+            for (const auto& corner : corners) {
+                const glm::vec3 world_corner = glm::vec3(world_transform * glm::vec4(corner, 1.0f));
+                total_min = glm::min(total_min, world_corner);
+                total_max = glm::max(total_max, world_corner);
+            }
+            has_bounds = true;
+        }
+
+        return has_bounds ? (total_min + total_max) * 0.5f : glm::vec3(0.0f);
+    }
+
+    glm::vec3 SceneManager::getSelectionVisualizerWorldCenter() const {
+        std::shared_lock slock(selection_.mutex());
+        const auto& ids = selection_.selectedNodeIds();
+        if (ids.empty())
+            return glm::vec3(0.0f);
+
+        glm::vec3 total_min(std::numeric_limits<float>::max());
+        glm::vec3 total_max(std::numeric_limits<float>::lowest());
+        bool has_bounds = false;
+
+        for (const core::NodeId id : ids) {
+            const auto* node = scene_.getNodeById(id);
+            if (!node)
+                continue;
+
+            glm::vec3 local_min, local_max;
+            if (!scene_.getNodeBounds(node->id, local_min, local_max))
+                continue;
+
+            const glm::mat4 world_transform = scene_coords::nodeVisualizerWorldTransform(scene_, node->id);
             const glm::vec3 corners[8] = {
                 {local_min.x, local_min.y, local_min.z},
                 {local_max.x, local_min.y, local_min.z},
@@ -1638,6 +1688,43 @@ namespace lfs::vis {
         }
     }
 
+    void SceneManager::syncDatasetCameraFrustumsToRenderSettings() {
+        auto* rm = services().renderingOrNull();
+        if (!rm || scene_.getAllCameras().empty())
+            return;
+
+        auto settings = rm->getSettings();
+        if (settings.show_camera_frustums)
+            return;
+
+        settings.show_camera_frustums = true;
+        rm->updateSettings(settings);
+    }
+
+    void SceneManager::finalizeDatasetSceneLoad(
+        const std::filesystem::path& dataset_path,
+        const std::filesystem::path& scene_path,
+        const lfs::core::events::state::SceneLoaded::Type type,
+        const size_t num_gaussians,
+        const int checkpoint_iteration) {
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            content_type_ = ContentType::Dataset;
+            dataset_path_ = dataset_path;
+        }
+
+        state::SceneLoaded{
+            .scene = nullptr,
+            .path = scene_path,
+            .type = type,
+            .num_gaussians = num_gaussians,
+            .checkpoint_iteration = checkpoint_iteration}
+            .emit();
+
+        python::set_application_scene(&scene_);
+        syncDatasetCameraFrustumsToRenderSettings();
+    }
+
     std::expected<void, std::string> SceneManager::applyLoadedDataset(
         const std::filesystem::path& path,
         const lfs::core::param::TrainingParameters& params,
@@ -1672,24 +1759,11 @@ namespace lfs::vis {
                 services().trainerOrNull()->setTrainer(std::move(trainer));
             }
 
-            {
-                std::lock_guard<std::mutex> lock(state_mutex_);
-                content_type_ = ContentType::Dataset;
-                dataset_path_ = path;
-            }
-
             const size_t num_gaussians = scene_.getTrainingModelGaussianCount();
             const auto* point_cloud = scene_.getVisiblePointCloud();
             const size_t num_points = point_cloud ? point_cloud->size() : 0;
 
-            state::SceneLoaded{
-                .scene = nullptr,
-                .path = path,
-                .type = state::SceneLoaded::Type::Dataset,
-                .num_gaussians = num_gaussians}
-                .emit();
-
-            python::set_application_scene(&scene_);
+            finalizeDatasetSceneLoad(path, path, state::SceneLoaded::Type::Dataset, num_gaussians);
 
             if ((num_gaussians > 0 || num_points > 0) && services().trainerOrNull() && services().trainerOrNull()->getTrainer()) {
                 ui::PointCloudModeChanged{.enabled = true, .voxel_size = DEFAULT_VOXEL_SIZE}.emit();
@@ -1768,13 +1842,6 @@ namespace lfs::vis {
                 throw std::runtime_error("No trainer manager available");
             }
 
-            // Update content state
-            {
-                std::lock_guard<std::mutex> lock(state_mutex_);
-                content_type_ = ContentType::Dataset;
-                dataset_path_ = path;
-            }
-
             // Get info from scene
             const size_t num_gaussians = scene_.getTrainingModelGaussianCount();
             const auto* point_cloud = scene_.getVisiblePointCloud();
@@ -1784,14 +1851,7 @@ namespace lfs::vis {
             LOG_INFO("Dataset loaded successfully - {} images, {} initial points/gaussians",
                      num_cameras, num_gaussians > 0 ? num_gaussians : num_points);
 
-            state::SceneLoaded{
-                .scene = nullptr,
-                .path = path,
-                .type = state::SceneLoaded::Type::Dataset,
-                .num_gaussians = num_gaussians}
-                .emit();
-
-            python::set_application_scene(&scene_);
+            finalizeDatasetSceneLoad(path, path, state::SceneLoaded::Type::Dataset, num_gaussians);
 
             state::DatasetLoadCompleted{
                 .path = path,
@@ -2014,12 +2074,6 @@ namespace lfs::vis {
             services().trainerOrNull()->setScene(&scene_);
             services().trainerOrNull()->setTrainerFromCheckpoint(std::move(trainer), checkpoint_iteration);
 
-            {
-                std::lock_guard<std::mutex> lock(state_mutex_);
-                content_type_ = ContentType::Dataset;
-                dataset_path_ = checkpoint_params.dataset.data_path;
-            }
-
             // Keep the viewer's editable state aligned with the restored trainer state.
             if (auto* param_mgr = services().paramsOrNull()) {
                 param_mgr->importTrainingParams(checkpoint_params);
@@ -2027,15 +2081,12 @@ namespace lfs::vis {
 
             LOG_INFO("Checkpoint loaded: {} gaussians, iteration {}", num_gaussians, checkpoint_iteration);
 
-            state::SceneLoaded{
-                .scene = nullptr,
-                .path = path,
-                .type = state::SceneLoaded::Type::Checkpoint,
-                .num_gaussians = num_gaussians,
-                .checkpoint_iteration = checkpoint_iteration}
-                .emit();
-
-            python::set_application_scene(&scene_);
+            finalizeDatasetSceneLoad(
+                checkpoint_params.dataset.data_path,
+                path,
+                state::SceneLoaded::Type::Checkpoint,
+                num_gaussians,
+                checkpoint_iteration);
 
             ui::PointCloudModeChanged{.enabled = false, .voxel_size = DEFAULT_VOXEL_SIZE}.emit();
             selectNode(MODEL_NAME);
@@ -2148,15 +2199,26 @@ namespace lfs::vis {
         // This keeps dataset "ready" scenes renderable before training has produced gaussians.
         if (!hasRenderableGaussians(state.combined_model)) {
             state.point_cloud = scene_.getVisiblePointCloud();
+            if (const auto transform = scene_.getVisiblePointCloudTransform()) {
+                state.point_cloud_transform = rendering::dataWorldTransformToVisualizerWorld(*transform);
+            }
         }
 
         state.meshes = scene_.getVisibleMeshes();
         for (auto& vm : state.meshes) {
+            vm.transform = rendering::dataWorldTransformToVisualizerWorld(vm.transform);
             vm.is_selected = selection_.isNodeSelected(vm.node_id);
         }
 
         // Get transforms and indices
         state.model_transforms = scene_.getVisibleNodeTransforms();
+        for (auto& transform : state.model_transforms) {
+            transform = rendering::dataWorldTransformToVisualizerWorld(transform);
+        }
+        state.camera_scene_transforms = scene_.getVisibleCameraSceneTransforms();
+        for (auto& transform : state.camera_scene_transforms) {
+            transform = rendering::dataWorldTransformToVisualizerWorld(transform);
+        }
         state.transform_indices = scene_.getTransformIndices();
         state.visible_splat_count = state.model_transforms.size();
 
@@ -2169,6 +2231,13 @@ namespace lfs::vis {
 
         // Get cropboxes (before lock — no selection dependency)
         state.cropboxes = scene_.getVisibleCropBoxes();
+        for (auto& cropbox : state.cropboxes) {
+            cropbox.world_transform = rendering::dataWorldTransformToVisualizerWorld(cropbox.world_transform);
+        }
+        state.ellipsoids = scene_.getVisibleEllipsoids();
+        for (auto& ellipsoid : state.ellipsoids) {
+            ellipsoid.world_transform = rendering::dataWorldTransformToVisualizerWorld(ellipsoid.world_transform);
+        }
 
         // Read selection-dependent state
         {
@@ -2392,7 +2461,7 @@ namespace lfs::vis {
 
                 // Transform crop box to node's local space if node has a transform
                 lfs::geometry::BoundingBox local_crop_box = crop_box;
-                const glm::mat4 node_world_transform = scene_.getWorldTransform(node->id);
+                const glm::mat4 node_world_transform = scene_coords::nodeDataWorldTransform(scene_, node->id);
                 static const glm::mat4 IDENTITY_MATRIX(1.0f);
 
                 if (node_world_transform != IDENTITY_MATRIX) {
@@ -2544,7 +2613,7 @@ namespace lfs::vis {
                 const size_t original_visible = node->model->visible_count();
 
                 // Transform means to ellipsoid local space and apply mask
-                const glm::mat4 node_world_transform = scene_.getWorldTransform(node->id);
+                const glm::mat4 node_world_transform = scene_coords::nodeDataWorldTransform(scene_, node->id);
                 const glm::mat4 combined_transform = inv_world * node_world_transform;
 
                 const auto applied_mask = lfs::core::soft_crop_by_ellipsoid(*node->model, combined_transform, radii, inverse);
@@ -3225,8 +3294,9 @@ namespace lfs::vis {
                 const auto& src = *node->model;
                 auto cloned = std::make_unique<lfs::core::SplatData>(
                     src.get_max_sh_degree(),
-                    src.means_raw().clone(), src.sh0_raw().clone(), src.shN_raw().clone(),
-                    src.scaling_raw().clone(), src.rotation_raw().clone(), src.opacity_raw().clone(),
+                    src.means_raw().cpu(), src.sh0_raw().cpu(),
+                    src.shN_raw().is_valid() ? src.shN_raw().cpu() : lfs::core::Tensor{},
+                    src.scaling_raw().cpu(), src.rotation_raw().cpu(), src.opacity_raw().cpu(),
                     src.get_scene_scale());
                 cloned->set_active_sh_degree(src.get_active_sh_degree());
                 entry.data = std::move(cloned);
@@ -3281,12 +3351,12 @@ namespace lfs::vis {
 
         gaussian_clipboard_ = std::make_unique<lfs::core::SplatData>(
             src.get_max_sh_degree(),
-            src.means_raw().index_select(0, indices).contiguous(),
-            src.sh0_raw().index_select(0, indices).contiguous(),
-            std::move(shN_selected),
-            src.scaling_raw().index_select(0, indices).contiguous(),
-            src.rotation_raw().index_select(0, indices).contiguous(),
-            src.opacity_raw().index_select(0, indices).contiguous(),
+            src.means_raw().index_select(0, indices).contiguous().cpu(),
+            src.sh0_raw().index_select(0, indices).contiguous().cpu(),
+            shN_selected.is_valid() ? shN_selected.cpu() : lfs::core::Tensor{},
+            src.scaling_raw().index_select(0, indices).contiguous().cpu(),
+            src.rotation_raw().index_select(0, indices).contiguous().cpu(),
+            src.opacity_raw().index_select(0, indices).contiguous().cpu(),
             src.get_scene_scale());
         gaussian_clipboard_->set_active_sh_degree(src.get_active_sh_degree());
 
@@ -3301,8 +3371,9 @@ namespace lfs::vis {
         const auto& src = *gaussian_clipboard_;
         auto data = std::make_unique<lfs::core::SplatData>(
             src.get_max_sh_degree(),
-            src.means_raw().clone(), src.sh0_raw().clone(), src.shN_raw().clone(),
-            src.scaling_raw().clone(), src.rotation_raw().clone(), src.opacity_raw().clone(),
+            src.means_raw().cuda(), src.sh0_raw().cuda(),
+            src.shN_raw().is_valid() ? src.shN_raw().cuda() : lfs::core::Tensor{},
+            src.scaling_raw().cuda(), src.rotation_raw().cuda(), src.opacity_raw().cuda(),
             src.get_scene_scale());
         data->set_active_sh_degree(src.get_active_sh_degree());
 
@@ -3413,8 +3484,9 @@ namespace lfs::vis {
             } else if (entry.data && entry.data->size() > 0) {
                 auto paste_data = std::make_unique<lfs::core::SplatData>(
                     entry.data->get_max_sh_degree(),
-                    entry.data->means_raw().clone(), entry.data->sh0_raw().clone(), entry.data->shN_raw().clone(),
-                    entry.data->scaling_raw().clone(), entry.data->rotation_raw().clone(), entry.data->opacity_raw().clone(),
+                    entry.data->means_raw().cuda(), entry.data->sh0_raw().cuda(),
+                    entry.data->shN_raw().is_valid() ? entry.data->shN_raw().cuda() : lfs::core::Tensor{},
+                    entry.data->scaling_raw().cuda(), entry.data->rotation_raw().cuda(), entry.data->opacity_raw().cuda(),
                     entry.data->get_scene_scale());
                 paste_data->set_active_sh_degree(entry.data->get_active_sh_degree());
 
@@ -3548,6 +3620,14 @@ namespace lfs::vis {
     }
 
     void SceneManager::invertSelection() {
+        auto* rendering_manager = services().renderingOrNull();
+        if (selection_service_ &&
+            rendering_manager &&
+            hasActiveSelectionFilter(rendering_manager)) {
+            (void)selection_service_->invertFiltered();
+            return;
+        }
+
         const size_t total = scene_.getTotalGaussianCount();
         if (total == 0)
             return;
@@ -3589,6 +3669,14 @@ namespace lfs::vis {
         auto* editor = services().editorOrNull();
         const auto tool = editor ? editor->getActiveTool() : ToolType::None;
         const bool is_selection_tool = (tool == ToolType::Selection || tool == ToolType::Brush);
+        auto* rendering_manager = services().renderingOrNull();
+
+        if (selection_service_ &&
+            rendering_manager &&
+            hasActiveSelectionFilter(rendering_manager)) {
+            (void)selection_service_->selectAllFiltered();
+            return;
+        }
 
         if (is_selection_tool) {
             const size_t total = scene_.getTotalGaussianCount();
@@ -3627,8 +3715,8 @@ namespace lfs::vis {
                 selectNodes(splat_names);
         }
 
-        if (auto* rm = services().renderingOrNull())
-            rm->markDirty(DirtyFlag::SELECTION);
+        if (rendering_manager)
+            rendering_manager->markDirty(DirtyFlag::SELECTION);
     }
 
     void SceneManager::copySelectionToClipboard() {

@@ -17,6 +17,9 @@
 
 namespace {
 
+    constexpr float kInvalidScreenPositionSentinel = -10000.0f;
+    constexpr float kInvalidScreenPositionThreshold = -1000.0f;
+
     struct PrimitiveFailureOffender {
         uint primitive_idx = 0;
         uint global_idx = 0;
@@ -179,7 +182,7 @@ namespace lfs::rendering::config {
 __global__ void init_mean2d_kernel(float2* data, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
-        data[idx] = make_float2(-10000.0f, -10000.0f);
+        data[idx] = make_float2(kInvalidScreenPositionSentinel, kInvalidScreenPositionSentinel);
     }
 }
 
@@ -192,7 +195,7 @@ __global__ void invalidate_outside_crop_kernel(
     if (idx >= n)
         return;
     if (outside_crop[idx]) {
-        screen_positions[idx] = make_float2(-10000.0f, -10000.0f);
+        screen_positions[idx] = make_float2(kInvalidScreenPositionSentinel, kInvalidScreenPositionSentinel);
     }
 }
 
@@ -209,9 +212,9 @@ __global__ void copy_screen_positions_kernel(
         return;
 
     float2 pos = mean2d[idx];
-    // Flip Y: window_y = height - rasterizer_y
+    // Convert OpenGL-style rasterizer Y to window-space Y.
     // Keep invalid markers as-is (they have large negative values)
-    if (pos.y > -1000.0f) {
+    if (pos.y > kInvalidScreenPositionThreshold) {
         pos.y = height - pos.y;
     }
     screen_positions_out[idx] = pos;
@@ -233,7 +236,7 @@ __global__ void brush_select_kernel(
     float2 pos = screen_positions[idx];
 
     // Skip invalid/off-screen positions (marked with large negative values)
-    if (pos.x < -1000.0f || pos.y < -1000.0f)
+    if (pos.x < kInvalidScreenPositionThreshold || pos.y < kInvalidScreenPositionThreshold)
         return;
 
     float dx = pos.x - mouse_x;
@@ -296,7 +299,7 @@ __global__ void polygon_select_kernel(
         return;
 
     const float2 pos = positions[idx];
-    if (pos.x < -1000.0f)
+    if (pos.x < kInvalidScreenPositionThreshold)
         return; // Invalid position marker
 
     if (point_in_polygon(pos.x, pos.y, polygon, num_verts))
@@ -315,7 +318,7 @@ __global__ void polygon_select_mode_kernel(
         return;
 
     const float2 pos = positions[idx];
-    if (pos.x < -1000.0f)
+    if (pos.x < kInvalidScreenPositionThreshold)
         return;
 
     if (point_in_polygon(pos.x, pos.y, polygon, num_verts))
@@ -332,7 +335,7 @@ __global__ void rect_select_kernel(
         return;
 
     const float2 pos = positions[idx];
-    if (pos.x < -1000.0f)
+    if (pos.x < kInvalidScreenPositionThreshold)
         return;
 
     if (pos.x >= x0 && pos.x <= x1 && pos.y >= y0 && pos.y <= y1)
@@ -350,7 +353,7 @@ __global__ void rect_select_mode_kernel(
         return;
 
     const float2 pos = positions[idx];
-    if (pos.x < -1000.0f)
+    if (pos.x < kInvalidScreenPositionThreshold)
         return;
 
     if (pos.x >= x0 && pos.x <= x1 && pos.y >= y0 && pos.y <= y1)
@@ -488,7 +491,8 @@ void lfs::rendering::forward(
     float ortho_scale,
     bool mip_filter,
     const int* visible_indices,
-    int visible_count) {
+    int visible_count,
+    cudaStream_t stream) {
 
     const dim3 grid(div_round_up(width, config::tile_width), div_round_up(height, config::tile_height), 1);
     const dim3 block(config::tile_width, config::tile_height, 1);
@@ -497,16 +501,7 @@ void lfs::rendering::forward(
     char* per_tile_buffers_blob = per_tile_buffers_func(required<PerTileBuffers>(n_tiles));
     PerTileBuffers per_tile_buffers = PerTileBuffers::from_blob(per_tile_buffers_blob, n_tiles);
 
-    static cudaStream_t memset_stream = 0;
-    if constexpr (!config::debug) {
-        static bool memset_stream_initialized = false;
-        if (!memset_stream_initialized) {
-            cudaStreamCreate(&memset_stream);
-            memset_stream_initialized = true;
-        }
-        cudaMemsetAsync(per_tile_buffers.instance_ranges, 0, sizeof(uint2) * n_tiles, memset_stream);
-    } else
-        cudaMemset(per_tile_buffers.instance_ranges, 0, sizeof(uint2) * n_tiles);
+    cudaMemsetAsync(per_tile_buffers.instance_ranges, 0, sizeof(uint2) * n_tiles, stream);
 
     // Use visible_count for buffer allocation if visibility filtering is active
     const int buffer_n_primitives = (visible_count > 0 && visible_indices != nullptr)
@@ -516,18 +511,21 @@ void lfs::rendering::forward(
     char* per_primitive_buffers_blob = per_primitive_buffers_func(required<PerPrimitiveBuffers>(buffer_n_primitives));
     PerPrimitiveBuffers per_primitive_buffers = PerPrimitiveBuffers::from_blob(per_primitive_buffers_blob, buffer_n_primitives);
 
-    cudaMemset(per_primitive_buffers.n_visible_primitives, 0, sizeof(uint));
-    cudaMemset(per_primitive_buffers.n_instances, 0, sizeof(uint));
+    cudaMemsetAsync(per_primitive_buffers.n_visible_primitives, 0, sizeof(uint), stream);
+    cudaMemsetAsync(per_primitive_buffers.n_instances, 0, sizeof(uint), stream);
 
     // Initialize mean2d with invalid marker values for brush selection
     // Only visible Gaussians will have their mean2d updated by preprocess kernel
     if (screen_positions_out != nullptr) {
         constexpr int init_block = 256;
         int init_grid = (buffer_n_primitives + init_block - 1) / init_block;
-        init_mean2d_kernel<<<init_grid, init_block>>>(per_primitive_buffers.mean2d, buffer_n_primitives);
+        init_mean2d_kernel<<<init_grid, init_block, 0, stream>>>(per_primitive_buffers.mean2d, buffer_n_primitives);
     }
 
-    kernels::forward::preprocess_cu<<<div_round_up(buffer_n_primitives, config::block_size_preprocess), config::block_size_preprocess>>>(
+    const bool include_low_opacity_selection_queries =
+        (screen_positions_out != nullptr) || (hovered_depth_id != nullptr);
+
+    kernels::forward::preprocess_cu<<<div_round_up(buffer_n_primitives, config::block_size_preprocess), config::block_size_preprocess, 0, stream>>>(
         means,
         scales_raw,
         rotations_raw,
@@ -569,7 +567,7 @@ void lfs::rendering::forward(
         selection_mask,
         cursor_active,
         cursor_x,
-        cursor_y,
+        cursor_active ? (static_cast<float>(height) - cursor_y) : cursor_y,
         cursor_radius * cursor_radius, // Pass squared radius for efficient comparison
         preview_selection_add_mode,
         preview_selection_out,
@@ -593,6 +591,7 @@ void lfs::rendering::forward(
         deleted_mask,
         focused_gaussian_id,
         hovered_depth_id,
+        include_low_opacity_selection_queries,
         emphasized_node_mask,
         num_selected_nodes,
         dim_non_emphasized,
@@ -603,25 +602,27 @@ void lfs::rendering::forward(
         mip_filter);
     CHECK_CUDA(config::debug, "preprocess")
 
-    // Copy screen positions if requested (for interactive overlay queries)
-    // Note: When visibility filtering is active, screen positions are written directly
-    // in the kernel using global_idx, so this copy is only needed without filtering
+    // Export screen positions in window coordinates (top-left origin) for GUI tools.
     if (screen_positions_out != nullptr && visible_indices == nullptr) {
-        cudaMemcpy(screen_positions_out, per_primitive_buffers.mean2d,
-                   sizeof(float2) * n_primitives, cudaMemcpyDeviceToDevice);
+        constexpr int BLOCK = 256;
+        const int grid_size = (n_primitives + BLOCK - 1) / BLOCK;
+        copy_screen_positions_kernel<<<grid_size, BLOCK, 0, stream>>>(
+            per_primitive_buffers.mean2d,
+            screen_positions_out,
+            static_cast<float>(height),
+            n_primitives);
 
         // In desaturate mode, invalidate screen positions for outside gaussians
         // Check crop box desaturate, ellipsoid desaturate, and depth filter
         const bool has_view_volume = (view_volume_transform != nullptr);
         if (crop_desaturate || ellipsoid_desaturate || has_view_volume) {
-            constexpr int BLOCK = 256;
-            const int grid_size = (n_primitives + BLOCK - 1) / BLOCK;
-            invalidate_outside_crop_kernel<<<grid_size, BLOCK>>>(
+            invalidate_outside_crop_kernel<<<grid_size, BLOCK, 0, stream>>>(
                 screen_positions_out, per_primitive_buffers.outside_crop, n_primitives);
         }
     }
 
     uint n_visible_primitives;
+    cudaStreamSynchronize(stream);
     cudaMemcpy(&n_visible_primitives, per_primitive_buffers.n_visible_primitives, sizeof(uint), cudaMemcpyDeviceToHost);
     uint n_instances;
     cudaMemcpy(&n_instances, per_primitive_buffers.n_instances, sizeof(uint), cudaMemcpyDeviceToHost);
@@ -664,10 +665,13 @@ void lfs::rendering::forward(
             per_primitive_buffers.cub_workspace_size,
             per_primitive_buffers.depth_keys,
             per_primitive_buffers.primitive_indices,
-            n_visible_primitives_i);
+            n_visible_primitives_i,
+            0,
+            static_cast<int>(sizeof(uint) * 8),
+            stream);
         CHECK_CUDA(config::debug, "cub::DeviceRadixSort::SortPairs (Depth)")
 
-        kernels::forward::apply_depth_ordering_cu<<<div_round_up(n_visible_primitives_i, config::block_size_apply_depth_ordering), config::block_size_apply_depth_ordering>>>(
+        kernels::forward::apply_depth_ordering_cu<<<div_round_up(n_visible_primitives_i, config::block_size_apply_depth_ordering), config::block_size_apply_depth_ordering, 0, stream>>>(
             per_primitive_buffers.primitive_indices.Current(),
             per_primitive_buffers.n_touched_tiles,
             per_primitive_buffers.offset,
@@ -679,10 +683,11 @@ void lfs::rendering::forward(
             per_primitive_buffers.cub_workspace_size,
             per_primitive_buffers.offset,
             per_primitive_buffers.offset,
-            n_visible_primitives_i);
+            n_visible_primitives_i,
+            stream);
         CHECK_CUDA(config::debug, "cub::DeviceScan::ExclusiveSum (Primitive Offsets)")
 
-        kernels::forward::create_instances_cu<<<div_round_up(n_visible_primitives_i, config::block_size_create_instances), config::block_size_create_instances>>>(
+        kernels::forward::create_instances_cu<<<div_round_up(n_visible_primitives_i, config::block_size_create_instances), config::block_size_create_instances, 0, stream>>>(
             per_primitive_buffers.primitive_indices.Current(),
             per_primitive_buffers.offset,
             per_primitive_buffers.screen_bounds,
@@ -700,23 +705,23 @@ void lfs::rendering::forward(
                 per_instance_buffers.cub_workspace_size,
                 per_instance_buffers.keys,
                 per_instance_buffers.primitive_indices,
-                n_instances_i);
+                n_instances_i,
+                0,
+                static_cast<int>(sizeof(ushort) * 8),
+                stream);
             CHECK_CUDA(config::debug, "cub::DeviceRadixSort::SortPairs (Tile)")
         }
     }
 
-    if constexpr (!config::debug)
-        cudaStreamSynchronize(memset_stream);
-
     if (n_instances > 0) {
-        kernels::forward::extract_instance_ranges_cu<<<div_round_up(n_instances_i, config::block_size_extract_instance_ranges), config::block_size_extract_instance_ranges>>>(
+        kernels::forward::extract_instance_ranges_cu<<<div_round_up(n_instances_i, config::block_size_extract_instance_ranges), config::block_size_extract_instance_ranges, 0, stream>>>(
             per_instance_buffers.keys.Current(),
             per_tile_buffers.instance_ranges,
             n_instances_i);
         CHECK_CUDA(config::debug, "extract_instance_ranges")
     }
 
-    kernels::forward::blend_cu<<<grid, block>>>(
+    kernels::forward::blend_cu<<<grid, block, 0, stream>>>(
         per_tile_buffers.instance_ranges,
         per_instance_buffers.primitive_indices.Current(),
         per_primitive_buffers.mean2d,
@@ -740,4 +745,6 @@ void lfs::rendering::forward(
         emphasized_node_mask,
         num_selected_nodes);
     CHECK_CUDA(config::debug, "blend")
+
+    cudaStreamSynchronize(stream);
 }

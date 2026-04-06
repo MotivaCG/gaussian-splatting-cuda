@@ -8,6 +8,7 @@
 #include "sequencer/rml_sequencer_panel.hpp"
 #include "core/events.hpp"
 #include "core/logger.hpp"
+#include "gui/rmlui/rml_input_utils.hpp"
 #include "gui/rmlui/rml_panel_host.hpp"
 #include "gui/rmlui/rml_theme.hpp"
 #include "gui/rmlui/rml_tooltip.hpp"
@@ -87,10 +88,6 @@ namespace lfs::vis {
             return signature;
         }
 
-        [[nodiscard]] bool hasFocusedKeyboardTarget(Rml::Element* element) {
-            return element && element->GetTagName() != "body";
-        }
-
         void forwardFocusedKeyboardInput(Rml::Context* const context,
                                          const PanelInputState& input) {
             const int mods = gui::sdlModsToRml(input.key_ctrl, input.key_shift,
@@ -160,7 +157,9 @@ namespace lfs::vis {
             ui.show_pip_preview = !ui.show_pip_preview;
         else if (id == "btn-equirect") {
             ui.equirectangular = !ui.equirectangular;
-            lfs::core::events::ui::RenderSettingsChanged{.equirectangular = ui.equirectangular}.emit();
+            auto event = lfs::core::events::ui::RenderSettingsChanged{};
+            event.equirectangular = ui.equirectangular;
+            event.emit();
         } else if (id == "btn-speed") {
             const size_t idx = findSpeedIndex(ui.playback_speed);
             const size_t next = (idx + 1) % SPEED_PRESETS.size();
@@ -665,10 +664,10 @@ namespace lfs::vis {
             }
 
             auto* const focused = rml_context_->GetFocusElement();
-            if (hasFocusedKeyboardTarget(focused))
+            if (gui::rml_input::hasFocusedKeyboardTarget(focused))
                 forwardFocusedKeyboardInput(rml_context_, input);
 
-            wants_keyboard_ = hasFocusedKeyboardTarget(focused) ||
+            wants_keyboard_ = gui::rml_input::hasFocusedKeyboardTarget(focused) ||
                               dragging_playhead_ || dragging_keyframe_ ||
                               controller_.hasSelection() || !selected_keyframes_.empty();
             return;
@@ -711,10 +710,10 @@ namespace lfs::vis {
         }
 
         auto* const focused = rml_context_->GetFocusElement();
-        if (hasFocusedKeyboardTarget(focused))
+        if (gui::rml_input::hasFocusedKeyboardTarget(focused))
             forwardFocusedKeyboardInput(rml_context_, input);
 
-        wants_keyboard_ = hasFocusedKeyboardTarget(focused) ||
+        wants_keyboard_ = gui::rml_input::hasFocusedKeyboardTarget(focused) ||
                           dragging_playhead_ || dragging_keyframe_ ||
                           controller_.hasSelection() || !selected_keyframes_.empty();
     }

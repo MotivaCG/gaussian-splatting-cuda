@@ -230,7 +230,7 @@ namespace lfs::python {
                        "Load PPISP weights from a sidecar and freeze PPISP learning during training")
             .int_prop(&OptimizationParameters::ppisp_controller_activation_step,
                       "ppisp_controller_activation_step", "Controller Step", -1, -1, 100000,
-                      "Iteration to start controller distillation (negative = default schedule)")
+                      "Iteration to start controller distillation (negative = final 5000 planned steps)")
             .float_prop(&OptimizationParameters::ppisp_controller_lr,
                         "ppisp_controller_lr", "Controller LR", 2e-3f, 1e-5f, 1e-1f,
                         "Learning rate for PPISP controller")
@@ -266,7 +266,7 @@ namespace lfs::python {
                        "Enable sparsity optimization")
             .int_prop(&OptimizationParameters::sparsify_steps,
                       "sparsify_steps", "Sparsify Steps", 15000, 1000, 50000,
-                      "Iteration to run sparsification")
+                      "Number of sparsification steps to run after regular training")
             .float_prop(&OptimizationParameters::prune_ratio,
                         "prune_ratio", "Prune Ratio", 0.6f, 0.0f, 1.0f,
                         "Target pruning ratio for sparsification")
@@ -383,11 +383,11 @@ namespace lfs::python {
 
         add_string(
             "data_path", "Data Path", "", "Path to training data", true,
-            [](const DatasetConfig& c) { return c.data_path.string(); });
+            [](const DatasetConfig& c) { return lfs::core::path_to_utf8(c.data_path); });
 
         add_string(
             "output_path", "Output Path", "", "Path for output files", true,
-            [](const DatasetConfig& c) { return c.output_path.string(); });
+            [](const DatasetConfig& c) { return lfs::core::path_to_utf8(c.output_path); });
 
         add_string(
             "images", "Images Folder", "images", "Subfolder containing images", true,
@@ -1118,27 +1118,7 @@ namespace lfs::python {
                             return;
 
                         const float ratio = (prev > 0.0f) ? (clamped / prev) : clamped;
-                        const auto scale = [ratio](const size_t v) {
-                            return static_cast<size_t>(std::lround(static_cast<float>(v) * ratio));
-                        };
-                        opt.iterations = scale(opt.iterations);
-                        opt.start_refine = scale(opt.start_refine);
-                        opt.reset_every = scale(opt.reset_every);
-                        opt.stop_refine = scale(opt.stop_refine);
-                        opt.refine_every = scale(opt.refine_every);
-                        opt.sh_degree_interval = scale(opt.sh_degree_interval);
-
-                        auto scale_vec = [ratio](std::vector<size_t>& steps) {
-                            std::set<size_t> unique;
-                            for (const auto& s : steps) {
-                                size_t scaled = static_cast<size_t>(std::lround(static_cast<float>(s) * ratio));
-                                if (scaled > 0)
-                                    unique.insert(scaled);
-                            }
-                            steps.assign(unique.begin(), unique.end());
-                        };
-                        scale_vec(opt.eval_steps);
-                        scale_vec(opt.save_steps);
+                        opt.scale_steps(ratio);
                     });
                 },
                 nb::arg("new_scaler"),
@@ -1227,8 +1207,10 @@ namespace lfs::python {
                 "Background color as (r, g, b) tuple")
             .def_prop_rw(
                 "bg_image_path",
-                [](PyOptimizationParams& self) { return self.params().bg_image_path.string(); },
-                [](PyOptimizationParams&, const std::string& v) { modify_params([&v](auto& p) { p.bg_image_path = v; }); },
+                [](PyOptimizationParams& self) { return lfs::core::path_to_utf8(self.params().bg_image_path); },
+                [](PyOptimizationParams&, const std::string& v) {
+                    modify_params([&v](auto& p) { p.bg_image_path = lfs::core::utf8_to_path(v); });
+                },
                 "Path to background image")
             .def_prop_rw(
                 "random",
@@ -1313,10 +1295,10 @@ namespace lfs::python {
             .def("can_edit", &PyDatasetConfig::can_edit,
                  "Check if dataset params can be edited (before training starts)")
             .def_prop_ro(
-                "data_path", [](const PyDatasetConfig& self) { return self.params().data_path.string(); },
+                "data_path", [](const PyDatasetConfig& self) { return lfs::core::path_to_utf8(self.params().data_path); },
                 "Path to training data directory")
             .def_prop_ro(
-                "output_path", [](const PyDatasetConfig& self) { return self.params().output_path.string(); },
+                "output_path", [](const PyDatasetConfig& self) { return lfs::core::path_to_utf8(self.params().output_path); },
                 "Path for output files")
             .def_prop_ro(
                 "images", [](const PyDatasetConfig& self) { return self.params().images; },

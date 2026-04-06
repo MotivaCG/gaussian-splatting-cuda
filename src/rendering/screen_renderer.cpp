@@ -98,14 +98,32 @@ namespace lfs::rendering {
     Result<void> ScreenQuadRenderer::render(ManagedShader& shader) const {
         LOG_TIMER_TRACE("ScreenQuadRenderer::render");
 
-        return renderTexture(shader, getTextureID(), depth_params_, getTexcoordScale(), getDepthTextureID());
+        return renderTexture(
+            shader,
+            getTextureID(),
+            depth_params_,
+            getTexcoordScale(),
+            getTexcoordScale(),
+            getDepthTextureID(),
+            false);
+    }
+
+    Result<void> ScreenQuadRenderer::renderQuad(ManagedShader& shader) const {
+        LOG_TIMER_TRACE("ScreenQuadRenderer::renderQuad");
+        (void)shader;
+
+        VAOBinder vao_bind(quadVAO_);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        return {};
     }
 
     Result<void> ScreenQuadRenderer::renderTexture(ManagedShader& shader,
                                                    const GLuint color_texture,
                                                    const DepthParams& depth_params,
-                                                   const glm::vec2 texcoord_scale,
-                                                   const GLuint depth_texture) const {
+                                                   const glm::vec2 color_texcoord_scale,
+                                                   const glm::vec2 depth_texcoord_scale,
+                                                   const GLuint depth_texture,
+                                                   const bool flip_y) const {
         LOG_TIMER_TRACE("ScreenQuadRenderer::renderTexture");
 
         GLStateGuard state_guard;
@@ -119,8 +137,16 @@ namespace lfs::rendering {
             return result;
         }
 
-        if (auto result = shader.set("texcoord_scale", texcoord_scale); !result) {
-            LOG_TRACE("Uniform 'texcoord_scale' not found in shader: {}", result.error());
+        if (auto result = shader.set("color_texcoord_scale", color_texcoord_scale); !result) {
+            LOG_TRACE("Uniform 'color_texcoord_scale' not found in shader: {}", result.error());
+        }
+
+        if (auto result = shader.set("depth_texcoord_scale", depth_texcoord_scale); !result) {
+            LOG_TRACE("Uniform 'depth_texcoord_scale' not found in shader: {}", result.error());
+        }
+
+        if (auto result = shader.set("flip_y", flip_y); !result) {
+            LOG_TRACE("Uniform 'flip_y' not set: {}", result.error());
         }
 
         glActiveTexture(GL_TEXTURE1);
@@ -154,6 +180,8 @@ namespace lfs::rendering {
             glEnable(GL_DEPTH_TEST);
             glDepthMask(GL_TRUE);
             glDepthFunc(GL_ALWAYS);
+        } else {
+            glDisable(GL_DEPTH_TEST);
         }
 
         glDrawArrays(GL_TRIANGLES, 0, 6);

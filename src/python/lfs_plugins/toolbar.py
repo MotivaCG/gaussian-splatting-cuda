@@ -226,6 +226,10 @@ class _GizmoToolbarController:
 
 
 class _UtilityToolbarController:
+    _CAMERA_MODE_SPECS = (
+        ("camera-orbit", "orbit", "Orbit Camera"),
+        ("camera-fpv", "fpv", "FPV Camera"),
+    )
     _RENDER_MODE_SPECS = (
         ("blob", "splats", "toolbar.splat_rendering"),
         ("dots-diagonal", "points", "toolbar.point_cloud"),
@@ -238,6 +242,13 @@ class _UtilityToolbarController:
 
     def snapshot(self):
         import lichtfeld as lf
+
+        try:
+            camera_mode = str(lf.get_camera_navigation_mode()).lower()
+        except Exception:
+            camera_mode = "orbit"
+        if camera_mode == "fly":
+            camera_mode = "fpv"
 
         has_render_manager = True
         try:
@@ -254,6 +265,17 @@ class _UtilityToolbarController:
             render_mode = None
 
         is_fullscreen = lf.is_fullscreen() if hasattr(lf, "is_fullscreen") else False
+        camera_mode_buttons = [
+            _button_record(
+                f"util-camera-{mode_id}",
+                "set_camera_navigation_mode",
+                mode_id,
+                _icon_src(icon_name),
+                tooltip_text=label,
+                selected=camera_mode == mode_id,
+            )
+            for icon_name, mode_id, label in self._CAMERA_MODE_SPECS
+        ]
         primary_buttons = [
             _button_record("util-home", "home", "", _icon_src("home"),
                            tooltip_key="toolbar.home"),
@@ -310,6 +332,7 @@ class _UtilityToolbarController:
             )
 
         return {
+            "camera_mode_buttons": camera_mode_buttons,
             "show_render_controls": has_render_manager,
             "primary_buttons": primary_buttons,
             "render_mode_buttons": render_mode_buttons,
@@ -320,6 +343,9 @@ class _UtilityToolbarController:
     def dispatch(self, action, value):
         import lichtfeld as lf
 
+        if action == "set_camera_navigation_mode":
+            lf.set_camera_navigation_mode(value)
+            return
         if action == "home":
             lf.reset_camera()
             return
@@ -357,6 +383,7 @@ class _ViewportToolbarController:
         "show_pivot_toolbar",
     )
     _RECORD_FIELDS = (
+        "camera_mode_buttons",
         "utility_primary_buttons",
         "render_mode_buttons",
         "projection_buttons",
@@ -408,6 +435,7 @@ class _ViewportToolbarController:
         self._sync_flag("show_submode_toolbar", gizmo_state["show_submode_toolbar"])
         self._sync_flag("show_pivot_toolbar", gizmo_state["show_pivot_toolbar"])
 
+        self._sync_records("camera_mode_buttons", utility_state["camera_mode_buttons"])
         self._sync_records("utility_primary_buttons", utility_state["primary_buttons"])
         self._sync_records("render_mode_buttons", utility_state["render_mode_buttons"])
         self._sync_records("projection_buttons", utility_state["projection_buttons"])

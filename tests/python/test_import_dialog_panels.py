@@ -65,6 +65,7 @@ def _install_lf_stub(monkeypatch, tmp_path):
         open_ply_file_dialog=lambda _start_dir="": state.init_browse_path,
     )
     lf_stub.detect_dataset_info = lambda _path: state.dataset_info
+    lf_stub.optimization_params = lambda: None
     lf_stub.load_file = lambda path, is_dataset=False, output_path="", init_path="": state.load_file_calls.append(
         {
             "path": path,
@@ -148,6 +149,9 @@ class _DocumentStub:
             return self.close_btn
         return None
 
+    def query_selector_all(self, _selector):
+        return []
+
 
 def test_dataset_import_panel_show_and_load(import_dialog_module):
     module, state = import_dialog_module
@@ -171,6 +175,36 @@ def test_dataset_import_panel_show_and_load(import_dialog_module):
             "is_dataset": True,
             "output_path": "/tmp/custom_output",
             "init_path": "/tmp/seed_points.ply",
+        }
+    ]
+    assert state.panel_enabled_calls[-1] == ("lfs.dataset_import", False)
+
+
+def test_dataset_import_panel_preserves_unicode_paths(import_dialog_module):
+    module, state = import_dialog_module
+    panel = module.DatasetImportPanel()
+    panel._handle = _HandleStub()
+
+    base_path = Path("/tmp/日本語_データセット")
+    state.dataset_info.base_path = base_path
+    state.dataset_info.images_path = base_path / "images"
+    state.dataset_info.sparse_path = base_path / "sparse"
+    state.dataset_info.masks_path = base_path / "masks"
+    state.output_browse_path = "/tmp/出力フォルダ"
+    state.init_browse_path = "/tmp/初期化ポイント.ply"
+
+    assert panel.show(str(base_path)) is True
+
+    panel._on_browse_output()
+    panel._on_browse_init()
+    panel._on_do_load()
+
+    assert state.load_file_calls == [
+        {
+            "path": str(base_path),
+            "is_dataset": True,
+            "output_path": "/tmp/出力フォルダ",
+            "init_path": "/tmp/初期化ポイント.ply",
         }
     ]
     assert state.panel_enabled_calls[-1] == ("lfs.dataset_import", False)
@@ -203,6 +237,33 @@ def test_resume_checkpoint_panel_validates_dataset_and_loads(import_dialog_modul
         {
             "checkpoint_path": state.checkpoint_path,
             "dataset_path": valid_path,
+            "output_path": state.output_browse_path,
+        }
+    ]
+    assert state.panel_enabled_calls[-1] == ("lfs.resume_checkpoint", False)
+
+
+def test_resume_checkpoint_panel_preserves_unicode_paths(import_dialog_module, tmp_path):
+    module, state = import_dialog_module
+    panel = module.ResumeCheckpointPanel()
+    panel._handle = _HandleStub()
+
+    dataset_path = tmp_path / "日本語_再開データセット"
+    dataset_path.mkdir()
+    state.checkpoint_path = str(tmp_path / "チェックポイント.resume")
+    state.checkpoint_params.dataset_path = str(dataset_path)
+    state.checkpoint_params.output_path = str(tmp_path / "出力先")
+    state.output_browse_path = str(tmp_path / "別の出力先")
+
+    assert panel.show(state.checkpoint_path) is True
+
+    panel._on_browse_output()
+    panel._on_do_load()
+
+    assert state.load_checkpoint_calls == [
+        {
+            "checkpoint_path": state.checkpoint_path,
+            "dataset_path": str(dataset_path),
             "output_path": state.output_browse_path,
         }
     ]

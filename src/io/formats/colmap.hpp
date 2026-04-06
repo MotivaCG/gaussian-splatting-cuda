@@ -79,6 +79,21 @@ namespace lfs::io {
         const std::string& images_folder = "images");
 
     /**
+     * @brief Validate COLMAP dataset image and mask layout against metadata
+     * @param base Base directory containing COLMAP data
+     * @param images_folder Folder containing images (default: "images")
+     * @return Success if the dataset layout matches the COLMAP metadata contract
+     *
+     * For nested image folders, COLMAP metadata must preserve the relative path
+     * under the images root. Duplicate basenames across subdirectories are valid
+     * only when images.bin/images.txt stores entries like "cam_a/frame.png"
+     * instead of just "frame.png". Masks follow the same relative-path contract.
+     */
+    Result<void> validate_colmap_dataset_layout(
+        const std::filesystem::path& base,
+        const std::string& images_folder = "images");
+
+    /**
      * @brief Read COLMAP point cloud from text file
      * @param filepath Base directory containing points3D.txt
      * @return PointCloud

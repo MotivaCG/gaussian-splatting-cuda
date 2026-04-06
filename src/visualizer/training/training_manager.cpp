@@ -30,7 +30,7 @@ namespace lfs::vis {
             cleanupTrainingResources(resources);
         });
 
-        state_machine_.setStateChangeCallback([this](TrainingState old_state, TrainingState new_state) {
+        state_machine_.setStateChangeCallback([this](TrainingState, TrainingState new_state) {
             // Emit events on state changes
             if (new_state == TrainingState::Idle) {
                 loss_buffer_.clear();
@@ -60,6 +60,7 @@ namespace lfs::vis {
         }
 
         if (trainer_) {
+            std::lock_guard<std::mutex> lock(trainer_lifetime_mutex_);
             trainer_->shutdown();
             trainer_.reset();
         }
@@ -96,6 +97,7 @@ namespace lfs::vis {
             pending_opt_params_ = params.optimization;
             pending_dataset_params_ = params.dataset;
 
+            std::lock_guard<std::mutex> lock(trainer_lifetime_mutex_);
             trainer_ = std::move(trainer);
             updateResourceTracking();
 
@@ -117,6 +119,7 @@ namespace lfs::vis {
             pending_opt_params_ = params.optimization;
             pending_dataset_params_ = params.dataset;
 
+            std::lock_guard<std::mutex> lock(trainer_lifetime_mutex_);
             trainer_ = std::move(trainer);
             updateResourceTracking();
             internal::TrainerReady{}.emit();
@@ -154,7 +157,10 @@ namespace lfs::vis {
         }
 
         // Destroy trainer - destructor handles cleanup
-        trainer_.reset();
+        {
+            std::lock_guard<std::mutex> lock(trainer_lifetime_mutex_);
+            trainer_.reset();
+        }
 
         // Transition to Idle
         updateResourceTracking();
@@ -416,7 +422,7 @@ namespace lfs::vis {
     int TrainerManager::getTotalIterations() const {
         if (!trainer_)
             return 0;
-        return static_cast<int>(trainer_->getParams().optimization.iterations);
+        return trainer_->get_total_iterations();
     }
 
     int TrainerManager::getNumSplats() const {
@@ -623,6 +629,28 @@ namespace lfs::vis {
             return scene_->getAllCameras();
         }
         return {};
+    }
+
+    std::expected<lfs::training::Trainer::CameraMetricsSnapshot, std::string>
+    TrainerManager::computeCameraMetricsForCameraId(
+        const int camera_id,
+        const bool include_ssim,
+        const lfs::training::Trainer::CameraMetricsAppearanceConfig& appearance) const {
+        std::lock_guard<std::mutex> lock(trainer_lifetime_mutex_);
+
+        if (!trainer_) {
+            return std::unexpected("trainer unavailable");
+        }
+        if (!scene_) {
+            return std::unexpected("scene unavailable");
+        }
+
+        const auto cam = scene_->getCameraByUid(camera_id);
+        if (!cam) {
+            return std::unexpected(std::format("camera {} not found", camera_id));
+        }
+
+        return trainer_->computeCameraMetrics(*cam, include_ssim, appearance);
     }
 
     void TrainerManager::applyPendingParams() {

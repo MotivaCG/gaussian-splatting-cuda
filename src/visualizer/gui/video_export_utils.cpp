@@ -5,7 +5,10 @@
 #include "gui/video_export_utils.hpp"
 #include "rendering/render_constants.hpp"
 #include "scene/scene_manager.hpp"
+#include "training/training_manager.hpp"
 #include <format>
+#include <optional>
+#include <shared_mutex>
 
 namespace lfs::vis::gui {
 
@@ -68,37 +71,15 @@ namespace lfs::vis::gui {
             return std::make_shared<lfs::core::Tensor>(tensor->clone());
         }
 
-        std::vector<glm::mat4> collectVisibleSplatTransforms(const lfs::core::Scene& scene) {
-            std::vector<glm::mat4> transforms;
-            const auto nodes = scene.getNodes();
-            transforms.reserve(nodes.size());
-            for (const auto* node : nodes) {
-                if (!node || node->type != lfs::core::NodeType::SPLAT || !node->model)
-                    continue;
-                if (!scene.isNodeEffectivelyVisible(node->id))
-                    continue;
-                transforms.push_back(scene.getWorldTransform(node->id));
+        [[nodiscard]] std::optional<std::shared_lock<std::shared_mutex>> acquireLiveModelRenderLock(
+            const lfs::vis::SceneManager& scene_manager) {
+            std::optional<std::shared_lock<std::shared_mutex>> lock;
+            if (const auto* tm = scene_manager.getTrainerManager()) {
+                if (const auto* trainer = tm->getTrainer()) {
+                    lock.emplace(trainer->getRenderMutex());
+                }
             }
-            return transforms;
-        }
-
-        glm::mat4 collectPointCloudTransform(const lfs::core::Scene& scene,
-                                             const lfs::core::PointCloud* point_cloud) {
-            if (!point_cloud) {
-                return glm::mat4(1.0f);
-            }
-
-            for (const auto* node : scene.getNodes()) {
-                if (!node || node->type != lfs::core::NodeType::POINTCLOUD || !node->point_cloud)
-                    continue;
-                if (node->point_cloud.get() != point_cloud)
-                    continue;
-                if (!scene.isNodeEffectivelyVisible(node->id))
-                    continue;
-                return scene.getWorldTransform(node->id);
-            }
-
-            return glm::mat4(1.0f);
+            return lock;
         }
 
     } // namespace
@@ -107,20 +88,21 @@ namespace lfs::vis::gui {
         const lfs::vis::SceneManager& scene_manager) {
         VideoExportSceneSnapshot snapshot;
 
+        auto render_lock = acquireLiveModelRenderLock(scene_manager);
         const auto render_state = scene_manager.buildRenderState();
         const auto& scene = scene_manager.getScene();
 
         if (const auto* const model = scene_manager.getModelForRendering();
             model && model->size() > 0) {
             snapshot.combined_model = std::shared_ptr<lfs::core::SplatData>(cloneSplatData(*model).release());
-            snapshot.model_transforms = collectVisibleSplatTransforms(scene);
+            snapshot.model_transforms = render_state.model_transforms;
             snapshot.transform_indices = cloneOptionalTensor(render_state.transform_indices);
             snapshot.selection_mask = cloneOptionalTensor(render_state.selection_mask);
             snapshot.selected_node_mask = render_state.selected_node_mask;
             snapshot.node_visibility_mask = render_state.node_visibility_mask;
         } else if (render_state.point_cloud && render_state.point_cloud->size() > 0) {
             snapshot.point_cloud = clonePointCloud(*render_state.point_cloud);
-            snapshot.point_cloud_transform = collectPointCloudTransform(scene, render_state.point_cloud);
+            snapshot.point_cloud_transform = render_state.point_cloud_transform;
         }
 
         snapshot.meshes.reserve(render_state.meshes.size());
@@ -148,9 +130,8 @@ namespace lfs::vis::gui {
         }
         snapshot.selected_cropbox_index = render_state.selected_cropbox_index;
 
-        const auto visible_ellipsoids = scene.getVisibleEllipsoids();
         const lfs::core::NodeId active_ellipsoid_id = scene_manager.getActiveSelectionEllipsoidId();
-        for (const auto& el : visible_ellipsoids) {
+        for (const auto& el : render_state.ellipsoids) {
             if (!el.data)
                 continue;
             if (active_ellipsoid_id != lfs::core::NULL_NODE && el.node_id != active_ellipsoid_id)
@@ -165,7 +146,7 @@ namespace lfs::vis::gui {
         }
 
         if (!snapshot.active_ellipsoid && active_ellipsoid_id == lfs::core::NULL_NODE) {
-            for (const auto& el : visible_ellipsoids) {
+            for (const auto& el : render_state.ellipsoids) {
                 if (!el.data)
                     continue;
                 snapshot.active_ellipsoid = VideoExportEllipsoidSnapshot{

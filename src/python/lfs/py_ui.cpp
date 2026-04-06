@@ -427,7 +427,7 @@ namespace lfs::python {
                 }
             }
 
-            std::filesystem::path icon_path = std::filesystem::path(plugin_path) / "icons" / (icon_name + ".png");
+            std::filesystem::path icon_path = lfs::core::utf8_to_path(plugin_path) / "icons" / (icon_name + ".png");
 
             if (!std::filesystem::exists(icon_path)) {
                 icon_path = lfs::vis::getAssetPath("icon/" + icon_name + ".png");
@@ -2040,27 +2040,27 @@ namespace lfs::python {
     // Sliders
     std::tuple<bool, float> PyUILayout::slider_float(const std::string& label, float value, float min, float max) {
         float v = value;
-        bool changed = ImGui::SliderFloat(label.c_str(), &v, min, max);
+        bool changed = lfs::vis::gui::widgets::SliderFloat(label.c_str(), &v, min, max);
         return {changed, v};
     }
 
     std::tuple<bool, int> PyUILayout::slider_int(const std::string& label, int value, int min, int max) {
         int v = value;
-        bool changed = ImGui::SliderInt(label.c_str(), &v, min, max);
+        bool changed = lfs::vis::gui::widgets::SliderInt(label.c_str(), &v, min, max);
         return {changed, v};
     }
 
     std::tuple<bool, std::tuple<float, float>> PyUILayout::slider_float2(
         const std::string& label, std::tuple<float, float> value, float min, float max) {
         float v[2] = {std::get<0>(value), std::get<1>(value)};
-        bool changed = ImGui::SliderFloat2(label.c_str(), v, min, max);
+        bool changed = lfs::vis::gui::widgets::SliderFloat2(label.c_str(), v, min, max);
         return {changed, {v[0], v[1]}};
     }
 
     std::tuple<bool, std::tuple<float, float, float>> PyUILayout::slider_float3(
         const std::string& label, std::tuple<float, float, float> value, float min, float max) {
         float v[3] = {std::get<0>(value), std::get<1>(value), std::get<2>(value)};
-        bool changed = ImGui::SliderFloat3(label.c_str(), v, min, max);
+        bool changed = lfs::vis::gui::widgets::SliderFloat3(label.c_str(), v, min, max);
         return {changed, {v[0], v[1], v[2]}};
     }
 
@@ -2068,14 +2068,14 @@ namespace lfs::python {
     std::tuple<bool, float> PyUILayout::drag_float(const std::string& label, float value,
                                                    float speed, float min, float max) {
         float v = value;
-        bool changed = ImGui::DragFloat(label.c_str(), &v, speed, min, max);
+        bool changed = vis::gui::widgets::DragFloat(label.c_str(), &v, speed, min, max);
         return {changed, v};
     }
 
     std::tuple<bool, int> PyUILayout::drag_int(const std::string& label, int value,
                                                float speed, int min, int max) {
         int v = value;
-        bool changed = ImGui::DragInt(label.c_str(), &v, speed, min, max);
+        bool changed = vis::gui::widgets::DragInt(label.c_str(), &v, speed, min, max);
         return {changed, v};
     }
 
@@ -2084,7 +2084,7 @@ namespace lfs::python {
         char buffer[INPUT_TEXT_BUFFER_SIZE];
         std::strncpy(buffer, value.c_str(), sizeof(buffer) - 1);
         buffer[sizeof(buffer) - 1] = '\0';
-        bool changed = ImGui::InputText(label.c_str(), buffer, sizeof(buffer));
+        bool changed = vis::gui::widgets::InputText(label.c_str(), buffer, sizeof(buffer));
         return {changed, std::string(buffer)};
     }
 
@@ -2093,20 +2093,20 @@ namespace lfs::python {
         char buffer[INPUT_TEXT_BUFFER_SIZE];
         std::strncpy(buffer, value.c_str(), sizeof(buffer) - 1);
         buffer[sizeof(buffer) - 1] = '\0';
-        bool changed = ImGui::InputTextWithHint(label.c_str(), hint.c_str(), buffer, sizeof(buffer));
+        bool changed = vis::gui::widgets::InputTextWithHint(label.c_str(), hint.c_str(), buffer, sizeof(buffer));
         return {changed, std::string(buffer)};
     }
 
     std::tuple<bool, float> PyUILayout::input_float(const std::string& label, float value, float step, float step_fast,
                                                     const std::string& format) {
         float v = value;
-        const bool changed = ImGui::InputFloat(label.c_str(), &v, step, step_fast, format.c_str());
+        const bool changed = vis::gui::widgets::InputFloat(label.c_str(), &v, step, step_fast, format.c_str());
         return {changed, v};
     }
 
     std::tuple<bool, int> PyUILayout::input_int(const std::string& label, int value, int step, int step_fast) {
         int v = value;
-        const bool changed = ImGui::InputInt(label.c_str(), &v, step, step_fast);
+        const bool changed = vis::gui::widgets::InputInt(label.c_str(), &v, step, step_fast);
         return {changed, v};
     }
 
@@ -2139,7 +2139,7 @@ namespace lfs::python {
 
         const float input_width = std::max(avail - buttons_total - spacing, 60.0f);
         ImGui::SetNextItemWidth(input_width);
-        if (ImGui::InputFloat("##val", &v, 0.0f, 0.0f, "%.3f")) {
+        if (vis::gui::widgets::InputFloat("##val", &v, 0.0f, 0.0f, "%.3f")) {
             changed = true;
         }
 
@@ -2188,7 +2188,7 @@ namespace lfs::python {
         const float input_width = available - button_width - ImGui::GetStyle().ItemSpacing.x;
 
         ImGui::SetNextItemWidth(input_width);
-        bool changed = ImGui::InputText(label.c_str(), buffer, sizeof(buffer));
+        bool changed = vis::gui::widgets::InputText(label.c_str(), buffer, sizeof(buffer));
 
         ImGui::SameLine();
         const std::string btn_id = "...##" + label + "_browse";
@@ -2510,8 +2510,9 @@ namespace lfs::python {
         char buffer[256];
         std::strncpy(buffer, value.c_str(), sizeof(buffer) - 1);
         buffer[sizeof(buffer) - 1] = '\0';
-        const bool entered = ImGui::InputText(label.c_str(), buffer, sizeof(buffer),
-                                              ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+        const bool entered = vis::gui::widgets::InputText(
+            label.c_str(), buffer, sizeof(buffer),
+            ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
         return {entered, std::string(buffer)};
     }
 
@@ -3101,7 +3102,7 @@ namespace lfs::python {
                 if (subtype == "COLOR" || subtype == "COLOR_GAMMA") {
                     changed = ImGui::ColorEdit3(display_name.c_str(), v);
                 } else {
-                    changed = ImGui::DragFloat3(display_name.c_str(), v, 0.01f);
+                    changed = vis::gui::widgets::DragFloat3(display_name.c_str(), v, 0.01f);
                 }
                 new_value = nb::make_tuple(v[0], v[1], v[2]);
             } else if (size == 4) {
@@ -3110,12 +3111,12 @@ namespace lfs::python {
                 if (subtype == "COLOR" || subtype == "COLOR_GAMMA") {
                     changed = ImGui::ColorEdit4(display_name.c_str(), v);
                 } else {
-                    changed = ImGui::DragFloat4(display_name.c_str(), v, 0.01f);
+                    changed = vis::gui::widgets::DragFloat4(display_name.c_str(), v, 0.01f);
                 }
                 new_value = nb::make_tuple(v[0], v[1], v[2], v[3]);
             } else if (size == 2) {
                 float v[2] = {nb::cast<float>(t[0]), nb::cast<float>(t[1])};
-                changed = ImGui::DragFloat2(display_name.c_str(), v, 0.01f);
+                changed = vis::gui::widgets::DragFloat2(display_name.c_str(), v, 0.01f);
                 new_value = nb::make_tuple(v[0], v[1]);
             }
         } else if (prop_type == "IntVectorProperty") {
@@ -3124,16 +3125,16 @@ namespace lfs::python {
 
             if (size == 3) {
                 int v[3] = {nb::cast<int>(t[0]), nb::cast<int>(t[1]), nb::cast<int>(t[2])};
-                changed = ImGui::DragInt3(display_name.c_str(), v);
+                changed = vis::gui::widgets::DragInt3(display_name.c_str(), v);
                 new_value = nb::make_tuple(v[0], v[1], v[2]);
             } else if (size == 4) {
                 int v[4] = {nb::cast<int>(t[0]), nb::cast<int>(t[1]),
                             nb::cast<int>(t[2]), nb::cast<int>(t[3])};
-                changed = ImGui::DragInt4(display_name.c_str(), v);
+                changed = vis::gui::widgets::DragInt4(display_name.c_str(), v);
                 new_value = nb::make_tuple(v[0], v[1], v[2], v[3]);
             } else if (size == 2) {
                 int v[2] = {nb::cast<int>(t[0]), nb::cast<int>(t[1])};
-                changed = ImGui::DragInt2(display_name.c_str(), v);
+                changed = vis::gui::widgets::DragInt2(display_name.c_str(), v);
                 new_value = nb::make_tuple(v[0], v[1]);
             }
         } else if (prop_type == "TensorProperty") {
@@ -4346,7 +4347,7 @@ namespace lfs::python {
             "load_image_texture",
             [](const std::string& path) -> nb::tuple {
                 try {
-                    auto [data, w, h, channels] = lfs::core::load_image(std::filesystem::path(path), -1, -1);
+                    auto [data, w, h, channels] = lfs::core::load_image(lfs::core::utf8_to_path(path), -1, -1);
                     if (!data)
                         return nb::make_tuple(0, 0, 0);
 
@@ -4364,7 +4365,7 @@ namespace lfs::python {
             "load_thumbnail",
             [](const std::string& path, int max_size) -> nb::tuple {
                 try {
-                    auto [data, w, h, channels] = lfs::core::load_image(std::filesystem::path(path), -1, max_size);
+                    auto [data, w, h, channels] = lfs::core::load_image(lfs::core::utf8_to_path(path), -1, max_size);
                     if (!data)
                         return nb::make_tuple(0, 0, 0);
 
@@ -4389,7 +4390,7 @@ namespace lfs::python {
         m.def(
             "get_image_info",
             [](const std::string& path) -> nb::tuple {
-                auto [w, h, c] = lfs::core::get_image_info(std::filesystem::path(path));
+                auto [w, h, c] = lfs::core::get_image_info(lfs::core::utf8_to_path(path));
                 return nb::make_tuple(w, h, c);
             },
             nb::arg("path"), "Get image dimensions without loading pixel data, returns (width, height, channels)");
@@ -4403,7 +4404,7 @@ namespace lfs::python {
 
                 auto entry = std::make_unique<PreloadEntry>();
                 entry->future = std::async(std::launch::async, [path_copy = path]() {
-                    return lfs::core::load_image(std::filesystem::path(path_copy), -1, -1);
+                    return lfs::core::load_image(lfs::core::utf8_to_path(path_copy), -1, -1);
                 });
                 g_preload_cache[path] = std::move(entry);
             },
@@ -4661,7 +4662,13 @@ namespace lfs::python {
             "register_file_associations", []() -> bool {
                 return lfs::vis::gui::registerFileAssociations();
             },
-            "Register LichtFeld Studio as default handler for .ply, .sog, .spz, .usd, .usda, .usdc, .usdz files (Windows only)");
+            "Register LichtFeld Studio as a supported handler for .ply, .sog, .spz, .usd, .usda, .usdc, .usdz files (Windows only)");
+
+        m.def(
+            "open_file_association_settings", []() -> bool {
+                return lfs::vis::gui::openFileAssociationSettings();
+            },
+            "Open the Windows Default Apps UI for LichtFeld Studio file associations (Windows only)");
 
         m.def(
             "unregister_file_associations", []() -> bool {
@@ -5173,10 +5180,11 @@ namespace lfs::python {
                 switch (rm->getSettings().split_view_mode) {
                 case vis::SplitViewMode::GTComparison: return "gt_comparison";
                 case vis::SplitViewMode::PLYComparison: return "ply_comparison";
+                case vis::SplitViewMode::IndependentDual: return "independent_dual";
                 default: return "none";
                 }
             },
-            "Get split view mode (none, gt_comparison, ply_comparison)");
+            "Get split view mode (none, gt_comparison, ply_comparison, independent_dual)");
 
         m.def(
             "get_speed_overlay", []() -> std::tuple<float, float, float, float> {

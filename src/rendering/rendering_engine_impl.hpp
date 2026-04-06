@@ -40,6 +40,10 @@ namespace lfs::rendering {
             const lfs::core::SplatData& splat_data,
             const ViewportRenderRequest& request) override;
 
+        Result<DualGaussianImageResult> renderGaussiansImagePair(
+            const lfs::core::SplatData& splat_data,
+            const std::array<ViewportRenderRequest, 2>& requests) override;
+
         Result<std::optional<int>> queryHoveredGaussianId(
             const lfs::core::SplatData& splat_data,
             const HoveredGaussianQueryRequest& request) override;
@@ -95,6 +99,10 @@ namespace lfs::rendering {
             const glm::ivec2& viewport_pos,
             const glm::ivec2& viewport_size) override;
 
+        Result<void> renderScreenSpaceVignette(
+            const glm::ivec2& viewport_size,
+            ScreenSpaceVignette vignette) override;
+
         Result<void> renderGrid(
             const ViewportData& viewport,
             GridPlane plane,
@@ -145,12 +153,16 @@ namespace lfs::rendering {
             const CameraFrustumPickRequest& request) override;
 
         void clearFrustumCache() override;
-        void setFrustumImageLoader(std::shared_ptr<lfs::io::PipelinedImageLoader> loader) override;
+        void setFrustumImageLoader(std::shared_ptr<lfs::io::PipelinedImageLoader> loader,
+                                   bool allow_fallback) override;
 
     private:
         Result<RenderingPipeline::ImageRenderResult> renderGaussiansRasterResult(
             const lfs::core::SplatData& splat_data,
             const ViewportRenderRequest& request);
+        Result<RenderingPipeline::DualImageRenderResult> renderGaussiansRasterResultPair(
+            const lfs::core::SplatData& splat_data,
+            const std::array<ViewportRenderRequest, 2>& requests);
         [[nodiscard]] static FrameMetadata makeFrameMetadata(const RenderingPipeline::ImageRenderResult& result);
         Result<GpuFrame> uploadRenderResultToGpuFrame(
             const RenderingPipeline::ImageRenderResult& result,
@@ -183,6 +195,7 @@ namespace lfs::rendering {
         bool mesh_rendered_this_frame_ = false;
 
         ManagedShader quad_shader_;
+        ManagedShader vignette_shader_;
 
         // Cache the last uploaded frame payload to avoid redundant CUDA->GL uploads
         // when presenting the exact same render result repeatedly (idle cached frames).

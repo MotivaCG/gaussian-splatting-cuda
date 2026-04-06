@@ -6,13 +6,16 @@
 #include "core/logger.hpp"
 #include "core/services.hpp"
 #include "gui/gui_manager.hpp"
+#include "internal/viewport.hpp"
 #include "operation/undo_entry.hpp"
 #include "operation/undo_history.hpp"
+#include "rendering/coordinate_conventions.hpp"
 #include "rendering/rasterizer/rasterization/include/forward.h"
 #include "rendering/rasterizer/rasterization/include/rasterization_api_tensor.h"
 #include "rendering/rendering_manager.hpp"
 #include "scene/scene_manager.hpp"
 #include "selection_group_mask.hpp"
+#include "training/training_manager.hpp"
 #include "visualizer_impl.hpp"
 #include <algorithm>
 #include <array>
@@ -22,6 +25,8 @@
 #include <glm/geometric.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/trigonometric.hpp>
+#include <optional>
+#include <shared_mutex>
 
 namespace lfs::vis {
 
@@ -93,15 +98,19 @@ namespace lfs::vis {
                                                core::Device::CPU,
                                                core::DataType::Float32);
             auto* data = polygon.ptr<float>();
-            const glm::mat4 vp = viewport.getProjectionMatrix(focal_mm) * viewport.getViewMatrix();
+            const glm::ivec2 render_size(render_width, render_height);
             for (size_t i = 0; i < world_points.size(); ++i) {
-                const glm::vec4 clip = vp * glm::vec4(world_points[i], 1.0f);
-                if (clip.w <= 0.0f) {
+                const auto projected = rendering::projectWorldPoint(
+                    viewport.camera.R,
+                    viewport.camera.t,
+                    render_size,
+                    world_points[i],
+                    focal_mm);
+                if (!projected) {
                     return std::nullopt;
                 }
-                const glm::vec3 ndc = glm::vec3(clip) / clip.w;
-                data[i * 2] = (ndc.x * 0.5f + 0.5f) * static_cast<float>(render_width);
-                data[i * 2 + 1] = (1.0f - (ndc.y * 0.5f + 0.5f)) * static_cast<float>(render_height);
+                data[i * 2] = projected->x;
+                data[i * 2 + 1] = projected->y;
             }
             return polygon;
         }
@@ -112,6 +121,17 @@ namespace lfs::vis {
             }
             const auto bool_mask = (mask.dtype() == core::DataType::Bool) ? mask : mask.to(core::DataType::Bool);
             return static_cast<size_t>(bool_mask.sum_scalar());
+        }
+
+        [[nodiscard]] std::optional<std::shared_lock<std::shared_mutex>> acquireLiveModelRenderLock(
+            const SceneManager* const scene_manager) {
+            std::optional<std::shared_lock<std::shared_mutex>> lock;
+            if (const auto* tm = scene_manager ? scene_manager->getTrainerManager() : nullptr) {
+                if (const auto* trainer = tm->getTrainer()) {
+                    lock.emplace(trainer->getRenderMutex());
+                }
+            }
+            return lock;
         }
 
         [[nodiscard]] float distanceSquaredToSegment(const glm::vec2 point,
@@ -169,24 +189,47 @@ namespace lfs::vis {
             const float* const rotation = rotation_cpu.ptr<float>();
             const float* const position = position_cpu.ptr<float>();
 
-            glm::mat3 view_rotation(1.0f);
-            for (int row = 0; row < 3; ++row) {
-                for (int col = 0; col < 3; ++col) {
-                    view_rotation[col][row] = rotation[row * 3 + col];
+            glm::mat4 scene_transform(1.0f);
+            if (auto* const scene_manager = services().sceneOrNull()) {
+                if (const auto transform =
+                        scene_manager->getScene().getCameraSceneTransformByUid(camera.uid())) {
+                    scene_transform = rendering::dataWorldTransformToVisualizerWorld(*transform);
                 }
             }
+
+            const auto pose = rendering::visualizerCameraPoseFromDataCameraToWorld(
+                glm::transpose(rendering::mat3FromRowMajor3x3(rotation)),
+                glm::vec3(position[0], position[1], position[2]),
+                scene_transform);
 
             const int width = std::max(camera.image_width(), camera.camera_width());
             const int height = std::max(camera.image_height(), camera.camera_height());
 
             return rendering::ViewportData{
-                .rotation = view_rotation,
-                .translation = glm::vec3(position[0], position[1], position[2]),
+                .rotation = pose.rotation,
+                .translation = pose.translation,
                 .size = glm::ivec2(width, height),
                 .focal_length_mm = rendering::vFovToFocalLength(glm::degrees(camera.FoVy())),
                 .orthographic = false,
                 .ortho_scale = 1.0f,
             };
+        }
+
+        [[nodiscard]] core::Tensor uploadModelTransformsToCuda(const std::vector<glm::mat4>& model_transforms) {
+            std::vector<float> transform_data(model_transforms.size() * 16);
+            for (size_t i = 0; i < model_transforms.size(); ++i) {
+                const auto& transform = model_transforms[i];
+                for (int row = 0; row < 4; ++row) {
+                    for (int col = 0; col < 4; ++col) {
+                        transform_data[i * 16 + row * 4 + col] = transform[col][row];
+                    }
+                }
+            }
+            return core::Tensor::from_vector(
+                       transform_data,
+                       {model_transforms.size(), size_t{4}, size_t{4}},
+                       core::Device::CPU)
+                .cuda();
         }
 
         [[nodiscard]] rendering::ViewportData viewportDataFromViewer(
@@ -211,6 +254,7 @@ namespace lfs::vis {
                 .translation = viewport.translation,
                 .size = viewport.size,
                 .focal_length_mm = viewport.focal_length_mm,
+                .intrinsics_override = std::nullopt,
                 .far_plane = far_plane,
                 .orthographic = viewport.orthographic,
                 .ortho_scale = viewport.ortho_scale,
@@ -327,6 +371,57 @@ namespace lfs::vis {
         return commitSelection(selection, mode, effectiveNodeMask(true), filters, "selection.ring");
     }
 
+    SelectionResult SelectionService::selectAllFiltered() {
+        if (!scene_manager_ || !rendering_manager_) {
+            return {false, 0, "Missing managers"};
+        }
+
+        const size_t total = scene_manager_->getScene().getTotalGaussianCount();
+        if (total == 0) {
+            return {true, 0, {}};
+        }
+
+        const auto filters = defaultFilterState();
+        auto selection = core::Tensor::ones({total}, core::Device::CUDA, core::DataType::Bool);
+        return commitSelection(selection,
+                               SelectionMode::Replace,
+                               effectiveNodeMask(filters.restrict_to_selected_nodes),
+                               filters,
+                               "selection.all.filtered");
+    }
+
+    SelectionResult SelectionService::invertFiltered() {
+        if (!scene_manager_ || !rendering_manager_) {
+            return {false, 0, "Missing managers"};
+        }
+
+        const size_t total = scene_manager_->getScene().getTotalGaussianCount();
+        if (total == 0) {
+            return {true, 0, {}};
+        }
+
+        const auto filters = defaultFilterState();
+        const auto node_mask = effectiveNodeMask(filters.restrict_to_selected_nodes);
+        auto filter_mask = core::Tensor::ones({total}, core::Device::CUDA, core::DataType::Bool);
+        applyFilters(filter_mask, filters, node_mask);
+
+        const auto& scene = scene_manager_->getScene();
+        const uint8_t group_id = scene.getActiveSelectionGroup();
+        const auto existing_mask = scene.getSelectionMask();
+        const auto current_active = (existing_mask && existing_mask->is_valid())
+                                        ? existing_mask->eq(group_id)
+                                        : core::Tensor::zeros({total}, core::Device::CUDA, core::DataType::Bool);
+        const auto any_selected = (existing_mask && existing_mask->is_valid())
+                                      ? existing_mask->gt(0.0f)
+                                      : core::Tensor::zeros({total}, core::Device::CUDA, core::DataType::Bool);
+        const auto other_selected = any_selected.logical_and(current_active.logical_not());
+        const auto toggle_mask = filter_mask.logical_and(other_selected.logical_not());
+        const auto inverted = current_active.logical_xor(toggle_mask);
+
+        return commitSelection(
+            inverted, SelectionMode::Replace, {}, SelectionFilterState{}, "selection.invert.filtered");
+    }
+
     SelectionResult SelectionService::applyMask(const std::vector<uint8_t>& mask, SelectionMode mode) {
         if (!scene_manager_) {
             return {false, 0, "Missing scene manager"};
@@ -436,17 +531,23 @@ namespace lfs::vis {
             return nullptr;
         }
 
+        const auto context = resolveViewerViewportContext();
+        if (!context || !context->info.valid()) {
+            return nullptr;
+        }
+
+        const size_t panel_index = splitViewPanelIndex(context->panel);
         const uint64_t generation = rendering_manager_->getViewportArtifactGeneration();
-        if (viewport_screen_positions_generation_ == generation) {
-            return (viewport_screen_positions_ && viewport_screen_positions_->is_valid())
-                       ? viewport_screen_positions_
+        if (viewport_screen_positions_generation_[panel_index] == generation) {
+            return (viewport_screen_positions_[panel_index] && viewport_screen_positions_[panel_index]->is_valid())
+                       ? viewport_screen_positions_[panel_index]
                        : nullptr;
         }
 
-        viewport_screen_positions_ = renderScreenPositionsForCurrentViewport();
-        viewport_screen_positions_generation_ = generation;
-        return (viewport_screen_positions_ && viewport_screen_positions_->is_valid())
-                   ? viewport_screen_positions_
+        viewport_screen_positions_[panel_index] = getScreenPositionsForContext(*context);
+        viewport_screen_positions_generation_[panel_index] = generation;
+        return (viewport_screen_positions_[panel_index] && viewport_screen_positions_[panel_index]->is_valid())
+                   ? viewport_screen_positions_[panel_index]
                    : nullptr;
     }
 
@@ -479,8 +580,77 @@ namespace lfs::vis {
         testing_camera_screen_positions_.clear();
         testing_viewport_.reset();
         testing_hovered_gaussian_id_.reset();
-        viewport_screen_positions_.reset();
-        viewport_screen_positions_generation_ = 0;
+        viewport_screen_positions_.fill(nullptr);
+        viewport_screen_positions_generation_.fill(0);
+    }
+
+    std::optional<SelectionService::ViewerViewportContext> SelectionService::resolveViewerViewportContext(
+        const std::optional<glm::vec2> screen_point,
+        const std::optional<SplitViewPanelId> panel_override) const {
+        ViewerViewportContext context;
+        context.panel = panel_override.value_or(SplitViewPanelId::Left);
+
+        if (testing_viewport_ && testing_viewport_->valid()) {
+            static Viewport testing_viewport_source(1, 1);
+            context.info = *testing_viewport_;
+            context.viewport = &testing_viewport_source;
+            return context;
+        }
+
+        auto* const gm = services().guiOrNull();
+        if (!rendering_manager_ || !gm || !gm->getViewer()) {
+            return std::nullopt;
+        }
+
+        const auto viewport_pos = gm->getViewportPos();
+        const auto viewport_size = gm->getViewportSize();
+        const auto panel = rendering_manager_->resolveViewerPanel(
+            gm->getViewer()->getViewport(),
+            {viewport_pos.x, viewport_pos.y},
+            {viewport_size.x, viewport_size.y},
+            screen_point,
+            panel_override);
+        if (!panel) {
+            return std::nullopt;
+        }
+
+        context.panel = panel->panel;
+        context.info = ViewportInfo{
+            .x = panel->x,
+            .y = panel->y,
+            .width = panel->width,
+            .height = panel->height,
+            .render_width = panel->render_width,
+            .render_height = panel->render_height,
+        };
+        context.viewport = panel->viewport;
+        return context.info.valid() ? std::optional<ViewerViewportContext>(context) : std::nullopt;
+    }
+
+    std::shared_ptr<core::Tensor> SelectionService::getScreenPositionsForContext(
+        const ViewerViewportContext& context) const {
+        if (testing_screen_positions_ && testing_screen_positions_->is_valid()) {
+            return testing_screen_positions_;
+        }
+        if (!context.info.valid()) {
+            return nullptr;
+        }
+
+        const size_t panel_index = splitViewPanelIndex(context.panel);
+        const uint64_t generation = rendering_manager_ ? rendering_manager_->getViewportArtifactGeneration() : 0;
+        if (rendering_manager_ &&
+            viewport_screen_positions_generation_[panel_index] == generation &&
+            viewport_screen_positions_[panel_index] &&
+            viewport_screen_positions_[panel_index]->is_valid()) {
+            return viewport_screen_positions_[panel_index];
+        }
+
+        auto screen_positions = renderScreenPositionsForViewerContext(context);
+        if (rendering_manager_) {
+            viewport_screen_positions_[panel_index] = screen_positions;
+            viewport_screen_positions_generation_[panel_index] = generation;
+        }
+        return screen_positions;
     }
 
     bool SelectionService::beginInteractiveSelection(const SelectionShape shape, const SelectionMode mode,
@@ -505,6 +675,11 @@ namespace lfs::vis {
         interactive_selection_.brush_radius = brush_radius;
         interactive_selection_.start_pos = start_pos;
         interactive_selection_.cursor_pos = start_pos;
+        interactive_selection_.viewport_context = resolveViewerViewportContext(start_pos);
+        if (!interactive_selection_.viewport_context || !interactive_selection_.viewport_context->info.valid()) {
+            interactive_selection_ = {};
+            return false;
+        }
         (void)resetBoolScratchBuffer(interactive_selection_.working_selection, total);
 
         switch (shape) {
@@ -735,10 +910,11 @@ namespace lfs::vis {
             return;
         }
 
-        const auto info = resolveViewportInfo();
-        if (!info) {
+        if (!session.viewport_context || !session.viewport_context->info.valid()) {
             return;
         }
+        const auto& context = *session.viewport_context;
+        const auto& info = context.info;
 
         rendering_manager_->clearRectPreview();
         rendering_manager_->clearPolygonPreview();
@@ -751,15 +927,17 @@ namespace lfs::vis {
         const bool add_mode = (session.mode != SelectionMode::Remove);
         switch (session.shape) {
         case SelectionShape::Brush: {
-            const auto render_cursor = screenToRender(session.cursor_pos, *info);
-            const float radius = session.brush_radius * (static_cast<float>(info->render_width) / info->width);
-            rendering_manager_->setCursorPreviewState(true, render_cursor.x, render_cursor.y, radius, add_mode, nullptr);
+            const auto render_cursor = screenToRender(session.cursor_pos, info);
+            const float radius = session.brush_radius * (static_cast<float>(info.render_width) / info.width);
+            rendering_manager_->setCursorPreviewState(
+                true, render_cursor.x, render_cursor.y, radius, add_mode, nullptr, false, 0.0f, context.panel);
             break;
         }
         case SelectionShape::Rectangle: {
-            const auto render_start = screenToRender(session.start_pos, *info);
-            const auto render_end = screenToRender(session.cursor_pos, *info);
-            rendering_manager_->setRectPreview(render_start.x, render_start.y, render_end.x, render_end.y, add_mode);
+            const auto render_start = screenToRender(session.start_pos, info);
+            const auto render_end = screenToRender(session.cursor_pos, info);
+            rendering_manager_->setRectPreview(
+                render_start.x, render_start.y, render_end.x, render_end.y, add_mode, context.panel);
             break;
         }
         case SelectionShape::Polygon: {
@@ -767,21 +945,31 @@ namespace lfs::vis {
                 rendering_manager_->setPolygonPreviewWorldSpace(
                     session.polygon_world_points,
                     shouldClosePolygonPreview(),
-                    add_mode);
+                    add_mode,
+                    context.panel);
             } else {
                 rendering_manager_->setPolygonPreview(
-                    screenPointsToRender(getPolygonPreviewPoints(), *info),
+                    screenPointsToRender(getPolygonPreviewPoints(), info),
                     shouldClosePolygonPreview(),
-                    add_mode);
+                    add_mode,
+                    context.panel);
             }
             break;
         }
         case SelectionShape::Lasso:
-            rendering_manager_->setLassoPreview(screenPointsToRender(session.points, *info), add_mode);
+            rendering_manager_->setLassoPreview(screenPointsToRender(session.points, info), add_mode, context.panel);
             break;
         case SelectionShape::Rings: {
-            const auto render_cursor = screenToRender(session.cursor_pos, *info);
-            rendering_manager_->setCursorPreviewState(true, render_cursor.x, render_cursor.y, 0.0f, add_mode, nullptr);
+            const auto render_cursor = screenToRender(session.cursor_pos, info);
+            int focused_gaussian_id = testing_hovered_gaussian_id_.value_or(-1);
+            if (focused_gaussian_id < 0) {
+                focused_gaussian_id =
+                    renderHoveredGaussianIdForViewerContext(context, session.cursor_pos, session.filters)
+                        .value_or(-1);
+            }
+            rendering_manager_->setCursorPreviewState(
+                true, render_cursor.x, render_cursor.y, 0.0f, add_mode, nullptr, false, 0.0f,
+                context.panel, focused_gaussian_id);
             break;
         }
         }
@@ -866,12 +1054,13 @@ namespace lfs::vis {
             return nullptr;
         }
 
+        auto render_lock = acquireLiveModelRenderLock(scene_manager_);
         auto cameras = scene_manager_->getScene().getAllCameras();
         if (camera_index >= static_cast<int>(cameras.size()) || !cameras[camera_index]) {
             return nullptr;
         }
 
-        auto* const engine = rendering_manager_->getRenderingEngine();
+        auto* const engine = rendering_manager_->getRenderingEngineIfInitialized();
         if (!engine || !engine->isInitialized()) {
             return nullptr;
         }
@@ -902,18 +1091,14 @@ namespace lfs::vis {
         return *screen_positions;
     }
 
-    std::shared_ptr<core::Tensor> SelectionService::renderScreenPositionsForCurrentViewport() const {
-        auto* const gm = services().guiOrNull();
-        if (!scene_manager_ || !rendering_manager_ || !gm || !gm->getViewer()) {
+    std::shared_ptr<core::Tensor> SelectionService::renderScreenPositionsForViewerContext(
+        const ViewerViewportContext& context) const {
+        if (!scene_manager_ || !rendering_manager_ || !context.viewport || !context.info.valid()) {
             return nullptr;
         }
 
-        const auto info = resolveViewportInfo();
-        if (!info) {
-            return nullptr;
-        }
-
-        auto* const engine = rendering_manager_->getRenderingEngine();
+        auto render_lock = acquireLiveModelRenderLock(scene_manager_);
+        auto* const engine = rendering_manager_->getRenderingEngineIfInitialized();
         if (!engine || !engine->isInitialized()) {
             return nullptr;
         }
@@ -924,9 +1109,11 @@ namespace lfs::vis {
         }
 
         const auto settings = rendering_manager_->getSettings();
+        Viewport projection_viewport = *context.viewport;
+        projection_viewport.windowSize = {context.info.render_width, context.info.render_height};
         rendering::ScreenPositionRenderRequest request{
             .frame_view = frameViewFromViewport(
-                viewportDataFromViewer(gm->getViewer()->getViewport(), *info, settings),
+                viewportDataFromViewer(projection_viewport, context.info, settings),
                 settings.background_color,
                 settings.depth_clip_enabled ? settings.depth_clip_far : lfs::rendering::DEFAULT_FAR_PLANE),
             .equirectangular = settings.equirectangular,
@@ -944,6 +1131,14 @@ namespace lfs::vis {
         }
 
         return *screen_positions;
+    }
+
+    std::shared_ptr<core::Tensor> SelectionService::renderScreenPositionsForCurrentViewport() const {
+        const auto context = resolveViewerViewportContext();
+        if (!context) {
+            return nullptr;
+        }
+        return renderScreenPositionsForViewerContext(*context);
     }
 
     std::optional<int> SelectionService::resolveCommandHoveredGaussianId(const float x, const float y,
@@ -978,32 +1173,40 @@ namespace lfs::vis {
         return renderHoveredGaussianId(viewportDataFromCamera(*cameras[camera_index]), {x, y}, filters);
     }
 
-    std::optional<int> SelectionService::renderHoveredGaussianIdForCurrentViewport(
-        const float x, const float y, const SelectionFilterState& filters) {
-        auto* const gm = services().guiOrNull();
-        if (!gm || !gm->getViewer() || !rendering_manager_) {
-            return std::nullopt;
-        }
-
-        const auto info = resolveViewportInfo();
-        if (!info) {
+    std::optional<int> SelectionService::renderHoveredGaussianIdForViewerContext(
+        const ViewerViewportContext& context,
+        const glm::vec2 cursor_pos,
+        const SelectionFilterState& filters) const {
+        if (!rendering_manager_ || !context.viewport || !context.info.valid()) {
             return std::nullopt;
         }
 
         const auto settings = rendering_manager_->getSettings();
+        Viewport projection_viewport = *context.viewport;
+        projection_viewport.windowSize = {context.info.render_width, context.info.render_height};
         return renderHoveredGaussianId(
-            viewportDataFromViewer(gm->getViewer()->getViewport(), *info, settings),
-            {x, y},
+            viewportDataFromViewer(projection_viewport, context.info, settings),
+            screenToRender(cursor_pos, context.info),
             filters);
+    }
+
+    std::optional<int> SelectionService::renderHoveredGaussianIdForCurrentViewport(
+        const float x, const float y, const SelectionFilterState& filters) {
+        const auto context = resolveViewerViewportContext(glm::vec2{x, y});
+        if (!context) {
+            return std::nullopt;
+        }
+        return renderHoveredGaussianIdForViewerContext(*context, {x, y}, filters);
     }
 
     std::optional<int> SelectionService::renderHoveredGaussianId(const rendering::ViewportData& viewport,
                                                                  const glm::vec2 cursor_pos,
-                                                                 const SelectionFilterState& filters) {
+                                                                 const SelectionFilterState& filters) const {
         if (!scene_manager_ || !rendering_manager_) {
             return std::nullopt;
         }
 
+        auto render_lock = acquireLiveModelRenderLock(scene_manager_);
         auto* const engine = rendering_manager_->getRenderingEngine();
         if (!engine || !engine->isInitialized()) {
             return std::nullopt;
@@ -1035,8 +1238,8 @@ namespace lfs::vis {
 
         if (filters.crop_filter) {
             const auto& scene = scene_manager_->getScene();
-            const auto& cropboxes = scene.getVisibleCropBoxes();
-            if (const auto* const cb = findRenderableByNodeId(cropboxes, scene_manager_->getActiveSelectionCropBoxId());
+            if (const auto* const cb =
+                    findRenderableByNodeId(scene_state.cropboxes, scene_manager_->getActiveSelectionCropBoxId());
                 cb && cb->data) {
                 request.filters.crop_region = rendering::GaussianScopedBoxFilter{
                     .bounds =
@@ -1047,8 +1250,8 @@ namespace lfs::vis {
                     .parent_node_index = scene.getVisibleNodeIndex(cb->parent_splat_id)};
             }
 
-            const auto& ellipsoids = scene.getVisibleEllipsoids();
-            if (const auto* const el = findRenderableByNodeId(ellipsoids, scene_manager_->getActiveSelectionEllipsoidId());
+            if (const auto* const el =
+                    findRenderableByNodeId(scene_state.ellipsoids, scene_manager_->getActiveSelectionEllipsoidId());
                 el && el->data) {
                 request.filters.ellipsoid_region = rendering::GaussianScopedEllipsoidFilter{
                     .bounds =
@@ -1099,32 +1302,11 @@ namespace lfs::vis {
     }
 
     std::optional<SelectionService::ViewportInfo> SelectionService::resolveViewportInfo() const {
-        if (testing_viewport_ && testing_viewport_->valid()) {
-            return testing_viewport_;
-        }
-
-        auto* const gm = services().guiOrNull();
-        if (!rendering_manager_ || !gm || !gm->getViewer()) {
+        const auto context = resolveViewerViewportContext();
+        if (!context || !context->info.valid()) {
             return std::nullopt;
         }
-
-        const auto pos = gm->getViewportPos();
-        const auto size = gm->getViewportSize();
-        const auto& viewport = gm->getViewer()->getViewport();
-        const glm::ivec2 rendered_size = rendering_manager_->getRenderedSize();
-
-        ViewportInfo info{
-            .x = pos.x,
-            .y = pos.y,
-            .width = size.x,
-            .height = size.y,
-            .render_width = rendered_size.x > 0 ? rendered_size.x : static_cast<int>(viewport.windowSize.x),
-            .render_height = rendered_size.y > 0 ? rendered_size.y : static_cast<int>(viewport.windowSize.y),
-        };
-        if (!info.valid()) {
-            return std::nullopt;
-        }
-        return info;
+        return context->info;
     }
 
     bool SelectionService::buildSelectionMaskForInteractiveSession(core::Tensor& selection_out,
@@ -1180,13 +1362,17 @@ namespace lfs::vis {
             return false;
         }
 
-        const auto screen_positions = getScreenPositions();
-        const auto info = resolveViewportInfo();
-        if (!screen_positions || !screen_positions->is_valid() || !info) {
+        const auto& session = interactive_selection_;
+        if (!session.viewport_context || !session.viewport_context->info.valid()) {
+            return false;
+        }
+        const auto screen_positions = getScreenPositionsForContext(*session.viewport_context);
+        const auto& info = session.viewport_context->info;
+        if (!screen_positions || !screen_positions->is_valid()) {
             return false;
         }
 
-        const float scale_x = static_cast<float>(info->render_width) / info->width;
+        const float scale_x = static_cast<float>(info.render_width) / info.width;
         const float scaled_radius = radius * scale_x;
         constexpr float STEP_FACTOR = 0.5f;
 
@@ -1202,7 +1388,7 @@ namespace lfs::vis {
             for (int step = 0; step < num_steps; ++step) {
                 const float t = (num_steps == 1) ? 1.0f : static_cast<float>(step + 1) / static_cast<float>(num_steps);
                 const glm::vec2 sample = from + delta * t;
-                const auto render = screenToRender(sample, *info);
+                const auto render = screenToRender(sample, info);
                 rendering::brush_select_tensor(*screen_positions, render.x, render.y, scaled_radius, selection_out);
             }
         }
@@ -1212,14 +1398,18 @@ namespace lfs::vis {
 
     bool SelectionService::buildRectangleSelection(const glm::vec2 start, const glm::vec2 end,
                                                    core::Tensor& selection_out) const {
-        const auto screen_positions = getScreenPositions();
-        const auto info = resolveViewportInfo();
-        if (!screen_positions || !screen_positions->is_valid() || !info) {
+        const auto& session = interactive_selection_;
+        if (!session.viewport_context || !session.viewport_context->info.valid()) {
+            return false;
+        }
+        const auto screen_positions = getScreenPositionsForContext(*session.viewport_context);
+        const auto& info = session.viewport_context->info;
+        if (!screen_positions || !screen_positions->is_valid()) {
             return false;
         }
 
-        const auto render_start = screenToRender(start, *info);
-        const auto render_end = screenToRender(end, *info);
+        const auto render_start = screenToRender(start, info);
+        const auto render_end = screenToRender(end, info);
         rendering::rect_select_tensor(*screen_positions,
                                       std::min(render_start.x, render_end.x),
                                       std::min(render_start.y, render_end.y),
@@ -1235,13 +1425,17 @@ namespace lfs::vis {
             return false;
         }
 
-        const auto screen_positions = getScreenPositions();
-        const auto info = resolveViewportInfo();
-        if (!screen_positions || !screen_positions->is_valid() || !info) {
+        const auto& session = interactive_selection_;
+        if (!session.viewport_context || !session.viewport_context->info.valid()) {
+            return false;
+        }
+        const auto screen_positions = getScreenPositionsForContext(*session.viewport_context);
+        const auto& info = session.viewport_context->info;
+        if (!screen_positions || !screen_positions->is_valid()) {
             return false;
         }
 
-        const auto& polygon = uploadRenderPointsToBuffer(points, *info,
+        const auto& polygon = uploadRenderPointsToBuffer(points, info,
                                                          polygon_vertex_host_buffer_,
                                                          polygon_vertex_device_buffer_);
         rendering::polygon_select_tensor(*screen_positions, polygon, selection_out);
@@ -1254,19 +1448,26 @@ namespace lfs::vis {
             return false;
         }
 
-        auto* const gm = services().guiOrNull();
-        const auto info = resolveViewportInfo();
-        const auto screen_positions = getScreenPositions();
-        if (!gm || !gm->getViewer() || !info || !screen_positions || !screen_positions->is_valid() ||
-            !rendering_manager_) {
+        const auto& session = interactive_selection_;
+        if (!rendering_manager_ || !session.viewport_context || !session.viewport_context->viewport ||
+            !session.viewport_context->info.valid()) {
             return false;
         }
 
+        const auto screen_positions = getScreenPositionsForContext(*session.viewport_context);
+        if (!screen_positions || !screen_positions->is_valid()) {
+            return false;
+        }
+
+        Viewport projection_viewport = *session.viewport_context->viewport;
+        projection_viewport.windowSize = {
+            session.viewport_context->info.render_width,
+            session.viewport_context->info.render_height};
         const auto polygon = projectWorldPolygonToRenderSpace(world_points,
-                                                              gm->getViewer()->getViewport(),
+                                                              projection_viewport,
                                                               rendering_manager_->getFocalLengthMm(),
-                                                              info->render_width,
-                                                              info->render_height);
+                                                              session.viewport_context->info.render_width,
+                                                              session.viewport_context->info.render_height);
         if (!polygon) {
             return false;
         }
@@ -1275,12 +1476,21 @@ namespace lfs::vis {
         return true;
     }
 
-    bool SelectionService::buildRingSelection(const glm::vec2 /*cursor_pos*/, core::Tensor& selection_out) const {
+    bool SelectionService::buildRingSelection(const glm::vec2 cursor_pos, core::Tensor& selection_out) const {
         if (!rendering_manager_) {
             return false;
         }
 
-        const int hovered_id = testing_hovered_gaussian_id_.value_or(rendering_manager_->getHoveredGaussianId());
+        const auto& session = interactive_selection_;
+        int hovered_id = testing_hovered_gaussian_id_.value_or(-1);
+        if (hovered_id < 0) {
+            if (!session.viewport_context) {
+                return false;
+            }
+            hovered_id =
+                renderHoveredGaussianIdForViewerContext(*session.viewport_context, cursor_pos, session.filters)
+                    .value_or(-1);
+        }
         if (hovered_id < 0 || static_cast<size_t>(hovered_id) >= selection_out.numel()) {
             return false;
         }
@@ -1385,56 +1595,68 @@ namespace lfs::vis {
     }
 
     std::optional<glm::vec3> SelectionService::resolveInteractivePolygonWorldPoint(const glm::vec2 screen_point) const {
-        auto* const gm = services().guiOrNull();
-        const auto info = resolveViewportInfo();
-        if (!gm || !gm->getViewer() || !info || !rendering_manager_) {
+        const auto& session = interactive_selection_;
+        if (!rendering_manager_ || !session.viewport_context || !session.viewport_context->viewport ||
+            !session.viewport_context->info.valid()) {
+            return std::nullopt;
+        }
+        const glm::ivec2 rendered_size = rendering_manager_->getRenderedSize();
+        if (rendered_size.x <= 0 || rendered_size.y <= 0) {
             return std::nullopt;
         }
 
-        const auto& viewport = gm->getViewer()->getViewport();
-        const float local_x = screen_point.x - info->x;
-        const float local_y = screen_point.y - info->y;
+        const auto& info = session.viewport_context->info;
+        Viewport projection_viewport = *session.viewport_context->viewport;
+        projection_viewport.windowSize = {info.render_width, info.render_height};
+        const auto render_point = screenToRender(screen_point, info);
         const float focal_length_mm = rendering_manager_->getFocalLengthMm();
         const float depth = rendering_manager_->getDepthAtPixel(
-            static_cast<int>(local_x), static_cast<int>(local_y));
+            static_cast<int>(render_point.x), static_cast<int>(render_point.y), session.viewport_context->panel);
 
         if (depth > 0.0f) {
-            const glm::vec3 world = viewport.unprojectPixel(local_x, local_y, depth, focal_length_mm);
+            const glm::vec3 world = projection_viewport.unprojectPixel(
+                render_point.x, render_point.y, depth, focal_length_mm);
             if (Viewport::isValidWorldPosition(world)) {
                 return world;
             }
         }
 
-        const float pivot_distance = glm::length(viewport.camera.pivot - viewport.camera.t);
+        const float pivot_distance = glm::length(projection_viewport.camera.pivot - projection_viewport.camera.t);
         const float fallback_distance = pivot_distance > 0.1f ? pivot_distance : 10.0f;
         const glm::vec3 fallback_world =
-            viewport.unprojectPixel(local_x, local_y, fallback_distance, focal_length_mm);
+            projection_viewport.unprojectPixel(render_point.x, render_point.y, fallback_distance, focal_length_mm);
         if (Viewport::isValidWorldPosition(fallback_world)) {
             return fallback_world;
         }
 
-        const glm::vec3 forward = glm::normalize(viewport.camera.R * glm::vec3(0.0f, 0.0f, 1.0f));
-        return viewport.camera.t + forward * fallback_distance;
+        const glm::vec3 forward = rendering::cameraForward(projection_viewport.camera.R);
+        return projection_viewport.camera.t + forward * fallback_distance;
     }
 
     std::optional<glm::vec2> SelectionService::projectInteractivePolygonWorldPoint(const glm::vec3 world_point) const {
-        auto* const gm = services().guiOrNull();
-        const auto info = resolveViewportInfo();
-        if (!gm || !gm->getViewer() || !info || !rendering_manager_) {
+        const auto& session = interactive_selection_;
+        if (!rendering_manager_ || !session.viewport_context || !session.viewport_context->viewport ||
+            !session.viewport_context->info.valid()) {
             return std::nullopt;
         }
 
-        const auto& viewport = gm->getViewer()->getViewport();
-        const glm::vec4 clip =
-            viewport.getProjectionMatrix(rendering_manager_->getFocalLengthMm()) *
-            viewport.getViewMatrix() * glm::vec4(world_point, 1.0f);
-        if (clip.w <= 0.0f) {
+        const auto& info = session.viewport_context->info;
+        Viewport projection_viewport = *session.viewport_context->viewport;
+        projection_viewport.windowSize = {info.render_width, info.render_height};
+        const auto projected = rendering::projectWorldPoint(
+            projection_viewport.camera.R,
+            projection_viewport.camera.t,
+            {info.render_width, info.render_height},
+            world_point,
+            rendering_manager_->getFocalLengthMm());
+        if (!projected) {
             return std::nullopt;
         }
 
-        const glm::vec3 ndc = glm::vec3(clip) / clip.w;
-        return glm::vec2(info->x + (ndc.x * 0.5f + 0.5f) * info->width,
-                         info->y + (1.0f - (ndc.y * 0.5f + 0.5f)) * info->height);
+        const float scale_x = info.width / static_cast<float>(std::max(info.render_width, 1));
+        const float scale_y = info.height / static_cast<float>(std::max(info.render_height, 1));
+        return glm::vec2(info.x + projected->x * scale_x,
+                         info.y + projected->y * scale_y);
     }
 
     bool SelectionService::shouldClosePolygonPreview() const {
@@ -1483,6 +1705,7 @@ namespace lfs::vis {
             return;
         }
 
+        auto render_lock = acquireLiveModelRenderLock(scene_manager_);
         const auto* const model = scene_manager_->getModelForRendering();
         if (!model || model->size() == 0) {
             return;
@@ -1498,9 +1721,9 @@ namespace lfs::vis {
         core::Tensor crop_max;
         bool crop_inverse = false;
 
-        const auto& scene = scene_manager_->getScene();
-        const auto& cropboxes = scene.getVisibleCropBoxes();
-        if (const auto* const cb = findRenderableByNodeId(cropboxes, scene_manager_->getActiveSelectionCropBoxId());
+        const auto render_state = scene_manager_->buildRenderState();
+        if (const auto* const cb =
+                findRenderableByNodeId(render_state.cropboxes, scene_manager_->getActiveSelectionCropBoxId());
             cb && cb->data) {
             const glm::mat4 inv_transform = glm::inverse(cb->world_transform);
             const float* const t_ptr = glm::value_ptr(inv_transform);
@@ -1514,14 +1737,33 @@ namespace lfs::vis {
         core::Tensor ellip_radii;
         bool ellipsoid_inverse = false;
 
-        const auto& ellipsoids = scene.getVisibleEllipsoids();
-        if (const auto* const el = findRenderableByNodeId(ellipsoids, scene_manager_->getActiveSelectionEllipsoidId());
+        if (const auto* const el =
+                findRenderableByNodeId(render_state.ellipsoids, scene_manager_->getActiveSelectionEllipsoidId());
             el && el->data) {
             const glm::mat4 inv_transform = glm::inverse(el->world_transform);
             const float* const t_ptr = glm::value_ptr(inv_transform);
             ellip_t = core::Tensor::from_vector(std::vector<float>(t_ptr, t_ptr + 16), {4, 4});
             ellip_radii = core::Tensor::from_vector({el->data->radii.x, el->data->radii.y, el->data->radii.z}, {3});
             ellipsoid_inverse = el->data->inverse;
+        }
+
+        core::Tensor model_transforms_cuda;
+        const core::Tensor* model_transforms_ptr = nullptr;
+        if (!render_state.model_transforms.empty()) {
+            model_transforms_cuda = uploadModelTransformsToCuda(render_state.model_transforms);
+            model_transforms_ptr = &model_transforms_cuda;
+        }
+
+        core::Tensor transform_indices_cuda;
+        const core::Tensor* transform_indices_ptr = nullptr;
+        if (render_state.transform_indices && render_state.transform_indices->is_valid() &&
+            render_state.transform_indices->numel() == means.size(0)) {
+            if (render_state.transform_indices->device() == core::Device::CUDA) {
+                transform_indices_ptr = render_state.transform_indices.get();
+            } else {
+                transform_indices_cuda = render_state.transform_indices->cuda();
+                transform_indices_ptr = &transform_indices_cuda;
+            }
         }
 
         rendering::filter_selection_by_crop(
@@ -1532,7 +1774,9 @@ namespace lfs::vis {
             crop_inverse,
             ellip_t.is_valid() ? &ellip_t : nullptr,
             ellip_radii.is_valid() ? &ellip_radii : nullptr,
-            ellipsoid_inverse);
+            ellipsoid_inverse,
+            model_transforms_ptr,
+            transform_indices_ptr);
     }
 
     void SelectionService::applyDepthFilter(core::Tensor& selection) const {
@@ -1540,6 +1784,7 @@ namespace lfs::vis {
             return;
         }
 
+        auto render_lock = acquireLiveModelRenderLock(scene_manager_);
         const auto* const model = scene_manager_->getModelForRendering();
         if (!model || model->size() == 0) {
             return;
@@ -1563,10 +1808,32 @@ namespace lfs::vis {
         const auto depth_max = core::Tensor::from_vector(
             {settings.depth_filter_max.x, settings.depth_filter_max.y, settings.depth_filter_max.z}, {3});
 
+        const auto render_state = scene_manager_->buildRenderState();
+        core::Tensor model_transforms_cuda;
+        const core::Tensor* model_transforms_ptr = nullptr;
+        if (!render_state.model_transforms.empty()) {
+            model_transforms_cuda = uploadModelTransformsToCuda(render_state.model_transforms);
+            model_transforms_ptr = &model_transforms_cuda;
+        }
+
+        core::Tensor transform_indices_cuda;
+        const core::Tensor* transform_indices_ptr = nullptr;
+        if (render_state.transform_indices && render_state.transform_indices->is_valid() &&
+            render_state.transform_indices->numel() == means.size(0)) {
+            if (render_state.transform_indices->device() == core::Device::CUDA) {
+                transform_indices_ptr = render_state.transform_indices.get();
+            } else {
+                transform_indices_cuda = render_state.transform_indices->cuda();
+                transform_indices_ptr = &transform_indices_cuda;
+            }
+        }
+
         rendering::filter_selection_by_crop(
             selection, means,
             &depth_t, &depth_min, &depth_max, false,
-            nullptr, nullptr, false);
+            nullptr, nullptr, false,
+            model_transforms_ptr,
+            transform_indices_ptr);
     }
 
     void SelectionService::clearInteractivePreviewState() {

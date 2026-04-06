@@ -126,8 +126,7 @@ namespace lfs::rendering {
             return {};
 
         const auto& positions = splat_data.get_means();
-        const auto& shs = splat_data.get_shs();
-        const auto colors = extractRGBFromSH(shs);
+        const auto colors = extractRGBFromSH(splat_data.sh0_raw());
 
         return renderInternal(positions, colors, view, projection, voxel_size, background_color,
                               model_transforms, transform_indices, equirectangular, crop_params);

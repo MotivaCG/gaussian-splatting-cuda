@@ -9,6 +9,7 @@
 #include "gui/rml_right_panel.hpp"
 #include "core/logger.hpp"
 #include "gui/panel_layout.hpp"
+#include "gui/rmlui/rml_input_utils.hpp"
 #include "gui/rmlui/rml_theme.hpp"
 #include "gui/rmlui/rmlui_manager.hpp"
 #include "gui/rmlui/rmlui_render_interface.hpp"
@@ -335,12 +336,21 @@ namespace lfs::vis::gui {
         return false;
     }
 
-    static bool hasFocusedKeyboardTarget(Rml::Element* el) {
-        return el && el->GetTagName() != "body";
-    }
-
     CursorRequest RmlRightPanel::getCursorRequest() const {
         return cursor_request_;
+    }
+
+    void RmlRightPanel::blurFocus() {
+        if (!rml_context_)
+            return;
+
+        auto* const focused = rml_context_->GetFocusElement();
+        if (!focused)
+            return;
+
+        focused->Blur();
+        wants_keyboard_ = false;
+        input_dirty_ = true;
     }
 
     bool RmlRightPanel::needsAnimationFrame() const {
@@ -370,7 +380,6 @@ namespace lfs::vis::gui {
 
         const float mx = input.mouse_x - layout.pos.x;
         const float my = input.mouse_y - layout.pos.y;
-        const bool inside_panel = mx >= 0.0f && my >= 0.0f && mx < layout.size.x && my < layout.size.y;
 
         if (mouse_moved)
             rml_context_->ProcessMouseMove(static_cast<int>(mx), static_cast<int>(my), 0);
@@ -440,7 +449,6 @@ namespace lfs::vis::gui {
                 if (input.mouse_clicked[0]) {
                     splitter_dragging_ = true;
                     input_dirty_ = true;
-                    drag_start_y_ = input.mouse_y;
                     if (splitter_el_)
                         splitter_el_->SetAttribute("class", "dragging");
                 }
@@ -462,7 +470,7 @@ namespace lfs::vis::gui {
                 focused->Blur();
         }
 
-        if (hasFocusedKeyboardTarget(rml_context_->GetFocusElement()) &&
+        if (rml_input::hasFocusedKeyboardTarget(rml_context_->GetFocusElement()) &&
             !input.viewport_keyboard_focus) {
             const int mods = sdlModsToRml(input.key_ctrl, input.key_shift,
                                           input.key_alt, input.key_super);
@@ -483,7 +491,7 @@ namespace lfs::vis::gui {
         }
 
         auto* focused = rml_context_->GetFocusElement();
-        wants_keyboard_ = hasFocusedKeyboardTarget(focused);
+        wants_keyboard_ = rml_input::hasFocusedKeyboardTarget(focused);
         wants_input_ = wants_input_ || wants_keyboard_;
     }
 

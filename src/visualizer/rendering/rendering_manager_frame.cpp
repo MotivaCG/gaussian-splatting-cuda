@@ -39,6 +39,11 @@ namespace lfs::vis {
             initialize();
         }
 
+        if (frustum_loader_dirty_.load(std::memory_order_relaxed) ||
+            frustum_loader_poll_until_ready_.load(std::memory_order_relaxed)) {
+            syncFrustumImageLoader(scene_manager);
+        }
+
         if (scene_manager && (dirty_mask_.load(std::memory_order_relaxed) & DirtyFlag::SELECTION)) {
             for (const auto& group : scene_manager->getScene().getSelectionGroups()) {
                 lfs::rendering::config::setSelectionGroupColor(
@@ -68,6 +73,7 @@ namespace lfs::vis {
         const bool resize_completed = resize_result.completed;
 
         auto render_lock = acquireLiveModelRenderLock(scene_manager);
+
         const lfs::core::SplatData* const model = scene_manager ? scene_manager->getModelForRendering() : nullptr;
         const bool has_renderable_model = hasRenderableGaussians(model);
         const auto* const visible_point_cloud =
@@ -167,9 +173,9 @@ namespace lfs::vis {
             glDisable(GL_SCISSOR_TEST);
         }
 
+        render_lock.reset();
+        queueCameraMetricsRefreshIfStale(scene_manager);
         viewport_interaction_context_.scene_manager = scene_manager;
-        viewport_interaction_context_.updatePickContext(context.viewport_region,
-                                                        viewport_interaction_context_.viewport_data);
     }
 
 } // namespace lfs::vis

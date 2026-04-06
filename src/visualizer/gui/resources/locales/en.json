@@ -124,6 +124,7 @@
     "refinement.refine_every": "  Refine Every:",
     "refinement.start_refine": "  Start Refine:",
     "refinement.stop_refine": "  Stop Refine:",
+    "refinement.grow_until_iter": "  Grow Until Iter:",
     "refinement.gradient_thr": "  Gradient Thr:",
     "refinement.reset_every": "  Reset Every:",
     "refinement.sh_upgrade_every": "  SH Upgrade Every:",
@@ -166,7 +167,8 @@
     "tooltip.tv_loss_weight": "Total variation loss for bilateral grid",
     "tooltip.refine_every": "Densification interval (iterations)",
     "tooltip.start_refine": "First densification step",
-    "tooltip.stop_refine": "Last densification step",
+    "tooltip.stop_refine": "Last refinement step. In MRNF, adding new splats stops at Grow Until Iter.",
+    "tooltip.grow_until_iter": "Last MRNF step that can add new splats",
     "tooltip.reset_every": "Opacity reset interval",
     "tooltip.sh_upgrade_every": "SH degree increase interval",
     "tooltip.init_opacity": "Initial Gaussian opacity",
@@ -438,6 +440,7 @@
     "equirectangular": "Equirectangular",
     "gut_mode": "GUT (3DGUT)",
     "mip_filter": "Mip Filter",
+    "camera_metrics": "Camera Metrics",
     "appearance_correction": "PPISP Correction",
     "ppisp_mode": "Mode",
     "ppisp_mode_manual": "Manual",
@@ -471,7 +474,11 @@
     "mesh_shadow_enabled": "Shadows",
     "mesh_shadow_resolution": "Shadow Resolution",
     "camera_frustum_scale": "Frustum Scale",
-    "voxel_size": "Voxel Size"
+    "voxel_size": "Voxel Size",
+    "theme_vignette": "Vignette",
+    "theme_vignette_intensity": "Vignette Intensity",
+    "theme_vignette_radius": "Vignette Radius",
+    "theme_vignette_softness": "Vignette Softness"
   },
   "toolbar": {
     "selection": "Selection (1)",
@@ -627,7 +634,11 @@
     "seq_export": "Export video from camera path",
     "seq_clear": "Clear all keyframes",
     "seq_interval": "Grid snap interval",
-    "seq_preview_size": "PiP preview scale"
+    "seq_preview_size": "PiP preview scale",
+    "theme_vignette": "Enable viewport edge darkening",
+    "theme_vignette_intensity": "Adjust vignette darkness (0-1)",
+    "theme_vignette_radius": "Adjust where the vignette starts (0-1)",
+    "theme_vignette_softness": "Adjust vignette edge softness (0-1)"
   },
   "exit_popup": {
     "title": "Exit Application?",
@@ -968,7 +979,13 @@
   },
   "status_bar": {
     "gt_compare": "GT Compare",
-    "camera": "Cam {cam_id}",
+    "camera": "Cam {}",
+    "ground_truth": "Ground Truth",
+    "ground_truth_excluded": "Ground Truth (Excluded from Training)",
+    "rendered": "Rendered",
+    "split_view": "Split View",
+    "primary_view": "Primary View",
+    "secondary_view": "Secondary View",
     "split": "Split:",
     "gpu": "GPU",
     "strategy_default": "Default"

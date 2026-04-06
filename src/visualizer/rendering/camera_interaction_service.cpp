@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "camera_interaction_service.hpp"
+#include "rendering/coordinate_conventions.hpp"
 #include "rendering/rendering.hpp"
 #include "scene/scene_manager.hpp"
 
@@ -36,19 +37,23 @@ namespace lfs::vis {
             return -1;
         }
 
-        glm::mat4 scene_transform(1.0f);
-        const auto transforms = scene_manager->getScene().getVisibleNodeTransforms();
-        if (!transforms.empty()) {
-            scene_transform = transforms[0];
+        const auto* panel = viewport_context.resolvePanel(mouse_pos);
+        if (!panel) {
+            return hovered_camera_id_;
+        }
+
+        auto scene_transforms = scene_manager->getScene().getVisibleCameraSceneTransforms();
+        for (auto& transform : scene_transforms) {
+            transform = lfs::rendering::dataWorldTransformToVisualizerWorld(transform);
         }
 
         const lfs::rendering::CameraFrustumPickRequest request{
             .mouse_pos = mouse_pos,
-            .viewport_pos = glm::vec2(viewport_context.viewport_region.x, viewport_context.viewport_region.y),
-            .viewport_size = glm::vec2(viewport_context.viewport_region.width, viewport_context.viewport_region.height),
-            .viewport = viewport_context.viewport_data,
+            .viewport_pos = panel->viewport_pos,
+            .viewport_size = panel->viewport_size,
+            .viewport = panel->viewport_data,
             .scale = settings.camera_frustum_scale,
-            .scene_transform = scene_transform};
+            .scene_transforms = std::move(scene_transforms)};
 
         const auto pick_result = engine->pickCameraFrustum(cameras, request);
 

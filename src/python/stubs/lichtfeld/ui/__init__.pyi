@@ -178,6 +178,19 @@ class ThemeSizes:
     @property
     def toolbar_spacing(self) -> float: ...
 
+class ThemeVignette:
+    @property
+    def enabled(self) -> bool: ...
+
+    @property
+    def intensity(self) -> float: ...
+
+    @property
+    def radius(self) -> float: ...
+
+    @property
+    def softness(self) -> float: ...
+
 class Theme:
     @property
     def name(self) -> str: ...
@@ -188,8 +201,20 @@ class Theme:
     @property
     def sizes(self) -> ThemeSizes: ...
 
+    @property
+    def vignette(self) -> ThemeVignette: ...
+
 def theme() -> Theme:
     """Get the current theme"""
+
+def set_theme_vignette_enabled(arg: bool, /) -> None:
+    """Set theme vignette enabled"""
+
+def set_theme_vignette_intensity(arg: float, /) -> None:
+    """Set theme vignette intensity"""
+
+def set_theme_vignette_style(arg0: float, arg1: float, arg2: float, /) -> None:
+    """Set vignette intensity, radius, and softness"""
 
 class PanelSpace(enum.Enum):
     SIDE_PANEL = 0
@@ -2280,7 +2305,12 @@ def is_windows_platform() -> bool:
 
 def register_file_associations() -> bool:
     """
-    Register LichtFeld Studio as default handler for .ply, .sog, .spz, .usd, .usda, .usdc, .usdz files (Windows only)
+    Register LichtFeld Studio as a supported handler for .ply, .sog, .spz, .usd, .usda, .usdc, .usdz files (Windows only)
+    """
+
+def open_file_association_settings() -> bool:
+    """
+    Open the Windows Default Apps UI for LichtFeld Studio file associations (Windows only)
     """
 
 def unregister_file_associations() -> bool:
@@ -2506,7 +2536,9 @@ def get_current_camera_id() -> int:
     """Get current camera ID for GT comparison"""
 
 def get_split_view_mode() -> str:
-    """Get split view mode (none, gt_comparison, ply_comparison)"""
+    """
+    Get split view mode (none, gt_comparison, ply_comparison, independent_dual)
+    """
 
 def get_speed_overlay() -> tuple[float, float, float, float]:
     """

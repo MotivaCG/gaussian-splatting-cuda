@@ -153,31 +153,39 @@ namespace lfs::io {
             }
         }
 
-        // Validation only mode
-        if (options.validate_only) {
+        try {
             if (options.progress) {
-                options.progress(100.0f, "COLMAP validation complete");
+                options.progress(10.0f, "Validating COLMAP dataset layout...");
             }
 
-            LOG_DEBUG("COLMAP validation successful");
+            if (auto validation_result = validate_colmap_dataset_layout(path, actual_images_folder); !validation_result) {
+                return std::unexpected(validation_result.error());
+            }
 
-            auto end_time = std::chrono::high_resolution_clock::now();
-            return LoadResult{
-                .data = LoadedScene{
-                    .cameras = {},
-                    .point_cloud = nullptr},
-                .scene_center = Tensor::zeros({3}, Device::CPU),
-                .loader_used = name(),
-                .load_time = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time),
-                .warnings = (has_points || has_points_text || has_points_ply) ? std::vector<std::string>{} : std::vector<std::string>{"No sparse point cloud found (points3D.bin|txt|ply) - will use random initialization"}};
-        }
+            // Validation only mode
+            if (options.validate_only) {
+                if (options.progress) {
+                    options.progress(100.0f, "COLMAP validation complete");
+                }
 
-        // Load cameras and images
-        if (options.progress) {
-            options.progress(20.0f, "Reading camera parameters...");
-        }
+                LOG_DEBUG("COLMAP validation successful");
 
-        try {
+                auto end_time = std::chrono::high_resolution_clock::now();
+                return LoadResult{
+                    .data = LoadedScene{
+                        .cameras = {},
+                        .point_cloud = nullptr},
+                    .scene_center = Tensor::zeros({3}, Device::CPU),
+                    .loader_used = name(),
+                    .load_time = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time),
+                    .warnings = (has_points || has_points_text || has_points_ply) ? std::vector<std::string>{} : std::vector<std::string>{"No sparse point cloud found (points3D.bin|txt|ply) - will use random initialization"}};
+            }
+
+            // Load cameras and images
+            if (options.progress) {
+                options.progress(20.0f, "Reading camera parameters...");
+            }
+
             std::vector<std::shared_ptr<Camera>> cameras;
             Tensor scene_center;
 

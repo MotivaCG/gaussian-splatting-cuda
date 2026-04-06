@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/logger.hpp"
+#include "core/path_utils.hpp"
 #include "python/python_runtime.hpp"
 #include "visualizer/input/input_bindings.hpp"
 
@@ -43,6 +44,7 @@ namespace lfs::python {
             .value("ZOOM_SPEED_UP", Action::ZOOM_SPEED_UP)
             .value("ZOOM_SPEED_DOWN", Action::ZOOM_SPEED_DOWN)
             .value("TOGGLE_SPLIT_VIEW", Action::TOGGLE_SPLIT_VIEW)
+            .value("TOGGLE_INDEPENDENT_SPLIT_VIEW", Action::TOGGLE_INDEPENDENT_SPLIT_VIEW)
             .value("TOGGLE_GT_COMPARISON", Action::TOGGLE_GT_COMPARISON)
             .value("TOGGLE_DEPTH_MODE", Action::TOGGLE_DEPTH_MODE)
             .value("CYCLE_PLY", Action::CYCLE_PLY)
@@ -243,9 +245,10 @@ namespace lfs::python {
         keymap.def(
             "export_profile",
             [](const std::string& path) {
+                const auto path_fs = lfs::core::utf8_to_path(path);
                 if (!get_keymap_bindings())
                     return false;
-                return get_keymap_bindings()->saveProfileToFile(path);
+                return get_keymap_bindings()->saveProfileToFile(path_fs);
             },
             nb::arg("path"),
             "Export current profile to file");
@@ -253,9 +256,10 @@ namespace lfs::python {
         keymap.def(
             "import_profile",
             [](const std::string& path) {
+                const auto path_fs = lfs::core::utf8_to_path(path);
                 if (!get_keymap_bindings())
                     return false;
-                return get_keymap_bindings()->loadProfileFromFile(path);
+                return get_keymap_bindings()->loadProfileFromFile(path_fs);
             },
             nb::arg("path"),
             "Import profile from file");

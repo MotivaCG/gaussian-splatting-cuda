@@ -45,7 +45,7 @@ namespace lfs::vis {
             static_cast<int>(viewport_size.x * scale),
             static_cast<int>(viewport_size.y * scale));
 
-        if (settings.split_view_mode == SplitViewMode::GTComparison && res.gt_context && res.gt_context->valid()) {
+        if (splitViewUsesGTComparison(settings.split_view_mode) && res.gt_context && res.gt_context->valid()) {
             render_size = res.gt_context->dimensions;
         }
 
@@ -55,8 +55,16 @@ namespace lfs::vis {
             point_cloud_request = buildPointCloudRenderRequest(ctx, ctx.render_size, ctx.scene_state.model_transforms);
             point_cloud_request->frame_view.size = render_size;
             point_cloud_request->frame_view.background_color = ctx.makeFrameView().background_color;
+            applyGTComparisonRenderCamera(
+                point_cloud_request->frame_view,
+                point_cloud_request->render.equirectangular,
+                res.gt_context);
         } else {
             gaussian_request = buildViewportRenderRequest(ctx, render_size);
+            applyGTComparisonRenderCamera(
+                gaussian_request->frame_view,
+                gaussian_request->equirectangular,
+                res.gt_context);
         }
 
         const bool need_hovered_output =
@@ -64,6 +72,10 @@ namespace lfs::vis {
         std::optional<lfs::rendering::HoveredGaussianQueryRequest> hovered_query_request;
         if (need_hovered_output) {
             hovered_query_request = buildHoveredGaussianQueryRequest(ctx, render_size);
+            applyGTComparisonRenderCamera(
+                hovered_query_request->frame_view,
+                hovered_query_request->equirectangular,
+                res.gt_context);
         }
 
         auto render_lock = acquireRenderLock(ctx);
@@ -107,8 +119,7 @@ namespace lfs::vis {
                     viewport_frame = lfs::rendering::GaussianGpuFrameResult{
                         .frame = *gpu_frame,
                         .metadata =
-                            {.depth = nullptr,
-                             .depth_right = nullptr,
+                            {.depth_panel_count = 1,
                              .valid = true,
                              .depth_is_ndc = gpu_frame->depth_is_ndc,
                              .external_depth_texture = gpu_frame->depth.valid() ? gpu_frame->depth.id : 0,

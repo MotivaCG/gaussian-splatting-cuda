@@ -138,7 +138,17 @@ namespace lfs::io {
                 const auto& info = camera_infos[i];
 
                 try {
-                    std::filesystem::path mask_path = mask_cache.find(info._image_name);
+                    std::filesystem::path mask_path;
+                    if (auto mask_lookup = mask_cache.lookup(info._image_name); mask_lookup.found()) {
+                        mask_path = std::move(mask_lookup.path);
+                    } else if (mask_lookup.ambiguous()) {
+                        return make_error(
+                            ErrorCode::INVALID_DATASET,
+                            std::format("Mask for image '{}' is ambiguous across the dataset mask folders. "
+                                        "Keep masks in the same relative subdirectories as the images or rename them uniquely.",
+                                        info._image_name),
+                            base_path);
+                    }
 
                     // Validate mask dimensions match image dimensions
                     if (!mask_path.empty()) {
@@ -202,7 +212,9 @@ namespace lfs::io {
             std::shared_ptr<PointCloud> point_cloud;
             std::vector<std::string> warnings;
             if (std::filesystem::exists(pointcloud_path)) {
-                point_cloud = std::make_shared<PointCloud>(load_simple_ply_point_cloud(pointcloud_path));
+                auto loaded_point_cloud = load_simple_ply_point_cloud(pointcloud_path);
+                point_cloud = std::make_shared<PointCloud>(
+                    convert_transforms_point_cloud_to_colmap_world(std::move(loaded_point_cloud)));
                 LOG_INFO("Loaded {} points from {}", point_cloud->size(),
                          lfs::core::path_to_utf8(pointcloud_path.filename()));
             } else {

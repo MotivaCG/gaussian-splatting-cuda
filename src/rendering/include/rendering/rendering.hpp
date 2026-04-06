@@ -51,6 +51,10 @@ namespace lfs::rendering {
         bool orthographic = false;
         float ortho_scale = DEFAULT_ORTHO_SCALE;
 
+        [[nodiscard]] glm::mat4 getViewMatrix() const {
+            return makeViewMatrix(rotation, translation);
+        }
+
         [[nodiscard]] glm::mat4 getProjectionMatrix(const float near_plane = DEFAULT_NEAR_PLANE,
                                                     const float far_plane = DEFAULT_FAR_PLANE) const {
             const float vfov = focalLengthToVFov(focal_length_mm);
@@ -185,17 +189,31 @@ namespace lfs::rendering {
         PointCloudFilterState filters;
     };
 
-    struct FrameMetadata {
+    struct FramePanelMetadata {
         std::shared_ptr<lfs::core::Tensor> depth;
-        std::shared_ptr<lfs::core::Tensor> depth_right; // For split view: depth from right panel
+        float start_position = 0.0f;
+        float end_position = 1.0f;
+
+        [[nodiscard]] bool valid() const {
+            return end_position > start_position;
+        }
+    };
+
+    struct FrameMetadata {
+        std::array<FramePanelMetadata, 2> depth_panels{};
+        size_t depth_panel_count = 0;
         bool valid = false;
         // Depth conversion parameters (needed for proper depth buffer writing)
         bool depth_is_ndc = false;               // True if depth is already NDC (0-1), e.g., from OpenGL
         unsigned int external_depth_texture = 0; // If set, use this OpenGL texture directly (zero-copy)
+        glm::vec2 depth_texcoord_scale{1.0f, 1.0f};
         float near_plane = DEFAULT_NEAR_PLANE;
         float far_plane = DEFAULT_FAR_PLANE;
         bool orthographic = false;
-        float split_position = -1.0f; // For split view: normalized split position (-1 = not split view)
+
+        [[nodiscard]] const std::shared_ptr<lfs::core::Tensor>& primaryDepth() const {
+            return depth_panels[0].depth;
+        }
     };
 
     struct GaussianGpuFrameResult {
@@ -207,6 +225,8 @@ namespace lfs::rendering {
         std::shared_ptr<lfs::core::Tensor> image;
         FrameMetadata metadata;
     };
+
+    using DualGaussianImageResult = std::array<GaussianImageResult, 2>;
 
     struct PointCloudImageResult {
         std::shared_ptr<lfs::core::Tensor> image;
@@ -233,6 +253,7 @@ namespace lfs::rendering {
         int sh_degree = 3;
         bool gut = false;
         bool equirectangular = false;
+        GaussianSceneState scene;
         GaussianFilterState filters;
         GaussianOverlayState overlay;
     };
@@ -240,6 +261,7 @@ namespace lfs::rendering {
     struct SplitViewPointCloudPanelRenderState {
         FrameView frame_view;
         PointCloudRenderState render;
+        PointCloudSceneState scene;
         PointCloudFilterState filters;
     };
 
@@ -257,6 +279,7 @@ namespace lfs::rendering {
         float end_position = 1.0f;
         glm::vec2 texcoord_scale{1.0f, 1.0f};
         std::optional<bool> flip_y;
+        bool normalize_x_to_panel = false;
     };
 
     struct SplitViewPanel {
@@ -270,7 +293,7 @@ namespace lfs::rendering {
     };
 
     struct SplitViewPresentationState {
-        glm::vec4 divider_color{1.0f, 0.85f, 0.0f, 1.0f};
+        glm::vec4 divider_color{0.29f, 0.33f, 0.42f, 1.0f};
         bool letterbox = false;
         glm::ivec2 content_size{0, 0};
     };
@@ -279,6 +302,7 @@ namespace lfs::rendering {
         std::array<SplitViewPanel, 2> panels;
         SplitViewCompositeState composite;
         SplitViewPresentationState presentation;
+        bool prefer_batched_gaussian_render = false;
     };
 
     enum class GridPlane {
@@ -350,8 +374,10 @@ namespace lfs::rendering {
         float scale = 0.1f;
         glm::vec3 train_color{0.0f, 1.0f, 0.0f};
         glm::vec3 eval_color{1.0f, 0.0f, 0.0f};
+        std::vector<glm::vec3> per_camera_colors;
         int focused_index = -1;
         glm::mat4 scene_transform{1.0f};
+        std::vector<glm::mat4> scene_transforms;
         bool equirectangular_view = false;
         std::unordered_set<int> disabled_uids;
         std::unordered_set<int> emphasized_uids;
@@ -364,6 +390,7 @@ namespace lfs::rendering {
         ViewportData viewport;
         float scale = 0.1f;
         glm::mat4 scene_transform{1.0f};
+        std::vector<glm::mat4> scene_transforms;
     };
 
     // Main rendering engine
@@ -385,6 +412,10 @@ namespace lfs::rendering {
         virtual Result<GaussianImageResult> renderGaussiansImage(
             const lfs::core::SplatData& splat_data,
             const ViewportRenderRequest& request) = 0;
+
+        virtual Result<DualGaussianImageResult> renderGaussiansImagePair(
+            const lfs::core::SplatData& splat_data,
+            const std::array<ViewportRenderRequest, 2>& requests) = 0;
 
         virtual Result<std::optional<int>> queryHoveredGaussianId(
             const lfs::core::SplatData& splat_data,
@@ -440,6 +471,10 @@ namespace lfs::rendering {
             const GpuFrame& frame,
             const glm::ivec2& viewport_pos,
             const glm::ivec2& viewport_size) = 0;
+
+        virtual Result<void> renderScreenSpaceVignette(
+            const glm::ivec2& viewport_size,
+            ScreenSpaceVignette vignette) = 0;
 
         // Overlay rendering - now returns Result for consistency
         virtual Result<void> renderGrid(
@@ -500,7 +535,8 @@ namespace lfs::rendering {
             const CameraFrustumPickRequest& request) = 0;
 
         virtual void clearFrustumCache() = 0;
-        virtual void setFrustumImageLoader(std::shared_ptr<lfs::io::PipelinedImageLoader> loader) = 0;
+        virtual void setFrustumImageLoader(std::shared_ptr<lfs::io::PipelinedImageLoader> loader,
+                                           bool allow_fallback) = 0;
     };
 
 } // namespace lfs::rendering

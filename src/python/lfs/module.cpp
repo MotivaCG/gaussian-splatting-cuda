@@ -46,6 +46,7 @@
 #include "core/image_io.hpp"
 #include "core/logger.hpp"
 #include "core/parameters.hpp"
+#include "core/path_utils.hpp"
 #include "gui/rmlui/elements/loss_graph_element.hpp"
 #include "internal/resource_paths.hpp"
 #include "io/filesystem_utils.hpp"
@@ -54,6 +55,7 @@
 
 #include "config.h"
 #include "core/checkpoint_format.hpp"
+#include "input/input_controller.hpp"
 #include "python/runner.hpp"
 #include "rendering/rendering_manager.hpp"
 #include "training/strategies/istrategy.hpp"
@@ -65,6 +67,7 @@
 #include "visualizer/gui_capabilities.hpp"
 #include "visualizer/operator/operator_registry.hpp"
 #include "visualizer/scene/scene_manager.hpp"
+#include "visualizer/scene_coordinate_utils.hpp"
 #include "visualizer/training/training_manager.hpp"
 #include "visualizer/window/window_manager.hpp"
 
@@ -106,6 +109,22 @@ namespace {
     using lfs::training::SelectionKind;
     using lfs::training::TrainingPhase;
     using lfs::training::TrainingSnapshot;
+
+    void warn_deprecated_python_api(const std::string_view old_name, const std::string_view replacement) {
+        const std::string message = std::format(
+            "lichtfeld.{}() is deprecated; use lichtfeld.{}() instead",
+            old_name,
+            replacement);
+        if (PyErr_WarnEx(PyExc_DeprecationWarning, message.c_str(), 2) < 0) {
+            throw nb::python_error();
+        }
+    }
+
+    // Python path strings are UTF-8. Avoid implicit std::filesystem::path(string)
+    // on Windows, which routes through the active ANSI code page.
+    std::filesystem::path python_utf8_path(const std::string& value) {
+        return lfs::core::utf8_to_path(value);
+    }
 
     CommandCenter* get_command_center_opt() {
         return lfs::event::command_center();
@@ -474,7 +493,7 @@ NB_MODULE(lichtfeld, m) {
         auto user_packages = lfs::python::get_user_packages_dir();
         nb::module_ sys = nb::module_::import_("sys");
         nb::list path = nb::cast<nb::list>(sys.attr("path"));
-        std::string pkg_path = user_packages.string();
+        const std::string pkg_path = lfs::core::path_to_utf8(user_packages);
         bool found = false;
         for (size_t i = 0; i < path.size(); ++i) {
             if (nb::cast<std::string>(path[i]) == pkg_path) {
@@ -669,10 +688,10 @@ NB_MODULE(lichtfeld, m) {
            const std::string& output_path, const std::string& init_path) {
             nb::gil_scoped_release release;
             lfs::core::events::cmd::LoadFile{
-                .path = path,
+                .path = python_utf8_path(path),
                 .is_dataset = is_dataset,
-                .output_path = output_path,
-                .init_path = init_path}
+                .output_path = python_utf8_path(output_path),
+                .init_path = python_utf8_path(init_path)}
                 .emit();
         },
         nb::arg("path"), nb::arg("is_dataset") = false,
@@ -681,7 +700,9 @@ NB_MODULE(lichtfeld, m) {
 
     m.def(
         "load_config_file",
-        [](const std::string& path) { lfs::core::events::cmd::LoadConfigFile{.path = path}.emit(); },
+        [](const std::string& path) {
+            lfs::core::events::cmd::LoadConfigFile{.path = python_utf8_path(path)}.emit();
+        },
         nb::arg("path"), "Load a JSON configuration file.");
 
     m.def(
@@ -689,9 +710,9 @@ NB_MODULE(lichtfeld, m) {
         [](const std::string& checkpoint_path, const std::string& dataset_path, const std::string& output_path) {
             nb::gil_scoped_release release;
             lfs::core::events::cmd::LoadCheckpointForTraining{
-                .checkpoint_path = checkpoint_path,
-                .dataset_path = dataset_path,
-                .output_path = output_path,
+                .checkpoint_path = python_utf8_path(checkpoint_path),
+                .dataset_path = python_utf8_path(dataset_path),
+                .output_path = python_utf8_path(output_path),
             }
                 .emit();
         },
@@ -717,6 +738,7 @@ NB_MODULE(lichtfeld, m) {
     m.def(
         "save_config_file",
         [](const std::string& path) {
+            const auto output_path = python_utf8_path(path);
             const auto* const param_manager = lfs::vis::services().paramsOrNull();
             if (!param_manager) {
                 throw std::runtime_error("No parameter manager available");
@@ -724,7 +746,7 @@ NB_MODULE(lichtfeld, m) {
             lfs::core::param::TrainingParameters params;
             params.dataset = param_manager->getDatasetConfig();
             params.optimization = param_manager->copyActiveParams();
-            if (const auto result = lfs::core::param::save_training_parameters_to_json(params, path); !result) {
+            if (const auto result = lfs::core::param::save_training_parameters_to_json(params, output_path); !result) {
                 throw std::runtime_error("Failed to save config: " + result.error());
             }
         },
@@ -953,14 +975,26 @@ NB_MODULE(lichtfeld, m) {
         "Get center of current selection (local space)");
 
     m.def(
+        "get_selection_visualizer_world_center", []() -> std::optional<std::vector<float>> {
+            auto* sm = lfs::python::get_scene_manager();
+            if (!sm || !sm->hasSelectedNode())
+                return std::nullopt;
+            const auto c = sm->getSelectionVisualizerWorldCenter();
+            return std::vector<float>{c.x, c.y, c.z};
+        },
+        "Get center of current selection in visualizer-world space");
+
+    m.def(
         "get_selection_world_center", []() -> std::optional<std::vector<float>> {
+            warn_deprecated_python_api("get_selection_world_center", "get_selection_visualizer_world_center");
             auto* sm = lfs::python::get_scene_manager();
             if (!sm || !sm->hasSelectedNode())
                 return std::nullopt;
             const auto c = sm->getSelectionWorldCenter();
             return std::vector<float>{c.x, c.y, c.z};
         },
-        "Get center of current selection (world space)");
+        "Deprecated: get center of current selection in legacy data-world space; use "
+        "get_selection_visualizer_world_center()");
 
     m.def(
         "has_scene", []() -> bool {
@@ -1022,6 +1056,20 @@ NB_MODULE(lichtfeld, m) {
         nb::arg("name"), "Get node transform matrix (16 floats, column-major)");
 
     m.def(
+        "get_node_visualizer_world_transform", [](const std::string& name) -> std::optional<std::vector<float>> {
+            auto* sm = lfs::python::get_scene_manager();
+            if (!sm)
+                return std::nullopt;
+
+            const auto transform = lfs::vis::scene_coords::nodeVisualizerWorldTransform(sm->getScene(), name);
+            if (!transform)
+                return std::nullopt;
+
+            return std::vector<float>(&(*transform)[0][0], &(*transform)[0][0] + 16);
+        },
+        nb::arg("name"), "Get node visualizer-world transform matrix (16 floats, column-major)");
+
+    m.def(
         "set_node_transform", [](const std::string& name, const std::vector<float>& mat) {
             auto* sm = lfs::python::get_scene_manager();
             if (!sm || mat.size() != 16)
@@ -1034,6 +1082,29 @@ NB_MODULE(lichtfeld, m) {
             }
         },
         nb::arg("name"), nb::arg("matrix"), "Set node transform matrix (16 floats, column-major)");
+
+    m.def(
+        "set_node_visualizer_world_transform", [](const std::string& name, const std::vector<float>& mat) {
+            auto* sm = lfs::python::get_scene_manager();
+            if (!sm || mat.size() != 16)
+                return;
+
+            glm::mat4 visualizer_world_transform;
+            std::memcpy(&visualizer_world_transform[0][0], mat.data(), 16 * sizeof(float));
+
+            const auto local_transform =
+                lfs::vis::scene_coords::nodeLocalTransformFromVisualizerWorld(sm->getScene(), name, visualizer_world_transform);
+            if (!local_transform)
+                return;
+
+            if (auto result = lfs::vis::cap::setTransformMatrix(
+                    *sm, {name}, *local_transform, "python.set_node_visualizer_world_transform");
+                !result) {
+                LOG_WARN("set_node_visualizer_world_transform fell back to direct update for '{}': {}", name, result.error());
+                sm->setNodeTransform(name, *local_transform);
+            }
+        },
+        nb::arg("name"), nb::arg("matrix"), "Set node visualizer-world transform matrix (16 floats, column-major)");
 
     m.def(
         "capture_selection_transforms", []() -> nb::dict {
@@ -1157,6 +1228,37 @@ NB_MODULE(lichtfeld, m) {
     m.def(
         "reset_camera", []() { lfs::core::events::cmd::ResetCamera{}.emit(); },
         "Reset camera to default position and orientation");
+    m.def(
+        "get_camera_navigation_mode", []() -> std::string {
+            const auto* controller = lfs::vis::InputController::instance();
+            if (!controller)
+                return "orbit";
+            return controller->cameraNavigationMode() == lfs::vis::InputController::CameraNavigationMode::FPV
+                       ? "fpv"
+                       : "orbit";
+        },
+        "Get the active camera navigation mode ('orbit' or 'fpv')");
+    m.def(
+        "set_camera_navigation_mode", [](const std::string& mode) {
+            auto* controller = lfs::vis::InputController::instance();
+            if (!controller)
+                return;
+
+            if (mode == "orbit") {
+                controller->setCameraNavigationMode(
+                    lfs::vis::InputController::CameraNavigationMode::Orbit);
+                return;
+            }
+            if (mode == "fpv" || mode == "fly") {
+                controller->setCameraNavigationMode(
+                    lfs::vis::InputController::CameraNavigationMode::FPV);
+                return;
+            }
+
+            throw std::invalid_argument(
+                "camera navigation mode must be 'orbit', 'fpv', or 'fly'");
+        },
+        nb::arg("mode"), "Set the active camera navigation mode");
     m.def(
         "toggle_fullscreen", []() { lfs::core::events::ui::ToggleFullscreen{}.emit(); },
         "Toggle fullscreen mode");
@@ -1376,7 +1478,7 @@ NB_MODULE(lichtfeld, m) {
         "open",
         [](const std::string& path_str) {
             namespace cmd = lfs::core::events::cmd;
-            cmd::LoadFile{.path = path_str, .is_dataset = true}.emit();
+            cmd::LoadFile{.path = python_utf8_path(path_str), .is_dataset = true}.emit();
         },
         nb::arg("path"),
         "Open a dataset or file in the application");
@@ -1414,13 +1516,13 @@ NB_MODULE(lichtfeld, m) {
     // Run a Python script file
     m.def(
         "run", [](const std::string& path) {
-            const std::filesystem::path script_path(path);
+            const std::filesystem::path script_path = lfs::core::utf8_to_path(path);
             if (!std::filesystem::exists(script_path)) {
                 throw std::runtime_error("Script not found: " + path);
             }
 
-            std::ifstream file(script_path);
-            if (!file) {
+            std::ifstream file;
+            if (!lfs::core::open_file_for_read(script_path, file)) {
                 throw std::runtime_error("Cannot open script: " + path);
             }
 
@@ -1429,8 +1531,8 @@ NB_MODULE(lichtfeld, m) {
             const std::string code = buffer.str();
 
             // Add script directory to sys.path and set __file__
-            const auto parent = script_path.parent_path().string();
-            const auto abs_path = std::filesystem::absolute(script_path).string();
+            const auto parent = lfs::core::path_to_utf8(script_path.parent_path());
+            const auto abs_path = lfs::core::path_to_utf8(std::filesystem::absolute(script_path));
 
             nb::module_ sys = nb::module_::import_("sys");
             nb::list sys_path = nb::cast<nb::list>(sys.attr("path"));
@@ -1660,16 +1762,16 @@ Example:
 
     nb::class_<lfs::io::DatasetInfo>(m, "DatasetInfo", "Information about a dataset directory")
         .def_prop_ro(
-            "base_path", [](const lfs::io::DatasetInfo& i) { return i.base_path.string(); },
+            "base_path", [](const lfs::io::DatasetInfo& i) { return lfs::core::path_to_utf8(i.base_path); },
             "Root directory of the dataset")
         .def_prop_ro(
-            "images_path", [](const lfs::io::DatasetInfo& i) { return i.images_path.string(); },
+            "images_path", [](const lfs::io::DatasetInfo& i) { return lfs::core::path_to_utf8(i.images_path); },
             "Path to the images directory")
         .def_prop_ro(
-            "sparse_path", [](const lfs::io::DatasetInfo& i) { return i.sparse_path.string(); },
+            "sparse_path", [](const lfs::io::DatasetInfo& i) { return lfs::core::path_to_utf8(i.sparse_path); },
             "Path to the COLMAP sparse reconstruction")
         .def_prop_ro(
-            "masks_path", [](const lfs::io::DatasetInfo& i) { return i.masks_path.string(); },
+            "masks_path", [](const lfs::io::DatasetInfo& i) { return lfs::core::path_to_utf8(i.masks_path); },
             "Path to the masks directory")
         .def_prop_ro(
             "has_masks", [](const lfs::io::DatasetInfo& i) { return i.has_masks; },
@@ -1682,12 +1784,12 @@ Example:
             "Number of masks in the dataset")
         .def("__repr__", [](const lfs::io::DatasetInfo& i) {
             return std::format("DatasetInfo(base_path='{}', images={}, masks={})",
-                               i.base_path.string(), i.image_count, i.mask_count);
+                               lfs::core::path_to_utf8(i.base_path), i.image_count, i.mask_count);
         });
 
     m.def(
         "detect_dataset_info",
-        [](const std::string& path) { return lfs::io::detect_dataset_info(path); },
+        [](const std::string& path) { return lfs::io::detect_dataset_info(python_utf8_path(path)); },
         nb::arg("path"), "Detect dataset information from a directory path");
 
     nb::class_<lfs::core::CheckpointHeader>(m, "CheckpointHeader", "Information from a checkpoint file header")
@@ -1702,7 +1804,7 @@ Example:
     m.def(
         "read_checkpoint_header",
         [](const std::string& path) -> std::optional<lfs::core::CheckpointHeader> {
-            auto result = lfs::core::load_checkpoint_header(path);
+            auto result = lfs::core::load_checkpoint_header(python_utf8_path(path));
             if (!result) {
                 return std::nullopt;
             }
@@ -1712,20 +1814,20 @@ Example:
 
     nb::class_<lfs::core::param::DatasetConfig>(m, "CheckpointParams", "Training parameters from a checkpoint")
         .def_prop_ro("dataset_path", [](const lfs::core::param::DatasetConfig& c) {
-            return c.data_path.string();
+            return lfs::core::path_to_utf8(c.data_path);
         })
         .def_prop_ro("output_path", [](const lfs::core::param::DatasetConfig& c) {
-            return c.output_path.string();
+            return lfs::core::path_to_utf8(c.output_path);
         })
         .def("__repr__", [](const lfs::core::param::DatasetConfig& c) {
             return std::format("CheckpointParams(dataset_path='{}', output_path='{}')",
-                               c.data_path.string(), c.output_path.string());
+                               lfs::core::path_to_utf8(c.data_path), lfs::core::path_to_utf8(c.output_path));
         });
 
     m.def(
         "read_checkpoint_params",
         [](const std::string& path) -> std::optional<lfs::core::param::DatasetConfig> {
-            auto result = lfs::core::load_checkpoint_params(path);
+            auto result = lfs::core::load_checkpoint_params(python_utf8_path(path));
             if (!result) {
                 return std::nullopt;
             }
@@ -1740,7 +1842,7 @@ Example:
     });
 
     // Module metadata
-    m.attr("__version__") = "0.1.0";
+    m.attr("__version__") = GIT_TAGGED_VERSION;
     m.attr("__all__") = nb::make_tuple(
         // Core access
         "context", "gaussians", "session", "get_scene",

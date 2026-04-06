@@ -25,6 +25,7 @@
 #include "gui/rmlui/rml_theme.hpp"
 #include "gui/rmlui/rmlui_render_interface.hpp"
 #include "gui/rmlui/rmlui_system_interface.hpp"
+#include "gui/scene_panel_native.hpp"
 #include "gui/string_keys.hpp"
 #include "gui/ui_widgets.hpp"
 #include "gui/utils/file_association.hpp"
@@ -43,6 +44,7 @@
 #include "python/package_manager.hpp"
 #include "python/python_runtime.hpp"
 #include "python/ui_hooks.hpp"
+#include "rendering/coordinate_conventions.hpp"
 #include "rendering/rendering_manager.hpp"
 #include "scene/scene_manager.hpp"
 #include "theme/theme.hpp"
@@ -88,11 +90,42 @@ namespace lfs::vis::gui {
             return result;
         }
 
-        void applyFrameInputCapture() {
+        PanelInputState maskInputForBlockedUi(PanelInputState input) {
+            input.mouse_x = -1.0e9f;
+            input.mouse_y = -1.0e9f;
+            for (auto& value : input.mouse_down)
+                value = false;
+            for (auto& value : input.mouse_clicked)
+                value = false;
+            for (auto& value : input.mouse_released)
+                value = false;
+            input.mouse_wheel = 0.0f;
+            input.key_ctrl = false;
+            input.key_shift = false;
+            input.key_alt = false;
+            input.key_super = false;
+            input.viewport_keyboard_focus = false;
+            input.keys_pressed.clear();
+            input.keys_released.clear();
+            input.text_codepoints.clear();
+            input.text_inputs.clear();
+            input.text_editing.clear();
+            input.text_editing_start = -1;
+            input.text_editing_length = -1;
+            input.has_text_editing = false;
+            return input;
+        }
+
+        void applyFrameInputCapture(RmlRightPanel* right_panel = nullptr) {
+            const bool panel_hosts_want_keyboard = RmlPanelHost::consumeFrameWantsKeyboard();
+            const bool panel_hosts_want_text_input = RmlPanelHost::consumeFrameWantsTextInput();
+            if ((panel_hosts_want_keyboard || panel_hosts_want_text_input) && right_panel)
+                right_panel->blurFocus();
+
             auto& focus = guiFocusState();
-            if (RmlPanelHost::consumeFrameWantsKeyboard())
+            if (panel_hosts_want_keyboard)
                 focus.want_capture_keyboard = true;
-            if (RmlPanelHost::consumeFrameWantsTextInput())
+            if (panel_hosts_want_text_input)
                 focus.want_text_input = true;
         }
 
@@ -207,8 +240,7 @@ namespace lfs::vis::gui {
 
         LayoutState state;
         state.load();
-
-        if (!state.file_association.empty())
+        if (state.file_association == "declined")
             return;
         if (areFileAssociationsRegistered())
             return;
@@ -229,7 +261,8 @@ namespace lfs::vis::gui {
 
             if (result.button_label == LOC(FileAssociation::YES)) {
                 registerFileAssociations();
-                ls.file_association = "registered";
+                openFileAssociationSettings();
+                return;
             } else if (result.button_label == LOC(FileAssociation::DONT_ASK)) {
                 ls.file_association = "declined";
             } else {
@@ -542,6 +575,7 @@ namespace lfs::vis::gui {
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
         io.ConfigFlags |= ImGuiConfigFlags_DockingEnable; // Enable Docking
         io.ConfigWindowsMoveFromTitleBarOnly = true;
+        io.ConfigDragClickToInputText = true;
         loadImGuiSettings();
 
         // Platform/Renderer initialization
@@ -600,6 +634,9 @@ namespace lfs::vis::gui {
         rmlui_manager_.init(viewer_->getWindow(), current_ui_scale_);
         lfs::vis::setThemeChangeCallback([this](const std::string& theme_id) {
             rmlui_manager_.activateTheme(theme_id);
+            if (auto* const rendering = viewer_ ? viewer_->getRenderingManager() : nullptr) {
+                rendering->markDirty(DirtyFlag::OVERLAY);
+            }
         });
         lfs::python::set_rml_manager(&rmlui_manager_);
 
@@ -817,6 +854,13 @@ namespace lfs::vis::gui {
         };
 
         // Floating panels (self-managed windows)
+        {
+            auto panel = std::static_pointer_cast<IPanel>(
+                std::make_shared<NativeScenePanel>(&rmlui_manager_));
+            native_panel_storage_.push_back(panel);
+            reg_panel("lfs.scene", "Scene", panel, PanelSpace::SceneHeader, 0);
+        }
+
         reg_panel("native.video_extractor", "Video Extractor",
                   make_panel(VideoExtractorPanel(video_widget_.get())),
                   PanelSpace::Floating, 11,
@@ -895,6 +939,10 @@ namespace lfs::vis::gui {
         drag_drop_.pollEvents();
         drag_drop_hovering_ = drag_drop_.isDragHovering();
 
+        if (auto* input_controller = viewer_->getInputController()) {
+            input_controller->getBindings().updateCapture();
+        }
+
         // Start frame
         ImGui_ImplOpenGL3_NewFrame();
 
@@ -914,12 +962,17 @@ namespace lfs::vis::gui {
             focus.want_text_input = ImGui::GetIO().WantTextInput;
         }
         rmlui_manager_.beginFrameCursorTracking();
+        const bool modal_overlay_open = rml_modal_overlay_->isOpen();
+        const bool context_menu_open = global_context_menu_ && global_context_menu_->isOpen();
+        const bool block_underlay_input = modal_overlay_open || context_menu_open;
 
         if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) {
-            auto* editor = panels::PythonConsoleState::getInstance().getEditor();
+            auto* console_state = panels::PythonConsoleState::tryGetInstance();
+            auto* editor = console_state ? console_state->getEditor() : nullptr;
             const bool editor_owns_escape =
                 editor && (editor->isFocused() || editor->hasActiveCompletion());
             if (!editor_owns_escape) {
+                widgets::RequestActiveEditCancel();
                 ImGui::ClearActiveID();
                 if (editor != nullptr) {
                     editor->unfocus();
@@ -984,6 +1037,8 @@ namespace lfs::vis::gui {
                 menu_input.screen_w = static_cast<int>(main_viewport->Size.x);
                 menu_input.screen_h = static_cast<int>(main_viewport->Size.y);
             }
+            if (block_underlay_input)
+                menu_input = maskInputForBlockedUi(std::move(menu_input));
 
             rml_menu_bar_.processInput(menu_input);
 
@@ -1072,11 +1127,12 @@ namespace lfs::vis::gui {
         panel_input.screen_y = mvp_input->Pos.y;
         panel_input.bg_draw_list = ImGui::GetBackgroundDrawList(mvp_input);
         panel_input.fg_draw_list = ImGui::GetForegroundDrawList(mvp_input);
+        PanelInputState raw_panel_input = panel_input;
+        if (block_underlay_input)
+            panel_input = maskInputForBlockedUi(std::move(panel_input));
         RmlPanelHost::clearQueuedForegroundComposites();
-
-        global_context_menu_->processInput(panel_input);
-        if (global_context_menu_->isOpen())
-            panel_input.mouse_wheel = 0;
+        if (!modal_overlay_open)
+            global_context_menu_->processInput(raw_panel_input);
 
         ScreenState screen;
         screen.work_pos = {mvp_input->WorkPos.x, mvp_input->WorkPos.y};
@@ -1169,7 +1225,7 @@ namespace lfs::vis::gui {
         panel_layout_.renderRightPanel(ctx, draw_ctx, show_main_panel_, ui_hidden_,
                                        window_states_, focus_panel_name_, panel_input, screen);
 
-        applyFrameInputCapture();
+        applyFrameInputCapture(&rml_right_panel_);
 
         auto apply_cursor = [](CursorRequest req) {
             switch (req) {
@@ -1200,14 +1256,70 @@ namespace lfs::vis::gui {
         floating_input.bg_draw_list = ImGui::GetForegroundDrawList(ImGui::GetMainViewport());
         reg.draw_panels(PanelSpace::Floating, draw_ctx, &floating_input);
 
-        applyFrameInputCapture();
+        applyFrameInputCapture(&rml_right_panel_);
 
         gizmo_manager_.updateToolState(ctx, ui_hidden_);
         gizmo_manager_.updateCropFlash();
 
+        float primary_toolbar_x = 0.0f;
+        float primary_toolbar_width = viewport_layout_.size.x;
+        bool show_secondary_toolbar = false;
+        float secondary_toolbar_x = 0.0f;
+        float secondary_toolbar_width = 0.0f;
+        if (auto* const rendering = viewer_ ? viewer_->getRenderingManager() : nullptr;
+            rendering && rendering->isIndependentSplitViewActive()) {
+            if (const auto primary_panel = rendering->resolveViewerPanel(
+                    viewer_->getViewport(),
+                    viewport_layout_.pos, viewport_layout_.size, std::nullopt, SplitViewPanelId::Left)) {
+                primary_toolbar_x = primary_panel->x - viewport_layout_.pos.x;
+                primary_toolbar_width = primary_panel->width;
+            }
+            if (const auto secondary_panel = rendering->resolveViewerPanel(
+                    viewer_->getViewport(),
+                    viewport_layout_.pos, viewport_layout_.size, std::nullopt, SplitViewPanelId::Right)) {
+                show_secondary_toolbar = secondary_panel->valid();
+                secondary_toolbar_x = secondary_panel->x - viewport_layout_.pos.x;
+                secondary_toolbar_width = secondary_panel->width;
+            }
+        }
+
+        rml_viewport_overlay_.setToolbarPanels(primary_toolbar_x,
+                                               primary_toolbar_width,
+                                               show_secondary_toolbar,
+                                               secondary_toolbar_x,
+                                               secondary_toolbar_width);
         rml_viewport_overlay_.setViewportBounds(
             viewport_layout_.pos, viewport_layout_.size,
             {panel_input.screen_x, panel_input.screen_y});
+        RmlViewportOverlay::GTMetricsOverlayState gt_metrics_overlay;
+        if (auto* const rendering = viewer_ ? viewer_->getRenderingManager() : nullptr) {
+            const auto settings = rendering->getSettings();
+            if (rendering->isGTComparisonActive() &&
+                settings.camera_metrics_mode != RenderSettings::CameraMetricsMode::Off) {
+                gt_metrics_overlay.visible = true;
+                gt_metrics_overlay.psnr_text = "--";
+                gt_metrics_overlay.show_ssim =
+                    settings.camera_metrics_mode == RenderSettings::CameraMetricsMode::PSNRSSIM;
+                gt_metrics_overlay.ssim_text = "--";
+
+                const auto content_bounds = rendering->getContentBounds(glm::ivec2(
+                    std::max(static_cast<int>(viewport_layout_.size.x), 0),
+                    std::max(static_cast<int>(viewport_layout_.size.y), 0)));
+                gt_metrics_overlay.x =
+                    content_bounds.x + content_bounds.width * settings.split_position + 18.0f;
+                gt_metrics_overlay.y = content_bounds.y + 18.0f;
+
+                const int current_camera_id = rendering->getCurrentCameraId();
+                if (const auto metrics = rendering->getLatestCameraMetrics();
+                    metrics && metrics->camera_id == current_camera_id) {
+                    gt_metrics_overlay.psnr_text = std::format("{:.2f}", metrics->psnr);
+                    if (gt_metrics_overlay.show_ssim && metrics->ssim.has_value()) {
+                        gt_metrics_overlay.ssim_text = std::format("{:.4f}", *metrics->ssim);
+                    }
+                }
+            }
+        }
+        rml_viewport_overlay_.setGTMetricsOverlay(std::move(gt_metrics_overlay));
         startup_overlay_.setInput(&panel_input);
         if (startup_overlay_.isVisible()) {
             auto& focus = guiFocusState();
@@ -1215,6 +1327,22 @@ namespace lfs::vis::gui {
             focus.want_capture_keyboard = true;
         }
         rml_viewport_overlay_.processInput(panel_input);
+        if (rml_viewport_overlay_.wantsInput() && panel_input.mouse_clicked[0]) {
+            if (auto* const rendering = viewer_ ? viewer_->getRenderingManager() : nullptr;
+                rendering && rendering->isIndependentSplitViewActive()) {
+                if (const auto target_panel = rendering->resolveViewerPanel(
+                        viewer_->getViewport(),
+                        viewport_layout_.pos,
+                        viewport_layout_.size,
+                        glm::vec2(panel_input.mouse_x, panel_input.mouse_y))) {
+                    if (auto* const input_controller = viewer_->getInputController()) {
+                        input_controller->setFocusedSplitPanel(target_panel->panel);
+                    } else {
+                        rendering->setFocusedSplitPanel(target_panel->panel);
+                    }
+                }
+            }
+        }
         if (lfs::python::has_python_hooks("viewport_overlay", "draw")) {
             lfs::python::invoke_python_hooks("viewport_overlay", "draw", true);
             lfs::python::invoke_python_hooks("viewport_overlay", "draw", false);
@@ -1246,7 +1374,7 @@ namespace lfs::vis::gui {
         python::draw_python_modals(scene);
         python::draw_python_popups(scene);
 
-        rml_modal_overlay_->processInput(panel_input);
+        rml_modal_overlay_->processInput(raw_panel_input);
         rml_viewport_overlay_.compositeToScreen(panel_input.screen_w, panel_input.screen_h);
         if (ImGui::GetMouseCursor() == ImGuiMouseCursor_Arrow)
             apply_rml_cursor(rmlui_manager_.consumeCursorRequest());
@@ -1332,17 +1460,61 @@ namespace lfs::vis::gui {
             auto* rm = ctx.viewer->getRenderingManager();
             auto* draw_list = ImGui::GetForegroundDrawList();
             const glm::ivec2 rendered_size = rm ? rm->getRenderedSize() : glm::ivec2(0);
-            const float render_to_screen_x =
-                (rendered_size.x > 0)
-                    ? (viewport_layout_.size.x / static_cast<float>(rendered_size.x))
-                    : (1.0f / std::max(rm ? rm->getSettings().render_scale : 1.0f, 0.001f));
-            const float render_to_screen_y =
-                (rendered_size.y > 0)
-                    ? (viewport_layout_.size.y / static_cast<float>(rendered_size.y))
-                    : (1.0f / std::max(rm ? rm->getSettings().render_scale : 1.0f, 0.001f));
-            const auto render_to_screen = [&](const float x, const float y) {
-                return ImVec2(viewport_layout_.pos.x + x * render_to_screen_x,
-                              viewport_layout_.pos.y + y * render_to_screen_y);
+            struct PreviewPanelContext {
+                float x = 0.0f;
+                float y = 0.0f;
+                float width = 0.0f;
+                float height = 0.0f;
+                int render_width = 0;
+                int render_height = 0;
+                const Viewport* viewport = nullptr;
+            };
+            const auto resolve_preview_panel = [&](const std::optional<SplitViewPanelId> panel) {
+                PreviewPanelContext panel_ctx{
+                    .x = viewport_layout_.pos.x,
+                    .y = viewport_layout_.pos.y,
+                    .width = viewport_layout_.size.x,
+                    .height = viewport_layout_.size.y,
+                    .render_width =
+                        rendered_size.x > 0 ? rendered_size.x : static_cast<int>(ctx.viewer->getViewport().windowSize.x),
+                    .render_height =
+                        rendered_size.y > 0 ? rendered_size.y : static_cast<int>(ctx.viewer->getViewport().windowSize.y),
+                    .viewport = &ctx.viewer->getViewport(),
+                };
+                if (!rm || !panel || !rm->isIndependentSplitViewActive()) {
+                    return panel_ctx;
+                }
+
+                const auto info = rm->resolveViewerPanel(
+                    ctx.viewer->getViewport(),
+                    {viewport_layout_.pos.x, viewport_layout_.pos.y},
+                    {viewport_layout_.size.x, viewport_layout_.size.y},
+                    std::nullopt,
+                    panel);
+                if (!info) {
+                    return panel_ctx;
+                }
+
+                panel_ctx.x = info->x;
+                panel_ctx.y = info->y;
+                panel_ctx.width = info->width;
+                panel_ctx.height = info->height;
+                panel_ctx.render_width = info->render_width;
+                panel_ctx.render_height = info->render_height;
+                panel_ctx.viewport = info->viewport;
+                return panel_ctx;
+            };
+            const auto render_to_screen = [&](const PreviewPanelContext& panel_ctx, const float x, const float y) {
+                const float render_to_screen_x =
+                    (panel_ctx.render_width > 0)
+                        ? (panel_ctx.width / static_cast<float>(panel_ctx.render_width))
+                        : (1.0f / std::max(rm ? rm->getSettings().render_scale : 1.0f, 0.001f));
+                const float render_to_screen_y =
+                    (panel_ctx.render_height > 0)
+                        ? (panel_ctx.height / static_cast<float>(panel_ctx.render_height))
+                        : (1.0f / std::max(rm ? rm->getSettings().render_scale : 1.0f, 0.001f));
+                return ImVec2(panel_ctx.x + x * render_to_screen_x,
+                              panel_ctx.y + y * render_to_screen_y);
             };
 
             if (rm && rm->isCursorPreviewActive()) {
@@ -1350,9 +1522,13 @@ namespace lfs::vis::gui {
                 float bx, by, br;
                 bool add_mode;
                 rm->getCursorPreviewState(bx, by, br, add_mode);
+                const auto panel_ctx = resolve_preview_panel(rm->getCursorPreviewPanel());
 
-                const ImVec2 screen_pos = render_to_screen(bx, by);
-                const float screen_radius = br * render_to_screen_x;
+                const ImVec2 screen_pos = render_to_screen(panel_ctx, bx, by);
+                const float screen_radius =
+                    (panel_ctx.render_width > 0)
+                        ? br * (panel_ctx.width / static_cast<float>(panel_ctx.render_width))
+                        : br;
 
                 const ImU32 brush_color = add_mode
                                               ? toU32WithAlpha(t.palette.success, 0.8f)
@@ -1366,9 +1542,10 @@ namespace lfs::vis::gui {
                 float rx0, ry0, rx1, ry1;
                 bool add_mode;
                 rm->getRectPreview(rx0, ry0, rx1, ry1, add_mode);
+                const auto panel_ctx = resolve_preview_panel(rm->getRectPreviewPanel());
 
-                const ImVec2 p0 = render_to_screen(rx0, ry0);
-                const ImVec2 p1 = render_to_screen(rx1, ry1);
+                const ImVec2 p0 = render_to_screen(panel_ctx, rx0, ry0);
+                const ImVec2 p1 = render_to_screen(panel_ctx, rx1, ry1);
 
                 const ImU32 fill_color = add_mode
                                              ? toU32WithAlpha(t.palette.success, 0.15f)
@@ -1387,6 +1564,7 @@ namespace lfs::vis::gui {
                 const auto& world_points = rm->getPolygonWorldPoints();
                 const bool closed = rm->isPolygonClosed();
                 const bool add_mode = rm->isPolygonAddMode();
+                const auto panel_ctx = resolve_preview_panel(rm->getPolygonPreviewPanel());
 
                 if (!points.empty() || !world_points.empty()) {
                     const ImU32 line_color = add_mode
@@ -1406,22 +1584,29 @@ namespace lfs::vis::gui {
                     if (rm->isPolygonPreviewWorldSpace()) {
                         screen_points.reserve(world_points.size());
 
-                        const auto& viewport = ctx.viewer->getViewport();
-                        const glm::mat4 vp_matrix =
-                            viewport.getProjectionMatrix(rm->getFocalLengthMm()) * viewport.getViewMatrix();
+                        if (!panel_ctx.viewport) {
+                            screen_points.clear();
+                        }
+                        Viewport projection_viewport = panel_ctx.viewport ? *panel_ctx.viewport : ctx.viewer->getViewport();
+                        projection_viewport.windowSize = {std::max(panel_ctx.render_width, 1),
+                                                          std::max(panel_ctx.render_height, 1)};
 
                         bool all_visible = true;
                         for (const auto& world_point : world_points) {
-                            const glm::vec4 clip = vp_matrix * glm::vec4(world_point, 1.0f);
-                            if (clip.w <= 0.0f) {
+                            const auto projected = lfs::rendering::projectWorldPoint(
+                                projection_viewport.camera.R,
+                                projection_viewport.camera.t,
+                                projection_viewport.windowSize,
+                                world_point,
+                                rm->getFocalLengthMm());
+                            if (!projected) {
                                 all_visible = false;
                                 break;
                             }
 
-                            const glm::vec3 ndc = glm::vec3(clip) / clip.w;
                             screen_points.emplace_back(
-                                viewport_layout_.pos.x + (ndc.x * 0.5f + 0.5f) * viewport_layout_.size.x,
-                                viewport_layout_.pos.y + (1.0f - (ndc.y * 0.5f + 0.5f)) * viewport_layout_.size.y);
+                                panel_ctx.x + projected->x * (panel_ctx.width / static_cast<float>(projection_viewport.windowSize.x)),
+                                panel_ctx.y + projected->y * (panel_ctx.height / static_cast<float>(projection_viewport.windowSize.y)));
                         }
 
                         if (!all_visible) {
@@ -1430,19 +1615,19 @@ namespace lfs::vis::gui {
                     } else {
                         screen_points.reserve(points.size());
                         for (const auto& [px, py] : points) {
-                            screen_points.push_back(render_to_screen(px, py));
+                            screen_points.push_back(render_to_screen(panel_ctx, px, py));
                         }
                     }
 
-                    const ImVec2 clip_min(viewport_layout_.pos.x, viewport_layout_.pos.y);
-                    float clip_bottom = viewport_layout_.pos.y + viewport_layout_.size.y;
+                    const ImVec2 clip_min(panel_ctx.x, panel_ctx.y);
+                    float clip_bottom = panel_ctx.y + panel_ctx.height;
                     if (panel_layout_.isShowSequencer()) {
                         const float seq_top = sequencer_ui_.panelTopY();
                         if (seq_top > 0.0f) {
                             clip_bottom = std::min(clip_bottom, seq_top);
                         }
                     }
-                    const ImVec2 clip_max(viewport_layout_.pos.x + viewport_layout_.size.x, clip_bottom);
+                    const ImVec2 clip_max(panel_ctx.x + panel_ctx.width, clip_bottom);
                     draw_list->PushClipRect(clip_min, clip_max, true);
 
                     if (closed && screen_points.size() >= 3) {
@@ -1525,15 +1710,16 @@ namespace lfs::vis::gui {
                 const auto& t = theme();
                 const auto& points = rm->getLassoPoints();
                 const bool add_mode = rm->isLassoAddMode();
+                const auto panel_ctx = resolve_preview_panel(rm->getLassoPreviewPanel());
 
                 if (points.size() >= 2) {
                     const ImU32 line_color = add_mode
                                                  ? toU32WithAlpha(t.palette.success, 0.8f)
                                                  : toU32WithAlpha(t.palette.error, 0.8f);
 
-                    ImVec2 prev = render_to_screen(points[0].first, points[0].second);
+                    ImVec2 prev = render_to_screen(panel_ctx, points[0].first, points[0].second);
                     for (size_t i = 1; i < points.size(); ++i) {
-                        ImVec2 curr = render_to_screen(points[i].first, points[i].second);
+                        ImVec2 curr = render_to_screen(panel_ctx, points[i].first, points[i].second);
                         draw_list->AddLine(prev, curr, line_color, 2.0f);
                         prev = curr;
                     }
@@ -1558,12 +1744,6 @@ namespace lfs::vis::gui {
     }
 
     void GuiManager::renderViewportDecorations() {
-        if (viewport_layout_.size.x > 0 && viewport_layout_.size.y > 0) {
-            const ImVec2 vp_pos(viewport_layout_.pos.x, viewport_layout_.pos.y);
-            const ImVec2 vp_size(viewport_layout_.size.x, viewport_layout_.size.y);
-            widgets::DrawViewportVignette(vp_pos, vp_size);
-        }
-
         if (!ui_hidden_ && viewport_layout_.size.x > 0 && viewport_layout_.size.y > 0) {
             const auto& t = theme();
             const float r = t.viewport.corner_radius;
@@ -1609,15 +1789,23 @@ namespace lfs::vis::gui {
             return;
         }
 
-        const auto& settings = rendering->getSettings();
-        if (settings.split_view_mode == SplitViewMode::Disabled) {
+        if (!rendering->isSplitViewActive()) {
             return;
         }
 
-        auto* const draw_list = ImGui::GetForegroundDrawList(ImGui::GetMainViewport());
-        const float divider_x = viewport_layout_.pos.x + settings.split_position * viewport_layout_.size.x;
-        constexpr float divider_width = 3.0f;
-        const ImU32 divider_color = IM_COL32(255, 217, 0, 255);
+        const auto& t = theme();
+        auto* const draw_list = ImGui::GetBackgroundDrawList(ImGui::GetMainViewport());
+        const auto divider_x = rendering->getSplitDividerScreenX(viewport_layout_.pos, viewport_layout_.size);
+        if (!divider_x) {
+            return;
+        }
+        constexpr float kSplitDividerMinWidthPx = 10.0f;
+        const float divider_width =
+            std::max(kSplitDividerMinWidthPx * current_ui_scale_,
+                     std::round(t.viewport.border_size * current_ui_scale_ * 4.0f));
+        const float divider_left = std::round(*divider_x - divider_width * 0.5f);
+        const float divider_right = std::round(*divider_x + divider_width * 0.5f);
+        const ImU32 divider_fill_color = toU32(t.menu_background());
 
         draw_list->PushClipRect(
             ImVec2(viewport_layout_.pos.x, viewport_layout_.pos.y),
@@ -1625,10 +1813,9 @@ namespace lfs::vis::gui {
                    viewport_layout_.pos.y + viewport_layout_.size.y),
             true);
         draw_list->AddRectFilled(
-            ImVec2(std::round(divider_x - divider_width * 0.5f), viewport_layout_.pos.y),
-            ImVec2(std::round(divider_x + divider_width * 0.5f),
-                   viewport_layout_.pos.y + viewport_layout_.size.y),
-            divider_color);
+            ImVec2(divider_left, viewport_layout_.pos.y),
+            ImVec2(divider_right, viewport_layout_.pos.y + viewport_layout_.size.y),
+            divider_fill_color);
         draw_list->PopClipRect();
     }
 
@@ -1638,7 +1825,10 @@ namespace lfs::vis::gui {
             return;
 
         auto& focus = guiFocusState();
-        const bool any_popup_or_modal_open = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+        const bool any_popup_or_modal_open =
+            ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) ||
+            isModalWindowOpen() ||
+            (global_context_menu_ && global_context_menu_->isOpen());
         const bool imgui_wants_input = focus.want_text_input || focus.want_capture_keyboard;
 
         if ((ImGuizmo::IsOver() || ImGuizmo::IsUsing()) && !any_popup_or_modal_open) {
@@ -1654,8 +1844,12 @@ namespace lfs::vis::gui {
             if (input.mouse_clicked[0] || input.mouse_clicked[1]) {
                 ImGui::ClearActiveID();
                 focus.want_capture_keyboard = false;
-                if (auto* editor = panels::PythonConsoleState::getInstance().getEditor()) {
-                    editor->unfocus();
+                auto* console_state = panels::PythonConsoleState::tryGetInstance();
+                if (console_state != nullptr) {
+                    auto* editor = console_state->getEditor();
+                    if (editor != nullptr) {
+                        editor->unfocus();
+                    }
                 }
             }
         }
@@ -1913,9 +2107,9 @@ namespace lfs::vis::gui {
                rml_modal_overlay_->isOpen();
     }
 
-    void GuiManager::captureKey(int key, int mods) {
+    void GuiManager::captureKey(int physical_key, int logical_key, int mods) {
         if (auto* input_controller = viewer_->getInputController()) {
-            input_controller->getBindings().captureKey(key, mods);
+            input_controller->getBindings().captureKey(physical_key, logical_key, mods);
         }
     }
 

@@ -173,6 +173,188 @@ namespace lfs::io {
         return Tensor::from_vector(std::vector<float>(values), {values.size()}, Device::CPU);
     }
 
+    static std::unexpected<Error> make_ambiguous_image_reference_error(
+        const fs::path& images_path,
+        const std::string& image_name) {
+
+        const fs::path image_rel_path = lfs::core::utf8_to_path(image_name);
+        const std::string basename = lfs::core::path_to_utf8(image_rel_path.filename());
+
+        return make_error(
+            ErrorCode::INVALID_DATASET,
+            std::format("COLMAP dataset contract violation: image '{}' is ambiguous under '{}': "
+                        "multiple files share that basename in subdirectories. "
+                        "Preserve the relative image path in COLMAP metadata, for example 'cam_a/{}' instead of '{}'.",
+                        image_name,
+                        lfs::core::path_to_utf8(images_path),
+                        basename,
+                        basename),
+            images_path);
+    }
+
+    static std::unexpected<Error> make_ambiguous_mask_reference_error(
+        const fs::path& base_path,
+        const std::string& image_name) {
+
+        return make_error(
+            ErrorCode::INVALID_DATASET,
+            std::format("COLMAP dataset contract violation: mask for image '{}' is ambiguous across the dataset "
+                        "mask folders. Keep masks in the same relative subdirectories as the images, for example "
+                        "'masks/{}', or rename them uniquely.",
+                        image_name,
+                        image_name),
+            base_path);
+    }
+
+    struct BasenameLayoutInfo {
+        size_t file_count = 0;
+        std::vector<fs::path> sample_relative_paths;
+    };
+
+    static std::string format_relative_path_examples(const std::vector<fs::path>& relative_paths) {
+        std::string formatted;
+        for (size_t i = 0; i < relative_paths.size(); ++i) {
+            if (i > 0) {
+                formatted += ", ";
+            }
+            formatted += std::format("'{}'", lfs::core::path_to_utf8(relative_paths[i]));
+        }
+        return formatted;
+    }
+
+    static std::unordered_map<std::string, BasenameLayoutInfo>
+    scan_image_basename_layout(const fs::path& images_path) {
+        std::unordered_map<std::string, BasenameLayoutInfo> layout;
+
+        if (!safe_is_directory(images_path)) {
+            return layout;
+        }
+
+        std::error_code ec;
+        for (fs::recursive_directory_iterator it(
+                 images_path,
+                 fs::directory_options::skip_permission_denied,
+                 ec),
+             end;
+             !ec && it != end;
+             it.increment(ec)) {
+            const auto& entry = *it;
+            std::error_code file_ec;
+            if (!entry.is_regular_file(file_ec) || file_ec || !is_image_file(entry.path())) {
+                continue;
+            }
+
+            const fs::path relative_path = entry.path().lexically_relative(images_path);
+            if (relative_path.empty()) {
+                continue;
+            }
+
+            const std::string basename_key = detail::normalize_lookup_key(entry.path().filename());
+            auto& info = layout[basename_key];
+            ++info.file_count;
+            if (info.sample_relative_paths.size() < 2) {
+                info.sample_relative_paths.push_back(relative_path);
+            }
+        }
+
+        return layout;
+    }
+
+    static std::unexpected<Error> make_nested_image_contract_error(
+        const fs::path& images_path,
+        const std::string& image_name,
+        const BasenameLayoutInfo& basename_layout,
+        const size_t metadata_reference_count) {
+
+        const fs::path image_rel_path = lfs::core::utf8_to_path(image_name);
+        const std::string basename = lfs::core::path_to_utf8(image_rel_path.filename());
+        const std::string examples = format_relative_path_examples(basename_layout.sample_relative_paths);
+        const std::string example_path = basename_layout.sample_relative_paths.empty()
+                                             ? basename
+                                             : lfs::core::path_to_utf8(basename_layout.sample_relative_paths.front());
+
+        std::string message = std::format(
+            "COLMAP dataset contract violation: image '{}' is referenced by basename only, but {} files with that "
+            "basename exist under '{}': {}. Preserve the relative image path in COLMAP metadata, for example '{}' "
+            "instead of '{}'.",
+            image_name,
+            basename_layout.file_count,
+            lfs::core::path_to_utf8(images_path),
+            examples,
+            example_path,
+            basename);
+
+        if (metadata_reference_count != basename_layout.file_count) {
+            message += std::format(
+                " Metadata contains {} record(s) named '{}' while the dataset contains {} file(s) with that "
+                "basename, so the export likely flattened or dropped subdirectory images.",
+                metadata_reference_count,
+                basename,
+                basename_layout.file_count);
+        }
+
+        return make_error(ErrorCode::INVALID_DATASET, std::move(message), images_path);
+    }
+
+    static Result<void> validate_colmap_dataset_layout_impl(
+        const fs::path& base,
+        const std::string& images_folder,
+        const std::vector<ImageData>& images) {
+
+        const fs::path images_path = base / lfs::core::utf8_to_path(images_folder);
+        if (!safe_is_directory(images_path)) {
+            return make_error(ErrorCode::PATH_NOT_FOUND, "Images folder does not exist", images_path);
+        }
+
+        const auto basename_layout = scan_image_basename_layout(images_path);
+        RecursiveFileCache image_cache(images_path);
+        MaskDirCache mask_cache(base);
+
+        std::unordered_map<std::string, size_t> basename_only_metadata_counts;
+        basename_only_metadata_counts.reserve(images.size());
+
+        for (const auto& image : images) {
+            const fs::path image_rel_path = lfs::core::utf8_to_path(image.name).lexically_normal();
+            if (image_rel_path.parent_path().empty()) {
+                const std::string basename_key = detail::normalize_lookup_key(image_rel_path.filename());
+                ++basename_only_metadata_counts[basename_key];
+            }
+        }
+
+        for (const auto& image : images) {
+            const fs::path image_rel_path = lfs::core::utf8_to_path(image.name).lexically_normal();
+            const std::string basename_key = detail::normalize_lookup_key(image_rel_path.filename());
+
+            if (image_rel_path.parent_path().empty()) {
+                if (auto it = basename_layout.find(basename_key);
+                    it != basename_layout.end() && it->second.file_count > 1) {
+                    return make_nested_image_contract_error(
+                        images_path,
+                        image.name,
+                        it->second,
+                        basename_only_metadata_counts[basename_key]);
+                }
+            }
+
+            if (auto image_lookup = image_cache.lookup(image_rel_path); image_lookup.found()) {
+                if (auto mask_lookup = mask_cache.lookup(image.name); mask_lookup.ambiguous()) {
+                    return make_ambiguous_mask_reference_error(base, image.name);
+                }
+            } else if (image_lookup.ambiguous()) {
+                return make_ambiguous_image_reference_error(images_path, image.name);
+            } else {
+                return make_error(
+                    ErrorCode::PATH_NOT_FOUND,
+                    std::format("Image '{}' was not found under '{}'",
+                                image.name,
+                                lfs::core::path_to_utf8(images_path)),
+                    images_path / image_rel_path);
+            }
+        }
+
+        return {};
+    }
+
     // -----------------------------------------------------------------------------
     //  Binary-file loader
     // -----------------------------------------------------------------------------
@@ -650,15 +832,17 @@ namespace lfs::io {
             std::filesystem::path image_path = images_path / image_rel_path;
 
             if (!safe_exists(image_path)) {
-                if (auto resolved_path = image_cache.find(image_rel_path);
-                    !resolved_path.empty()) {
+                if (auto image_lookup = image_cache.lookup(image_rel_path);
+                    image_lookup.found()) {
                     if (!used_recursive_image_lookup) {
                         LOG_WARN("COLMAP images are not in the expected flat layout under '{}'; "
                                  "falling back to recursive image lookup",
                                  lfs::core::path_to_utf8(images_path));
                         used_recursive_image_lookup = true;
                     }
-                    image_path = std::move(resolved_path);
+                    image_path = std::move(image_lookup.path);
+                } else if (image_lookup.ambiguous()) {
+                    return make_ambiguous_image_reference_error(images_path, img.name);
                 } else {
                     return make_error(ErrorCode::PATH_NOT_FOUND,
                                       std::format("Image '{}' was not found under '{}'",
@@ -827,7 +1011,12 @@ namespace lfs::io {
                                   image_path);
             }
 
-            std::filesystem::path mask_path = mask_cache.find(img.name);
+            std::filesystem::path mask_path;
+            if (auto mask_lookup = mask_cache.lookup(img.name); mask_lookup.found()) {
+                mask_path = std::move(mask_lookup.path);
+            } else if (mask_lookup.ambiguous()) {
+                return make_ambiguous_mask_reference_error(base_path, img.name);
+            }
 
             // Validate mask dimensions match image dimensions
             if (!mask_path.empty()) {
@@ -897,6 +1086,39 @@ namespace lfs::io {
         return read_point3D_binary(points3d_file);
     }
 
+    Result<void> validate_colmap_dataset_layout(const std::filesystem::path& base,
+                                                const std::string& images_folder) {
+        try {
+            const auto search_paths = get_colmap_search_paths(base);
+            const fs::path cameras_bin = find_file_in_paths(search_paths, "cameras.bin");
+            const fs::path images_bin = find_file_in_paths(search_paths, "images.bin");
+            const fs::path cameras_txt = find_file_in_paths(search_paths, "cameras.txt");
+            const fs::path images_txt = find_file_in_paths(search_paths, "images.txt");
+
+            const bool has_binary_pair = !cameras_bin.empty() && !images_bin.empty();
+            const bool has_text_pair = !cameras_txt.empty() && !images_txt.empty();
+
+            if (!has_binary_pair && !has_text_pair) {
+                return make_error(ErrorCode::MISSING_REQUIRED_FILES,
+                                  "Missing required COLMAP metadata pair (cameras.bin/images.bin or cameras.txt/images.txt)",
+                                  base);
+            }
+
+            std::vector<ImageData> images;
+            if (has_binary_pair) {
+                images = read_images_binary(images_bin);
+            } else {
+                images = read_images_text(images_txt);
+            }
+
+            return validate_colmap_dataset_layout_impl(base, images_folder, images);
+        } catch (const std::exception& e) {
+            return make_error(ErrorCode::CORRUPTED_DATA,
+                              std::format("Failed to validate COLMAP dataset: {}", e.what()),
+                              base);
+        }
+    }
+
     Result<std::tuple<std::vector<std::shared_ptr<Camera>>, Tensor>>
     read_colmap_cameras_and_images(const std::filesystem::path& base,
                                    const std::string& images_folder) {
@@ -912,6 +1134,10 @@ namespace lfs::io {
         auto images = read_images_binary(images_file);
 
         LOG_INFO("Read {} cameras and {} images from COLMAP", cam_map.size(), images.size());
+
+        if (auto validation = validate_colmap_dataset_layout_impl(base, images_folder, images); !validation) {
+            return std::unexpected(validation.error());
+        }
 
         return assemble_colmap_cameras(base, cam_map, images, images_folder);
     }
@@ -937,6 +1163,10 @@ namespace lfs::io {
         auto images = read_images_text(images_file);
 
         LOG_INFO("Read {} cameras and {} images from COLMAP text files", cam_map.size(), images.size());
+
+        if (auto validation = validate_colmap_dataset_layout_impl(base, images_folder, images); !validation) {
+            return std::unexpected(validation.error());
+        }
 
         return assemble_colmap_cameras(base, cam_map, images, images_folder);
     }
