@@ -69,6 +69,15 @@ if(MSVC)
             $<$<COMPILE_LANGUAGE:CUDA>:FMT_UNICODE=0>
     )
 endif()
+
+# SMN specific sources
+set(SMN_SOURCES
+    smn/focused_segment_trainer.cpp
+    smn/mask_pruning.cpp
+    smn/mask_pruning_visualizer.cpp
+    smn/noise_guided_splatting.cpp
+)
+
 # Optimizer sources
 set(TRAINING_NEW_SOURCES
     optimizer/adam_optimizer.cpp
@@ -94,10 +103,11 @@ set(TRAINING_NEW_SOURCES
     checkpoint.cpp
     trainer.cpp
     training_setup.cpp
-    smn/mask_pruning.cpp
-    smn/mask_pruning_visualizer.cpp
-    smn/noise_guided_splatting.cpp
+    ${SMN_SOURCES}
 )
+
+# Organize SMN files in Visual Studio folder
+source_group("SMN" FILES ${SMN_SOURCES})
 
 # lfs_training - Training module with optimizer
 add_library(lfs_training STATIC ${TRAINING_NEW_SOURCES})

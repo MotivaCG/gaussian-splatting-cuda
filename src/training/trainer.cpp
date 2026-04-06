@@ -1,4 +1,4 @@
-/* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
+﻿/* SPDX-FileCopyrightText: 2025 LichtFeld Studio Authors
  *
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
@@ -55,32 +55,6 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
-
-#include "smn/mask_penalty.hpp" //matting modes
-#include "smn/mask_pruning.hpp"
-#include "smn/mask_pruning_visualizer.hpp"
-
-// FocusedSegment densification mask dilation radius (in pixels).
-//
-// Controls how much the FG mask is dilated before multiplying it against the
-// densification error map in FocusedSegment mode. Affects ONLY densification
-// placement, not the loss or the image gradient.
-//
-//   0  : disabled — hard mask. Safest against halos, but pixels of fine
-//        structures (hair, eyelashes) that straddle the mask border see
-//        error=0 and are never densified there.
-//   2-3: recommended — covers thin fine structures without reintroducing
-//        large background regions. The final prune (leakage, centervote,
-//        ellipse boundary) removes anything that leaks into the background.
-//   6  : matches the SSIM 11x11 half-window. Maximum recovery of boundary
-//        detail but higher risk of creating splats in the near-background
-//        that the prune then has to clean up.
-//
-// Tune per scene: scenes with fine hair / fur benefit from 3; scenes with
-// clean silhouettes are fine at 0.
-#ifndef FOCUSED_DENSIFY_DILATE_RADIUS
-#define FOCUSED_DENSIFY_DILATE_RADIUS 3
-#endif
 
 namespace lfs::training {
 
@@ -650,294 +624,6 @@ namespace lfs::training {
             return r;
         }
     } // namespace
-
-    // =========================================================================
-    // FocusedSegment helpers
-    //
-    // All FocusedSegment-specific logic is grouped here in free functions so
-    // that the call sites inside Trainer methods are one-liners. This keeps
-    // the hot paths in compute_photometric_loss_with_mask, train_step and the
-    // post-training prune section lean and minimizes merge-conflict surface
-    // area when syncing with upstream.
-    //
-    // Any rename or refactor of Trainer internals that is coming from main
-    // should NOT touch this block — keep FocusedSegment-specific state and
-    // logic isolated. If upstream renames a field on OptimizationParameters
-    // (e.g. mask_opacity_penalty_weight_bg), update the references inside
-    // this block to match main's new names.
-    // =========================================================================
-    namespace focused_segment {
-
-        // Apply the 7-phase FocusedSegment schedule to a local OptimizationParameters
-        // copy for the current iteration. Called from both the PPISP and non-PPISP
-        // paths in train_step. Mutates step_params in place.
-        //
-        // Spatial L1 weighting (FG=1.0, BG=kBgTarget) is always active from Phase 2
-        // onward. Only the alpha penalty is scheduled.
-        //
-        //  Progress  | Phase              | Alpha penalty
-        // -----------+--------------------+--------------------------------------
-        //   0 - 15%  | None               | none
-        //  15 - 25%  | BG spatial ramp    | none
-        //  25 - 40%  | Spatial active     | none (growth still active)
-        //  40 - 50%  | FG ramp 0->full    | FG only (fill holes)
-        //  50 - 60%  | FG at full         | FG only (consolidate before BG presses)
-        //  60 - 70%  | FG full + BG ramp  | FG + BG (trim silhouette)
-        //  70 - 85%  | Decay to 0         | both ramp down to 0
-        //  85 - 100% | Free refinement    | none (natural border alpha)
-        inline void apply_schedule(lfs::core::param::OptimizationParameters& step_params,
-                                   float progress) {
-            if (step_params.mask_mode != lfs::core::param::MaskMode::FocusedSegment)
-                return;
-
-            constexpr float kNoneEnd           = 0.15f;
-            constexpr float kBgRampEnd         = 0.25f;
-            constexpr float kBgTarget          = 0.05f; // Active-phase BG gradient weight (FG focused)
-            constexpr float kBgTargetFree      = 0.08f; // Free-refinement BG weight — slightly higher
-                                                        // than kBgTarget to allow gentle BG refinement
-                                                        // without reintroducing detail. Kept low to help
-                                                        // fine silhouettes (hair) stay sharp.
-            step_params.focused_bg_weight      = kBgTarget;
-
-            constexpr float kFgPenaltyStart    = 0.40f;
-            constexpr float kFgPenaltyEnd      = 0.50f;
-
-            constexpr float kBothPenaltyStart  = 0.60f;
-            constexpr float kBothPenaltyEnd    = 0.70f;
-
-            constexpr float kPenaltyDecayStart = 0.75f;
-            constexpr float kPenaltyDecayEnd   = 0.85f;
-
-            static_assert(kBgRampEnd < kFgPenaltyStart, "BG spatial ramp must finish before FG penalty starts");
-            static_assert(kFgPenaltyEnd <= kBothPenaltyStart, "FG penalty must reach full before BG joins");
-            static_assert(kBothPenaltyEnd <= kPenaltyDecayStart, "Both at full before decay starts");
-
-            if (progress < kNoneEnd) {
-                step_params.mask_mode = lfs::core::param::MaskMode::None;
-                step_params.focused_bg_weight = 1.0f;
-            } else if (progress < kBgRampEnd) {
-                const float t = (progress - kNoneEnd) / (kBgRampEnd - kNoneEnd);
-                step_params.focused_bg_weight = 1.0f - t * (1.0f - kBgTarget);
-                step_params.mask_opacity_penalty_weight = 0.0f;
-                step_params.mask_opacity_penalty_weight_bg = 0.0f;
-            } else if (progress < kFgPenaltyStart) {
-                step_params.mask_opacity_penalty_weight = 0.0f;
-                step_params.mask_opacity_penalty_weight_bg = 0.0f;
-            } else if (progress < kFgPenaltyEnd) {
-                const float t = (progress - kFgPenaltyStart) / (kFgPenaltyEnd - kFgPenaltyStart);
-                step_params.mask_opacity_penalty_weight *= t;
-                step_params.mask_opacity_penalty_weight_bg = 0.0f;
-            } else if (progress < kBothPenaltyEnd) {
-                const float t_bg = (progress - kBothPenaltyStart) / (kBothPenaltyEnd - kBothPenaltyStart);
-                step_params.mask_opacity_penalty_weight_bg *= std::clamp(t_bg, 0.0f, 1.0f);
-            } else if (progress < kPenaltyDecayEnd) {
-                const float t_decay = 1.0f - (progress - kPenaltyDecayStart) / (kPenaltyDecayEnd - kPenaltyDecayStart);
-                const float factor = std::clamp(t_decay, 0.0f, 1.0f);
-                step_params.mask_opacity_penalty_weight *= factor;
-                step_params.mask_opacity_penalty_weight_bg *= factor;
-                step_params.focused_bg_weight = kBgTarget * factor + kBgTargetFree * (1 - factor);
-            } else {
-                step_params.mask_opacity_penalty_weight = 0.0f;
-                step_params.mask_opacity_penalty_weight_bg = 0.0f;
-                step_params.focused_bg_weight = kBgTargetFree;
-            }
-        }
-
-        // Result of the FocusedSegment masked loss — mirrors Trainer::MaskLossResult.
-        // grad_raw is left empty: FocusedSegment does not use the decoupled appearance
-        // loss path. If an appearance-corrected `corrected` tensor is passed in, the
-        // full-image loss is computed on it (same behavior as None mode) and no
-        // separate raw-rendered gradient is produced.
-        struct LossOutputs {
-            lfs::core::Tensor loss;
-            lfs::core::Tensor grad_corrected;
-            lfs::core::Tensor grad_raw;
-            lfs::core::Tensor grad_alpha;
-        };
-
-        // FocusedSegment photometric loss: full-image L1+SSIM forward (same quality as
-        // None mode) with a post-hoc spatial weight map (FG=1.0, BG=focused_bg_weight)
-        // applied to grad_corrected, plus an independent grad_alpha pressure pushing FG
-        // alpha -> 1 and BG alpha -> 0. The scalar loss is rescaled to reflect the
-        // FG-focused weighting so that logged values track FG reconstruction quality.
-        //
-        // photometric_loss is passed by reference because it holds a persistent
-        // workspace that is reused across iterations.
-        //
-        // raw_rendered is currently unused — FocusedSegment does not split into
-        // appearance-corrected vs raw gradients. The parameter exists to match the
-        // master signature of compute_photometric_loss_with_mask and to allow a
-        // future decoupled FocusedSegment variant without another churn.
-        inline std::expected<LossOutputs, std::string> compute_loss(
-            const lfs::core::Tensor& corrected,
-            const lfs::core::Tensor& /*raw_rendered*/,
-            const lfs::core::Tensor& gt_image,
-            const lfs::core::Tensor& mask_2d,
-            const lfs::core::Tensor& alpha,
-            const lfs::core::param::OptimizationParameters& opt_params,
-            lfs::training::losses::PhotometricLoss& photometric_loss) {
-
-            using namespace lfs::core;
-
-            const float kBgWeight = opt_params.focused_bg_weight; // BG gradient weight relative to FG (1.0)
-            constexpr float kDarknessBoost = 2.0f; // extra FG weight on dark pixels; 0 = disabled
-            constexpr float kAlphaFgWeight = 1.5f; // grad_alpha pressure to push FG alpha -> 1
-            constexpr float kAlphaBgWeight = 1.0f; // grad_alpha pressure to push BG alpha -> 0
-
-            const Tensor bg_mask = Tensor::full(mask_2d.shape(), 1.0f, mask_2d.device()) - mask_2d;
-
-            // Step 1: full-image L1+SSIM forward — identical to None mode.
-            // Produces correct grad_image and populates fused_workspace ssim_map for
-            // pixel-error-based densification. No gradient approximation here.
-            lfs::training::losses::PhotometricLoss::Params params{.lambda_dssim = opt_params.lambda_dssim};
-            auto full_result = photometric_loss.forward(corrected, gt_image, params);
-            if (!full_result)
-                return std::unexpected(full_result.error());
-            auto [full_loss, ctx] = *full_result;
-            Tensor grad = ctx.grad_image;
-            Tensor loss = full_loss;
-
-            // Step 2: spatial weight map — FG=1.0, BG=kBgWeight.
-            // Darkness bonus applied to FG only (Rec.601 perceptual luminance from GT, not rendered).
-            // Using GT keeps the weight map stable across iterations — rendered changes every step.
-            // BG stays flat at kBgWeight regardless of darkness, avoiding spurious BG gradient boosts.
-            Tensor weight_map;
-            if (kDarknessBoost > 0.0f) {
-                const bool chw = (gt_image.ndim() == 3 && gt_image.shape()[0] == 3);
-                const Tensor r = chw ? gt_image.slice(0, 0, 1).squeeze(0) : gt_image.slice(2, 0, 1).squeeze(2);
-                const Tensor g = chw ? gt_image.slice(0, 1, 2).squeeze(0) : gt_image.slice(2, 1, 2).squeeze(2);
-                const Tensor b = chw ? gt_image.slice(0, 2, 3).squeeze(0) : gt_image.slice(2, 2, 3).squeeze(2);
-                const Tensor brightness = r * 0.299f + g * 0.587f + b * 0.114f;
-                const Tensor darkness = Tensor::full(brightness.shape(), 1.0f, brightness.device()) - brightness;
-                weight_map = mask_2d * (Tensor::full(darkness.shape(), 1.0f, darkness.device()) + darkness * kDarknessBoost) + bg_mask * kBgWeight;
-            } else {
-                weight_map = mask_2d + bg_mask * kBgWeight;
-            }
-
-            // Normalize weight_map by its mean so the global gradient magnitude stays
-            // comparable to None mode — prevents scale drift when mask size varies across scenes.
-            const float weight_mean = weight_map.mean().item<float>();
-            weight_map = weight_map * (1.0f / std::max(weight_mean, 1e-4f));
-
-            // Step 3: apply spatial weights to gradient.
-            // Multiplying grad post-hoc is exact for L1 (pixel-wise) and a good approximation
-            // for SSIM (window-based). In practice this outperforms discarding SSIM gradient entirely.
-            const Tensor weight_3d = (corrected.ndim() == 3 && corrected.shape()[0] == 3)
-                                         ? weight_map.unsqueeze(0)
-                                         : weight_map.unsqueeze(2);
-            grad = grad * weight_3d;
-
-            // Scale scalar loss to reflect FG-focused weighting.
-            // This ensures the logged loss is representative of FG reconstruction quality,
-            // not diluted by the large BG area. fg_pixels is cached to avoid a second GPU sync.
-            const float total_pixels = static_cast<float>(mask_2d.numel());
-            const float fg_pixels = std::max(mask_2d.sum().item<float>(), 1.0f);
-            const float bg_pixels = std::max(total_pixels - fg_pixels, 1.0f);
-            loss = loss * (fg_pixels / std::max(total_pixels * weight_mean, 1e-6f));
-
-            // Step 4: alpha pressure via grad_alpha.
-            // NOTE: modifying the scalar `loss` does NOT affect Gaussian parameters — only
-            // grad_image and grad_alpha propagate through rasterize_backward to the optimizer.
-            // Alpha pressure is therefore applied purely through grad_alpha.
-            //
-            // Each zone (FG/BG) is normalized independently by its pixel count so that pressure
-            // is balanced regardless of how much of the image the mask occupies.
-            //
-            // Sign convention (gradient descent: param -= lr * grad):
-            //   FG: negative grad_alpha  -> alpha_raw increases -> rendered alpha approaches 1
-            //   BG: positive grad_alpha  -> alpha_raw decreases -> rendered alpha approaches 0
-            Tensor grad_alpha;
-            const float w_fg = opt_params.mask_opacity_penalty_weight;
-            const float w_bg = opt_params.mask_opacity_penalty_weight_bg;
-            if (alpha.is_valid() && (w_fg > 0.0f || w_bg > 0.0f)) {
-                const Tensor alpha_2d = alpha.ndim() == 3 ? alpha.squeeze(0) : alpha;
-
-                grad_alpha = bg_mask * (w_bg * kAlphaBgWeight / bg_pixels)    // BG: push alpha -> 0
-                             - mask_2d * (w_fg * kAlphaFgWeight / fg_pixels); // FG: push alpha -> 1
-            }
-
-            return LossOutputs{.loss = loss, .grad_corrected = grad, .grad_raw = {}, .grad_alpha = grad_alpha};
-        }
-
-        // Post-training mask-based pruning for FocusedSegment mode.
-        //
-        // Runs the full pruning pipeline (geometric dome -> center vote -> leakage ->
-        // cluster/extreme -> ellipse boundary -> isolation) using thresholds tuned for
-        // the FocusedSegment use case: relaxed vote/leak thresholds that protect
-        // legitimate border splats (feet, arms, fine hair) while still removing
-        // halos and floaters.
-        //
-        // The commented-out call at the end of Trainer::train() is intentional —
-        // re-enable when the post-training prune phase is desired.
-        inline void run_post_training_prune(
-            lfs::core::param::MaskMode mask_mode,
-            bool invert_masks,
-            lfs::training::IStrategy& strategy,
-            lfs::training::CameraDataset& train_dataset) {
-
-            if (mask_mode != lfs::core::param::MaskMode::FocusedSegment)
-                return;
-
-            mask_pruning::GeometricDomePruningConfig geomdome_cfg;
-            // default values are ok
-
-            mask_pruning::CenterVotePruningConfig center_cfg;
-            center_cfg.enabled = true;
-
-            // Conservative threshold — protects legitimate border splats (feet, arms).
-            // Only removes Gaussians clearly outside the mask in a large majority of views.
-            // In a dome with 104 cameras, a splat visible in 30 views can afford 8 bad-mask
-            // views and still pass (73% good > 0.72).
-            center_cfg.vote_ratio_threshold = 0.75f;
-            // Moderate margin — avoids penalizing splats near frustum edges without
-            // being as permissive as the original 0.25 that missed lateral floaters.
-            center_cfg.border_safe_margin = 0.33f;
-            center_cfg.enable_depth_filtering = true;
-            center_cfg.min_visibility_count = 3;
-            center_cfg.invert_masks = invert_masks;
-
-            mask_pruning::LeakagePruningConfig leak_cfg;
-            leak_cfg.enabled = true;
-            // Main tool for halos — removes elongated Gaussians whose footprint
-            // extends outside the mask. Center vote is too permissive for these.
-            leak_cfg.leak_keep_threshold = 0.70f;
-            // 2 of 8 sample points outside counts as a leak per view.
-            // Catches elongated splats extending above heads without being too strict
-            // on border splats that legitimately straddle the mask edge.
-            leak_cfg.per_view_leak_fraction = 0.25f;
-            leak_cfg.min_visibility_count = 3;
-            // Low radius — evaluate small/thin elongated splats that caused halos.
-            // Original 2.0f missed these entirely.
-            leak_cfg.min_pixel_radius = 1.0f;
-            leak_cfg.sample_points = 8;
-            // Small dilation — tolerates 3px at mask boundary to protect
-            // extremities that straddle the mask edge in some views.
-            leak_cfg.dilate_px = 2;
-            leak_cfg.invert_masks = invert_masks;
-
-            mask_pruning::IsolationPruningConfig iso_cfg;
-            iso_cfg.enabled = true;
-
-            LOG_INFO("Running post-training mask-based pruning...");
-
-            auto pruning_result = mask_pruning::prune_after_training(
-                strategy,
-                train_dataset,
-                geomdome_cfg,
-                center_cfg,
-                leak_cfg,
-                iso_cfg);
-
-            if (!pruning_result) {
-                LOG_WARN("Post-training pruning failed: {}", pruning_result.error());
-            } else if (pruning_result->splats_removed > 0) {
-                LOG_INFO("Pruning complete: removed {} splats ({:.1f}%)",
-                         pruning_result->splats_removed,
-                         pruning_result->removal_ratio() * 100.0f);
-            }
-        }
-
-    } // namespace focused_segment
 
     // Tile configuration for memory-efficient training
     enum class TileMode {
@@ -1619,11 +1305,10 @@ namespace lfs::training {
                 grad_alpha = (alpha_2d - mask_2d).sign() * (ALPHA_CONSISTENCY_WEIGHT / static_cast<float>(alpha_2d.numel()));
             }
         } else if (mode == param::MaskMode::FocusedSegment) {
-            // All logic lives in focused_segment::compute_loss (anonymous namespace at
-            // the top of this file) to keep this dispatcher lean and isolate
-            // FocusedSegment from upstream merges.
-            auto fs_result = focused_segment::compute_loss(
-                corrected, raw_rendered, gt_image, mask_2d, alpha, opt_params, photometric_loss_);
+            // FocusedSegment-specific logic lives in training/smn/focused_segment_trainer.cpp
+            // so that this dispatcher stays close to upstream.
+            auto fs_result = focused_segment_compute_loss(
+                corrected, raw_rendered, gt_image, mask_2d, alpha, opt_params);
             if (!fs_result)
                 return std::unexpected(fs_result.error());
             loss = fs_result->loss;
@@ -3231,7 +2916,7 @@ namespace lfs::training {
 
                         const float progress = static_cast<float>(iter) / static_cast<float>(params_.optimization.iterations);
 
-                        focused_segment::apply_schedule(step_params, progress);
+                        focused_segment_apply_schedule(step_params, progress);
 
                         auto result = compute_photometric_loss_with_mask(
                             corrected_image, gt_tile, mask_tile, output.alpha, step_params, raw_loss_input);
@@ -3272,7 +2957,7 @@ namespace lfs::training {
 
                     const float progress = static_cast<float>(iter) /
                                            static_cast<float>(params_.optimization.iterations);
-                    focused_segment::apply_schedule(step_params, progress);
+                    focused_segment_apply_schedule(step_params, progress);
 
                     // Normal phase: full forward + backward through all components
                     auto tile_context_guard = makeScopeGuard(cleanup_tile_context);
@@ -3418,21 +3103,7 @@ namespace lfs::training {
                         }
 
                         if (use_mask && params_.optimization.mask_mode == lfs::core::param::MaskMode::FocusedSegment) {
-                            // Dilate the mask before multiplying so that splats straddling the mask
-                            // border still accumulate enough error for densification (clone/split).
-                            // Without dilation, a splat with 50% of its footprint outside the mask
-                            // sees its error halved, which suppresses cloning and creates holes at
-                            // the object boundary. See FOCUSED_DENSIFY_DILATE_RADIUS at file top.
-                            if constexpr (FOCUSED_DENSIFY_DILATE_RADIUS > 0) {
-                                constexpr int kDensifyDilateRadius = FOCUSED_DENSIFY_DILATE_RADIUS;
-                                constexpr int kDensifyDilateKernel = 2 * kDensifyDilateRadius + 1;
-                                auto mask_4d = mask_tile.unsqueeze(0).unsqueeze(0); // [1,1,H,W]
-                                auto dilated = mask_4d.max_pool2d(kDensifyDilateKernel, 1, kDensifyDilateRadius);
-                                auto dilated_2d = dilated.squeeze(0).squeeze(0); // [H,W]
-                                tile_error_map.mul_(dilated_2d).contiguous();
-                            } else {
-                                tile_error_map.mul_(mask_tile).contiguous();
-                            }
+                            focused_segment_apply_densification_mask(tile_error_map, mask_tile);
                         }
                         if (use_mask &&
                             (params_.optimization.mask_mode == lfs::core::param::MaskMode::Segment ||
@@ -4153,7 +3824,7 @@ namespace lfs::training {
             // -----------------------------------------------------------------
             // Post-training mask-based pruning
             // -----------------------------------------------------------------
-            // focused_segment::run_post_training_prune(
+            // focused_segment_run_post_training_prune(
             //     params_.optimization.mask_mode,
             //     params_.optimization.invert_masks,
             //     *strategy_,

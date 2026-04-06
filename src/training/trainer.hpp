@@ -498,5 +498,36 @@ namespace lfs::training {
 
         std::function<void()> on_iteration_start_;
         GTLoadConfigSnapshot gt_load_config_snapshot_;
+
+        
+        // **********************************************************************************/    
+        // FocusedSegment-specific helpers live in training/smn/focused_segment_trainer.cpp
+        // so that the main Trainer dispatcher stays close to upstream.
+        // **********************************************************************************/
+        static void focused_segment_apply_schedule(
+            lfs::core::param::OptimizationParameters& step_params,
+            float progress);
+
+        std::expected<MaskLossResult, std::string> focused_segment_compute_loss(
+            const lfs::core::Tensor& corrected,
+            const lfs::core::Tensor& raw_rendered,
+            const lfs::core::Tensor& gt_image,
+            const lfs::core::Tensor& mask_2d,
+            const lfs::core::Tensor& alpha,
+            const lfs::core::param::OptimizationParameters& opt_params);
+
+        static void focused_segment_apply_densification_mask(
+            lfs::core::Tensor& error_map,
+            const lfs::core::Tensor& mask_tile);
+
+        static void focused_segment_run_post_training_prune(
+            lfs::core::param::MaskMode mask_mode,
+            bool invert_masks,
+            lfs::training::IStrategy& strategy,
+            lfs::training::CameraDataset& train_dataset);
+            
+        // **********************************************************************************/    
+        // End FocusedSegment-specific helpers.
+        // **********************************************************************************/
     };
 } // namespace lfs::training
