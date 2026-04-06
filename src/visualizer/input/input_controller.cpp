@@ -224,12 +224,8 @@ namespace lfs::vis {
 
         dataset_load_completed_handler_id_ = state::DatasetLoadCompleted::when([this](const auto& e) {
             if (e.success) {
-                if (tool_context_ && handleFocusSelection(viewport_)) {
-                    viewport_.camera.saveHomePosition();
-                } else {
-                    viewport_.camera.resetToHome();
-                    publishCameraMove();
-                }
+                viewport_.camera.resetToHome();
+                publishCameraMove();
             }
         });
 
