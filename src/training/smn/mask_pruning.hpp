@@ -119,8 +119,18 @@ namespace lfs::training {
             /// Minimum ratio of views where center must be inside mask to keep splat
             float vote_ratio_threshold = 0.90f;
 
-            /// Minimum number of views where splat must be visible to be considered
-            int min_visibility_count = 3;
+            /// Minimum fraction of usable cameras in which the splat must be visible
+            /// to be considered by the ratio test.
+            ///
+            /// "Usable cameras" means cameras that were actually processed by the
+            /// center-vote pass after excluding missing masks, size mismatches and
+            /// projection failures. This is a pure ratio threshold:
+            ///
+            ///   required_views = ceil(min_visibility_ratio * usable_cameras)
+            ///
+            /// Example:
+            ///   0.10f with 104 usable cameras requires visibility in at least 11 views.
+            float min_visibility_ratio = 0.1f;
 
             /// Projection parameters
             float eps2d = 0.3f;
@@ -162,8 +172,15 @@ namespace lfs::training {
             /// Per-view: if outside_samples_ratio > this => that view counts as leaking
             float per_view_leak_fraction = 0.50f;
 
-            /// Minimum number of evaluated views
-            int min_visibility_count = 1;
+            /// Minimum fraction of usable cameras that must provide decisive
+            /// good/bad evidence before the splat is judged by leakage.
+            ///
+            /// "Usable cameras" means cameras that were actually processed by the
+            /// leakage pass after excluding missing masks, size mismatches and
+            /// projection failures. This is a pure ratio threshold:
+            ///
+            ///   required_decisive_views = ceil(min_visibility_ratio * usable_cameras)
+            float min_visibility_ratio = 0.1f;
 
             /// Minimum projected pixel radius to consider for leakage eval
             float min_pixel_radius = 2.0f;

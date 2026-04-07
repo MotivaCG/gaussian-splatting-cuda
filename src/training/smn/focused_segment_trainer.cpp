@@ -294,12 +294,16 @@ namespace lfs::training {
         // Only removes Gaussians clearly outside the mask in a large majority of views.
         // In a dome with 104 cameras, a splat visible in 30 views can afford 8 bad-mask
         // views and still pass (73% good > 0.72).
-        center_cfg.vote_ratio_threshold = 0.75f;
+        center_cfg.vote_ratio_threshold = 0.8f;
         // Moderate margin - avoids penalizing splats near frustum edges without
         // being as permissive as the original 0.25 that missed lateral floaters.
         center_cfg.border_safe_margin = 0.33f;
         center_cfg.enable_depth_filtering = true;
-        center_cfg.min_visibility_count = 3;
+        // Dome-oriented rule: require visibility in at least 10% of usable cameras.
+        // With 104 usable cameras this means 11+ views, which is much stricter than
+        // the old fixed threshold and helps remove floaters seen only in a handful
+        // of side views.
+        center_cfg.min_visibility_ratio = 0.35f;
         center_cfg.invert_masks = invert_masks;
 
         mask_pruning::LeakagePruningConfig leak_cfg;
@@ -311,7 +315,8 @@ namespace lfs::training {
         // Catches elongated splats extending above heads without being too strict
         // on border splats that legitimately straddle the mask edge.
         leak_cfg.per_view_leak_fraction = 0.25f;
-        leak_cfg.min_visibility_count = 3;
+        // Require decisive good/bad leakage evidence in at least 10% of usable cameras.
+        leak_cfg.min_visibility_ratio = 0.10f;
         // Low radius - evaluate small/thin elongated splats that caused halos.
         // Original 2.0f missed these entirely.
         leak_cfg.min_pixel_radius = 1.0f;

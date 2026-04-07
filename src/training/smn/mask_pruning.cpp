@@ -53,6 +53,15 @@ namespace lfs::training::mask_pruning {
             return (v < lo) ? lo : (v > hi ? hi : v);
         }
 
+        static inline int required_views_from_ratio(int usable_cameras, float min_visibility_ratio) {
+            const int usable = std::max(0, usable_cameras);
+            const float ratio = std::clamp(min_visibility_ratio, 0.0f, 1.0f);
+            if (usable <= 0) {
+                return 1;
+            }
+            return std::max(1, static_cast<int>(std::ceil(ratio * static_cast<float>(usable))));
+        }
+
         // Old semantics: radii must be positive in both axes to be considered visible.
         static inline bool is_visible_radii_strict(int rx, int ry) {
             return (rx > 0) && (ry > 0);
@@ -735,8 +744,13 @@ namespace lfs::training::mask_pruning {
             }
         }
 
-        LOG_INFO("[prune_by_center_vote] Processed {} cameras, skipped: {} no mask, {} size mismatch, {} proj error",
-                 n_cams, skipped_no_mask, skipped_size_mismatch, skipped_proj_error);
+        const int usable_cameras = std::max(0, n_cams - skipped_no_mask - skipped_size_mismatch - skipped_proj_error);
+        const int required_visibility = required_views_from_ratio(usable_cameras, config.min_visibility_ratio);
+
+        LOG_INFO("[prune_by_center_vote] Cameras: {} total, {} usable, skipped: {} no mask, {} size mismatch, {} proj error",
+                 n_cams, usable_cameras, skipped_no_mask, skipped_size_mismatch, skipped_proj_error);
+        LOG_INFO("[prune_by_center_vote] Visibility requirement: >= {} / {} usable cameras ({:.1f}%)",
+                 required_visibility, usable_cameras, 100.0f * config.min_visibility_ratio);
 
         long long sum_tot = 0;
         int count_zero_vis = 0;
@@ -749,7 +763,7 @@ namespace lfs::training::mask_pruning {
 
             if (t == 0) {
                 count_zero_vis++;
-            } else if (t < config.min_visibility_count) {
+            } else if (t < required_visibility) {
                 count_low_vis++;
             } else {
                 count_adequate_vis++;
@@ -759,8 +773,8 @@ namespace lfs::training::mask_pruning {
         LOG_INFO("[prune_by_center_vote] === VISIBILITY DISTRIBUTION ===");
         LOG_INFO("[prune_by_center_vote]   Zero visibility:     {:6d} ({:5.1f}%) <- NEVER SEEN, WILL BE REMOVED",
                  count_zero_vis, 100.0 * count_zero_vis / N);
-        LOG_INFO("[prune_by_center_vote]   Low visibility:      {:6d} ({:5.1f}%) <- Seen in <{} views, WILL BE REMOVED",
-                 count_low_vis, 100.0 * count_low_vis / N, config.min_visibility_count);
+        LOG_INFO("[prune_by_center_vote]   Low visibility:      {:6d} ({:5.1f}%) <- Seen in <{} / {} usable cameras ({:.1f}%), WILL BE REMOVED",
+                 count_low_vis, 100.0 * count_low_vis / N, required_visibility, usable_cameras, 100.0f * config.min_visibility_ratio);
         LOG_INFO("[prune_by_center_vote]   Adequate visibility: {:6d} ({:5.1f}%) <- Evaluated by ratio test",
                  count_adequate_vis, 100.0 * count_adequate_vis / N);
 
@@ -772,15 +786,15 @@ namespace lfs::training::mask_pruning {
 
         bool any_meets = false;
         for (int i = 0; i < N; ++i) {
-            if (tot[static_cast<size_t>(i)] >= config.min_visibility_count) {
+            if (tot[static_cast<size_t>(i)] >= required_visibility) {
                 any_meets = true;
                 break;
             }
         }
 
         if (!any_meets) {
-            LOG_WARN("[prune_by_center_vote] No splats reached min_vis={}; ALL WOULD BE REMOVED, skipping prune.",
-                     config.min_visibility_count);
+            LOG_WARN("[prune_by_center_vote] No splats reached required visibility {} / {} ({:.1f}%); ALL WOULD BE REMOVED, skipping prune.",
+                     required_visibility, usable_cameras, 100.0f * config.min_visibility_ratio);
             LOG_INFO("[prune_by_center_vote] Removed 0 splats (0.000%)");
             return PruningResult{.splats_before = N, .splats_after = N, .splats_removed = 0, .success = true};
         }
@@ -801,12 +815,12 @@ namespace lfs::training::mask_pruning {
             const int p = pos[static_cast<size_t>(i)];
             const float ratio = static_cast<float>(p) / static_cast<float>(std::max(1, t));
 
-            const bool keep = (t >= config.min_visibility_count) && (ratio >= config.vote_ratio_threshold);
+            const bool keep = (t >= required_visibility) && (ratio >= config.vote_ratio_threshold);
 
             if (keep) {
                 ++keep_cnt;
                 rm_acc(i) = 0;
-                if (t >= config.min_visibility_count) {
+                if (t >= required_visibility) {
                     adequate_kept++;
                 }
             } else {
@@ -815,7 +829,7 @@ namespace lfs::training::mask_pruning {
 
                 if (t == 0) {
                     removed_zero_vis++;
-                } else if (t < config.min_visibility_count) {
+                } else if (t < required_visibility) {
                     removed_low_vis++;
                 } else {
                     removed_bad_ratio++;
@@ -827,8 +841,8 @@ namespace lfs::training::mask_pruning {
         LOG_INFO("[prune_by_center_vote] === REMOVAL BREAKDOWN ===");
         LOG_INFO("[prune_by_center_vote]   Removed (zero_vis):     {:6d} <- Never visible in any masked camera",
                  removed_zero_vis);
-        LOG_INFO("[prune_by_center_vote]   Removed (low_vis):      {:6d} <- Visible in <{} cameras",
-                 removed_low_vis, config.min_visibility_count);
+        LOG_INFO("[prune_by_center_vote]   Removed (low_vis):      {:6d} <- Visible in <{} / {} usable cameras ({:.1f}%)",
+                 removed_low_vis, required_visibility, usable_cameras, 100.0f * config.min_visibility_ratio);
         LOG_INFO("[prune_by_center_vote]   Removed (bad_ratio):    {:6d} <- {:.1f}% of valid votes were outside relaxed mask band (threshold={:.1f}%)",
                  removed_bad_ratio, 100.0 * (1.0 - config.vote_ratio_threshold), 100.0 * config.vote_ratio_threshold);
         LOG_INFO("[prune_by_center_vote]   TOTAL TO REMOVE:        {:6d} ({:5.1f}%)",
@@ -837,8 +851,8 @@ namespace lfs::training::mask_pruning {
                  adequate_kept, adequate_kept + adequate_removed);
 
         if (keep_cnt == 0) {
-            LOG_WARN("[prune_by_center_vote] keep_mask would be empty (thr={}, min_vis={}); skipping prune.",
-                     config.vote_ratio_threshold, config.min_visibility_count);
+            LOG_WARN("[prune_by_center_vote] keep_mask would be empty (thr={}, min_vis_ratio={:.3f} -> {} / {} usable cameras); skipping prune.",
+                     config.vote_ratio_threshold, config.min_visibility_ratio, required_visibility, usable_cameras);
             LOG_INFO("[prune_by_center_vote] Removed 0 splats (0.000%)");
             return PruningResult{.splats_before = N, .splats_after = N, .splats_removed = 0, .success = true};
         }
@@ -1103,8 +1117,13 @@ namespace lfs::training::mask_pruning {
             }
         }
 
-        LOG_INFO("[prune_by_mask_leakage] Processed {} cameras, skipped: {} no mask, {} size mismatch, {} proj error",
-                 n_cams, skipped_no_mask, skipped_size_mismatch, skipped_proj_error);
+        const int usable_cameras = std::max(0, n_cams - skipped_no_mask - skipped_size_mismatch - skipped_proj_error);
+        const int required_decisive_views = required_views_from_ratio(usable_cameras, config.min_visibility_ratio);
+
+        LOG_INFO("[prune_by_mask_leakage] Cameras: {} total, {} usable, skipped: {} no mask, {} size mismatch, {} proj error",
+                 n_cams, usable_cameras, skipped_no_mask, skipped_size_mismatch, skipped_proj_error);
+        LOG_INFO("[prune_by_mask_leakage] Decisive evidence requirement: >= {} / {} usable cameras ({:.1f}%)",
+                 required_decisive_views, usable_cameras, 100.0f * config.min_visibility_ratio);
 
         // =========================================================================
         // DIAGNOSTIC LOGGING - Analyze evaluation distribution
@@ -1534,8 +1553,13 @@ namespace lfs::training::mask_pruning {
             }
         }
 
-        LOG_INFO("[prune_by_mask_leakage] Processed {} cameras, skipped: {} no mask, {} size mismatch, {} proj error",
-                 n_cams, skipped_no_mask, skipped_size_mismatch, skipped_proj_error);
+        const int usable_cameras = std::max(0, n_cams - skipped_no_mask - skipped_size_mismatch - skipped_proj_error);
+        const int required_decisive_views = required_views_from_ratio(usable_cameras, config.min_visibility_ratio);
+
+        LOG_INFO("[prune_by_mask_leakage] Cameras: {} total, {} usable, skipped: {} no mask, {} size mismatch, {} proj error",
+                 n_cams, usable_cameras, skipped_no_mask, skipped_size_mismatch, skipped_proj_error);
+        LOG_INFO("[prune_by_mask_leakage] Decisive evidence requirement: >= {} / {} usable cameras ({:.1f}%)",
+                 required_decisive_views, usable_cameras, 100.0f * config.min_visibility_ratio);
 
         // =========================================================================
         // DIAGNOSTIC LOGGING
@@ -1551,7 +1575,7 @@ namespace lfs::training::mask_pruning {
 
             if (d == 0) {
                 count_zero_decisive++;
-            } else if (d < config.min_visibility_count) {
+            } else if (d < required_decisive_views) {
                 count_low_decisive++;
             } else {
                 count_adequate_decisive++;
@@ -1561,8 +1585,8 @@ namespace lfs::training::mask_pruning {
         LOG_INFO("[prune_by_mask_leakage] === DECISIVE EVIDENCE DISTRIBUTION ===");
         LOG_INFO("[prune_by_mask_leakage]   Zero decisive:       {:6d} ({:5.1f}%) <- No strong good/bad evidence",
                  count_zero_decisive, 100.0 * count_zero_decisive / N);
-        LOG_INFO("[prune_by_mask_leakage]   Low decisive:        {:6d} ({:5.1f}%) <- Strong evidence in <{} views",
-                 count_low_decisive, 100.0 * count_low_decisive / N, config.min_visibility_count);
+        LOG_INFO("[prune_by_mask_leakage]   Low decisive:        {:6d} ({:5.1f}%) <- Strong evidence in <{} / {} usable cameras ({:.1f}%)",
+                 count_low_decisive, 100.0 * count_low_decisive / N, required_decisive_views, usable_cameras, 100.0f * config.min_visibility_ratio);
         LOG_INFO("[prune_by_mask_leakage]   Adequate decisive:   {:6d} ({:5.1f}%) <- Enough decisive views",
                  count_adequate_decisive, 100.0 * count_adequate_decisive / N);
 
@@ -1582,12 +1606,13 @@ namespace lfs::training::mask_pruning {
         int n_remove = 0;
 
         int kept_zero_decisive = 0;
+        int kept_low_decisive = 0;
         int kept_low_bad = 0;
         int kept_positive_balance = 0;
         int removed_by_negative_evidence = 0;
 
         constexpr float kBadVoteWeight = 2.0f;
-        const int min_bad_votes = std::max(1, (config.min_visibility_count + 1) / 2);
+        const int min_bad_votes = std::max(1, (required_decisive_views + 1) / 2);
 
         for (int i = 0; i < N; ++i) {
             const int good = good_votes[static_cast<size_t>(i)];
@@ -1599,6 +1624,13 @@ namespace lfs::training::mask_pruning {
                 rm_acc(i) = 0;
                 ++keep_cnt;
                 ++kept_zero_decisive;
+                continue;
+            }
+
+            if (dec < required_decisive_views) {
+                rm_acc(i) = 0;
+                ++keep_cnt;
+                ++kept_low_decisive;
                 continue;
             }
 
@@ -1633,6 +1665,8 @@ namespace lfs::training::mask_pruning {
         LOG_INFO("[prune_by_mask_leakage] === DECISION BREAKDOWN ===");
         LOG_INFO("[prune_by_mask_leakage]   KEPT (zero_decisive):     {:6d} <- No strong multiview evidence",
                  kept_zero_decisive);
+        LOG_INFO("[prune_by_mask_leakage]   KEPT (low_decisive):      {:6d} <- Decisive views < {} / {} usable cameras ({:.1f}%)",
+                 kept_low_decisive, required_decisive_views, usable_cameras, 100.0f * config.min_visibility_ratio);
         LOG_INFO("[prune_by_mask_leakage]   KEPT (low_bad_votes):     {:6d} <- Bad votes < min_bad_votes ({})",
                  kept_low_bad, min_bad_votes);
         LOG_INFO("[prune_by_mask_leakage]   KEPT (positive_balance):  {:6d} <- Good evidence compensated bad evidence",
