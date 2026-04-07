@@ -26,6 +26,7 @@
 #include "visualizer/scene_coordinate_utils.hpp"
 #include "visualizer_impl.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <format>
 #include <functional>
@@ -35,6 +36,17 @@
 namespace lfs::vis::gui {
 
     using ExportFormat = lfs::core::ExportFormat;
+
+    [[nodiscard]] std::filesystem::path defaultDatasetOutputPath(
+        const std::filesystem::path& dataset_path) {
+        auto base_path = dataset_path;
+        auto ext = dataset_path.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        if (ext == ".json") {
+            base_path = dataset_path.parent_path();
+        }
+        return base_path / "output";
+    }
 
     [[nodiscard]] const char* getDatasetTypeName(const std::filesystem::path& path) {
         switch (lfs::io::Loader::getDatasetType(path)) {
@@ -529,8 +541,10 @@ namespace lfs::vis::gui {
                 return;
             }
             auto params = data_loader->getParameters();
-            if (!cmd.output_path.empty())
-                params.dataset.output_path = cmd.output_path;
+            params.init_path = std::nullopt;
+            params.resume_checkpoint = std::nullopt;
+            params.dataset.output_path =
+                cmd.output_path.empty() ? defaultDatasetOutputPath(cmd.path) : cmd.output_path;
             if (!cmd.init_path.empty())
                 params.init_path = lfs::core::path_to_utf8(cmd.init_path);
             startAsyncImport(cmd.path, params);
@@ -776,6 +790,43 @@ namespace lfs::vis::gui {
         }
     }
 
+    void AsyncTaskManager::cancelImport() {
+        const bool had_activity = import_state_.active.load() ||
+                                  import_state_.show_completion.load() ||
+                                  import_state_.thread.has_value();
+        if (!had_activity) {
+            return;
+        }
+
+        LOG_INFO("Cancelling import");
+        if (import_state_.thread) {
+            import_state_.thread->request_stop();
+            if (import_state_.thread->joinable()) {
+                import_state_.thread->join();
+            }
+            import_state_.thread.reset();
+        }
+
+        import_state_.active.store(false);
+        import_state_.load_complete.store(false);
+        import_state_.show_completion.store(false);
+        import_state_.progress.store(0.0f);
+        {
+            const std::lock_guard lock(import_state_.mutex);
+            import_state_.path.clear();
+            import_state_.stage.clear();
+            import_state_.dataset_type.clear();
+            import_state_.error.clear();
+            import_state_.num_images = 0;
+            import_state_.num_points = 0;
+            import_state_.success = false;
+            import_state_.is_mesh = false;
+            import_state_.load_result.reset();
+            import_state_.params = {};
+        }
+        PanelRegistry::instance().invalidate_poll_cache();
+    }
+
     void AsyncTaskManager::startAsyncImport(const std::filesystem::path& path,
                                             const lfs::core::param::TrainingParameters& params) {
         if (import_state_.active.load()) {
@@ -822,8 +873,8 @@ namespace lfs::vis::gui {
                             return;
                         import_state_.progress.store(pct / 100.0f);
                         const std::lock_guard lock(import_state_.mutex);
-                        import_state_.stage = msg;
-                    }};
+                        import_state_.stage = msg; },
+                    .cancel_requested = [&stop_token]() { return stop_token.stop_requested(); }};
 
                 auto loader = lfs::io::Loader::create();
                 auto result = loader->load(path, load_options);

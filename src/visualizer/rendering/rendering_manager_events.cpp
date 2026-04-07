@@ -193,6 +193,7 @@ namespace lfs::vis {
         if (engine_) {
             engine_->setFrustumImageLoader(nullptr, false);
         }
+        storeFrustumImageLoaderSyncState({}, false, false);
         camera_interaction_service_.clearCurrentCamera();
         camera_interaction_service_.clearHoveredCamera();
         frame_lifecycle_service_.resetModelTracking();

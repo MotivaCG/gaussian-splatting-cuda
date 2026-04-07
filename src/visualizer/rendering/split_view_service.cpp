@@ -13,7 +13,7 @@
 
 namespace lfs::vis {
 
-    namespace {
+    namespace detail {
         [[nodiscard]] glm::mat4 currentSceneTransform(SceneManager* const scene_manager,
                                                       const int camera_uid) {
             if (!scene_manager) {
@@ -24,15 +24,34 @@ namespace lfs::vis {
             if (const auto transform = scene.getCameraSceneTransformByUid(camera_uid)) {
                 return lfs::rendering::dataWorldTransformToVisualizerWorld(*transform);
             }
-            if (const auto transform = scene.getVisiblePointCloudTransform()) {
-                return lfs::rendering::dataWorldTransformToVisualizerWorld(*transform);
+
+            const auto visible_nodes = scene.getNodes();
+            const lfs::core::SceneNode* single_visible_point_cloud = nullptr;
+            for (const auto* node : visible_nodes) {
+                if (!node || node->type != lfs::core::NodeType::POINTCLOUD || !node->point_cloud) {
+                    continue;
+                }
+                if (!scene.isNodeEffectivelyVisible(node->id)) {
+                    continue;
+                }
+                if (single_visible_point_cloud) {
+                    return lfs::rendering::dataWorldTransformToVisualizerWorld(glm::mat4(1.0f));
+                }
+                single_visible_point_cloud = node;
             }
+            if (single_visible_point_cloud) {
+                return lfs::rendering::dataWorldTransformToVisualizerWorld(
+                    scene.getWorldTransform(single_visible_point_cloud->id));
+            }
+
             const auto visible_transforms = scene.getVisibleNodeTransforms();
             return visible_transforms.empty()
                        ? glm::mat4(1.0f)
                        : lfs::rendering::dataWorldTransformToVisualizerWorld(visible_transforms[0]);
         }
+    } // namespace detail
 
+    namespace {
         [[nodiscard]] bool equalVec2(const glm::vec2& a, const glm::vec2& b) {
             return a.x == b.x && a.y == b.y;
         }
@@ -322,7 +341,7 @@ namespace lfs::vis {
         const glm::ivec2 aligned(
             ((dims.x + GPU_ALIGNMENT - 1) / GPU_ALIGNMENT) * GPU_ALIGNMENT,
             ((dims.y + GPU_ALIGNMENT - 1) / GPU_ALIGNMENT) * GPU_ALIGNMENT);
-        const glm::mat4 scene_transform = currentSceneTransform(scene_manager, current_camera_id);
+        const glm::mat4 scene_transform = detail::currentSceneTransform(scene_manager, current_camera_id);
 
         if (gt_context_ &&
             gt_context_->camera_id == current_camera_id &&

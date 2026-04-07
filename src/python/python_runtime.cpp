@@ -108,6 +108,7 @@ namespace lfs::python {
         core::Scene* g_scene_for_python = nullptr;
 
         ApplicationSceneContext g_app_scene_context;
+        std::atomic<vis::Visualizer*> g_visualizer{nullptr};
         std::atomic<vis::TrainerManager*> g_trainer_manager{nullptr};
         std::atomic<vis::ParameterManager*> g_parameter_manager{nullptr};
         std::atomic<vis::RenderingManager*> g_rendering_manager{nullptr};
@@ -224,6 +225,9 @@ namespace lfs::python {
 
     void set_trainer_manager(vis::TrainerManager* tm) { g_trainer_manager.store(tm); }
     vis::TrainerManager* get_trainer_manager() { return g_trainer_manager.load(); }
+
+    void set_visualizer(vis::Visualizer* viewer) { g_visualizer.store(viewer); }
+    vis::Visualizer* get_visualizer() { return g_visualizer.load(); }
 
     void set_parameter_manager(vis::ParameterManager* pm) { g_parameter_manager.store(pm); }
     vis::ParameterManager* get_parameter_manager() { return g_parameter_manager.load(); }

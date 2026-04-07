@@ -235,6 +235,9 @@ def reset_training() -> None:
 def save_checkpoint() -> None:
     """Save a training checkpoint to disk"""
 
+def new_project() -> None:
+    """Clear all project state and start a new project"""
+
 def clear_scene() -> None:
     """Remove all nodes from the scene"""
 
@@ -1836,6 +1839,9 @@ class DatasetInfo:
 
 def detect_dataset_info(path: str) -> DatasetInfo:
     """Detect dataset information from a directory path"""
+
+def is_dataset_path(path: str) -> bool:
+    """Check whether a path can be treated as a dataset source"""
 
 class CheckpointHeader:
     """Information from a checkpoint file header"""

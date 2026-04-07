@@ -108,6 +108,102 @@ namespace lfs::vis {
             }
         }
 
+        [[nodiscard]] std::vector<const core::SceneNode*> collectVisiblePointCloudNodes(const core::Scene& scene) {
+            std::vector<const core::SceneNode*> visible_nodes;
+            for (const auto* node : scene.getNodes()) {
+                if (!node || node->type != core::NodeType::POINTCLOUD || !node->point_cloud) {
+                    continue;
+                }
+                if (!scene.isNodeEffectivelyVisible(node->id)) {
+                    continue;
+                }
+                visible_nodes.push_back(node);
+            }
+            return visible_nodes;
+        }
+
+        [[nodiscard]] size_t visiblePointCloudPointCount(const core::Scene& scene) {
+            size_t point_count = 0;
+            for (const auto* node : collectVisiblePointCloudNodes(scene)) {
+                point_count += static_cast<size_t>(node->point_cloud->size());
+            }
+            return point_count;
+        }
+
+        [[nodiscard]] std::shared_ptr<core::PointCloud> buildMergedVisiblePointCloud(
+            const core::Scene& scene,
+            const std::vector<const core::SceneNode*>& visible_nodes) {
+            size_t total_points = 0;
+            for (const auto* node : visible_nodes) {
+                total_points += static_cast<size_t>(node->point_cloud->size());
+            }
+
+            std::vector<float> merged_means;
+            std::vector<float> merged_colors;
+            merged_means.reserve(total_points * 3);
+            merged_colors.reserve(total_points * 3);
+
+            for (const auto* node : visible_nodes) {
+                const auto& point_cloud = *node->point_cloud;
+                const glm::mat4 world_transform = scene.getWorldTransform(node->id);
+                auto means_cpu = point_cloud.means.to(core::DataType::Float32).cpu();
+                auto means_acc = means_cpu.accessor<float, 2>();
+                const size_t point_count = static_cast<size_t>(point_cloud.size());
+
+                for (size_t i = 0; i < point_count; ++i) {
+                    const glm::vec4 world_pos = world_transform * glm::vec4(
+                                                                      means_acc(i, 0),
+                                                                      means_acc(i, 1),
+                                                                      means_acc(i, 2),
+                                                                      1.0f);
+                    merged_means.push_back(world_pos.x);
+                    merged_means.push_back(world_pos.y);
+                    merged_means.push_back(world_pos.z);
+                }
+
+                if (point_cloud.colors.dtype() == core::DataType::UInt8) {
+                    auto colors_cpu = point_cloud.colors.cpu();
+                    auto colors_acc = colors_cpu.accessor<uint8_t, 2>();
+                    for (size_t i = 0; i < point_count; ++i) {
+                        merged_colors.push_back(static_cast<float>(colors_acc(i, 0)) / 255.0f);
+                        merged_colors.push_back(static_cast<float>(colors_acc(i, 1)) / 255.0f);
+                        merged_colors.push_back(static_cast<float>(colors_acc(i, 2)) / 255.0f);
+                    }
+                } else {
+                    auto colors_cpu = point_cloud.colors.to(core::DataType::Float32).cpu();
+                    auto colors_acc = colors_cpu.accessor<float, 2>();
+                    for (size_t i = 0; i < point_count; ++i) {
+                        merged_colors.push_back(colors_acc(i, 0));
+                        merged_colors.push_back(colors_acc(i, 1));
+                        merged_colors.push_back(colors_acc(i, 2));
+                    }
+                }
+            }
+
+            auto merged = std::make_shared<core::PointCloud>();
+            if (total_points == 0) {
+                merged->means = core::Tensor::zeros(
+                    {size_t{0}, size_t{3}},
+                    core::Device::CPU,
+                    core::DataType::Float32);
+                merged->colors = core::Tensor::zeros(
+                    {size_t{0}, size_t{3}},
+                    core::Device::CPU,
+                    core::DataType::Float32);
+            } else {
+                merged->means = core::Tensor::from_vector(
+                    merged_means,
+                    {total_points, size_t{3}},
+                    core::Device::CPU);
+                merged->colors = core::Tensor::from_vector(
+                    merged_colors,
+                    {total_points, size_t{3}},
+                    core::Device::CPU);
+            }
+            merged->attribute_names = visible_nodes.front()->point_cloud->attribute_names;
+            return merged;
+        }
+
     } // namespace
 
     using namespace lfs::core::events;
@@ -131,7 +227,6 @@ namespace lfs::vis {
         python::set_application_scene(&scene_);
         LOG_DEBUG("SceneManager initialized");
     }
-
     SceneManager::~SceneManager() = default;
 
     void SceneManager::setupEventHandlers() {
@@ -161,10 +256,6 @@ namespace lfs::vis {
                 "Set Lock State",
                 history_before,
                 op::SceneGraphMetadataEntry::captureNodes(*this, {cmd.name}));
-        });
-
-        cmd::ClearScene::when([this](const auto&) {
-            clear();
         });
 
         cmd::SwitchToEditMode::when([this](const auto&) {
@@ -358,7 +449,9 @@ namespace lfs::vis {
             core::Scene::Transaction txn(scene_);
 
             // Clear existing scene
-            clear();
+            if (!clear()) {
+                return;
+            }
 
             // Load the file
             LOG_DEBUG("Creating loader for splat file");
@@ -671,6 +764,7 @@ namespace lfs::vis {
             content_type_ = ContentType::Empty;
             splat_paths_.clear();
             dataset_path_.clear();
+            cached_params_.reset();
         }
 
         state::SceneCleared{}.emit();
@@ -1737,7 +1831,9 @@ namespace lfs::vis {
             if (services().trainerOrNull()) {
                 services().trainerOrNull()->clearTrainer();
             }
-            clear();
+            if (!clear()) {
+                return std::unexpected("Failed to clear existing scene");
+            }
 
             auto dataset_params = params;
             dataset_params.dataset.data_path = path;
@@ -1760,8 +1856,7 @@ namespace lfs::vis {
             }
 
             const size_t num_gaussians = scene_.getTrainingModelGaussianCount();
-            const auto* point_cloud = scene_.getVisiblePointCloud();
-            const size_t num_points = point_cloud ? point_cloud->size() : 0;
+            const size_t num_points = visiblePointCloudPointCount(scene_);
 
             finalizeDatasetSceneLoad(path, path, state::SceneLoaded::Type::Dataset, num_gaussians);
 
@@ -1811,7 +1906,9 @@ namespace lfs::vis {
             if (services().trainerOrNull()) {
                 services().trainerOrNull()->clearTrainer();
             }
-            clear();
+            if (!clear()) {
+                return std::unexpected("Failed to clear existing scene");
+            }
 
             cached_params_ = dataset_params;
 
@@ -1844,8 +1941,7 @@ namespace lfs::vis {
 
             // Get info from scene
             const size_t num_gaussians = scene_.getTrainingModelGaussianCount();
-            const auto* point_cloud = scene_.getVisiblePointCloud();
-            const size_t num_points = point_cloud ? point_cloud->size() : 0;
+            const size_t num_points = visiblePointCloudPointCount(scene_);
             const size_t num_cameras = scene_.getAllCameras().size();
 
             LOG_INFO("Dataset loaded successfully - {} images, {} initial points/gaussians",
@@ -1958,8 +2054,7 @@ namespace lfs::vis {
                 content_type_ = ContentType::Dataset;
             }
 
-            const auto* point_cloud = scene_.getVisiblePointCloud();
-            const size_t num_points = point_cloud ? point_cloud->size() : 0;
+            const size_t num_points = visiblePointCloudPointCount(scene_);
             const size_t num_cameras = scene_.getAllCameras().size();
 
             state::SceneLoaded{
@@ -2023,7 +2118,9 @@ namespace lfs::vis {
             if (services().trainerOrNull()) {
                 services().trainerOrNull()->clearTrainer();
             }
-            clear();
+            if (!clear()) {
+                throw std::runtime_error("Failed to clear existing scene");
+            }
 
             cached_params_ = checkpoint_params;
 
@@ -2098,7 +2195,7 @@ namespace lfs::vis {
         }
     }
 
-    void SceneManager::clear() {
+    bool SceneManager::clear() {
         LOG_DEBUG("Clearing scene");
 
         // Check if clearing is allowed via state machine
@@ -2106,11 +2203,12 @@ namespace lfs::vis {
             if (!services().trainerOrNull()->canPerform(TrainingAction::ClearScene)) {
                 LOG_WARN("Cannot clear scene: {}",
                          services().trainerOrNull()->getActionBlockedReason(TrainingAction::ClearScene));
-                return;
+                return false;
             }
         }
         op::undoHistory().clear();
         resetToEmptyState(false);
+        return true;
     }
 
     void SceneManager::switchToEditMode() {
@@ -2198,9 +2296,17 @@ namespace lfs::vis {
         // Fall back to the visible point cloud whenever the active splat model is absent or empty.
         // This keeps dataset "ready" scenes renderable before training has produced gaussians.
         if (!hasRenderableGaussians(state.combined_model)) {
-            state.point_cloud = scene_.getVisiblePointCloud();
-            if (const auto transform = scene_.getVisiblePointCloudTransform()) {
-                state.point_cloud_transform = rendering::dataWorldTransformToVisualizerWorld(*transform);
+            const auto visible_point_cloud_nodes = collectVisiblePointCloudNodes(scene_);
+            if (visible_point_cloud_nodes.size() > 1) {
+                state.owned_point_cloud = buildMergedVisiblePointCloud(scene_, visible_point_cloud_nodes);
+                state.point_cloud = state.owned_point_cloud.get();
+                state.point_cloud_transform =
+                    rendering::dataWorldTransformToVisualizerWorld(glm::mat4(1.0f));
+            }
+            if (visible_point_cloud_nodes.size() == 1) {
+                state.point_cloud = visible_point_cloud_nodes.front()->point_cloud.get();
+                state.point_cloud_transform = rendering::dataWorldTransformToVisualizerWorld(
+                    scene_.getWorldTransform(visible_point_cloud_nodes.front()->id));
             }
         }
 

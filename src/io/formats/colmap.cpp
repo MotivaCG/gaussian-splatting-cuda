@@ -31,6 +31,14 @@ namespace lfs::io {
 
     namespace fs = std::filesystem;
 
+    namespace {
+        constexpr size_t CANCEL_POLL_INTERVAL = 64;
+
+        [[nodiscard]] bool should_poll_cancel(const size_t index) {
+            return (index % CANCEL_POLL_INTERVAL) == 0;
+        }
+    } // namespace
+
     // -----------------------------------------------------------------------------
     //  Quaternion to rotation matrix (torch-free)
     // -----------------------------------------------------------------------------
@@ -223,7 +231,8 @@ namespace lfs::io {
     }
 
     static std::unordered_map<std::string, BasenameLayoutInfo>
-    scan_image_basename_layout(const fs::path& images_path) {
+    scan_image_basename_layout(const fs::path& images_path,
+                               const LoadOptions& options = {}) {
         std::unordered_map<std::string, BasenameLayoutInfo> layout;
 
         if (!safe_is_directory(images_path)) {
@@ -231,6 +240,7 @@ namespace lfs::io {
         }
 
         std::error_code ec;
+        size_t scanned_entries = 0;
         for (fs::recursive_directory_iterator it(
                  images_path,
                  fs::directory_options::skip_permission_denied,
@@ -238,6 +248,11 @@ namespace lfs::io {
              end;
              !ec && it != end;
              it.increment(ec)) {
+            if (should_poll_cancel(scanned_entries)) {
+                throw_if_load_cancel_requested(options, "COLMAP image layout scan cancelled");
+            }
+            ++scanned_entries;
+
             const auto& entry = *it;
             std::error_code file_ec;
             if (!entry.is_regular_file(file_ec) || file_ec || !is_image_file(entry.path())) {
@@ -299,21 +314,26 @@ namespace lfs::io {
     static Result<void> validate_colmap_dataset_layout_impl(
         const fs::path& base,
         const std::string& images_folder,
-        const std::vector<ImageData>& images) {
+        const std::vector<ImageData>& images,
+        const LoadOptions& options = {}) {
 
         const fs::path images_path = base / lfs::core::utf8_to_path(images_folder);
         if (!safe_is_directory(images_path)) {
             return make_error(ErrorCode::PATH_NOT_FOUND, "Images folder does not exist", images_path);
         }
 
-        const auto basename_layout = scan_image_basename_layout(images_path);
-        RecursiveFileCache image_cache(images_path);
-        MaskDirCache mask_cache(base);
+        const auto basename_layout = scan_image_basename_layout(images_path, options);
+        RecursiveFileCache image_cache(images_path, options.cancel_requested);
+        MaskDirCache mask_cache(base, options.cancel_requested);
 
         std::unordered_map<std::string, size_t> basename_only_metadata_counts;
         basename_only_metadata_counts.reserve(images.size());
 
-        for (const auto& image : images) {
+        for (size_t i = 0; i < images.size(); ++i) {
+            if (should_poll_cancel(i)) {
+                throw_if_load_cancel_requested(options, "COLMAP metadata validation cancelled");
+            }
+            const auto& image = images[i];
             const fs::path image_rel_path = lfs::core::utf8_to_path(image.name).lexically_normal();
             if (image_rel_path.parent_path().empty()) {
                 const std::string basename_key = detail::normalize_lookup_key(image_rel_path.filename());
@@ -321,7 +341,11 @@ namespace lfs::io {
             }
         }
 
-        for (const auto& image : images) {
+        for (size_t i = 0; i < images.size(); ++i) {
+            if (should_poll_cancel(i)) {
+                throw_if_load_cancel_requested(options, "COLMAP dataset validation cancelled");
+            }
+            const auto& image = images[i];
             const fs::path image_rel_path = lfs::core::utf8_to_path(image.name).lexically_normal();
             const std::string basename_key = detail::normalize_lookup_key(image_rel_path.filename());
 
@@ -467,7 +491,8 @@ namespace lfs::io {
     // -----------------------------------------------------------------------------
     //  images.bin
     // -----------------------------------------------------------------------------
-    std::vector<ImageData> read_images_binary(const std::filesystem::path& file_path) {
+    std::vector<ImageData> read_images_binary(const std::filesystem::path& file_path,
+                                              const LoadOptions& options = {}) {
         LOG_TIMER_TRACE("Read images.bin");
         auto buf_owner = read_binary(file_path);
         const char* cur = buf_owner->data();
@@ -479,6 +504,9 @@ namespace lfs::io {
         images.reserve(n_images);
 
         for (uint64_t i = 0; i < n_images; ++i) {
+            if (should_poll_cancel(static_cast<size_t>(i))) {
+                throw_if_load_cancel_requested(options, "COLMAP image metadata load cancelled");
+            }
             ImageData img;
             img.image_id = read_u32(cur);
 
@@ -514,7 +542,9 @@ namespace lfs::io {
     //  cameras.bin
     // -----------------------------------------------------------------------------
     std::unordered_map<uint32_t, CameraDataIntermediate>
-    read_cameras_binary(const std::filesystem::path& file_path, float scale_factor = 1.0f) {
+    read_cameras_binary(const std::filesystem::path& file_path,
+                        float scale_factor = 1.0f,
+                        const LoadOptions& options = {}) {
         LOG_TIMER_TRACE("Read cameras.bin");
         auto buf_owner = read_binary(file_path);
         const char* cur = buf_owner->data();
@@ -528,6 +558,9 @@ namespace lfs::io {
         cams.reserve(n_cams);
 
         for (uint64_t i = 0; i < n_cams; ++i) {
+            if (should_poll_cancel(static_cast<size_t>(i))) {
+                throw_if_load_cancel_requested(options, "COLMAP camera metadata load cancelled");
+            }
             CameraDataIntermediate cam;
             cam.camera_id = read_u32(cur);
             cam.model_id = read_i32(cur);
@@ -569,7 +602,8 @@ namespace lfs::io {
     // -----------------------------------------------------------------------------
     //  points3D.bin
     // -----------------------------------------------------------------------------
-    PointCloud read_point3D_binary(const std::filesystem::path& file_path) {
+    PointCloud read_point3D_binary(const std::filesystem::path& file_path,
+                                   const LoadOptions& options = {}) {
         LOG_TIMER_TRACE("Read points3D.bin");
         auto buf_owner = read_binary(file_path);
         const char* cur = buf_owner->data();
@@ -582,6 +616,9 @@ namespace lfs::io {
         std::vector<uint8_t> colors(N * 3);
 
         for (uint64_t i = 0; i < N; ++i) {
+            if (should_poll_cancel(static_cast<size_t>(i))) {
+                throw_if_load_cancel_requested(options, "COLMAP point cloud load cancelled");
+            }
             cur += 8; // skip point ID
 
             positions[i * 3 + 0] = static_cast<float>(read_f64(cur));
@@ -613,7 +650,8 @@ namespace lfs::io {
     // -----------------------------------------------------------------------------
     //  Text-file helpers
     // -----------------------------------------------------------------------------
-    std::vector<std::string> read_text_file(const std::filesystem::path& file_path) {
+    std::vector<std::string> read_text_file(const std::filesystem::path& file_path,
+                                            const LoadOptions& options = {}) {
         LOG_TRACE("Reading text file: {}", lfs::core::path_to_utf8(file_path));
         std::ifstream file;
         if (!lfs::core::open_file_for_read(file_path, file)) {
@@ -624,6 +662,9 @@ namespace lfs::io {
         std::vector<std::string> lines;
         std::string line;
         while (std::getline(file, line)) {
+            if (should_poll_cancel(lines.size())) {
+                throw_if_load_cancel_requested(options, "COLMAP text metadata load cancelled");
+            }
             if (line.starts_with("#"))
                 continue;
             if (!line.empty() && line.back() == '\r')
@@ -664,14 +705,18 @@ namespace lfs::io {
     // -----------------------------------------------------------------------------
     //  images.txt
     // -----------------------------------------------------------------------------
-    std::vector<ImageData> read_images_text(const std::filesystem::path& file_path) {
+    std::vector<ImageData> read_images_text(const std::filesystem::path& file_path,
+                                            const LoadOptions& options = {}) {
         LOG_TIMER_TRACE("Read images.txt");
-        auto lines = read_text_file(file_path);
+        auto lines = read_text_file(file_path, options);
 
         std::vector<ImageData> images;
         images.reserve(lines.size());
 
         for (size_t line_idx = 0; line_idx < lines.size(); ++line_idx) {
+            if (should_poll_cancel(line_idx)) {
+                throw_if_load_cancel_requested(options, "COLMAP image metadata parse cancelled");
+            }
             const auto& line = lines[line_idx];
             std::istringstream iss(line);
 
@@ -710,16 +755,22 @@ namespace lfs::io {
     //  cameras.txt
     // -----------------------------------------------------------------------------
     std::unordered_map<uint32_t, CameraDataIntermediate>
-    read_cameras_text(const std::filesystem::path& file_path, float scale_factor = 1.0f) {
+    read_cameras_text(const std::filesystem::path& file_path,
+                      float scale_factor = 1.0f,
+                      const LoadOptions& options = {}) {
         LOG_TIMER_TRACE("Read cameras.txt");
-        auto lines = read_text_file(file_path);
+        auto lines = read_text_file(file_path, options);
 
         LOG_DEBUG("Reading {} cameras from text file{}", lines.size(),
                   scale_factor != 1.0f ? std::format(" with scale factor {}", scale_factor) : "");
 
         std::unordered_map<uint32_t, CameraDataIntermediate> cams;
 
-        for (const auto& line : lines) {
+        for (size_t line_idx = 0; line_idx < lines.size(); ++line_idx) {
+            if (should_poll_cancel(line_idx)) {
+                throw_if_load_cancel_requested(options, "COLMAP camera metadata parse cancelled");
+            }
+            const auto& line = lines[line_idx];
             const auto tokens = split_string(line, ' ');
             if (tokens.size() < 4) {
                 LOG_ERROR("Invalid format in cameras.txt: {}", line);
@@ -761,9 +812,10 @@ namespace lfs::io {
     // -----------------------------------------------------------------------------
     //  points3D.txt
     // -----------------------------------------------------------------------------
-    PointCloud read_point3D_text(const std::filesystem::path& file_path) {
+    PointCloud read_point3D_text(const std::filesystem::path& file_path,
+                                 const LoadOptions& options = {}) {
         LOG_TIMER_TRACE("Read points3D.txt");
-        auto lines = read_text_file(file_path);
+        auto lines = read_text_file(file_path, options);
         uint64_t N = lines.size();
         LOG_DEBUG("Reading {} 3D points from text file", N);
 
@@ -771,6 +823,9 @@ namespace lfs::io {
         std::vector<uint8_t> colors(N * 3);
 
         for (uint64_t i = 0; i < N; ++i) {
+            if (should_poll_cancel(static_cast<size_t>(i))) {
+                throw_if_load_cancel_requested(options, "COLMAP point cloud parse cancelled");
+            }
             const auto& line = lines[i];
             const auto tokens = split_string(line, ' ');
 
@@ -804,7 +859,8 @@ namespace lfs::io {
     assemble_colmap_cameras(const std::filesystem::path& base_path,
                             const std::unordered_map<uint32_t, CameraDataIntermediate>& cam_map,
                             const std::vector<ImageData>& images,
-                            const std::string& images_folder) {
+                            const std::string& images_folder,
+                            const LoadOptions& options = {}) {
 
         LOG_TIMER_TRACE("Assemble COLMAP cameras");
 
@@ -818,8 +874,8 @@ namespace lfs::io {
         std::vector<std::shared_ptr<Camera>> cameras;
         cameras.reserve(images.size());
 
-        RecursiveFileCache image_cache(images_path);
-        MaskDirCache mask_cache(base_path);
+        RecursiveFileCache image_cache(images_path, options.cancel_requested);
+        MaskDirCache mask_cache(base_path, options.cancel_requested);
         bool used_recursive_image_lookup = false;
 
         // Accumulate camera positions for scene center
@@ -827,6 +883,9 @@ namespace lfs::io {
         camera_positions.reserve(images.size() * 3);
 
         for (size_t i = 0; i < images.size(); ++i) {
+            if (should_poll_cancel(i)) {
+                throw_if_load_cancel_requested(options, "COLMAP camera assembly cancelled");
+            }
             const ImageData& img = images[i];
             const std::filesystem::path image_rel_path = lfs::core::utf8_to_path(img.name);
             std::filesystem::path image_path = images_path / image_rel_path;
@@ -1080,14 +1139,16 @@ namespace lfs::io {
         throw std::runtime_error(error_msg);
     }
 
-    PointCloud read_colmap_point_cloud(const std::filesystem::path& filepath) {
+    PointCloud read_colmap_point_cloud(const std::filesystem::path& filepath,
+                                       const LoadOptions& options) {
         LOG_TIMER_TRACE("Read COLMAP point cloud");
         fs::path points3d_file = get_sparse_file_path(filepath, "points3D.bin");
-        return read_point3D_binary(points3d_file);
+        return read_point3D_binary(points3d_file, options);
     }
 
     Result<void> validate_colmap_dataset_layout(const std::filesystem::path& base,
-                                                const std::string& images_folder) {
+                                                const std::string& images_folder,
+                                                const LoadOptions& options) {
         try {
             const auto search_paths = get_colmap_search_paths(base);
             const fs::path cameras_bin = find_file_in_paths(search_paths, "cameras.bin");
@@ -1106,12 +1167,14 @@ namespace lfs::io {
 
             std::vector<ImageData> images;
             if (has_binary_pair) {
-                images = read_images_binary(images_bin);
+                images = read_images_binary(images_bin, options);
             } else {
-                images = read_images_text(images_txt);
+                images = read_images_text(images_txt, options);
             }
 
-            return validate_colmap_dataset_layout_impl(base, images_folder, images);
+            return validate_colmap_dataset_layout_impl(base, images_folder, images, options);
+        } catch (const LoadCancelledError& e) {
+            return make_error(ErrorCode::CANCELLED, e.what(), base);
         } catch (const std::exception& e) {
             return make_error(ErrorCode::CORRUPTED_DATA,
                               std::format("Failed to validate COLMAP dataset: {}", e.what()),
@@ -1121,7 +1184,8 @@ namespace lfs::io {
 
     Result<std::tuple<std::vector<std::shared_ptr<Camera>>, Tensor>>
     read_colmap_cameras_and_images(const std::filesystem::path& base,
-                                   const std::string& images_folder) {
+                                   const std::string& images_folder,
+                                   const LoadOptions& options) {
 
         LOG_TIMER_TRACE("Read COLMAP cameras and images");
 
@@ -1130,27 +1194,29 @@ namespace lfs::io {
         fs::path cams_file = get_sparse_file_path(base, "cameras.bin");
         fs::path images_file = get_sparse_file_path(base, "images.bin");
 
-        auto cam_map = read_cameras_binary(cams_file, scale_factor);
-        auto images = read_images_binary(images_file);
+        auto cam_map = read_cameras_binary(cams_file, scale_factor, options);
+        auto images = read_images_binary(images_file, options);
 
         LOG_INFO("Read {} cameras and {} images from COLMAP", cam_map.size(), images.size());
 
-        if (auto validation = validate_colmap_dataset_layout_impl(base, images_folder, images); !validation) {
+        if (auto validation = validate_colmap_dataset_layout_impl(base, images_folder, images, options); !validation) {
             return std::unexpected(validation.error());
         }
 
-        return assemble_colmap_cameras(base, cam_map, images, images_folder);
+        return assemble_colmap_cameras(base, cam_map, images, images_folder, options);
     }
 
-    PointCloud read_colmap_point_cloud_text(const std::filesystem::path& filepath) {
+    PointCloud read_colmap_point_cloud_text(const std::filesystem::path& filepath,
+                                            const LoadOptions& options) {
         LOG_TIMER_TRACE("Read COLMAP point cloud (text)");
         fs::path points3d_file = get_sparse_file_path(filepath, "points3D.txt");
-        return read_point3D_text(points3d_file);
+        return read_point3D_text(points3d_file, options);
     }
 
     Result<std::tuple<std::vector<std::shared_ptr<Camera>>, Tensor>>
     read_colmap_cameras_and_images_text(const std::filesystem::path& base,
-                                        const std::string& images_folder) {
+                                        const std::string& images_folder,
+                                        const LoadOptions& options) {
 
         LOG_TIMER_TRACE("Read COLMAP cameras and images (text)");
 
@@ -1159,16 +1225,16 @@ namespace lfs::io {
         fs::path cams_file = get_sparse_file_path(base, "cameras.txt");
         fs::path images_file = get_sparse_file_path(base, "images.txt");
 
-        auto cam_map = read_cameras_text(cams_file, scale_factor);
-        auto images = read_images_text(images_file);
+        auto cam_map = read_cameras_text(cams_file, scale_factor, options);
+        auto images = read_images_text(images_file, options);
 
         LOG_INFO("Read {} cameras and {} images from COLMAP text files", cam_map.size(), images.size());
 
-        if (auto validation = validate_colmap_dataset_layout_impl(base, images_folder, images); !validation) {
+        if (auto validation = validate_colmap_dataset_layout_impl(base, images_folder, images, options); !validation) {
             return std::unexpected(validation.error());
         }
 
-        return assemble_colmap_cameras(base, cam_map, images, images_folder);
+        return assemble_colmap_cameras(base, cam_map, images, images_folder, options);
     }
 
     Result<std::tuple<std::vector<std::shared_ptr<Camera>>, Tensor>>

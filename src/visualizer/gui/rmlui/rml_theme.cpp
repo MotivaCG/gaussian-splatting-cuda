@@ -4,6 +4,7 @@
 
 #include "gui/rmlui/rml_theme.hpp"
 #include "core/logger.hpp"
+#include "core/path_utils.hpp"
 #include "internal/resource_paths.hpp"
 #include "theme/theme.hpp"
 
@@ -16,6 +17,7 @@
 #include <fstream>
 #include <functional>
 #include <mutex>
+#include <string_view>
 
 namespace lfs::vis::gui::rml_theme {
 
@@ -33,6 +35,31 @@ namespace lfs::vis::gui::rml_theme {
         const auto b = static_cast<int>(c.b * 255.0f);
         const auto a = static_cast<int>(alpha * 255.0f);
         return std::format("rgba({},{},{},{})", r, g, b, a);
+    }
+
+    std::string pathToRmlImageSource(const std::filesystem::path& path) {
+        constexpr std::string_view SAFE_CHARS = "/:._-~";
+
+        const std::string utf8 = lfs::core::path_to_utf8(path);
+        std::string encoded;
+        encoded.reserve(utf8.size());
+
+        const auto is_ascii_alnum = [](const unsigned char ch) {
+            return (ch >= '0' && ch <= '9') ||
+                   (ch >= 'A' && ch <= 'Z') ||
+                   (ch >= 'a' && ch <= 'z');
+        };
+
+        for (const unsigned char ch : utf8) {
+            if (is_ascii_alnum(ch) || SAFE_CHARS.find(static_cast<char>(ch)) != std::string_view::npos) {
+                encoded.push_back(static_cast<char>(ch));
+                continue;
+            }
+
+            encoded += std::format("%{:02X}", static_cast<unsigned int>(ch));
+        }
+
+        return encoded;
     }
 
     std::string loadBaseRCSS(const std::string& asset_name) {
@@ -193,12 +220,12 @@ namespace lfs::vis::gui::rml_theme {
 
         std::string check_path;
         try {
-            check_path = lfs::vis::getAssetPath("icon/check.png").string();
+            check_path = pathToRmlImageSource(lfs::vis::getAssetPath("icon/check.png"));
         } catch (...) {}
 
         std::string arrow_path;
         try {
-            arrow_path = lfs::vis::getAssetPath("icon/dropdown-arrow.png").string();
+            arrow_path = pathToRmlImageSource(lfs::vis::getAssetPath("icon/dropdown-arrow.png"));
         } catch (...) {}
 
         const float tn = t.button.tint_normal;

@@ -5,6 +5,7 @@
 #include "io/formats/colmap.hpp"
 #include "io/loaders/colmap_loader.hpp"
 
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -134,6 +135,26 @@ namespace {
         void write_minimal_colmap_text_dataset(const fs::path& dataset_dir,
                                                const std::string& image_name) {
             write_minimal_colmap_text_dataset(dataset_dir, std::vector<std::string>{image_name});
+        }
+
+        void write_ascii_double_ply(const fs::path& path, const size_t vertex_count) {
+            fs::create_directories(path.parent_path());
+            std::ofstream out(path, std::ios::binary);
+            ASSERT_TRUE(out.is_open()) << "Failed to open " << path;
+            out << "ply\n";
+            out << "format ascii 1.0\n";
+            out << "element vertex " << vertex_count << "\n";
+            out << "property double x\n";
+            out << "property double y\n";
+            out << "property double z\n";
+            out << "end_header\n";
+            for (size_t i = 0; i < vertex_count; ++i) {
+                out << static_cast<double>(i) << ' '
+                    << static_cast<double>(i) * 0.5 << ' '
+                    << static_cast<double>(i) * -0.25 << '\n';
+            }
+            out.close();
+            ASSERT_TRUE(out.good()) << "Failed to write " << path;
         }
 
         fs::path temp_dir_;
@@ -272,6 +293,64 @@ TEST_F(ColmapImageLayoutTest, ValidateOnlyRunsColmapPreflight) {
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, lfs::io::ErrorCode::INVALID_DATASET);
     EXPECT_NE(result.error().message.find("basename only"), std::string::npos);
+}
+
+TEST_F(ColmapImageLayoutTest, ValidationCanBeCancelledDuringFilesystemScan) {
+    const fs::path dataset_dir = temp_dir_ / "dataset";
+
+    write_minimal_colmap_text_dataset(dataset_dir, "frame_0001.png");
+    write_png(dataset_dir / "images" / "frame_0001.png");
+
+    int cancel_checks = 0;
+    auto result = lfs::io::validate_colmap_dataset_layout(dataset_dir, "images", {
+                                                                                     .cancel_requested = [&cancel_checks]() {
+                                                                                         return ++cancel_checks >= 1;
+                                                                                     },
+                                                                                 });
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, lfs::io::ErrorCode::CANCELLED);
+}
+
+TEST_F(ColmapImageLayoutTest, LoadCanBeCancelledDuringMetadataParse) {
+    const fs::path dataset_dir = temp_dir_ / "dataset";
+
+    write_minimal_colmap_text_dataset(dataset_dir, "frame_0001.png");
+    write_png(dataset_dir / "images" / "frame_0001.png");
+
+    int cancel_checks = 0;
+    lfs::io::ColmapLoader loader;
+    auto result = loader.load(dataset_dir, {
+                                               .cancel_requested = [&cancel_checks]() {
+                                                   return ++cancel_checks >= 2;
+                                               },
+                                           });
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, lfs::io::ErrorCode::CANCELLED);
+}
+
+TEST_F(ColmapImageLayoutTest, LoadCancelsInsteadOfFallingBackFromCustomPointCloudPly) {
+    const fs::path dataset_dir = temp_dir_ / "dataset";
+
+    write_minimal_colmap_text_dataset(dataset_dir, "frame_0001.png");
+    write_png(dataset_dir / "images" / "frame_0001.png");
+    write_ascii_double_ply(dataset_dir / "points3D.ply", 300000);
+
+    std::atomic<bool> cancel_requested{false};
+    std::atomic<int> cancel_checks{0};
+    cancel_requested.store(true, std::memory_order_relaxed);
+
+    lfs::io::ColmapLoader loader;
+    auto result = loader.load(dataset_dir, {
+                                               .cancel_requested = [&cancel_requested, &cancel_checks]() {
+                                                   const int check_count = cancel_checks.fetch_add(1, std::memory_order_relaxed) + 1;
+                                                   return cancel_requested.load(std::memory_order_relaxed) && check_count >= 50;
+                                               },
+                                           });
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, lfs::io::ErrorCode::CANCELLED);
 }
 
 TEST_F(ColmapImageLayoutTest, DetectDatasetInfoCountsNestedImagesAndMasks) {

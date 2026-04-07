@@ -35,6 +35,7 @@ namespace lfs::core {
 } // namespace lfs::core
 
 namespace lfs::vis {
+    class Visualizer;
     class SceneManager;
     class TrainerManager;
     class ParameterManager;
@@ -281,6 +282,9 @@ namespace lfs::python {
 
     LFS_PYTHON_RUNTIME_API void set_trainer_manager(vis::TrainerManager* tm);
     LFS_PYTHON_RUNTIME_API vis::TrainerManager* get_trainer_manager();
+
+    LFS_PYTHON_RUNTIME_API void set_visualizer(vis::Visualizer* viewer);
+    LFS_PYTHON_RUNTIME_API vis::Visualizer* get_visualizer();
 
     LFS_PYTHON_RUNTIME_API void set_parameter_manager(vis::ParameterManager* pm);
     LFS_PYTHON_RUNTIME_API vis::ParameterManager* get_parameter_manager();

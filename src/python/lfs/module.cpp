@@ -60,6 +60,7 @@
 #include "rendering/rendering_manager.hpp"
 #include "training/strategies/istrategy.hpp"
 #include "training/trainer.hpp"
+#include "training/training_state.hpp"
 #include "visualizer/core/editor_context.hpp"
 #include "visualizer/core/parameter_manager.hpp"
 #include "visualizer/core/services.hpp"
@@ -69,13 +70,16 @@
 #include "visualizer/scene/scene_manager.hpp"
 #include "visualizer/scene_coordinate_utils.hpp"
 #include "visualizer/training/training_manager.hpp"
+#include "visualizer/visualizer.hpp"
 #include "visualizer/window/window_manager.hpp"
 
+#include <atomic>
 #include <cstring>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -124,6 +128,67 @@ namespace {
     // on Windows, which routes through the active ANSI code page.
     std::filesystem::path python_utf8_path(const std::string& value) {
         return lfs::core::utf8_to_path(value);
+    }
+
+    std::expected<void, std::string> post_clear_scene_to_viewer(lfs::vis::Visualizer& viewer) {
+        if (viewer.isOnViewerThread()) {
+            if (!viewer.acceptsPostedWork()) {
+                return std::unexpected("Viewer is shutting down");
+            }
+            return viewer.clearScene();
+        }
+
+        auto promise = std::make_shared<std::promise<std::expected<void, std::string>>>();
+        auto future = promise->get_future();
+        auto completed = std::make_shared<std::atomic_bool>(false);
+
+        auto finish = [promise, completed](std::expected<void, std::string> result) mutable {
+            if (!completed->exchange(true)) {
+                promise->set_value(std::move(result));
+            }
+        };
+
+        const bool posted = viewer.postWork(lfs::vis::Visualizer::WorkItem{
+            .run =
+                [&viewer, finish]() mutable {
+                    finish(viewer.clearScene());
+                },
+            .cancel =
+                [finish]() mutable {
+                    finish(std::unexpected("Viewer is shutting down"));
+                },
+        });
+
+        if (!posted) {
+            return std::unexpected("Viewer is shutting down");
+        }
+
+        return future.get();
+    }
+
+    std::expected<void, std::string> clear_scene_from_python() {
+        if (auto* const viewer = lfs::python::get_visualizer()) {
+            return post_clear_scene_to_viewer(*viewer);
+        }
+
+        auto* const scene_manager = lfs::python::get_scene_manager();
+        if (!scene_manager) {
+            return std::unexpected("No scene manager available");
+        }
+
+        if (scene_manager->clear()) {
+            return {};
+        }
+
+        if (auto* const trainer_manager = lfs::python::get_trainer_manager();
+            trainer_manager &&
+            scene_manager->getContentType() == lfs::vis::SceneManager::ContentType::Dataset &&
+            !trainer_manager->canPerform(lfs::vis::TrainingAction::ClearScene)) {
+            return std::unexpected(
+                std::string(trainer_manager->getActionBlockedReason(lfs::vis::TrainingAction::ClearScene)));
+        }
+
+        return std::unexpected("Scene clear request was rejected");
     }
 
     CommandCenter* get_command_center_opt() {
@@ -673,9 +738,17 @@ NB_MODULE(lichtfeld, m) {
         "save_checkpoint", []() { lfs::core::events::cmd::SaveCheckpoint{}.emit(); },
         "Save a training checkpoint to disk");
     m.def(
+        "new_project", []() {
+            nb::gil_scoped_release release;
+            lfs::core::events::cmd::NewProject{}.emit();
+        },
+        "Clear all project state and start a new project");
+    m.def(
         "clear_scene", []() {
             nb::gil_scoped_release release;
-            lfs::core::events::cmd::ClearScene{}.emit();
+            if (auto result = clear_scene_from_python(); !result) {
+                throw std::runtime_error(std::format("clear_scene failed: {}", result.error()));
+            }
         },
         "Remove all nodes from the scene");
     m.def(
@@ -1791,6 +1864,10 @@ Example:
         "detect_dataset_info",
         [](const std::string& path) { return lfs::io::detect_dataset_info(python_utf8_path(path)); },
         nb::arg("path"), "Detect dataset information from a directory path");
+    m.def(
+        "is_dataset_path",
+        [](const std::string& path) { return lfs::io::Loader::isDatasetPath(python_utf8_path(path)); },
+        nb::arg("path"), "Check whether a path can be treated as a dataset source");
 
     nb::class_<lfs::core::CheckpointHeader>(m, "CheckpointHeader", "Information from a checkpoint file header")
         .def_ro("iteration", &lfs::core::CheckpointHeader::iteration)

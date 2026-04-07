@@ -60,7 +60,7 @@ namespace lfs::vis {
         std::expected<void, std::string> loadDataset(const std::filesystem::path& path) override;
         std::expected<void, std::string> loadCheckpointForTraining(const std::filesystem::path& path) override;
         void consolidateModels() override;
-        void clearScene() override;
+        [[nodiscard]] std::expected<void, std::string> clearScene() override;
         core::Scene& getScene() override { return scene_manager_->getScene(); }
         bool postWork(WorkItem work) override;
         LFS_VIS_API bool postRenderWork(WorkItem work);
@@ -146,6 +146,7 @@ namespace lfs::vis {
         // GUI manager
         std::unique_ptr<gui::GuiManager> gui_manager_;
         friend class gui::GuiManager;
+        friend class VisualizerImplResetTest_ResetTrainingPreservesExplicitInitPath_Test;
 
         // Allow ToolContext to access GUI manager for logging
         friend class ToolContext;
@@ -165,8 +166,11 @@ namespace lfs::vis {
         void handleTrainingCompleted(const lfs::core::events::state::TrainingCompleted& event);
         void handleLoadFileCommand(const lfs::core::events::cmd::LoadFile& cmd);
         void handleLoadConfigFile(const std::filesystem::path& path);
+        void handleNewProject();
+        void performNewProject();
         void handleSwitchToLatestCheckpoint();
         void performReset();
+        void resetProjectState();
 
         // Tool initialization
         void initializeTools();
@@ -235,6 +239,7 @@ namespace lfs::vis {
         bool tools_initialized_ = false;
         bool view_context_bridge_initialized_ = false;
         bool pending_auto_train_ = false;
+        bool pending_new_project_ = false;
         bool pending_reset_ = false;
         bool gui_frame_rendered_ = false;
         std::chrono::high_resolution_clock::time_point last_frame_time_ = std::chrono::high_resolution_clock::now();

@@ -1260,11 +1260,16 @@ namespace lfs::io {
         return has_opacity && has_scale && has_rotation;
     }
 
-    std::expected<lfs::core::PointCloud, std::string> load_ply_point_cloud(const std::filesystem::path& filepath) {
+    std::expected<lfs::core::PointCloud, std::string> load_ply_point_cloud(const std::filesystem::path& filepath,
+                                                                           const LoadOptions& options) {
         constexpr uint8_t DEFAULT_COLOR = 255;
 
         if (!std::filesystem::exists(filepath)) {
             return std::unexpected(std::format("File not found: {}", lfs::core::path_to_utf8(filepath)));
+        }
+
+        if (is_load_cancel_requested(options)) {
+            return std::unexpected("Load cancelled");
         }
 
         try {
@@ -1290,7 +1295,9 @@ namespace lfs::io {
                 has_colors = true;
             } catch (...) {}
 
+            throw_if_load_cancel_requested(options, "PLY read cancelled");
             ply.read(file);
+            throw_if_load_cancel_requested(options, "PLY read cancelled");
 
             const size_t N = vertices->count;
             LOG_DEBUG("Point cloud: {} points", N);
@@ -1303,8 +1310,12 @@ namespace lfs::io {
                 std::memcpy(pos_ptr, vertices->buffer.get(), N * 3 * sizeof(float));
             } else if (vertices->t == tinyply::Type::FLOAT64) {
                 const auto* src = reinterpret_cast<const double*>(vertices->buffer.get());
-                for (size_t i = 0; i < N * 3; ++i)
+                for (size_t i = 0; i < N * 3; ++i) {
+                    if ((i % 4096) == 0) {
+                        throw_if_load_cancel_requested(options, "PLY vertex conversion cancelled");
+                    }
                     pos_ptr[i] = static_cast<float>(src[i]);
+                }
             } else {
                 return std::unexpected("Unsupported vertex type");
             }
@@ -1325,7 +1336,10 @@ namespace lfs::io {
                 color_tensor = Tensor::full({N, 3}, DEFAULT_COLOR, Device::CPU, DataType::UInt8);
             }
 
+            throw_if_load_cancel_requested(options, "PLY point cloud load cancelled");
             return PointCloud(std::move(positions), std::move(color_tensor));
+        } catch (const LoadCancelledError& e) {
+            return std::unexpected(std::string(e.what()));
         } catch (const std::exception& e) {
             return std::unexpected(std::format("Load failed: {}", e.what()));
         }

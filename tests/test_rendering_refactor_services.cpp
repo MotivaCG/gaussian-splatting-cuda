@@ -28,6 +28,10 @@
 
 namespace lfs::vis {
 
+    namespace detail {
+        glm::mat4 currentSceneTransform(SceneManager* scene_manager, int camera_uid);
+    }
+
     namespace {
         std::unique_ptr<lfs::core::SplatData> makeTestSplat(const float x) {
             using lfs::core::DataType;
@@ -298,6 +302,28 @@ namespace lfs::vis {
         EXPECT_FALSE(plan->panels[1].panel.presentation.flip_y.has_value());
     }
 
+    TEST(SplitViewServiceTest, CurrentSceneTransformUsesIdentityForMultipleVisiblePointClouds) {
+        SceneManager manager;
+        auto& scene = manager.getScene();
+
+        const auto left_parent = scene.addGroup("LeftParent");
+        const auto right_parent = scene.addGroup("RightParent");
+
+        scene.setNodeTransform(
+            "LeftParent",
+            glm::translate(glm::mat4(1.0f), glm::vec3(1.0f, 2.0f, 3.0f)));
+        scene.setNodeTransform(
+            "RightParent",
+            glm::translate(glm::mat4(1.0f), glm::vec3(-4.0f, 5.0f, 6.0f)));
+
+        scene.addPointCloud("LeftCloud", makeTestPointCloud(), left_parent);
+        scene.addPointCloud("RightCloud", makeTestPointCloud(), right_parent);
+
+        EXPECT_EQ(
+            detail::currentSceneTransform(&manager, -1),
+            lfs::rendering::dataWorldTransformToVisualizerWorld(glm::mat4(1.0f)));
+    }
+
     TEST_F(SceneManagerRenderStateTest, DatasetReadyStateKeepsVisiblePointCloudWhenTrainingModelIsEmpty) {
         SceneManager manager;
         manager.changeContentType(SceneManager::ContentType::Dataset);
@@ -370,6 +396,172 @@ namespace lfs::vis {
         const auto state = manager.buildRenderState();
         ASSERT_EQ(state.model_transforms.size(), 1u);
         expectVisualizerTranslationFromData(state.model_transforms[0], {1.0f, 2.0f, 3.0f});
+    }
+
+    TEST_F(SceneManagerRenderStateTest, MultipleVisiblePointCloudsAreMergedAcrossParentTransforms) {
+        SceneManager manager;
+        auto& scene = manager.getScene();
+
+        const auto left_parent = scene.addGroup("LeftParent");
+        const auto right_parent = scene.addGroup("RightParent");
+
+        scene.setNodeTransform(
+            "LeftParent",
+            glm::translate(glm::mat4(1.0f), glm::vec3(1.0f, 2.0f, 3.0f)));
+        scene.setNodeTransform(
+            "RightParent",
+            glm::translate(glm::mat4(1.0f), glm::vec3(-4.0f, 5.0f, 6.0f)));
+
+        auto left_means = lfs::core::Tensor::from_vector(
+            {0.0f, 0.0f, 0.0f,
+             1.0f, 0.0f, 0.0f},
+            {size_t{2}, size_t{3}},
+            lfs::core::Device::CPU);
+        auto left_colors = lfs::core::Tensor::from_vector(
+            {1.0f, 0.0f, 0.0f,
+             0.0f, 1.0f, 0.0f},
+            {size_t{2}, size_t{3}},
+            lfs::core::Device::CPU);
+        scene.addPointCloud(
+            "LeftCloud",
+            std::make_shared<lfs::core::PointCloud>(std::move(left_means), std::move(left_colors)),
+            left_parent);
+
+        auto right_means = lfs::core::Tensor::from_vector(
+            {0.0f, 1.0f, 0.0f},
+            {size_t{1}, size_t{3}},
+            lfs::core::Device::CPU);
+        auto right_colors = lfs::core::Tensor::from_vector(
+            {0.0f, 0.0f, 1.0f},
+            {size_t{1}, size_t{3}},
+            lfs::core::Device::CPU);
+        scene.addPointCloud(
+            "RightCloud",
+            std::make_shared<lfs::core::PointCloud>(std::move(right_means), std::move(right_colors)),
+            right_parent);
+
+        const auto state = manager.buildRenderState();
+        ASSERT_NE(state.point_cloud, nullptr);
+        EXPECT_EQ(state.point_cloud->size(), 3);
+        EXPECT_TRUE(state.model_transforms.empty());
+        EXPECT_EQ(state.point_cloud_transform,
+                  lfs::rendering::dataWorldTransformToVisualizerWorld(glm::mat4(1.0f)));
+
+        auto means_cpu = state.point_cloud->means.cpu();
+        auto acc = means_cpu.accessor<float, 2>();
+        EXPECT_FLOAT_EQ(acc(0, 0), 1.0f);
+        EXPECT_FLOAT_EQ(acc(0, 1), 2.0f);
+        EXPECT_FLOAT_EQ(acc(0, 2), 3.0f);
+        EXPECT_FLOAT_EQ(acc(1, 0), 2.0f);
+        EXPECT_FLOAT_EQ(acc(1, 1), 2.0f);
+        EXPECT_FLOAT_EQ(acc(1, 2), 3.0f);
+        EXPECT_FLOAT_EQ(acc(2, 0), -4.0f);
+        EXPECT_FLOAT_EQ(acc(2, 1), 6.0f);
+        EXPECT_FLOAT_EQ(acc(2, 2), 6.0f);
+    }
+
+    TEST_F(SceneManagerRenderStateTest, MultipleVisiblePointCloudMergeRefreshesWhenSourceDataChanges) {
+        SceneManager manager;
+        auto& scene = manager.getScene();
+
+        const auto left_parent = scene.addGroup("LeftParent");
+        const auto right_parent = scene.addGroup("RightParent");
+
+        auto left_point_cloud = std::make_shared<lfs::core::PointCloud>(
+            lfs::core::Tensor::from_vector(
+                {0.0f, 0.0f, 0.0f},
+                {size_t{1}, size_t{3}},
+                lfs::core::Device::CPU),
+            lfs::core::Tensor::from_vector(
+                {1.0f, 0.0f, 0.0f},
+                {size_t{1}, size_t{3}},
+                lfs::core::Device::CPU));
+        auto right_point_cloud = std::make_shared<lfs::core::PointCloud>(
+            lfs::core::Tensor::from_vector(
+                {1.0f, 1.0f, 1.0f},
+                {size_t{1}, size_t{3}},
+                lfs::core::Device::CPU),
+            lfs::core::Tensor::from_vector(
+                {0.0f, 1.0f, 0.0f},
+                {size_t{1}, size_t{3}},
+                lfs::core::Device::CPU));
+
+        scene.addPointCloud("LeftCloud", left_point_cloud, left_parent);
+        scene.addPointCloud("RightCloud", right_point_cloud, right_parent);
+
+        const auto initial_state = manager.buildRenderState();
+        ASSERT_NE(initial_state.point_cloud, nullptr);
+        ASSERT_EQ(initial_state.point_cloud->size(), 2);
+
+        right_point_cloud->means = lfs::core::Tensor::from_vector(
+            {10.0f, 20.0f, 30.0f},
+            {size_t{1}, size_t{3}},
+            lfs::core::Device::CPU);
+
+        const auto updated_state = manager.buildRenderState();
+        ASSERT_NE(updated_state.point_cloud, nullptr);
+        ASSERT_EQ(updated_state.point_cloud->size(), 2);
+
+        auto means_cpu = updated_state.point_cloud->means.cpu();
+        auto acc = means_cpu.accessor<float, 2>();
+        EXPECT_FLOAT_EQ(acc(0, 0), 0.0f);
+        EXPECT_FLOAT_EQ(acc(0, 1), 0.0f);
+        EXPECT_FLOAT_EQ(acc(0, 2), 0.0f);
+        EXPECT_FLOAT_EQ(acc(1, 0), 10.0f);
+        EXPECT_FLOAT_EQ(acc(1, 1), 20.0f);
+        EXPECT_FLOAT_EQ(acc(1, 2), 30.0f);
+    }
+
+    TEST_F(SceneManagerRenderStateTest, MultipleVisiblePointCloudMergeRefreshesWhenSourceTensorChangesInPlace) {
+        SceneManager manager;
+        auto& scene = manager.getScene();
+
+        const auto left_parent = scene.addGroup("LeftParent");
+        const auto right_parent = scene.addGroup("RightParent");
+
+        auto left_point_cloud = std::make_shared<lfs::core::PointCloud>(
+            lfs::core::Tensor::from_vector(
+                {0.0f, 0.0f, 0.0f},
+                {size_t{1}, size_t{3}},
+                lfs::core::Device::CPU),
+            lfs::core::Tensor::from_vector(
+                {1.0f, 0.0f, 0.0f},
+                {size_t{1}, size_t{3}},
+                lfs::core::Device::CPU));
+        auto right_point_cloud = std::make_shared<lfs::core::PointCloud>(
+            lfs::core::Tensor::from_vector(
+                {1.0f, 1.0f, 1.0f},
+                {size_t{1}, size_t{3}},
+                lfs::core::Device::CPU),
+            lfs::core::Tensor::from_vector(
+                {0.0f, 1.0f, 0.0f},
+                {size_t{1}, size_t{3}},
+                lfs::core::Device::CPU));
+
+        scene.addPointCloud("LeftCloud", left_point_cloud, left_parent);
+        scene.addPointCloud("RightCloud", right_point_cloud, right_parent);
+
+        const auto initial_state = manager.buildRenderState();
+        ASSERT_NE(initial_state.point_cloud, nullptr);
+        ASSERT_EQ(initial_state.point_cloud->size(), 2);
+
+        right_point_cloud->means.copy_(lfs::core::Tensor::from_vector(
+            {7.0f, 8.0f, 9.0f},
+            {size_t{1}, size_t{3}},
+            lfs::core::Device::CPU));
+
+        const auto updated_state = manager.buildRenderState();
+        ASSERT_NE(updated_state.point_cloud, nullptr);
+        ASSERT_EQ(updated_state.point_cloud->size(), 2);
+
+        auto means_cpu = updated_state.point_cloud->means.cpu();
+        auto acc = means_cpu.accessor<float, 2>();
+        EXPECT_FLOAT_EQ(acc(0, 0), 0.0f);
+        EXPECT_FLOAT_EQ(acc(0, 1), 0.0f);
+        EXPECT_FLOAT_EQ(acc(0, 2), 0.0f);
+        EXPECT_FLOAT_EQ(acc(1, 0), 7.0f);
+        EXPECT_FLOAT_EQ(acc(1, 1), 8.0f);
+        EXPECT_FLOAT_EQ(acc(1, 2), 9.0f);
     }
 
     TEST_F(SceneManagerRenderStateTest, PlyComparisonBuildsFullFrameWipeFromCombinedSceneMasks) {
@@ -701,6 +893,22 @@ namespace lfs::vis {
         lfs::core::events::state::SceneCleared{}.emit();
 
         EXPECT_EQ(manager.getSettings().split_view_mode, SplitViewMode::Disabled);
+    }
+
+    TEST_F(RenderingManagerEventsTest, SceneClearedResetsFrustumLoaderSyncCache) {
+        RenderingManager manager;
+        manager.frustum_loader_sync_initialized_ = true;
+        manager.synced_frustum_allow_fallback_ = true;
+        manager.frustum_loader_dirty_.store(true, std::memory_order_relaxed);
+        manager.frustum_loader_poll_until_ready_.store(true, std::memory_order_relaxed);
+
+        lfs::core::events::state::SceneCleared{}.emit();
+
+        EXPECT_TRUE(manager.frustum_loader_sync_initialized_);
+        EXPECT_FALSE(manager.synced_frustum_loader_);
+        EXPECT_FALSE(manager.synced_frustum_allow_fallback_);
+        EXPECT_FALSE(manager.frustum_loader_dirty_.load(std::memory_order_relaxed));
+        EXPECT_FALSE(manager.frustum_loader_poll_until_ready_.load(std::memory_order_relaxed));
     }
 
     TEST_F(RenderingManagerEventsTest, ToggleIndependentSplitViewInitializesSecondaryViewport) {

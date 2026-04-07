@@ -8,9 +8,11 @@
 #include "input/input_controller.hpp"
 #include "input/sdl_key_mapping.hpp"
 #include <SDL3/SDL.h>
+#include <cstring>
 #include <glad/glad.h>
 #include <imgui_impl_sdl3.h>
 #include <iostream>
+#include <string>
 #include <imgui.h>
 
 namespace lfs::vis {
@@ -43,6 +45,48 @@ namespace lfs::vis {
             default:
                 return true;
             }
+        }
+
+        std::string compiledVideoDrivers() {
+            const int num_drivers = SDL_GetNumVideoDrivers();
+            if (num_drivers <= 0) {
+                return "<none>";
+            }
+
+            std::string result;
+            for (int i = 0; i < num_drivers; ++i) {
+                const char* const driver = SDL_GetVideoDriver(i);
+                if (i > 0) {
+                    result += ", ";
+                }
+                result += driver ? driver : "<null>";
+            }
+            return result;
+        }
+
+        bool hasCompiledVideoDriver(const char* const expected_driver) {
+            const int num_drivers = SDL_GetNumVideoDrivers();
+            for (int i = 0; i < num_drivers; ++i) {
+                const char* const driver = SDL_GetVideoDriver(i);
+                if (driver && std::strcmp(driver, expected_driver) == 0) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        void reportSdlVideoInitFailure() {
+            std::cerr << "Failed to initialize SDL: " << SDL_GetError() << std::endl;
+
+#if defined(__linux__)
+            std::cerr << "Compiled SDL video drivers: " << compiledVideoDrivers() << std::endl;
+            if (!hasCompiledVideoDriver("x11") && !hasCompiledVideoDriver("wayland")) {
+                std::cerr
+                    << "This SDL build lacks both X11 and Wayland support. Install the Linux GUI build "
+                       "dependencies and rebuild SDL3."
+                    << std::endl;
+            }
+#endif
         }
     } // namespace
 
@@ -78,7 +122,7 @@ namespace lfs::vis {
 
     bool WindowManager::init() {
         if (!SDL_Init(SDL_INIT_VIDEO)) {
-            std::cerr << "Failed to initialize SDL: " << SDL_GetError() << std::endl;
+            reportSdlVideoInitFailure();
             return false;
         }
 

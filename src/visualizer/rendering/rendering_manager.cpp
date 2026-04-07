@@ -233,6 +233,20 @@ namespace lfs::vis {
         }
     }
 
+    void RenderingManager::storeFrustumImageLoaderSyncState(
+        std::shared_ptr<lfs::io::PipelinedImageLoader> loader,
+        const bool allow_fallback,
+        const bool wait_for_active_loader) {
+        {
+            std::lock_guard<std::mutex> lock(frustum_loader_sync_mutex_);
+            synced_frustum_loader_ = std::move(loader);
+            synced_frustum_allow_fallback_ = allow_fallback;
+            frustum_loader_sync_initialized_ = true;
+        }
+        frustum_loader_poll_until_ready_.store(wait_for_active_loader, std::memory_order_relaxed);
+        frustum_loader_dirty_.store(false, std::memory_order_relaxed);
+    }
+
     void RenderingManager::syncFrustumImageLoader(SceneManager* const scene_manager) {
         if (!engine_) {
             return;
@@ -268,15 +282,12 @@ namespace lfs::vis {
                 frustum_loader_dirty_.store(false, std::memory_order_relaxed);
                 return;
             }
-
-            synced_frustum_loader_ = frustum_loader;
-            synced_frustum_allow_fallback_ = allow_fallback_loader;
-            frustum_loader_sync_initialized_ = true;
         }
 
-        engine_->setFrustumImageLoader(std::move(frustum_loader), allow_fallback_loader);
-        frustum_loader_poll_until_ready_.store(wait_for_active_loader, std::memory_order_relaxed);
-        frustum_loader_dirty_.store(false, std::memory_order_relaxed);
+        engine_->setFrustumImageLoader(frustum_loader, allow_fallback_loader);
+        storeFrustumImageLoaderSyncState(std::move(frustum_loader),
+                                         allow_fallback_loader,
+                                         wait_for_active_loader);
     }
 
     void RenderingManager::advanceSplitOffset() {

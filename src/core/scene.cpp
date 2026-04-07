@@ -325,6 +325,8 @@ namespace lfs::core {
         resetSelectionState();
 
         initial_point_cloud_.reset();
+        scene_center_ = {};
+        images_have_alpha_ = false;
         point_cloud_modified_ = false;
         training_model_node_.clear();
 

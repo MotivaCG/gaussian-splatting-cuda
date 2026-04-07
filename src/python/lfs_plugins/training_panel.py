@@ -1388,7 +1388,7 @@ class TrainingPanel(Panel):
         elif action == "reset":
             lf.reset_training()
         elif action == "clear":
-            lf.clear_scene()
+            lf.new_project()
         elif action == "switch_edit":
             lf.switch_to_edit_mode()
         elif action == "save_checkpoint":
@@ -1566,7 +1566,7 @@ class TrainingPanel(Panel):
                 if layout.button_styled(tr("training_panel.reset"), "secondary", FULL_WIDTH):
                     lf.reset_training()
             if layout.button_styled(tr("training_panel.clear"), "error", FULL_WIDTH):
-                lf.clear_scene()
+                lf.new_project()
 
         elif state == "running":
             if layout.button_styled(tr("training_panel.pause"), "warning", FULL_WIDTH):
@@ -1590,7 +1590,7 @@ class TrainingPanel(Panel):
             if layout.button_styled(tr("training_panel.reset"), "secondary", FULL_WIDTH):
                 lf.reset_training()
             if layout.button_styled(tr("training_panel.clear"), "error", FULL_WIDTH):
-                lf.clear_scene()
+                lf.new_project()
 
         elif state == "error":
             layout.text_colored(tr("status.error"), COLOR_ERROR)
@@ -1599,7 +1599,7 @@ class TrainingPanel(Panel):
             if layout.button_styled(tr("training_panel.reset"), "secondary", FULL_WIDTH):
                 lf.reset_training()
             if layout.button_styled(tr("training_panel.clear"), "error", FULL_WIDTH):
-                lf.clear_scene()
+                lf.new_project()
 
         elif state == "stopping":
             layout.text_colored(tr("status.stopping"), COLOR_MUTED)

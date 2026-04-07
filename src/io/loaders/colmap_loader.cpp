@@ -46,6 +46,10 @@ namespace lfs::io {
                               "COLMAP dataset must be a directory", path);
         }
 
+        if (is_load_cancel_requested(options)) {
+            return make_error(ErrorCode::CANCELLED, "COLMAP dataset load cancelled", path);
+        }
+
         // Report initial progress
         if (options.progress) {
             options.progress(0.0f, "Loading COLMAP dataset...");
@@ -158,7 +162,9 @@ namespace lfs::io {
                 options.progress(10.0f, "Validating COLMAP dataset layout...");
             }
 
-            if (auto validation_result = validate_colmap_dataset_layout(path, actual_images_folder); !validation_result) {
+            throw_if_load_cancel_requested(options, "COLMAP dataset validation cancelled");
+
+            if (auto validation_result = validate_colmap_dataset_layout(path, actual_images_folder, options); !validation_result) {
                 return std::unexpected(validation_result.error());
             }
 
@@ -191,14 +197,14 @@ namespace lfs::io {
 
             if (has_cameras && has_images) {
                 LOG_DEBUG("Reading binary COLMAP data");
-                auto result = read_colmap_cameras_and_images(path, actual_images_folder);
+                auto result = read_colmap_cameras_and_images(path, actual_images_folder, options);
                 if (!result) {
                     return std::unexpected(result.error());
                 }
                 std::tie(cameras, scene_center) = std::move(*result);
             } else if (has_cameras_text && has_images_text) {
                 LOG_DEBUG("Reading text COLMAP data");
-                auto result = read_colmap_cameras_and_images_text(path, actual_images_folder);
+                auto result = read_colmap_cameras_and_images_text(path, actual_images_folder, options);
                 if (!result) {
                     return std::unexpected(result.error());
                 }
@@ -214,32 +220,37 @@ namespace lfs::io {
 
             LOG_DEBUG("Creating {} camera objects", cameras.size());
 
-            const bool images_have_alpha = detect_camera_alpha(cameras);
+            const bool images_have_alpha = detect_camera_alpha(cameras, options.cancel_requested);
 
             if (options.progress) {
                 options.progress(60.0f, "Loading point cloud...");
             }
 
+            throw_if_load_cancel_requested(options, "COLMAP point cloud load cancelled");
+
             // Load point cloud: points3D.ply > points3D.bin > points3D.txt
             std::shared_ptr<PointCloud> point_cloud;
             if (has_points_ply) {
                 LOG_INFO("Loading custom point cloud from points3D.ply");
-                auto pc_result = load_ply_point_cloud(points_ply);
+                auto pc_result = load_ply_point_cloud(points_ply, options);
                 if (pc_result) {
                     point_cloud = std::make_shared<PointCloud>(std::move(*pc_result));
                     LOG_INFO("Loaded {} points from points3D.ply", point_cloud->size());
                 } else {
+                    if (is_load_cancel_requested(options)) {
+                        return std::unexpected(make_error(ErrorCode::CANCELLED, pc_result.error(), points_ply));
+                    }
                     LOG_WARN("Failed to load points3D.ply: {}, falling back", pc_result.error());
                 }
             }
             if (!point_cloud && has_points) {
                 LOG_DEBUG("Loading binary point cloud");
-                auto loaded_pc = read_colmap_point_cloud(path);
+                auto loaded_pc = read_colmap_point_cloud(path, options);
                 point_cloud = std::make_shared<PointCloud>(std::move(loaded_pc));
                 LOG_INFO("Loaded {} points from COLMAP", point_cloud->size());
             } else if (!point_cloud && has_points_text) {
                 LOG_DEBUG("Loading text point cloud");
-                auto loaded_pc = read_colmap_point_cloud_text(path);
+                auto loaded_pc = read_colmap_point_cloud_text(path, options);
                 point_cloud = std::make_shared<PointCloud>(std::move(loaded_pc));
                 LOG_INFO("Loaded {} points from COLMAP text file", point_cloud->size());
             } else if (!point_cloud) {
@@ -276,6 +287,8 @@ namespace lfs::io {
 
             return result;
 
+        } catch (const LoadCancelledError& e) {
+            return make_error(ErrorCode::CANCELLED, e.what(), path);
         } catch (const std::exception& e) {
             return make_error(ErrorCode::CORRUPTED_DATA,
                               std::format("Failed to load COLMAP dataset: {}", e.what()), path);

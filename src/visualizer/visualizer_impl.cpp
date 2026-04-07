@@ -29,7 +29,6 @@
 #include "tools/brush_tool.hpp"
 #include "tools/builtin_tools.hpp"
 #include "tools/selection_tool.hpp"
-#include <io/filesystem_utils.hpp>
 // clang-format off
 #include <glad/glad.h>
 // clang-format on
@@ -195,6 +194,8 @@ namespace lfs::vis {
     }
 
     void VisualizerImpl::setupPythonBridge() {
+        python::set_visualizer(this);
+        callback_cleanup_.add([] { python::set_visualizer(nullptr); });
         python::set_trainer_manager(trainer_manager_.get());
         callback_cleanup_.add([] { python::set_trainer_manager(nullptr); });
         python::set_parameter_manager(parameter_manager_.get());
@@ -694,10 +695,8 @@ namespace lfs::vis {
             performReset();
         });
 
-        cmd::ClearScene::when([this](const auto&) {
-            if (auto* const param_mgr = services().paramsOrNull()) {
-                param_mgr->resetToDefaults();
-            }
+        cmd::NewProject::when([this](const auto&) {
+            handleNewProject();
         });
 
         // Undo/Redo commands (require command_history_ which lives here)
@@ -937,6 +936,13 @@ namespace lfs::vis {
         }
         if (selection_tool_ && selection_tool_->isEnabled() && tool_context_) {
             selection_tool_->update(*tool_context_);
+        }
+
+        if (pending_new_project_ && trainer_manager_ &&
+            trainer_manager_->canPerform(TrainingAction::ClearScene)) {
+            pending_new_project_ = false;
+            trainer_manager_->waitForCompletion();
+            performNewProject();
         }
 
         if (pending_reset_ && trainer_manager_ && !trainer_manager_->isTrainingActive()) {
@@ -1249,8 +1255,68 @@ namespace lfs::vis {
         scene_manager_->consolidateNodeModels();
     }
 
-    void VisualizerImpl::clearScene() {
-        data_loader_->clearScene();
+    std::expected<void, std::string> VisualizerImpl::clearScene() {
+        if (!data_loader_) {
+            return std::unexpected("No data loader available");
+        }
+
+        if (data_loader_->clearScene()) {
+            return {};
+        }
+
+        if (trainer_manager_ && scene_manager_ &&
+            scene_manager_->getContentType() == SceneManager::ContentType::Dataset &&
+            !trainer_manager_->canPerform(TrainingAction::ClearScene)) {
+            return std::unexpected(
+                std::string(trainer_manager_->getActionBlockedReason(TrainingAction::ClearScene)));
+        }
+
+        return std::unexpected("Scene clear request was rejected");
+    }
+
+    void VisualizerImpl::handleNewProject() {
+        if (gui_manager_) {
+            gui_manager_->asyncTasks().cancelImport();
+        }
+
+        pending_view_paths_.clear();
+        pending_dataset_path_.clear();
+        pending_auto_train_ = false;
+        pending_reset_ = false;
+
+        if (trainer_manager_ && !trainer_manager_->canPerform(TrainingAction::ClearScene)) {
+            pending_new_project_ = true;
+            if (trainer_manager_->canStop()) {
+                trainer_manager_->stopTraining();
+            }
+            return;
+        }
+
+        pending_new_project_ = false;
+        performNewProject();
+    }
+
+    void VisualizerImpl::performNewProject() {
+        if (!data_loader_ || !data_loader_->clearScene()) {
+            return;
+        }
+        resetProjectState();
+    }
+
+    void VisualizerImpl::resetProjectState() {
+        if (auto* const param_mgr = services().paramsOrNull()) {
+            param_mgr->clearSession();
+        }
+
+        if (data_loader_) {
+            data_loader_->setParameters({});
+        }
+
+        pending_view_paths_.clear();
+        pending_dataset_path_.clear();
+        pending_auto_train_ = false;
+        pending_new_project_ = false;
+        pending_reset_ = false;
     }
 
     void VisualizerImpl::wakeMainLoop() const {
@@ -1339,28 +1405,41 @@ namespace lfs::vis {
             return;
         }
 
+        const auto preserved_camera = viewport_.camera;
+
         const auto& init_path = data_loader_->getParameters().init_path;
         if (auto* const param_mgr = services().paramsOrNull(); param_mgr && param_mgr->ensureLoaded()) {
             auto params = param_mgr->createForDataset(path, {});
             if (trainer_manager_) {
                 params.dataset = trainer_manager_->getEditableDatasetParams();
                 params.dataset.data_path = path;
-
-                auto ply_in_sparse = lfs::io::find_file_in_paths(
-                    lfs::io::get_colmap_search_paths(path), "points3D.ply");
-                if (!ply_in_sparse.empty()) {
-                    params.init_path = std::nullopt;
-                    LOG_INFO("Reset: using points3D.ply from {}", lfs::core::path_to_utf8(ply_in_sparse));
-                } else {
-                    params.init_path = init_path;
-                }
+                params.init_path = init_path;
             }
             data_loader_->setParameters(params);
         }
 
+        const auto restore_camera = [this, &preserved_camera]() {
+            viewport_.camera = preserved_camera;
+            if (selection_tool_ && selection_tool_->isEnabled()) {
+                selection_tool_->syncDepthFilterToCamera(viewport_);
+            }
+            if (rendering_manager_) {
+                rendering_manager_->markDirty(DirtyFlag::CAMERA);
+            }
+            ui::CameraMove{
+                .rotation = viewport_.getRotationMatrix(),
+                .translation = viewport_.getTranslation()}
+                .emit();
+            wakeMainLoop();
+        };
+
         if (const auto result = data_loader_->loadDataset(path); !result) {
             LOG_ERROR("Reset reload failed: {}", result.error());
+            restore_camera();
+            return;
         }
+
+        restore_camera();
     }
 
     void VisualizerImpl::handleLoadFileCommand([[maybe_unused]] const lfs::core::events::cmd::LoadFile& cmd) {

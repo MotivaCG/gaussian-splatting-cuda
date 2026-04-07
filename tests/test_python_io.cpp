@@ -353,6 +353,39 @@ end_header
     EXPECT_NEAR(acc(1, 2), -4.0f, EPSILON);
 }
 
+TEST_F(PythonIOTest, LoadTransformsDatasetCanBeCancelled) {
+    const fs::path dataset_dir = temp_dir / "cancelled_transforms_dataset";
+    write_text_file(
+        dataset_dir / "transforms_train.json",
+        R"json({
+  "w": 1,
+  "h": 1,
+  "camera_angle_x": 0.78539816339,
+  "frames": [
+    {
+      "file_path": "frame_0001.png",
+      "transform_matrix": [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0]
+      ]
+    }
+  ]
+})json");
+
+    int cancel_checks = 0;
+    auto loader = Loader::create();
+    auto result = loader->load(dataset_dir, {
+                                                .cancel_requested = [&cancel_checks]() {
+                                                    return ++cancel_checks >= 3;
+                                                },
+                                            });
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::CANCELLED);
+}
+
 // Test loading COLMAP dataset
 TEST_F(PythonIOTest, LoadCOLMAPDataset) {
     if (!fs::exists(bicycle_dir / "sparse")) {

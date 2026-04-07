@@ -61,7 +61,7 @@ namespace lfs::core {
             EVENT(LoadConfigFile, std::filesystem::path path;);
             EVENT(ShowDatasetLoadPopup, std::filesystem::path dataset_path;);
             EVENT(ShowResumeCheckpointPopup, std::filesystem::path checkpoint_path;);
-            EVENT(ClearScene, );
+            EVENT(NewProject, );
             EVENT(RequestExit, );
             EVENT(ForceExit, );
             EVENT(SwitchToEditMode, );

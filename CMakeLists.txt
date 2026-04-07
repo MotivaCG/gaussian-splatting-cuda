@@ -13,6 +13,11 @@ endif()
 
 cmake_minimum_required(VERSION 3.30)
 
+option(LFS_ENFORCE_LINUX_GUI_BACKENDS "Fail configure when Linux SDL3 would lack X11 and Wayland support" ON)
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/LinuxGuiSanity.cmake")
+lfs_linux_preflight_gui_backends()
+
 # Suppress CMake developer warnings
 set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS ON CACHE BOOL "" FORCE)
 
@@ -408,6 +413,7 @@ find_package(Threads REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(glad REQUIRED)
 find_package(SDL3 REQUIRED)
+lfs_validate_linux_sdl_video_backends()
 find_package(glm REQUIRED)
 find_package(imgui REQUIRED)
 find_package(implot REQUIRED)

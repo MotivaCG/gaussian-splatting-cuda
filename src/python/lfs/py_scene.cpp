@@ -13,6 +13,8 @@
 #include "visualizer/operation/undo_entry.hpp"
 #include "visualizer/operation/undo_history.hpp"
 #include "visualizer/scene/scene_manager.hpp"
+#include "visualizer/training/training_manager.hpp"
+#include "visualizer/training/training_state.hpp"
 #include <algorithm>
 #include <nanobind/ndarray.h>
 
@@ -570,7 +572,19 @@ namespace lfs::python {
 
     void PyScene::clear() {
         if (auto* const scene_manager = get_scene_manager()) {
-            scene_manager->clear();
+            if (scene_manager->clear()) {
+                return;
+            }
+
+            if (auto* const trainer_manager = lfs::python::get_trainer_manager();
+                trainer_manager &&
+                scene_manager->getContentType() == lfs::vis::SceneManager::ContentType::Dataset &&
+                !trainer_manager->canPerform(lfs::vis::TrainingAction::ClearScene)) {
+                throw std::runtime_error(
+                    std::string(trainer_manager->getActionBlockedReason(lfs::vis::TrainingAction::ClearScene)));
+            }
+
+            throw std::runtime_error("Scene clear request was rejected");
             return;
         }
         scene_->clear();

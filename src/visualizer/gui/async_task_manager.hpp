@@ -105,6 +105,7 @@ namespace lfs::vis {
                 return std::chrono::duration<float>(elapsed).count();
             }
             void dismissImport() { import_state_.show_completion.store(false); }
+            void cancelImport();
 
             // Video export
             [[nodiscard]] bool isExportingVideo() const { return video_export_state_.active.load(); }

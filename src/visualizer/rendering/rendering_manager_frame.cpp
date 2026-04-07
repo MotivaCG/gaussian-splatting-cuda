@@ -30,6 +30,21 @@ namespace lfs::vis {
             }
             return lock;
         }
+
+        [[nodiscard]] bool hasVisibleRenderablePointCloud(const lfs::core::Scene& scene) {
+            for (const auto* node : scene.getNodes()) {
+                if (!node || node->type != lfs::core::NodeType::POINTCLOUD || !node->point_cloud) {
+                    continue;
+                }
+                if (!scene.isNodeEffectivelyVisible(node->id)) {
+                    continue;
+                }
+                if (node->point_cloud->size() > 0) {
+                    return true;
+                }
+            }
+            return false;
+        }
     } // namespace
 
     void RenderingManager::renderFrame(const RenderContext& context) {
@@ -76,9 +91,9 @@ namespace lfs::vis {
 
         const lfs::core::SplatData* const model = scene_manager ? scene_manager->getModelForRendering() : nullptr;
         const bool has_renderable_model = hasRenderableGaussians(model);
-        const auto* const visible_point_cloud =
-            (scene_manager && !has_renderable_model) ? scene_manager->getScene().getVisiblePointCloud() : nullptr;
-        const bool has_visible_point_cloud = visible_point_cloud && visible_point_cloud->size() > 0;
+        const bool has_visible_point_cloud =
+            scene_manager && !has_renderable_model &&
+            hasVisibleRenderablePointCloud(scene_manager->getScene());
         const size_t model_ptr = reinterpret_cast<size_t>(model);
 
         if (const auto model_change = frame_lifecycle_service_.handleModelChange(model_ptr, viewport_artifact_service_);

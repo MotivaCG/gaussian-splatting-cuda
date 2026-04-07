@@ -5,10 +5,12 @@
 #pragma once
 
 #include "core/path_utils.hpp"
+#include "io/loader.hpp"
 
 #include <algorithm>
 #include <array>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <system_error>
 #include <unordered_map>
@@ -20,6 +22,7 @@ namespace lfs::io {
     namespace fs = std::filesystem;
 
     namespace detail {
+        inline constexpr size_t CANCEL_POLL_INTERVAL = 64;
 
         inline void ascii_lower_inplace(std::string& value) {
             for (char& ch : value) {
@@ -38,6 +41,13 @@ namespace lfs::io {
 
         inline std::string normalize_lookup_key(const fs::path& value) {
             return normalize_lookup_key(lfs::core::path_to_utf8(value.lexically_normal()));
+        }
+
+        inline void throw_if_scan_cancel_requested(const CancelCallback& cancel_requested,
+                                                   const std::string_view message) {
+            if (cancel_requested && cancel_requested()) {
+                throw LoadCancelledError(std::string(message));
+            }
         }
 
     } // namespace detail
@@ -122,11 +132,13 @@ namespace lfs::io {
     // fallback when that basename is unique under the indexed root.
     class RecursiveFileCache {
     public:
-        explicit RecursiveFileCache(const fs::path& root_path) {
+        explicit RecursiveFileCache(const fs::path& root_path,
+                                    const CancelCallback& cancel_requested = nullptr) {
             if (!safe_is_directory(root_path))
                 return;
 
             std::error_code ec;
+            size_t scanned_entries = 0;
             for (fs::recursive_directory_iterator it(
                      root_path,
                      fs::directory_options::skip_permission_denied,
@@ -134,6 +146,12 @@ namespace lfs::io {
                  end;
                  !ec && it != end;
                  it.increment(ec)) {
+                if ((scanned_entries % detail::CANCEL_POLL_INTERVAL) == 0) {
+                    detail::throw_if_scan_cancel_requested(cancel_requested,
+                                                           "Filesystem scan cancelled");
+                }
+                ++scanned_entries;
+
                 const auto& entry = *it;
                 std::error_code file_ec;
                 if (!entry.is_regular_file(file_ec) || file_ec)
@@ -225,13 +243,16 @@ namespace lfs::io {
     // Avoids repeated directory scans for every image.
     class MaskDirCache {
     public:
-        explicit MaskDirCache(const fs::path& base_path) {
+        explicit MaskDirCache(const fs::path& base_path,
+                              const CancelCallback& cancel_requested = nullptr) {
             for (const auto* folder : MASK_SEARCH_FOLDERS) {
+                detail::throw_if_scan_cancel_requested(cancel_requested,
+                                                       "Mask directory scan cancelled");
                 const fs::path mask_dir = base_path / folder;
                 if (!safe_is_directory(mask_dir))
                     continue;
 
-                dir_indices_.emplace_back(mask_dir);
+                dir_indices_.emplace_back(mask_dir, cancel_requested);
             }
         }
 

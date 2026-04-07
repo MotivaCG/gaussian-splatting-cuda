@@ -364,6 +364,9 @@ namespace lfs::vis {
         void clearFrustumThumbnailState();
         void invalidateFrustumImageLoaderSync(bool poll_until_ready = false);
         void syncFrustumImageLoader(SceneManager* scene_manager);
+        void storeFrustumImageLoaderSyncState(std::shared_ptr<lfs::io::PipelinedImageLoader> loader,
+                                              bool allow_fallback,
+                                              bool wait_for_active_loader);
         void setupEventHandlers();
         void handleToggleSplitView();
         void handleToggleIndependentSplitView(const lfs::core::events::cmd::ToggleIndependentSplitView& event);
@@ -429,6 +432,8 @@ namespace lfs::vis {
         uint64_t render_count_ = 0;
 
         ViewportOverlayService viewport_overlay_service_;
+
+        friend class RenderingManagerEventsTest_SceneClearedResetsFrustumLoaderSyncCache_Test;
     };
 
 } // namespace lfs::vis
