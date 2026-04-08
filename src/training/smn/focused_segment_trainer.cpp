@@ -76,8 +76,8 @@ namespace lfs::training {
             return;
         }
 
-        constexpr float kNoneEnd = 0.15f;
-        constexpr float kBgRampEnd = 0.25f;
+        constexpr float kNoneEnd = 0.15f; // End of warm-up with masking disabled.
+        constexpr float kBgRampEnd = 0.25f; // End of BG spatial weighting ramp.
         constexpr float kBgTarget = 0.05f; // Active-phase BG gradient weight (FG focused)
         constexpr float kBgTargetFree = 0.08f; // Free-refinement BG weight - slightly higher
                                                // than kBgTarget to allow gentle BG refinement
@@ -85,14 +85,17 @@ namespace lfs::training {
                                                // fine silhouettes (hair) stay sharp.
         step_params.focused_bg_weight = kBgTarget;
 
-        constexpr float kFgPenaltyStart = 0.40f;
-        constexpr float kFgPenaltyEnd = 0.50f;
+        constexpr float kFgPenaltyStart = 0.40f; // Start ramping FG alpha pressure up.
+        constexpr float kFgPenaltyEnd = 0.50f; // FG alpha pressure reaches full strength.
 
-        constexpr float kBothPenaltyStart = 0.60f;
-        constexpr float kBothPenaltyEnd = 0.70f;
+        constexpr float kBothPenaltyStart = 0.60f; // Start ramping BG alpha pressure up.
+        constexpr float kBothPenaltyEnd = 0.70f; // FG+BG alpha pressure both fully active.
 
-        constexpr float kPenaltyDecayStart = 0.75f;
-        constexpr float kPenaltyDecayEnd = 0.85f;
+        constexpr float kPenaltyDecayStart = 0.75f; // Start relaxing alpha pressure toward residual floors.
+        constexpr float kPenaltyDecayEnd = 0.85f; // End of decay; residual floors remain until training ends.
+
+        constexpr float kFgPenaltyFloor = 0.15f; // Final FG residual penalty. Kept at 0 to avoid carving holes from mask noise.
+        constexpr float kBgPenaltyFloor = 0.15f; // Final BG residual penalty. Keeps gentle cleanup of late halos/spikes outside the mask.
 
         static_assert(kBgRampEnd < kFgPenaltyStart, "BG spatial ramp must finish before FG penalty starts");
         static_assert(kFgPenaltyEnd <= kBothPenaltyStart, "FG penalty must reach full before BG joins");
@@ -117,14 +120,18 @@ namespace lfs::training {
             const float t_bg = (progress - kBothPenaltyStart) / (kBothPenaltyEnd - kBothPenaltyStart);
             step_params.mask_opacity_penalty_weight_bg *= std::clamp(t_bg, 0.0f, 1.0f);
         } else if (progress < kPenaltyDecayEnd) {
-            const float t_decay = 1.0f - (progress - kPenaltyDecayStart) / (kPenaltyDecayEnd - kPenaltyDecayStart);
-            const float factor = std::clamp(t_decay, 0.0f, 1.0f);
-            step_params.mask_opacity_penalty_weight *= factor;
-            step_params.mask_opacity_penalty_weight_bg *= factor;
-            step_params.focused_bg_weight = kBgTarget * factor + kBgTargetFree * (1.0f - factor);
+            const float t_decay = std::clamp(
+                (progress - kPenaltyDecayStart) / (kPenaltyDecayEnd - kPenaltyDecayStart),
+                0.0f,
+                1.0f);
+            const float fg_factor = 1.0f + (kFgPenaltyFloor - 1.0f) * t_decay;
+            const float bg_factor = 1.0f + (kBgPenaltyFloor - 1.0f) * t_decay;
+            step_params.mask_opacity_penalty_weight *= fg_factor;
+            step_params.mask_opacity_penalty_weight_bg *= bg_factor;
+            step_params.focused_bg_weight = kBgTarget * (1.0f - t_decay) + kBgTargetFree * t_decay;
         } else {
-            step_params.mask_opacity_penalty_weight = 0.0f;
-            step_params.mask_opacity_penalty_weight_bg = 0.0f;
+            step_params.mask_opacity_penalty_weight *= kFgPenaltyFloor;
+            step_params.mask_opacity_penalty_weight_bg *= kBgPenaltyFloor;
             step_params.focused_bg_weight = kBgTargetFree;
         }
     }
