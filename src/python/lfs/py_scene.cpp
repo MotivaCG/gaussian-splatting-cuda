@@ -851,17 +851,7 @@ namespace lfs::python {
 
     void PyScene::set_selection_mask(const PyTensor& mask) {
         if (auto* const scene_manager = get_scene_manager()) {
-            const auto cpu_mask = mask.tensor().device() == core::Device::CUDA ? mask.tensor().cpu() : mask.tensor();
-            std::vector<uint8_t> values;
-            if (cpu_mask.dtype() == core::DataType::Bool) {
-                const auto bool_values = cpu_mask.to_vector_bool();
-                values.reserve(bool_values.size());
-                for (const bool value : bool_values)
-                    values.push_back(value ? 1 : 0);
-            } else {
-                values = cpu_mask.to_vector_uint8();
-            }
-            (void)scene_manager->applySelectionMask(values);
+            (void)scene_manager->applySelectionMask(mask.tensor());
             return;
         }
         scene_->setSelectionMask(std::make_shared<core::Tensor>(mask.tensor()));

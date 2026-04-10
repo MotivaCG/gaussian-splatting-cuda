@@ -54,6 +54,25 @@ namespace lfs::vis::gui {
 
         right_panel_width_ = std::clamp(right_panel_width_, min_w, max_w);
 
+        auto& reg = PanelRegistry::instance();
+        const bool float_blocks_right_panel =
+            reg.isPositionOverFloatingPanel(input.mouse_x, input.mouse_y);
+        const auto mask_mouse_input = [&](const PanelInputState& src) {
+            PanelInputState masked = src;
+            masked.mouse_x = -1.0e9f;
+            masked.mouse_y = -1.0e9f;
+            for (auto& v : masked.mouse_clicked)
+                v = false;
+            for (auto& v : masked.mouse_released)
+                v = false;
+            for (auto& v : masked.mouse_down)
+                v = false;
+            masked.mouse_wheel = 0.0f;
+            return masked;
+        };
+        const PanelInputState masked_panel_input =
+            float_blocks_right_panel ? mask_mouse_input(input) : input;
+
         const bool python_console_visible = window_states["python_console"];
         const float available_for_split = screen.work_size.x - right_panel_width_ - PANEL_GAP;
 
@@ -70,7 +89,7 @@ namespace lfs::vis::gui {
         const float console_x = right_panel_x - (python_console_visible ? python_console_width_ + PANEL_GAP : 0.0f);
 
         if (python_console_visible) {
-            renderDockedPythonConsole(ctx, console_x, panel_h, input, screen);
+            renderDockedPythonConsole(ctx, console_x, panel_h, masked_panel_input, screen);
         } else {
             python_console_hovering_edge_ = false;
             python_console_resizing_ = false;
@@ -90,28 +109,10 @@ namespace lfs::vis::gui {
 
         const float scene_h = std::max(min_h, avail_h * scene_panel_ratio_ - splitter_h * 0.5f);
 
-        auto& reg = PanelRegistry::instance();
-        const bool float_blocks_scene_header =
-            reg.isPositionOverFloatingPanel(input.mouse_x, input.mouse_y);
-        const auto mask_mouse_input = [&](const PanelInputState& src) {
-            PanelInputState masked = src;
-            masked.mouse_x = -1.0e9f;
-            masked.mouse_y = -1.0e9f;
-            for (auto& v : masked.mouse_clicked)
-                v = false;
-            for (auto& v : masked.mouse_released)
-                v = false;
-            for (auto& v : masked.mouse_down)
-                v = false;
-            masked.mouse_wheel = 0.0f;
-            return masked;
-        };
-        const PanelInputState scene_header_input =
-            float_blocks_scene_header ? mask_mouse_input(input) : input;
         reg.preload_panels_direct(PanelSpace::SceneHeader, content_w, scene_h, draw_ctx,
-                                  -1.0f, -1.0f, &scene_header_input);
+                                  -1.0f, -1.0f, &masked_panel_input);
         reg.draw_panels_direct(PanelSpace::SceneHeader, content_x, content_top,
-                               content_w, scene_h, draw_ctx, &scene_header_input);
+                               content_w, scene_h, draw_ctx, &masked_panel_input);
 
         const auto main_tabs = reg.get_panels_for_space(PanelSpace::MainPanelTab);
 
@@ -142,10 +143,10 @@ namespace lfs::vis::gui {
 
         const float preloaded_main_h =
             reg.preload_single_panel_direct(active_tab_id_, content_w, kPreloadMaxHeight, draw_ctx,
-                                            clip_y_min, clip_y_max, &input);
+                                            clip_y_min, clip_y_max, &masked_panel_input);
         const float preloaded_child_h =
             reg.preload_child_panels_direct(active_tab_id_, content_w, kPreloadMaxHeight, draw_ctx,
-                                            clip_y_min, clip_y_max, &input);
+                                            clip_y_min, clip_y_max, &masked_panel_input);
         const float preloaded_total_h = preloaded_main_h + preloaded_child_h;
         const float preloaded_max_scroll =
             std::max(0.0f, preloaded_total_h - tab_content_h);
@@ -160,11 +161,13 @@ namespace lfs::vis::gui {
                 : 0.0f;
         const float content_draw_w = std::max(0.0f, content_w - scrollbar_gutter);
         const bool over_tab_content =
-            input.mouse_x >= content_x && input.mouse_x < content_x + content_w &&
-            input.mouse_y >= tab_content_y && input.mouse_y < tab_content_y + tab_content_h;
+            masked_panel_input.mouse_x >= content_x &&
+            masked_panel_input.mouse_x < content_x + content_w &&
+            masked_panel_input.mouse_y >= tab_content_y &&
+            masked_panel_input.mouse_y < tab_content_y + tab_content_h;
 
         bool suppress_content_input = false;
-        if (!input.mouse_down[0])
+        if (!masked_panel_input.mouse_down[0])
             tab_scrollbar_dragging_ = false;
 
         if (preloaded_max_scroll > 0.0f && tab_content_h > 0.0f) {
@@ -178,47 +181,48 @@ namespace lfs::vis::gui {
                                           : 0.0f;
             const float thumb_y = track_y + scroll_frac * thumb_range;
             const bool over_scrollbar =
-                input.mouse_x >= content_x + content_draw_w &&
-                input.mouse_x < content_x + content_w &&
-                input.mouse_y >= track_y &&
-                input.mouse_y < track_y + track_h;
+                masked_panel_input.mouse_x >= content_x + content_draw_w &&
+                masked_panel_input.mouse_x < content_x + content_w &&
+                masked_panel_input.mouse_y >= track_y &&
+                masked_panel_input.mouse_y < track_y + track_h;
 
             if (tab_scrollbar_dragging_) {
                 suppress_content_input = true;
                 if (thumb_range > 0.0f) {
                     const float clamped_thumb_y = std::clamp(
-                        input.mouse_y - tab_scrollbar_drag_offset_,
+                        masked_panel_input.mouse_y - tab_scrollbar_drag_offset_,
                         track_y,
                         track_y + thumb_range);
                     const float next_frac = (clamped_thumb_y - track_y) / thumb_range;
                     tab_scroll_offset_ = next_frac * preloaded_max_scroll;
                 }
-            } else if (over_scrollbar && input.mouse_clicked[0]) {
+            } else if (over_scrollbar && masked_panel_input.mouse_clicked[0]) {
                 suppress_content_input = true;
-                if (input.mouse_y >= thumb_y && input.mouse_y <= thumb_y + thumb_h) {
+                if (masked_panel_input.mouse_y >= thumb_y &&
+                    masked_panel_input.mouse_y <= thumb_y + thumb_h) {
                     tab_scrollbar_dragging_ = true;
-                    tab_scrollbar_drag_offset_ = input.mouse_y - thumb_y;
+                    tab_scrollbar_drag_offset_ = masked_panel_input.mouse_y - thumb_y;
                 } else if (thumb_range > 0.0f) {
                     const float target_thumb_y = std::clamp(
-                        input.mouse_y - thumb_h * 0.5f,
+                        masked_panel_input.mouse_y - thumb_h * 0.5f,
                         track_y,
                         track_y + thumb_range);
                     const float next_frac = (target_thumb_y - track_y) / thumb_range;
                     tab_scroll_offset_ = next_frac * preloaded_max_scroll;
                     tab_scrollbar_dragging_ = true;
-                    tab_scrollbar_drag_offset_ = input.mouse_y - target_thumb_y;
+                    tab_scrollbar_drag_offset_ = masked_panel_input.mouse_y - target_thumb_y;
                 }
             }
         } else {
             tab_scrollbar_dragging_ = false;
         }
 
-        if (over_tab_content && input.mouse_wheel != 0.0f) {
-            tab_scroll_offset_ -= input.mouse_wheel * 30.0f;
+        if (over_tab_content && masked_panel_input.mouse_wheel != 0.0f) {
+            tab_scroll_offset_ -= masked_panel_input.mouse_wheel * 30.0f;
             tab_scroll_offset_ = std::clamp(tab_scroll_offset_, 0.0f, preloaded_max_scroll);
         }
 
-        PanelInputState content_input = input;
+        PanelInputState content_input = masked_panel_input;
         if (tab_scrollbar_dragging_ || suppress_content_input) {
             content_input.mouse_down[0] = false;
             content_input.mouse_clicked[0] = false;
@@ -241,7 +245,7 @@ namespace lfs::vis::gui {
                 continue;
 
             reg.preload_single_panel_direct(tab.id, content_draw_w, tab_content_h, draw_ctx,
-                                            clip_y_min, clip_y_max, &input);
+                                            clip_y_min, clip_y_max, &masked_panel_input);
             background_preload_index_ = idx + 1;
             break;
         }
@@ -264,10 +268,10 @@ namespace lfs::vis::gui {
 
             const float rounding = std::max(t.sizes.scrollbar_rounding, scrollbar_w * 0.5f);
             const bool over_scrollbar =
-                input.mouse_x >= content_x + content_draw_w &&
-                input.mouse_x < content_x + content_w &&
-                input.mouse_y >= track_y &&
-                input.mouse_y < track_y + track_h;
+                masked_panel_input.mouse_x >= content_x + content_draw_w &&
+                masked_panel_input.mouse_x < content_x + content_w &&
+                masked_panel_input.mouse_y >= track_y &&
+                masked_panel_input.mouse_y < track_y + track_h;
 
             const ImU32 track_col = ImGui::ColorConvertFloat4ToU32(
                 withAlpha(t.palette.background, 0.5f));

@@ -43,7 +43,8 @@
     "scene": "场景",
     "rendering": "渲染",
     "training": "训练",
-    "preferences": "偏好设置"
+    "preferences": "偏好设置",
+    "histogram": "Histogram"
   },
   "getting_started": {
     "title": "快速入门指南",
@@ -300,8 +301,8 @@
     "background": "背景",
     "enable_for_training": "启用训练",
     "disable_for_training": "禁用训练",
-    "enable_all_training": "全部启用训练",
-    "disable_all_training": "全部禁用训练",
+    "enable_all_training": "启用所选相机",
+    "disable_all_training": "禁用所选相机",
     "training_enabled_tooltip": "已包含在训练中",
     "training_disabled_tooltip": "已从训练中排除",
     "go_to_keyframe": "转到关键帧视图",
@@ -512,7 +513,8 @@
     "perspective": "透视",
     "orthographic": "正交",
     "sequencer": "序列器",
-    "ellipsoid": "Ellipsoid"
+    "ellipsoid": "Ellipsoid",
+    "histogram": "Histogram"
   },
   "transform": {
     "node": "节点：%s",
@@ -584,6 +586,14 @@
     "theme_vignette_intensity": "调整暗角暗度 (0-1)",
     "theme_vignette_radius": "调整暗角开始的位置 (0-1)",
     "theme_vignette_softness": "调整暗角边缘的柔和度 (0-1)",
+    "simplify_source": "用作简化输入的已选 splat 节点",
+    "simplify_target": "简化结果中要保留的目标高斯数量",
+    "simplify_knn_k": "用于评估合并候选的邻域大小",
+    "simplify_merge_cap": "单次迭代中允许合并的高斯最大比例",
+    "simplify_opacity_prune": "在合并前剪除低于该不透明度阈值的高斯",
+    "simplify_output": "将要添加到场景中的新简化 splat 节点名称",
+    "simplify_apply": "根据所选来源创建一个新的简化 splat 节点",
+    "simplify_cancel": "取消当前正在运行的 splat 简化任务",
     "render_scale": "查看器分辨率（越低=越少VRAM）",
     "point_cloud_forced": "训练开始前强制启用",
     "desaturate_unselected": "使未选择的PLY变暗",
@@ -1014,7 +1024,16 @@
     "keyframe_preview": "关键帧 {} 预览"
   },
   "rendering_panel": {
-    "fov_format": "FOV：{hfov:.1f}° H / {vfov:.1f}° V"
+    "fov_format": "FOV：{hfov:.1f}° H / {vfov:.1f}° V",
+    "section_simplify": "Splat 简化",
+    "simplify_source": "来源",
+    "simplify_select_source": "选择一个 splat 节点",
+    "simplify_target": "目标",
+    "simplify_knn_k": "kNN K",
+    "simplify_merge_cap": "合并上限",
+    "simplify_opacity_prune": "不透明度剪枝",
+    "simplify_original": "原始",
+    "simplify_output": "输出"
   },
   "scripts_panel": {
     "actions": "操作",
@@ -1104,5 +1123,135 @@
     "clear_confirm": "清除所有关键帧？",
     "confirm": "确认",
     "cancel": "取消"
+  },
+  "histogram": {
+    "title_eyebrow": "Gaussian Analysis",
+    "field": "Field",
+    "log_scale": "对数刻度",
+    "samples": "Samples",
+    "range": "Range",
+    "mean": "Mean",
+    "median": "Median",
+    "p95": "P95",
+    "peak_bin": "Peak Bin",
+    "bin_count": "{count} bins",
+    "bins": "分箱",
+    "compare_x_bins": "X 分箱",
+    "compare_y_bins": "Y 分箱",
+    "marked": "Marked",
+    "count": "Count",
+    "clear": "Clear",
+    "delete": "Delete",
+    "no_marked_range": "No marked range",
+    "gaussian_count": "{count} Gaussians",
+    "range_value": "{min} to {max}",
+    "status_drag_delete": "Left-drag across the histogram to mark a range, then delete it.",
+    "status_selection": "Marked range becomes the active Gaussian selection.",
+    "summary": "{metric} distribution across {count} Gaussians",
+    "bin_tooltip": "Bin {index}: {left} to {right} | {count} Gaussians",
+    "compare_with": "Compare With",
+    "compare_bin_count": "{x_count} x {y_count} 分箱",
+    "compare": {
+      "off": "Off",
+      "summary": "{x_metric} vs {y_metric} across {count} Gaussians",
+      "range_value": "X {x_range} | Y {y_range}",
+      "status_selection": "Marked compare region becomes the active Gaussian selection.",
+      "bin_tooltip": "X {x_range} | Y {y_range} | {count} Gaussians",
+      "empty": {
+        "title": "Compare unavailable",
+        "message": "Choose a second metric to see how two Gaussian properties cluster together.",
+        "metric_unavailable": {
+          "title": "Compare metric unavailable",
+          "message": "The comparison metric could not be read from the combined Gaussian model."
+        },
+        "no_visible_values": {
+          "title": "No comparable values",
+          "message": "The selected metric pair does not contain any visible finite samples to visualize."
+        }
+      }
+    },
+    "delete_failed": {
+      "title": "Delete Failed",
+      "status": "Delete failed: {message}",
+      "unexpected": "The delete pipeline raised an unexpected error.",
+      "invalid_result": "The delete pipeline returned an invalid result.",
+      "reported_failure": "The delete pipeline reported a failure."
+    },
+    "empty": {
+      "unavailable": {
+        "title": "Histogram unavailable",
+        "message": "Switch to a view or edit scene with Gaussian splats to inspect a distribution."
+      },
+      "no_scene": {
+        "title": "No scene loaded",
+        "message": "Load a Gaussian scene, then reopen the histogram panel."
+      },
+      "no_visible_gaussians": {
+        "title": "No visible Gaussians",
+        "message": "The histogram only works when the active scene exposes a visible Gaussian model."
+      },
+      "metric_unavailable": {
+        "title": "Metric unavailable",
+        "message": "The selected metric could not be read from the combined Gaussian model."
+      },
+      "no_visible_values": {
+        "title": "No visible values",
+        "message": "The selected metric does not contain any visible finite samples to visualize."
+      }
+    },
+    "metric": {
+      "opacity": {
+        "label": "Opacity",
+        "description": "Activated Gaussian opacity in [0, 1]."
+      },
+      "position_x": {
+        "label": "Position X",
+        "description": "Gaussian world-space center on the X axis."
+      },
+      "position_y": {
+        "label": "Position Y",
+        "description": "Gaussian world-space center on the Y axis."
+      },
+      "position_z": {
+        "label": "Position Z",
+        "description": "Gaussian world-space center on the Z axis."
+      },
+      "scale_x": {
+        "label": "Scale X",
+        "description": "Activated Gaussian scale on the X axis."
+      },
+      "scale_y": {
+        "label": "Scale Y",
+        "description": "Activated Gaussian scale on the Y axis."
+      },
+      "scale_z": {
+        "label": "Scale Z",
+        "description": "Activated Gaussian scale on the Z axis."
+      },
+      "scale_max": {
+        "label": "Scale Max",
+        "description": "Largest activated scale component per Gaussian."
+      },
+      "volume": {
+        "label": "Volume",
+        "description": "Ellipsoid volume derived from activated Gaussian scales."
+      },
+      "anisotropy": {
+        "label": "Anisotropy",
+        "description": "Ratio of largest to smallest activated scale. 1 is sphere-like; larger values are spikier."
+      },
+      "erank": {
+        "label": "有效秩",
+        "description": "基于熵的已激活高斯尺度有效秩。1 表示线状，2 表示片状，3 表示球状。"
+      },
+      "distance": {
+        "label": "Distance",
+        "description": "Distance from the current scene center."
+      }
+    },
+    "undo": "Undo",
+    "redo": "Redo",
+    "undo_named": "Undo: {name}",
+    "redo_named": "Redo: {name}"
   }
 }

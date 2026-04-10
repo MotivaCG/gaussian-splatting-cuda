@@ -423,7 +423,6 @@ namespace lfs::vis::gui {
                                      std::format("snap_{}", snap_values[i]),
                                      false, false, false, active});
                 }
-                active_transport_menu_ = TransportMenuType::SNAP;
                 break;
             }
             case Target::PREVIEW: {
@@ -436,7 +435,6 @@ namespace lfs::vis::gui {
                                      std::format("scale_{}", scale_values[i]),
                                      false, false, false, active});
                 }
-                active_transport_menu_ = TransportMenuType::PREVIEW;
                 break;
             }
             case Target::FORMAT: {
@@ -450,70 +448,54 @@ namespace lfs::vis::gui {
                                      std::format("preset_{}", p),
                                      false, false, false, active});
                 }
-                active_transport_menu_ = TransportMenuType::FORMAT;
                 break;
             }
             case Target::CLEAR: {
                 items.push_back({LOC("context_menu.clear_confirm"), "", false, true});
                 items.push_back({LOC("context_menu.confirm"), "clear_confirm"});
                 items.push_back({LOC("context_menu.cancel"), "clear_cancel"});
-                active_transport_menu_ = TransportMenuType::CLEAR_CONFIRM;
                 break;
             }
             default:
                 break;
             }
 
-            if (!items.empty())
-                cm.request(std::move(items), ctx_req.screen_x, ctx_req.screen_y);
-        }
-
-        if (active_transport_menu_ != TransportMenuType::NONE) {
-            auto& cm = viewer_->getGuiManager()->globalContextMenu();
-            auto action = cm.pollResult();
-            if (!action.empty()) {
-                switch (active_transport_menu_) {
-                case TransportMenuType::SNAP: {
-                    if (action.starts_with("snap_")) {
-                        float val = std::stof(action.substr(5));
-                        ui_state_.snap_interval = val;
-                    }
-                    break;
-                }
-                case TransportMenuType::PREVIEW: {
-                    if (action.starts_with("scale_")) {
-                        float val = std::stof(action.substr(6));
-                        ui_state_.pip_preview_scale = val;
-                    }
-                    break;
-                }
-                case TransportMenuType::FORMAT: {
-                    if (action.starts_with("preset_")) {
-                        using lfs::io::video::VideoPreset;
-                        int idx = std::stoi(action.substr(7));
-                        ui_state_.preset = static_cast<VideoPreset>(idx);
-                        const auto info = lfs::io::video::getPresetInfo(ui_state_.preset);
-                        ui_state_.custom_width = info.width;
-                        ui_state_.custom_height = info.height;
-                        ui_state_.framerate = info.framerate;
-                    }
-                    break;
-                }
-                case TransportMenuType::CLEAR_CONFIRM: {
-                    if (action == "clear_confirm" &&
-                        (controller_.timeline().realKeyframeCount() > 0 || controller_.timeline().hasAnimationClip())) {
-                        controller_.clear();
-                        lfs::core::events::state::KeyframeListChanged{.count = 0}.emit();
-                        LOG_INFO("All keyframes cleared");
-                    }
-                    break;
-                }
-                default:
-                    break;
-                }
-                active_transport_menu_ = TransportMenuType::NONE;
-            } else if (!cm.isOpen()) {
-                active_transport_menu_ = TransportMenuType::NONE;
+            if (!items.empty()) {
+                const auto target = ctx_req.target;
+                cm.request(std::move(items), ctx_req.screen_x, ctx_req.screen_y,
+                           [this, target](std::string_view action) {
+                               switch (target) {
+                               case Target::SNAP:
+                                   if (action.starts_with("snap_"))
+                                       ui_state_.snap_interval = std::stof(std::string(action.substr(5)));
+                                   break;
+                               case Target::PREVIEW:
+                                   if (action.starts_with("scale_"))
+                                       ui_state_.pip_preview_scale = std::stof(std::string(action.substr(6)));
+                                   break;
+                               case Target::FORMAT:
+                                   if (action.starts_with("preset_")) {
+                                       using lfs::io::video::VideoPreset;
+                                       const int idx = std::stoi(std::string(action.substr(7)));
+                                       ui_state_.preset = static_cast<VideoPreset>(idx);
+                                       const auto info = lfs::io::video::getPresetInfo(ui_state_.preset);
+                                       ui_state_.custom_width = info.width;
+                                       ui_state_.custom_height = info.height;
+                                       ui_state_.framerate = info.framerate;
+                                   }
+                                   break;
+                               case Target::CLEAR:
+                                   if (action == "clear_confirm" &&
+                                       (controller_.timeline().realKeyframeCount() > 0 || controller_.timeline().hasAnimationClip())) {
+                                       controller_.clear();
+                                       lfs::core::events::state::KeyframeListChanged{.count = 0}.emit();
+                                       LOG_INFO("All keyframes cleared");
+                                   }
+                                   break;
+                               case Target::NONE:
+                                   break;
+                               }
+                           });
             }
         }
     }

@@ -83,7 +83,20 @@ def rendering_panel_module(monkeypatch):
 def test_rendering_panel_section_headers_use_literals_without_missing_keys(rendering_panel_module):
     module = rendering_panel_module
     requested_keys = []
-    module.lf.ui.tr = lambda key: requested_keys.append(key) or key
+    translations = {
+        "rendering_panel.section_simplify": "Simplify Localized",
+        "rendering_panel.simplify_source": "Input Source",
+        "rendering_panel.simplify_select_source": "Pick a splat",
+        "rendering_panel.simplify_target": "Goal",
+        "rendering_panel.simplify_knn_k": "Neighbors",
+        "rendering_panel.simplify_merge_cap": "Merge Limit",
+        "rendering_panel.simplify_opacity_prune": "Opacity Cutoff",
+        "rendering_panel.simplify_original": "Before",
+        "rendering_panel.simplify_output": "Result",
+        "common.apply": "Run",
+        "common.cancel": "Abort",
+    }
+    module.lf.ui.tr = lambda key: requested_keys.append(key) or translations.get(key, key)
     model = _BindingModelStub()
     panel = module.RenderingPanel()
 
@@ -91,11 +104,23 @@ def test_rendering_panel_section_headers_use_literals_without_missing_keys(rende
 
     assert model.func_bindings["label_hdr_viewport"]() == "Viewport"
     assert model.func_bindings["label_hdr_camera"]() == "Camera & Projection"
-    assert model.func_bindings["label_hdr_simplify"]() == "Splat Simplify"
+    assert model.func_bindings["label_hdr_simplify"]() == "Simplify Localized"
     assert model.func_bindings["label_hdr_selection"]() == "Selection & Overlays"
     assert model.func_bindings["label_hdr_post_process"]() == "Post Processing"
+    assert model.func_bindings["label_simplify_source"]() == "Input Source:"
+    assert model.func_bindings["label_simplify_select_source"]() == "Pick a splat"
+    assert model.func_bindings["label_simplify_target"]() == "Goal:"
+    assert model.func_bindings["label_simplify_target_stat"]() == "Goal"
+    assert model.func_bindings["label_simplify_knn_k"]() == "Neighbors:"
+    assert model.func_bindings["label_simplify_merge_cap"]() == "Merge Limit:"
+    assert model.func_bindings["label_simplify_opacity_prune"]() == "Opacity Cutoff:"
+    assert model.func_bindings["label_simplify_original"]() == "Before"
+    assert model.func_bindings["label_simplify_output"]() == "Result:"
+    assert model.func_bindings["label_simplify_apply"]() == "Run"
+    assert model.func_bindings["label_simplify_cancel"]() == "Abort"
     assert "rendering_panel.section_viewport" not in requested_keys
     assert "rendering_panel.section_camera" not in requested_keys
+    assert "rendering_panel.section_simplify" in requested_keys
     assert "rendering_panel.section_selection" not in requested_keys
     assert "rendering_panel.section_post_process" not in requested_keys
 
@@ -124,3 +149,29 @@ def test_rendering_panel_binds_theme_vignette_controls(rendering_panel_module):
 
     assert set_calls["enabled"] == [False]
     assert set_calls["intensity"] == [0.4]
+
+
+def test_rendering_rml_exposes_simplify_tooltips_and_locale_labels():
+    project_root = Path(__file__).parent.parent.parent
+    rendering_rml = project_root / "src" / "visualizer" / "gui" / "rmlui" / "resources" / "rendering.rml"
+    content = rendering_rml.read_text()
+
+    assert 'data-tooltip="tooltip.simplify_source"' in content
+    assert 'data-tooltip="tooltip.simplify_target"' in content
+    assert 'data-tooltip="tooltip.simplify_knn_k"' in content
+    assert 'data-tooltip="tooltip.simplify_merge_cap"' in content
+    assert 'data-tooltip="tooltip.simplify_opacity_prune"' in content
+    assert 'data-tooltip="tooltip.simplify_output"' in content
+    assert 'data-tooltip="tooltip.simplify_apply"' in content
+    assert 'data-tooltip="tooltip.simplify_cancel"' in content
+    assert "{{label_simplify_source}}" in content
+    assert "{{label_simplify_select_source}}" in content
+    assert "{{label_simplify_target}}" in content
+    assert "{{label_simplify_knn_k}}" in content
+    assert "{{label_simplify_merge_cap}}" in content
+    assert "{{label_simplify_opacity_prune}}" in content
+    assert "{{label_simplify_original}}" in content
+    assert "{{label_simplify_target_stat}}" in content
+    assert "{{label_simplify_output}}" in content
+    assert "{{label_simplify_apply}}" in content
+    assert "{{label_simplify_cancel}}" in content

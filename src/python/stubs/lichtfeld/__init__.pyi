@@ -368,7 +368,7 @@ def can_transform_selection() -> bool:
     """Check if selected node can be transformed"""
 
 def get_num_gaussians() -> int:
-    """Get total number of gaussians in scene"""
+    """Get number of active gaussians in scene"""
 
 def get_node_transform(name: str) -> list[float] | None:
     """Get node transform matrix (16 floats, column-major)"""
@@ -405,10 +405,16 @@ def reset_camera() -> None:
     """Reset camera to default position and orientation"""
 
 def get_camera_navigation_mode() -> str:
-    """Get the active camera navigation mode ('orbit' or 'fpv')"""
+    """Get the active camera navigation mode ('orbit', 'trackball', or 'fpv')"""
 
 def set_camera_navigation_mode(mode: str) -> None:
     """Set the active camera navigation mode"""
+
+def get_camera_view_snap_enabled() -> bool:
+    """Check whether camera axis-view snapping is enabled"""
+
+def set_camera_view_snap_enabled(enabled: bool) -> None:
+    """Enable or disable camera axis-view snapping"""
 
 def toggle_fullscreen() -> None:
     """Toggle fullscreen mode"""
@@ -500,6 +506,12 @@ class Tensor:
 
     def numpy(self, copy: bool = True) -> object:
         """Convert to NumPy array"""
+
+    def tolist(self) -> object:
+        """Convert tensor to nested Python lists"""
+
+    def count_nonzero(self) -> int:
+        """Count non-zero elements"""
 
     @staticmethod
     def from_numpy(arr: NDArray, copy: bool = True) -> Tensor:
@@ -884,6 +896,9 @@ class Tensor:
     def norm_scalar(self, p: float = 2.0) -> float:
         """Lp norm as scalar"""
 
+    def sort(self, dim: int = -1, descending: bool = False) -> tuple:
+        """Sort tensor values along a dimension and return (values, indices)"""
+
     def index_select(self, dim: int, indices: Tensor) -> Tensor:
         """Select along dimension by indices"""
 
@@ -1003,7 +1018,7 @@ def get_mesh2splat_error() -> str:
     Get error message from last mesh-to-splat conversion (empty on success)
     """
 
-def simplify_splats(source_name: str, ratio: float = 0.1, knn_k: int = 16, merge_cap: float = 0.5) -> None:
+def simplify_splats(source_name: str, ratio: float = 0.1, knn_k: int = 16, merge_cap: float = 0.5, opacity_prune_threshold: float = 0.10000000149011612) -> None:
     """Simplify a splat node asynchronously and create a new output node."""
 
 def cancel_splat_simplify() -> None:

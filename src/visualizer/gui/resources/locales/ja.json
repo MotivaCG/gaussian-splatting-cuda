@@ -43,7 +43,8 @@
     "scene": "シーン",
     "rendering": "レンダリング",
     "training": "トレーニング",
-    "preferences": "環境設定"
+    "preferences": "環境設定",
+    "histogram": "Histogram"
   },
   "getting_started": {
     "title": "クイックスタートガイド",
@@ -300,8 +301,8 @@
     "background": "背景",
     "enable_for_training": "トレーニングに含める",
     "disable_for_training": "トレーニングから除外",
-    "enable_all_training": "すべてをトレーニングに含める",
-    "disable_all_training": "すべてをトレーニングから除外",
+    "enable_all_training": "選択したカメラを有効化",
+    "disable_all_training": "選択したカメラを無効化",
     "training_enabled_tooltip": "トレーニングに含まれています",
     "training_disabled_tooltip": "トレーニングから除外されています",
     "go_to_keyframe": "キーフレームビューに移動",
@@ -512,7 +513,8 @@
     "perspective": "透視投影",
     "orthographic": "平行投影",
     "sequencer": "シーケンサー",
-    "ellipsoid": "Ellipsoid"
+    "ellipsoid": "Ellipsoid",
+    "histogram": "Histogram"
   },
   "transform": {
     "node": "ノード: %s",
@@ -584,6 +586,14 @@
     "theme_vignette_intensity": "ビネットの暗さを調整 (0-1)",
     "theme_vignette_radius": "ビネットが始まる位置を調整 (0-1)",
     "theme_vignette_softness": "ビネット境界の柔らかさを調整 (0-1)",
+    "simplify_source": "簡略化の入力として使う選択中のスプラットノード",
+    "simplify_target": "簡略化結果に残すガウシアン数の目標値",
+    "simplify_knn_k": "統合候補を評価するために使う近傍サイズ",
+    "simplify_merge_cap": "1回のパスで統合できるガウシアンの最大割合",
+    "simplify_opacity_prune": "統合前にこの不透明度しきい値未満のガウシアンを削除",
+    "simplify_output": "シーンに追加される新しい簡略化スプラットノードの名前",
+    "simplify_apply": "選択した入力から新しい簡略化スプラットノードを作成",
+    "simplify_cancel": "実行中のスプラット簡略化ジョブをキャンセル",
     "render_scale": "ビューア解像度（低い=VRAM削減）",
     "point_cloud_forced": "トレーニング開始前に強制",
     "desaturate_unselected": "未選択PLYを暗くする",
@@ -1014,7 +1024,16 @@
     "keyframe_preview": "キーフレーム {} プレビュー"
   },
   "rendering_panel": {
-    "fov_format": "FOV: {hfov:.1f}° H / {vfov:.1f}° V"
+    "fov_format": "FOV: {hfov:.1f}° H / {vfov:.1f}° V",
+    "section_simplify": "スプラット簡略化",
+    "simplify_source": "ソース",
+    "simplify_select_source": "スプラットノードを選択",
+    "simplify_target": "目標",
+    "simplify_knn_k": "kNN K",
+    "simplify_merge_cap": "統合上限",
+    "simplify_opacity_prune": "不透明度プルーニング",
+    "simplify_original": "元データ",
+    "simplify_output": "出力"
   },
   "scripts_panel": {
     "actions": "アクション",
@@ -1104,5 +1123,135 @@
     "clear_confirm": "すべてのキーフレームを削除しますか？",
     "confirm": "確認",
     "cancel": "キャンセル"
+  },
+  "histogram": {
+    "title_eyebrow": "Gaussian Analysis",
+    "field": "Field",
+    "log_scale": "対数スケール",
+    "samples": "Samples",
+    "range": "Range",
+    "mean": "Mean",
+    "median": "Median",
+    "p95": "P95",
+    "peak_bin": "Peak Bin",
+    "bin_count": "{count} bins",
+    "bins": "ビン",
+    "compare_x_bins": "Xビン",
+    "compare_y_bins": "Yビン",
+    "marked": "Marked",
+    "count": "Count",
+    "clear": "Clear",
+    "delete": "Delete",
+    "no_marked_range": "No marked range",
+    "gaussian_count": "{count} Gaussians",
+    "range_value": "{min} to {max}",
+    "status_drag_delete": "Left-drag across the histogram to mark a range, then delete it.",
+    "status_selection": "Marked range becomes the active Gaussian selection.",
+    "summary": "{metric} distribution across {count} Gaussians",
+    "bin_tooltip": "Bin {index}: {left} to {right} | {count} Gaussians",
+    "compare_with": "Compare With",
+    "compare_bin_count": "{x_count} x {y_count} ビン",
+    "compare": {
+      "off": "Off",
+      "summary": "{x_metric} vs {y_metric} across {count} Gaussians",
+      "range_value": "X {x_range} | Y {y_range}",
+      "status_selection": "Marked compare region becomes the active Gaussian selection.",
+      "bin_tooltip": "X {x_range} | Y {y_range} | {count} Gaussians",
+      "empty": {
+        "title": "Compare unavailable",
+        "message": "Choose a second metric to see how two Gaussian properties cluster together.",
+        "metric_unavailable": {
+          "title": "Compare metric unavailable",
+          "message": "The comparison metric could not be read from the combined Gaussian model."
+        },
+        "no_visible_values": {
+          "title": "No comparable values",
+          "message": "The selected metric pair does not contain any visible finite samples to visualize."
+        }
+      }
+    },
+    "delete_failed": {
+      "title": "Delete Failed",
+      "status": "Delete failed: {message}",
+      "unexpected": "The delete pipeline raised an unexpected error.",
+      "invalid_result": "The delete pipeline returned an invalid result.",
+      "reported_failure": "The delete pipeline reported a failure."
+    },
+    "empty": {
+      "unavailable": {
+        "title": "Histogram unavailable",
+        "message": "Switch to a view or edit scene with Gaussian splats to inspect a distribution."
+      },
+      "no_scene": {
+        "title": "No scene loaded",
+        "message": "Load a Gaussian scene, then reopen the histogram panel."
+      },
+      "no_visible_gaussians": {
+        "title": "No visible Gaussians",
+        "message": "The histogram only works when the active scene exposes a visible Gaussian model."
+      },
+      "metric_unavailable": {
+        "title": "Metric unavailable",
+        "message": "The selected metric could not be read from the combined Gaussian model."
+      },
+      "no_visible_values": {
+        "title": "No visible values",
+        "message": "The selected metric does not contain any visible finite samples to visualize."
+      }
+    },
+    "metric": {
+      "opacity": {
+        "label": "Opacity",
+        "description": "Activated Gaussian opacity in [0, 1]."
+      },
+      "position_x": {
+        "label": "Position X",
+        "description": "Gaussian world-space center on the X axis."
+      },
+      "position_y": {
+        "label": "Position Y",
+        "description": "Gaussian world-space center on the Y axis."
+      },
+      "position_z": {
+        "label": "Position Z",
+        "description": "Gaussian world-space center on the Z axis."
+      },
+      "scale_x": {
+        "label": "Scale X",
+        "description": "Activated Gaussian scale on the X axis."
+      },
+      "scale_y": {
+        "label": "Scale Y",
+        "description": "Activated Gaussian scale on the Y axis."
+      },
+      "scale_z": {
+        "label": "Scale Z",
+        "description": "Activated Gaussian scale on the Z axis."
+      },
+      "scale_max": {
+        "label": "Scale Max",
+        "description": "Largest activated scale component per Gaussian."
+      },
+      "volume": {
+        "label": "Volume",
+        "description": "Ellipsoid volume derived from activated Gaussian scales."
+      },
+      "anisotropy": {
+        "label": "Anisotropy",
+        "description": "Ratio of largest to smallest activated scale. 1 is sphere-like; larger values are spikier."
+      },
+      "erank": {
+        "label": "有効ランク",
+        "description": "有効化されたガウススケールのエントロピーに基づく有効ランクです。1 は線状、2 は面状、3 は球状を表します。"
+      },
+      "distance": {
+        "label": "Distance",
+        "description": "Distance from the current scene center."
+      }
+    },
+    "undo": "Undo",
+    "redo": "Redo",
+    "undo_named": "Undo: {name}",
+    "redo_named": "Redo: {name}"
   }
 }
