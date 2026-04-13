@@ -616,9 +616,13 @@
     "selection_colors": "Kolory wizualizacji zaznaczenia",
     "seq_camera_path": "Przełącz wizualizację ścieżki kamery",
     "seq_first": "Przejdź do pierwszej klatki kluczowej",
+    "seq_prev_keyframe": "Przejdź do poprzedniej klatki kluczowej",
+    "seq_prev": "Przejdź do poprzedniej klatki kluczowej",
     "seq_stop": "Zatrzymaj odtwarzanie",
     "seq_play": "Odtwórz animację",
     "seq_pause": "Wstrzymaj animację",
+    "seq_next_keyframe": "Przejdź do następnej klatki kluczowej",
+    "seq_next": "Przejdź do następnej klatki kluczowej",
     "seq_last": "Przejdź do ostatniej klatki kluczowej",
     "seq_loop_off": "Włącz odtwarzanie w pętli",
     "seq_loop_on": "Wyłącz odtwarzanie w pętli",
@@ -634,6 +638,8 @@
     "seq_quality": "Jakość CRF (niższa = lepsza jakość, większy plik)",
     "seq_export": "Eksportuj wideo ze ścieżki kamery",
     "seq_clear": "Usuń wszystkie klatki kluczowe",
+    "seq_dock": "Zadokuj sekwencer",
+    "seq_undock": "Oddokuj sekwencer",
     "seq_interval": "Interwał siatki",
     "seq_preview_size": "Skala podglądu PiP"
   },
@@ -845,7 +851,8 @@
     "no_image": "Brak obrazu",
     "zoom": "Zoom",
     "fit": "Dopasuj",
-    "storage_section": "MAGAZYN"
+    "storage_section": "MAGAZYN",
+    "color_picker": "Pobierz"
   },
   "startup": {
     "supported_by": "Wspierane przez",

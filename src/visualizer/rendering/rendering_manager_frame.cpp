@@ -94,6 +94,7 @@ namespace lfs::vis {
         const bool has_visible_point_cloud =
             scene_manager && !has_renderable_model &&
             hasVisibleRenderablePointCloud(scene_manager->getScene());
+        const bool has_renderable_content = has_renderable_model || has_visible_point_cloud;
         const size_t model_ptr = reinterpret_cast<size_t>(model);
 
         if (const auto model_change = frame_lifecycle_service_.handleModelChange(model_ptr, viewport_artifact_service_);
@@ -119,7 +120,7 @@ namespace lfs::vis {
             scene_manager,
             settings_,
             camera_interaction_service_.currentCameraId(),
-            has_renderable_model || has_visible_point_cloud,
+            has_renderable_content,
             viewport_artifact_service_.hasGpuFrame(),
             gt_texture_cache_,
             request_gt_prerender);
@@ -129,7 +130,7 @@ namespace lfs::vis {
 
         if (const DirtyMask required_dirty = frame_lifecycle_service_.requiredDirtyMask(
                 viewport_artifact_service_.hasViewportOutput(),
-                has_renderable_model || has_visible_point_cloud,
+                has_renderable_content,
                 settings_.split_view_mode);
             required_dirty) {
             dirty_mask_.fetch_or(required_dirty, std::memory_order_relaxed);
@@ -152,7 +153,15 @@ namespace lfs::vis {
             glEnable(GL_SCISSOR_TEST);
         }
 
-        const DirtyMask frame_dirty = dirty_mask_.exchange(0);
+        DirtyMask frame_dirty = dirty_mask_.exchange(0);
+        if (frame_dirty == 0 &&
+            !has_renderable_content &&
+            !splitViewEnabled(settings_.split_view_mode)) {
+            // GUI-only animation frames still clear the shell background first. When the scene is
+            // empty, force the viewport background pass so the empty startup view keeps its own
+            // black clear + grid instead of flashing the UI shell color.
+            frame_dirty |= DirtyFlag::BACKGROUND;
+        }
         RenderFrameCoordinator frame_coordinator{
             {.engine = *engine_,
              .pass_graph = pass_graph_,

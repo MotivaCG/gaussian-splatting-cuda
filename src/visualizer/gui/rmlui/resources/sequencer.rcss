@@ -1,6 +1,7 @@
 body {
     font-family: Inter;
-    display: block;
+    display: flex;
+    flex-direction: column;
     margin: 0;
     padding: 0;
     overflow: hidden;
@@ -9,11 +10,45 @@ body {
 }
 
 #panel {
-    display: block;
+    display: flex;
+    flex-direction: column;
     width: 100%;
     height: 100%;
+    min-height: 0;
     padding: 3dp 16dp 8dp 16dp;
     box-sizing: border-box;
+}
+
+#panel.is-floating {
+    padding-top: 10dp;
+}
+
+#floating-header {
+    min-height: 28dp;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8dp;
+    padding: 0 4dp;
+    margin-bottom: 6dp;
+}
+
+#floating-title {
+    font-size: 12dp;
+    font-weight: bold;
+    color: #cdd6f4;
+}
+
+#floating-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6dp;
+    flex-shrink: 0;
+}
+
+.floating-header-action {
+    min-width: 64dp;
 }
 
 #transport-row {
@@ -290,15 +325,19 @@ body {
 }
 
 #header {
-    display: block;
+    display: flex;
     width: 100%;
-    height: 56dp;
+    min-height: 56dp;
+    flex: 1 1 56dp;
+    min-width: 0;
 }
 
 #timeline {
-    display: block;
+    display: flex;
+    flex-direction: column;
     width: 100%;
     height: 100%;
+    min-height: 0;
     position: relative;
     overflow: hidden;
 }
@@ -341,7 +380,8 @@ body {
 #track-area {
     display: block;
     width: 100%;
-    height: 28dp;
+    flex: 1;
+    min-height: 28dp;
     position: relative;
     margin-top: 4dp;
 }
@@ -350,18 +390,20 @@ body {
     display: block;
     position: absolute;
     left: 0;
-    top: 2dp;
+    top: 50%;
     width: 100%;
     height: 24dp;
+    margin-top: -12dp;
     border-radius: 4dp;
 }
 
 #hint {
     display: block;
     position: absolute;
-    top: 4dp;
+    top: 50%;
     left: 0;
     width: 100%;
+    margin-top: -6dp;
     text-align: center;
     font-size: 10dp;
 }
@@ -380,7 +422,8 @@ body {
     position: absolute;
     width: 12dp;
     height: 12dp;
-    top: 8dp;
+    top: 50%;
+    margin-top: -6dp;
     margin-left: -6dp;
     transform: rotate(45deg);
     border-radius: 1dp;
@@ -399,7 +442,8 @@ body {
     border-radius: 6dp;
     width: 10dp;
     height: 10dp;
-    top: 9dp;
+    top: 50%;
+    margin-top: -5dp;
     margin-left: -5dp;
 }
 

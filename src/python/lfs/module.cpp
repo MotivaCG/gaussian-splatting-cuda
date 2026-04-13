@@ -66,6 +66,7 @@
 #include "visualizer/core/services.hpp"
 #include "visualizer/gui/panel_registry.hpp"
 #include "visualizer/gui_capabilities.hpp"
+#include "visualizer/ipc/view_context.hpp"
 #include "visualizer/operator/operator_registry.hpp"
 #include "visualizer/scene/scene_manager.hpp"
 #include "visualizer/scene_coordinate_utils.hpp"
@@ -1407,9 +1408,17 @@ NB_MODULE(lichtfeld, m) {
             auto* rm = lfs::python::get_rendering_manager();
             if (!rm)
                 return;
-            auto settings = rm->getSettings();
-            settings.orthographic = ortho;
-            rm->updateSettings(settings);
+
+            float viewport_height = 0.0f;
+            float distance_to_pivot = 0.0f;
+            if (const auto view = lfs::vis::get_current_view_info(); view.has_value()) {
+                viewport_height = static_cast<float>(view->height);
+                const glm::vec3 eye(view->translation[0], view->translation[1], view->translation[2]);
+                const glm::vec3 pivot(view->pivot[0], view->pivot[1], view->pivot[2]);
+                distance_to_pivot = glm::length(pivot - eye);
+            }
+
+            rm->setOrthographic(ortho, viewport_height, distance_to_pivot);
         },
         nb::arg("ortho"), "Enable or disable orthographic projection");
 

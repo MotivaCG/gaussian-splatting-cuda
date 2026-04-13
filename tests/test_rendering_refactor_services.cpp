@@ -21,6 +21,7 @@
 #include "visualizer/rendering/viewport_request_builder.hpp"
 #include "visualizer/scene/scene_manager.hpp"
 
+#include <cmath>
 #include <filesystem>
 #include <glm/gtc/matrix_transform.hpp>
 #include <gtest/gtest.h>
@@ -262,6 +263,38 @@ namespace lfs::vis {
 
         expectMat3Near(pose.rotation, lfs::rendering::DATA_TO_VISUALIZER_CAMERA_AXES);
         EXPECT_EQ(pose.translation, glm::vec3(1.0f, 2.0f, 3.0f));
+    }
+
+    TEST(RenderingManagerEventsTest, OrthographicTogglePreservesApparentZoomAtPivotInBothDirections) {
+        RenderingManager manager;
+        auto settings = manager.getSettings();
+        settings.focal_length_mm = 50.0f;
+        manager.updateSettings(settings);
+
+        constexpr float viewport_height = 900.0f;
+        constexpr float distance_to_pivot = 7.5f;
+
+        manager.setOrthographic(true, viewport_height, distance_to_pivot);
+        const auto ortho_settings = manager.getSettings();
+        ASSERT_TRUE(ortho_settings.orthographic);
+
+        const float expected_scale = viewport_height /
+                                     (2.0f * distance_to_pivot *
+                                      std::tan(glm::radians(lfs::rendering::focalLengthToVFov(50.0f)) * 0.5f));
+        EXPECT_NEAR(ortho_settings.ortho_scale, expected_scale, 1e-4f);
+
+        settings = ortho_settings;
+        settings.ortho_scale *= 1.75f;
+        manager.updateSettings(settings);
+
+        manager.setOrthographic(false, viewport_height, distance_to_pivot);
+        const auto perspective_settings = manager.getSettings();
+        ASSERT_FALSE(perspective_settings.orthographic);
+
+        const float expected_vfov = glm::degrees(2.0f * std::atan(
+                                                            viewport_height / (2.0f * distance_to_pivot * settings.ortho_scale)));
+        const float expected_focal = lfs::rendering::vFovToFocalLength(expected_vfov);
+        EXPECT_NEAR(perspective_settings.focal_length_mm, expected_focal, 1e-4f);
     }
 
     TEST(SplitViewServiceTest, GtComparisonPlanPreservesGtTextureOrigin) {

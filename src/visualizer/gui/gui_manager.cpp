@@ -51,6 +51,7 @@
 #include "tools/brush_tool.hpp"
 #include "tools/selection_tool.hpp"
 #include "visualizer_impl.hpp"
+#include <OpenImageIO/imageio.h>
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <chrono>
@@ -190,6 +191,78 @@ namespace lfs::vis::gui {
             draw_data.AddDrawList(&dl);
             ImGui_ImplOpenGL3_RenderDrawData(&draw_data);
         }
+
+        SDL_Cursor* loadColorCursorFromAsset(const std::string& asset_name, int hot_x, int hot_y) {
+            try {
+                const auto path = lfs::vis::getAssetPath(asset_name);
+                const std::string path_utf8 = lfs::core::path_to_utf8(path);
+                std::unique_ptr<OIIO::ImageInput> in(OIIO::ImageInput::open(path_utf8));
+                if (!in)
+                    return nullptr;
+
+                const OIIO::ImageSpec& spec = in->spec();
+                const int width = spec.width;
+                const int height = spec.height;
+                const int channels = spec.nchannels;
+                if (width <= 0 || height <= 0 || channels <= 0) {
+                    in->close();
+                    return nullptr;
+                }
+
+                const int read_channels = std::clamp(channels, 1, 4);
+                std::vector<unsigned char> source_pixels(static_cast<size_t>(width) * height * read_channels);
+                if (!in->read_image(0, 0, 0, read_channels, OIIO::TypeDesc::UINT8, source_pixels.data())) {
+                    in->close();
+                    return nullptr;
+                }
+                in->close();
+
+                std::vector<unsigned char> rgba_pixels(static_cast<size_t>(width) * height * 4, 0);
+                for (int i = 0; i < width * height; ++i) {
+                    const size_t src = static_cast<size_t>(i) * read_channels;
+                    const size_t dst = static_cast<size_t>(i) * 4;
+                    switch (read_channels) {
+                    case 1:
+                        rgba_pixels[dst + 0] = source_pixels[src + 0];
+                        rgba_pixels[dst + 1] = source_pixels[src + 0];
+                        rgba_pixels[dst + 2] = source_pixels[src + 0];
+                        rgba_pixels[dst + 3] = 255;
+                        break;
+                    case 2:
+                        rgba_pixels[dst + 0] = source_pixels[src + 0];
+                        rgba_pixels[dst + 1] = source_pixels[src + 0];
+                        rgba_pixels[dst + 2] = source_pixels[src + 0];
+                        rgba_pixels[dst + 3] = source_pixels[src + 1];
+                        break;
+                    case 3:
+                        rgba_pixels[dst + 0] = source_pixels[src + 0];
+                        rgba_pixels[dst + 1] = source_pixels[src + 1];
+                        rgba_pixels[dst + 2] = source_pixels[src + 2];
+                        rgba_pixels[dst + 3] = 255;
+                        break;
+                    default:
+                        rgba_pixels[dst + 0] = source_pixels[src + 0];
+                        rgba_pixels[dst + 1] = source_pixels[src + 1];
+                        rgba_pixels[dst + 2] = source_pixels[src + 2];
+                        rgba_pixels[dst + 3] = source_pixels[src + 3];
+                        break;
+                    }
+                }
+
+                SDL_Surface* surface = SDL_CreateSurfaceFrom(width, height, SDL_PIXELFORMAT_RGBA32,
+                                                             rgba_pixels.data(), width * 4);
+                if (!surface) {
+                    return nullptr;
+                }
+
+                SDL_Cursor* cursor = SDL_CreateColorCursor(surface, hot_x, hot_y);
+                SDL_DestroySurface(surface);
+                return cursor;
+            } catch (const std::exception& e) {
+                LOG_WARN("Could not load cursor asset '{}': {}", asset_name, e.what());
+                return nullptr;
+            }
+        }
     } // namespace
 
     GuiManager::GuiManager(VisualizerImpl* viewer)
@@ -276,6 +349,65 @@ namespace lfs::vis::gui {
     }
 
     GuiManager::~GuiManager() = default;
+
+    void GuiManager::initCustomCursors() {
+        if (!pipette_cursor_) {
+            // The tip of the dropper sits near the lower-left corner in the 24x24 Tabler asset.
+            pipette_cursor_ = loadColorCursorFromAsset("icon/color-picker.png", 4, 19);
+            if (!pipette_cursor_)
+                LOG_WARN("Could not create pipette cursor from icon/color-picker.png");
+        }
+    }
+
+    void GuiManager::destroyCustomCursors() {
+        if (pipette_cursor_) {
+            SDL_SetCursor(SDL_GetDefaultCursor());
+            SDL_DestroyCursor(pipette_cursor_);
+            pipette_cursor_ = nullptr;
+        }
+    }
+
+    void GuiManager::applyRmlCursorRequest(const RmlCursorRequest req) {
+        if (req != RmlCursorRequest::Pipette && pipette_cursor_)
+            SDL_SetCursor(SDL_GetDefaultCursor());
+
+        switch (req) {
+        case RmlCursorRequest::Arrow:
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Arrow);
+            break;
+        case RmlCursorRequest::TextInput:
+            ImGui::SetMouseCursor(ImGuiMouseCursor_TextInput);
+            break;
+        case RmlCursorRequest::Hand:
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            break;
+        case RmlCursorRequest::Pipette:
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Arrow);
+            if (pipette_cursor_)
+                SDL_SetCursor(pipette_cursor_);
+            break;
+        case RmlCursorRequest::ResizeEW:
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+            break;
+        case RmlCursorRequest::ResizeNS:
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+            break;
+        case RmlCursorRequest::ResizeNWSE:
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
+            break;
+        case RmlCursorRequest::ResizeNESW:
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNESW);
+            break;
+        case RmlCursorRequest::ResizeAll:
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+            break;
+        case RmlCursorRequest::NotAllowed:
+            ImGui::SetMouseCursor(ImGuiMouseCursor_NotAllowed);
+            break;
+        case RmlCursorRequest::None:
+            break;
+        }
+    }
 
     void GuiManager::initMenuBar() {
         menu_bar_->setOnShowPythonConsole([this]() {
@@ -598,6 +730,7 @@ namespace lfs::vis::gui {
 
         lfs::python::set_shared_dpi_scale(current_ui_scale_);
         lfs::vis::setThemeDpiScale(current_ui_scale_);
+        initCustomCursors();
 
         // Set application icon
         try {
@@ -819,6 +952,7 @@ namespace lfs::vis::gui {
 
         sequencer_ui_.destroyGLResources();
         drag_drop_.shutdown();
+        destroyCustomCursors();
 
         if (ImGui::GetCurrentContext()) {
             saveImGuiSettings();
@@ -889,7 +1023,8 @@ namespace lfs::vis::gui {
 
         reg_panel("native.sequencer", "Sequencer",
                   make_panel(SequencerPanel(&sequencer_ui_, &panel_layout_)),
-                  PanelSpace::ViewportOverlay, 500);
+                  PanelSpace::BottomDock, 500,
+                  0, 8192.0f);
 
         reg_panel("native.python_overlay", "Python Overlay",
                   make_panel(PythonOverlayPanel(this)),
@@ -1151,9 +1286,11 @@ namespace lfs::vis::gui {
             std::abs(panel_layout_.getRightPanelWidth() - last_ui_layout_right_panel_w_) > 0.5f ||
             std::abs(panel_layout_.getScenePanelRatio() - last_ui_layout_scene_ratio_) > 0.0001f ||
             std::abs(panel_layout_.getPythonConsoleWidth() - last_ui_layout_python_console_w_) > 0.5f ||
+            std::abs(panel_layout_.getBottomDockHeight() - last_ui_layout_bottom_dock_h_) > 0.5f ||
             show_main_panel_ != last_ui_layout_show_main_panel_ ||
             ui_hidden_ != last_ui_layout_ui_hidden_ ||
             python_console_visible != last_ui_layout_python_console_visible_ ||
+            panel_layout_.isBottomDockVisible() != last_ui_layout_bottom_dock_visible_ ||
             panel_layout_.getActiveTab() != last_ui_layout_active_tab_;
 
         if (ui_layout_changed) {
@@ -1163,9 +1300,11 @@ namespace lfs::vis::gui {
             last_ui_layout_right_panel_w_ = panel_layout_.getRightPanelWidth();
             last_ui_layout_scene_ratio_ = panel_layout_.getScenePanelRatio();
             last_ui_layout_python_console_w_ = panel_layout_.getPythonConsoleWidth();
+            last_ui_layout_bottom_dock_h_ = panel_layout_.getBottomDockHeight();
             last_ui_layout_show_main_panel_ = show_main_panel_;
             last_ui_layout_ui_hidden_ = ui_hidden_;
             last_ui_layout_python_console_visible_ = python_console_visible;
+            last_ui_layout_bottom_dock_visible_ = panel_layout_.isBottomDockVisible();
             last_ui_layout_active_tab_ = panel_layout_.getActiveTab();
         }
 
@@ -1226,6 +1365,8 @@ namespace lfs::vis::gui {
 
         panel_layout_.renderRightPanel(ctx, draw_ctx, show_main_panel_, ui_hidden_,
                                        window_states_, focus_panel_name_, panel_input, screen);
+        panel_layout_.renderBottomDock(draw_ctx, show_main_panel_, ui_hidden_,
+                                       panel_input, screen);
 
         applyFrameInputCapture(&rml_right_panel_);
 
@@ -1236,21 +1377,6 @@ namespace lfs::vis::gui {
             default: break;
             }
         };
-        auto apply_rml_cursor = [](RmlCursorRequest req) {
-            switch (req) {
-            case RmlCursorRequest::Arrow: ImGui::SetMouseCursor(ImGuiMouseCursor_Arrow); break;
-            case RmlCursorRequest::TextInput: ImGui::SetMouseCursor(ImGuiMouseCursor_TextInput); break;
-            case RmlCursorRequest::Hand: ImGui::SetMouseCursor(ImGuiMouseCursor_Hand); break;
-            case RmlCursorRequest::ResizeEW: ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW); break;
-            case RmlCursorRequest::ResizeNS: ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS); break;
-            case RmlCursorRequest::ResizeNWSE: ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE); break;
-            case RmlCursorRequest::ResizeNESW: ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNESW); break;
-            case RmlCursorRequest::ResizeAll: ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll); break;
-            case RmlCursorRequest::NotAllowed: ImGui::SetMouseCursor(ImGuiMouseCursor_NotAllowed); break;
-            case RmlCursorRequest::None: break;
-            }
-        };
-
         python::set_viewport_bounds(viewport_layout_.pos.x, viewport_layout_.pos.y,
                                     viewport_layout_.size.x, viewport_layout_.size.y);
 
@@ -1379,7 +1505,7 @@ namespace lfs::vis::gui {
         rml_modal_overlay_->processInput(raw_panel_input);
         rml_viewport_overlay_.compositeToScreen(panel_input.screen_w, panel_input.screen_h);
         if (ImGui::GetMouseCursor() == ImGuiMouseCursor_Arrow)
-            apply_rml_cursor(rmlui_manager_.consumeCursorRequest());
+            applyRmlCursorRequest(rmlui_manager_.consumeCursorRequest());
         apply_cursor(rml_right_panel_.getCursorRequest());
         apply_cursor(panel_layout_.getCursorRequest());
         syncWindowTextInput(viewer_->getWindow());
@@ -1584,6 +1710,7 @@ namespace lfs::vis::gui {
 
                     std::vector<ImVec2> screen_points;
                     if (rm->isPolygonPreviewWorldSpace()) {
+                        const auto render_settings = rm->getSettings();
                         screen_points.reserve(world_points.size());
 
                         if (!panel_ctx.viewport) {
@@ -1600,7 +1727,9 @@ namespace lfs::vis::gui {
                                 projection_viewport.camera.t,
                                 projection_viewport.windowSize,
                                 world_point,
-                                rm->getFocalLengthMm());
+                                render_settings.focal_length_mm,
+                                render_settings.orthographic,
+                                render_settings.ortho_scale);
                             if (!projected) {
                                 all_visible = false;
                                 break;

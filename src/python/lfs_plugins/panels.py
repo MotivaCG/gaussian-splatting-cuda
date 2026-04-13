@@ -45,7 +45,7 @@ def register_builtin_panels():
         view_menu.register()
         help_menu.register()
 
-        # Floating panels
+        # Auxiliary panels
         from .export_panel import ExportPanel
         lf.register_class(ExportPanel)
         lf.ui.set_panel_enabled("lfs.export", False)

@@ -118,17 +118,22 @@ Getting started:
 
 <div align="center">
 
-<a href="https://www.core11.eu/">
-  <img src="docs/media/core11_multi.svg" alt="Core 11" height="60">
-</a>
+<p>
+  <a href="https://www.core11.eu/">
+    <img src="docs/media/core11_multi.svg" alt="Core 11" height="60">
+  </a>
+</p>
 
 <br>
-<a href="https://web.volinga.ai/">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/media/volinga-dark.svg">
-    <img src="docs/media/volinga.svg" alt="Volinga" height="108">
-  </picture>
-</a>
+
+<p>
+  <a href="https://web.volinga.ai/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/media/volinga-dark.svg">
+      <img src="docs/media/volinga.svg" alt="Volinga" height="108">
+    </picture>
+  </a>
+</p>
 
 </div>
 

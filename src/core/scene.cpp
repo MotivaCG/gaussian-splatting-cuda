@@ -866,6 +866,8 @@ namespace lfs::core {
                 has_selection = true;
                 count = static_cast<int>(selected_indices.size());
             } else {
+                // Empty selection is equivalent to no selection.
+                selection_mask_.reset();
                 has_selection_ = false;
             }
         }
@@ -879,11 +881,17 @@ namespace lfs::core {
         {
             std::unique_lock lock(selection_mutex_);
             selection_mask_ = std::move(mask);
-            has_selection_ = selection_mask_ && selection_mask_->is_valid() && selection_mask_->numel() > 0;
-            has_selection = has_selection_;
-
-            if (has_selection_) {
+            const bool valid =
+                selection_mask_ && selection_mask_->is_valid() && selection_mask_->numel() > 0;
+            if (valid) {
                 count = static_cast<int>(selection_mask_->ne(0).to(core::DataType::Float32).sum_scalar());
+            }
+
+            // Treat an all-zero tensor as "no selection" to keep API semantics consistent.
+            has_selection_ = count > 0;
+            has_selection = has_selection_;
+            if (!has_selection_) {
+                selection_mask_.reset();
             }
         }
         events::state::SelectionChanged{.has_selection = has_selection, .count = count}.emit();

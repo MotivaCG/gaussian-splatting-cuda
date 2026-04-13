@@ -14,6 +14,9 @@
 #include "theme/theme.hpp"
 #include "training/trainer.hpp"
 #include "training/training_manager.hpp"
+
+#include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 namespace lfs::vis {
@@ -180,23 +183,34 @@ namespace lfs::vis {
     void RenderingManager::setOrthographic(const bool enabled, const float viewport_height, const float distance_to_pivot) {
         std::lock_guard<std::mutex> lock(settings_mutex_);
 
-        // Calculate ortho_scale to preserve apparent size at pivot distance
-        if (enabled && !settings_.orthographic) {
-            constexpr float MIN_DISTANCE = 0.01f;
-            constexpr float MIN_SCALE = 1.0f;
-            constexpr float MAX_SCALE = 10000.0f;
-            constexpr float DEFAULT_SCALE = 100.0f;
+        constexpr float MIN_DISTANCE = 0.01f;
+        constexpr float MIN_SCALE = 1.0f;
+        constexpr float MAX_SCALE = 10000.0f;
+        constexpr float DEFAULT_SCALE = 100.0f;
 
-            if (viewport_height <= 0.0f || distance_to_pivot <= MIN_DISTANCE) {
-                LOG_WARN("setOrthographic: invalid viewport_height={} or distance={}", viewport_height, distance_to_pivot);
+        if (viewport_height <= 0.0f || distance_to_pivot <= MIN_DISTANCE) {
+            LOG_WARN("setOrthographic: invalid viewport_height={} or distance={}", viewport_height, distance_to_pivot);
+            if (enabled && !settings_.orthographic) {
                 settings_.ortho_scale = DEFAULT_SCALE;
-            } else {
-                const float vfov = lfs::rendering::focalLengthToVFov(settings_.focal_length_mm);
-                const float half_tan_fov = std::tan(glm::radians(vfov) * 0.5f);
-                settings_.ortho_scale = std::clamp(
-                    viewport_height / (2.0f * distance_to_pivot * half_tan_fov),
-                    MIN_SCALE, MAX_SCALE);
             }
+            settings_.orthographic = enabled;
+            markDirty(DirtyFlag::CAMERA);
+            return;
+        }
+
+        if (enabled && !settings_.orthographic) {
+            const float vfov = lfs::rendering::focalLengthToVFov(settings_.focal_length_mm);
+            const float half_tan_fov = std::tan(glm::radians(vfov) * 0.5f);
+            settings_.ortho_scale = std::clamp(
+                viewport_height / (2.0f * distance_to_pivot * half_tan_fov),
+                MIN_SCALE, MAX_SCALE);
+        } else if (!enabled && settings_.orthographic) {
+            const float half_tan_fov = viewport_height / (2.0f * distance_to_pivot * settings_.ortho_scale);
+            const float vfov = glm::degrees(2.0f * std::atan(half_tan_fov));
+            settings_.focal_length_mm = std::clamp(
+                lfs::rendering::vFovToFocalLength(vfov),
+                lfs::rendering::MIN_FOCAL_LENGTH_MM,
+                lfs::rendering::MAX_FOCAL_LENGTH_MM);
         }
 
         settings_.orthographic = enabled;

@@ -83,6 +83,15 @@ namespace lfs::vis {
                                 unsigned int target_texture,
                                 int width, int height);
 
+        // Render preview image directly into an external texture without touching
+        // the shared viewport presentation textures.
+        bool renderPreviewTexture(SceneManager* scene_manager,
+                                  const glm::mat3& camera_rotation,
+                                  const glm::vec3& camera_position,
+                                  float focal_length_mm,
+                                  unsigned int target_texture,
+                                  int width, int height);
+
         void markDirty();
         void markDirty(DirtyMask flags);
 

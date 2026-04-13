@@ -301,17 +301,30 @@ namespace lfs::rendering {
                                                       const glm::vec3& translation,
                                                       const glm::ivec2& viewport_size,
                                                       const glm::vec3& world_point,
-                                                      const float focal_length_mm) {
+                                                      const float focal_length_mm,
+                                                      const bool orthographic = false,
+                                                      const float ortho_scale = DEFAULT_ORTHO_SCALE) {
         const glm::vec3 view = glm::transpose(rotation) * (world_point - translation);
         if (!isFiniteVec3(view) || view.z >= -1e-6f) {
             return std::nullopt;
         }
 
-        const auto [fx, fy] = computePixelFocalLengths(viewport_size, focal_length_mm);
         const float width = static_cast<float>(viewport_size.x);
         const float height = static_cast<float>(viewport_size.y);
         const float cx = width * 0.5f;
         const float cy = height * 0.5f;
+
+        if (orthographic) {
+            if (!std::isfinite(ortho_scale) || ortho_scale <= 0.0f) {
+                return std::nullopt;
+            }
+
+            return glm::vec2(
+                cx + view.x * ortho_scale,
+                cy - view.y * ortho_scale);
+        }
+
+        const auto [fx, fy] = computePixelFocalLengths(viewport_size, focal_length_mm);
         const float depth = -view.z;
 
         return glm::vec2(

@@ -22,6 +22,7 @@ set(LFS_TRAINING_KERNEL_SOURCES
     kernels/bilateral_grid_backward.cu
     kernels/bilateral_grid_tv.cu
     kernels/ppisp.cu
+    kernels/pruning_kernels.cu
     kernels/mcmc_kernels.cu
     kernels/mrnf_kernels.cu
     kernels/densification_kernels.cu

@@ -125,7 +125,8 @@ namespace lfs::vis {
                              .external_depth_texture = gpu_frame->depth.valid() ? gpu_frame->depth.id : 0,
                              .near_plane = gpu_frame->near_plane,
                              .far_plane = gpu_frame->far_plane,
-                             .orthographic = gpu_frame->orthographic}};
+                             .orthographic = gpu_frame->orthographic,
+                             .color_has_alpha = gpu_frame->color_has_alpha}};
                 }
             }
         } else if (settings.apply_appearance_correction) {

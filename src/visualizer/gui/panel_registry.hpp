@@ -108,6 +108,7 @@ namespace lfs::vis::gui {
         virtual bool wantsKeyboard() const { return false; }
         virtual bool needsAnimationFrame() const { return false; }
         virtual bool wantsExternalFloatingShadow() const { return true; }
+        virtual void setPanelSpace(PanelSpace space) { (void)space; }
     };
 
     struct PanelInfo {
@@ -225,10 +226,10 @@ namespace lfs::vis::gui {
         float draw_panels_direct(PanelSpace space, float x, float y, float w, float max_h,
                                  const PanelDrawContext& ctx,
                                  const PanelInputState* input = nullptr);
-        void preload_panels_direct(PanelSpace space, float w, float max_h,
-                                   const PanelDrawContext& ctx,
-                                   float clip_y_min = -1.0f, float clip_y_max = -1.0f,
-                                   const PanelInputState* input = nullptr);
+        float preload_panels_direct(PanelSpace space, float w, float max_h,
+                                    const PanelDrawContext& ctx,
+                                    float clip_y_min = -1.0f, float clip_y_max = -1.0f,
+                                    const PanelInputState* input = nullptr);
         float draw_single_panel_direct(const std::string& id, float x, float y, float w, float h,
                                        const PanelDrawContext& ctx,
                                        float clip_y_min = -1.0f, float clip_y_max = -1.0f,

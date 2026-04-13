@@ -239,6 +239,41 @@ namespace lfs::vis::gui {
         const auto chip_accent_border = colorToRmlAlpha(p.primary, 0.59f);
         const auto primary_bg_soft = colorToRmlAlpha(p.primary, 0.16f);
         const auto warning = colorToRml(p.warning);
+        const auto blend_rgba = [](const ImVec4& base, const ImVec4& accent, float factor) {
+            return ImVec4{base.x + (accent.x - base.x) * factor,
+                          base.y + (accent.y - base.y) * factor,
+                          base.z + (accent.z - base.z) * factor,
+                          1.0f};
+        };
+        const auto histogram_surface = colorToRmlAlpha(p.surface, floating_window ? 0.96f : 0.94f);
+        const auto histogram_hero_decor =
+            std::format("decorator: vertical-gradient({} {}); background-color: transparent",
+                        colorToRml(blend_rgba(p.surface_bright, p.primary, t.isLightTheme() ? 0.04f : 0.10f)),
+                        colorToRml(blend_rgba(p.surface, p.primary_dim, t.isLightTheme() ? 0.02f : 0.05f)));
+        const auto histogram_chart_bg = colorToRmlAlpha(blend_rgba(p.background, p.surface, 0.22f),
+                                                        t.isLightTheme() ? 0.97f : 0.95f);
+        const auto histogram_grid = colorToRmlAlpha(p.border, t.isLightTheme() ? 0.16f : 0.34f);
+        const auto histogram_toolbar_item = colorToRmlAlpha(p.surface_bright, t.isLightTheme() ? 0.85f : 0.72f);
+        const auto histogram_toolbar_select =
+            colorToRmlAlpha(blend_rgba(p.surface, p.background, 0.28f), t.isLightTheme() ? 0.95f : 0.92f);
+        const auto histogram_toolbar_divider = colorToRmlAlpha(p.border, t.isLightTheme() ? 0.55f : 0.85f);
+        const auto histogram_footer_chip = colorToRmlAlpha(p.surface_bright, t.isLightTheme() ? 0.82f : 0.68f);
+        const auto histogram_fill_decor =
+            std::format("decorator: vertical-gradient({} {}); background-color: {}",
+                        colorToRml(blend_rgba(p.primary_dim, p.primary, 0.25f)),
+                        colorToRml(blend_rgba(p.primary, ImVec4(1, 1, 1, 1), t.isLightTheme() ? 0.04f : 0.10f)),
+                        primary);
+        const auto histogram_fill_selected_decor =
+            std::format("decorator: vertical-gradient({} {}); background-color: {}",
+                        colorToRml(blend_rgba(p.warning, p.primary, 0.18f)),
+                        colorToRml(blend_rgba(p.warning, ImVec4(1, 1, 1, 1), t.isLightTheme() ? 0.06f : 0.12f)),
+                        warning);
+        const auto histogram_selection_fill = colorToRmlAlpha(p.warning, t.isLightTheme() ? 0.14f : 0.18f);
+        const auto histogram_history_icon_disabled = colorToRmlAlpha(p.text_dim, 0.48f);
+        const auto background = colorToRml(p.background);
+        const auto primary_border_soft = colorToRmlAlpha(p.primary, 0.33f);
+        const auto primary_border_faint = colorToRmlAlpha(p.primary, 0.13f);
+        const auto primary_accent = colorToRmlAlpha(p.primary, 0.22f);
 
         return std::format(
             "body {{ color: {0}; background-color: {12}; }}\n"
@@ -272,12 +307,44 @@ namespace lfs::vis::gui {
             ".is-binding-section {{ color: {3}; background-color: {22}; }}\n"
             ".is-action-name {{ color: {0}; }}\n"
             ".is-binding-desc {{ color: {0}; }}\n"
-            ".is-binding-desc.is-capturing {{ color: {23}; }}\n",
+            ".is-binding-desc.is-capturing {{ color: {23}; }}\n"
+            "#histogram-hero {{ {24}; border-color: {4}; }}\n"
+            ".stat-card, #histogram-card, #compare-card, .empty-card, #histogram-footer {{ background-color: {25}; border-color: {4}; }}\n"
+            "#histogram-chart, #compare-chart {{ background-color: {26}; border-color: {4}; }}\n"
+            ".histogram-grid-line {{ background-color: {27}; }}\n"
+            ".hero-eyebrow, .stat-label, .footer-label, .axis-metric, #histogram-bin-count, #compare-bin-count, .control-label {{ color: {1}; }}\n"
+            ".hero-title, .stat-value, #histogram-summary, #compare-summary, .axis-label, .footer-value, #histogram-floating-title {{ color: {0}; }}\n"
+            ".hero-description, .empty-message, .footer-hint {{ color: {1}; }}\n"
+            ".empty-title {{ color: {0}; }}\n"
+            "#histogram-docked-controls {{ border-left-color: {28}; }}\n"
+            "#histogram-docked-controls .histogram-toolbar-item {{ background-color: {29}; border-color: {28}; }}\n"
+            "#histogram-docked-controls .histogram-toolbar-item--action {{ background-color: transparent; border-width: 0; }}\n"
+            "#histogram-docked-controls .histogram-select {{ background-color: {30}; border-color: {28}; }}\n"
+            ".histogram-slider-value {{ color: {0}; }}\n"
+            ".histogram-bar-fill, .compare-cell-fill {{ {31}; }}\n"
+            ".histogram-bar.selected .histogram-bar-fill, .compare-cell.selected .compare-cell-fill {{ {32}; }}\n"
+            "#histogram-selection, #compare-selection {{ border-color: {23}; background-color: {33}; decorator: none; }}\n"
+            ".histogram-history-icon {{ image-color: {0}; }}\n"
+            ".histogram-history-btn:disabled .histogram-history-icon {{ image-color: {34}; }}\n"
+            ".footer-history-actions {{ background-color: {35}; border-color: {28}; }}\n"
+            ".training-panel-title {{ color: {0}; border-top-color: {36}; }}\n"
+            ".training-panel-title-icon {{ image-color: {3}; }}\n"
+            ".training-subsection-title {{ color: {1}; border-top-color: {37}; }}\n"
+            ".loss-graph-wrap {{ background-color: {38}; }}\n"
+            ".loss-tick {{ color: {1}; }}\n"
+            ".color-picker-popup {{ background-color: {2}; border-color: {4}; }}\n"
+            ".mask-settings-group {{ border-left-color: {39}; }}\n"
+            ".mask-settings-divider {{ background-color: {37}; }}\n",
             text, text_dim, surface, primary, border, row_even, row_odd,
             row_hover, row_hover_border, row_selected, row_selected_hover,
             row_hover_border_selected, body_bg, tab_inactive_bg, tab_hover_border,
             tab_hover_bg, tab_active_bg, tab_active_border, tab_active_bottom,
-            chip_bg, chip_accent_bg, chip_accent_border, primary_bg_soft, warning);
+            chip_bg, chip_accent_bg, chip_accent_border, primary_bg_soft, warning,
+            histogram_hero_decor, histogram_surface, histogram_chart_bg, histogram_grid,
+            histogram_toolbar_divider, histogram_toolbar_item, histogram_toolbar_select,
+            histogram_fill_decor, histogram_fill_selected_decor, histogram_selection_fill,
+            histogram_history_icon_disabled, histogram_footer_chip, primary_border_soft,
+            primary_border_faint, background, primary_accent);
     }
 
     bool RmlPanelHost::syncThemeProperties() {
@@ -977,24 +1044,27 @@ namespace lfs::vis::gui {
             input.mouse_wheel != 0.0f)
             had_input = true;
 
+        const int mods = sdlModsToRml(input.key_ctrl, input.key_shift,
+                                      input.key_alt, input.key_super);
+
         if (mouse_moved) {
             last_forwarded_mx_ = rml_mx;
             last_forwarded_my_ = rml_my;
-            rml_context_->ProcessMouseMove(rml_mx, rml_my, 0);
+            rml_context_->ProcessMouseMove(rml_mx, rml_my, mods);
         }
         if (hovered) {
             if (input.mouse_clicked[0])
-                rml_context_->ProcessMouseButtonDown(0, 0);
+                rml_context_->ProcessMouseButtonDown(0, mods);
             if (input.mouse_released[0])
-                rml_context_->ProcessMouseButtonUp(0, 0);
+                rml_context_->ProcessMouseButtonUp(0, mods);
 
             if (input.mouse_clicked[1])
-                rml_context_->ProcessMouseButtonDown(1, 0);
+                rml_context_->ProcessMouseButtonDown(1, mods);
             if (input.mouse_released[1])
-                rml_context_->ProcessMouseButtonUp(1, 0);
+                rml_context_->ProcessMouseButtonUp(1, mods);
 
             if (input.mouse_wheel != 0.0f)
-                rml_context_->ProcessMouseWheel(Rml::Vector2f(0, -input.mouse_wheel), 0);
+                rml_context_->ProcessMouseWheel(Rml::Vector2f(0, -input.mouse_wheel), mods);
 
             if (input.mouse_clicked[0])
                 sync_text_focus();
@@ -1024,8 +1094,6 @@ namespace lfs::vis::gui {
         };
 
         if (forward_keys) {
-            const int mods = sdlModsToRml(input.key_ctrl, input.key_shift,
-                                          input.key_alt, input.key_super);
             for (int sc : input.keys_pressed) {
                 if (!composing && sc == SDL_SCANCODE_ESCAPE) {
                     if (auto* const focused = rml_context_->GetFocusElement();

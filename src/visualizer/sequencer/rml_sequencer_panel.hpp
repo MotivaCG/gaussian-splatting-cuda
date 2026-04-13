@@ -115,14 +115,18 @@ namespace lfs::vis {
         RmlSequencerPanel(const RmlSequencerPanel&) = delete;
         RmlSequencerPanel& operator=(const RmlSequencerPanel&) = delete;
 
-        void render(float viewport_x, float viewport_width, float viewport_y_bottom,
+        void render(float panel_x, float panel_y, float panel_width, float total_height,
                     const PanelInputState& input);
 
         void setFilmStripAttached(bool attached) { film_strip_attached_ = attached; }
+        void setFloating(bool floating) { floating_ = floating; }
+        [[nodiscard]] bool isFloating() const { return floating_; }
 
         [[nodiscard]] bool consumeSavePathRequest();
         [[nodiscard]] bool consumeLoadPathRequest();
         [[nodiscard]] bool consumeExportRequest();
+        [[nodiscard]] bool consumeDockToggleRequest();
+        [[nodiscard]] bool consumeClosePanelRequest();
         [[nodiscard]] bool consumeClearRequest();
 
         void openFocalLengthEdit(size_t index, float current_focal_mm);
@@ -135,6 +139,7 @@ namespace lfs::vis {
         [[nodiscard]] float cachedPanelX() const { return cached_panel_x_; }
         [[nodiscard]] float cachedPanelY() const { return cached_panel_y_; }
         [[nodiscard]] float cachedPanelWidth() const { return cached_panel_width_; }
+        [[nodiscard]] float cachedHeight() const { return cached_height_; }
         [[nodiscard]] float cachedDpRatio() const { return cached_dp_ratio_; }
         [[nodiscard]] float cachedPlayheadScreenX() const { return cached_playhead_screen_x_; }
         [[nodiscard]] bool isPlayheadInRange() const { return playhead_in_range_; }
@@ -210,6 +215,8 @@ namespace lfs::vis {
 
         // Cached DOM elements
         bool elements_cached_ = false;
+        Rml::Element* el_panel_ = nullptr;
+        Rml::Element* el_floating_header_ = nullptr;
         Rml::Element* el_ruler_ = nullptr;
         Rml::Element* el_track_bar_ = nullptr;
         Rml::Element* el_keyframes_ = nullptr;
@@ -239,6 +246,11 @@ namespace lfs::vis {
         Rml::Element* el_btn_load_ = nullptr;
         Rml::Element* el_btn_export_ = nullptr;
         Rml::Element* el_btn_clear_ = nullptr;
+        Rml::Element* el_transport_dock_sep_ = nullptr;
+        Rml::Element* el_btn_dock_toggle_ = nullptr;
+        Rml::Element* el_dock_toggle_label_ = nullptr;
+        Rml::Element* el_btn_close_panel_ = nullptr;
+        Rml::Element* el_close_panel_label_ = nullptr;
 
         // Keyframe element pool
         std::vector<Rml::Element*> keyframe_elements_;
@@ -283,11 +295,15 @@ namespace lfs::vis {
 
         bool film_strip_attached_ = false;
         bool last_film_strip_attached_ = false;
+        bool floating_ = false;
+        bool last_floating_ = false;
 
         // Request flags consumed by SequencerUIManager
         bool save_path_requested_ = false;
         bool load_path_requested_ = false;
         bool export_requested_ = false;
+        bool dock_toggle_requested_ = false;
+        bool close_panel_requested_ = false;
         bool clear_requested_ = false;
 
         TransportContextMenuRequest transport_ctx_request_;

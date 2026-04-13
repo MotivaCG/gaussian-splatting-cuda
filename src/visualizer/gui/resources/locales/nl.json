@@ -616,9 +616,13 @@
     "selection_colors": "Kleuren voor selectie visualisatie",
     "seq_camera_path": "Camerapad-visualisatie in-/uitschakelen",
     "seq_first": "Naar eerste keyframe springen",
+    "seq_prev_keyframe": "Naar vorige keyframe springen",
+    "seq_prev": "Naar vorige keyframe springen",
     "seq_stop": "Afspelen stoppen",
     "seq_play": "Animatie afspelen",
     "seq_pause": "Animatie pauzeren",
+    "seq_next_keyframe": "Naar volgende keyframe springen",
+    "seq_next": "Naar volgende keyframe springen",
     "seq_last": "Naar laatste keyframe springen",
     "seq_loop_off": "Herhaald afspelen inschakelen",
     "seq_loop_on": "Herhaald afspelen uitschakelen",
@@ -634,6 +638,8 @@
     "seq_quality": "CRF-kwaliteit (lager = betere kwaliteit, groter bestand)",
     "seq_export": "Video exporteren vanuit camerapad",
     "seq_clear": "Alle keyframes verwijderen",
+    "seq_dock": "Sequencer vastzetten",
+    "seq_undock": "Sequencer losmaken",
     "seq_interval": "Rasterinterval",
     "seq_preview_size": "PiP-voorbeeldschaal"
   },
@@ -845,7 +851,8 @@
     "no_image": "Geen afbeelding",
     "zoom": "Zoom",
     "fit": "Passend",
-    "storage_section": "OPSLAG"
+    "storage_section": "OPSLAG",
+    "color_picker": "Pipet"
   },
   "startup": {
     "supported_by": "Ondersteund door",

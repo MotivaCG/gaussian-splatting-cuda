@@ -176,12 +176,15 @@ namespace lfs::vis::gui {
         const float mx = input.mouse_x - input.screen_x;
         const float my = input.mouse_y - input.screen_y;
 
-        ctx_->ProcessMouseMove(static_cast<int>(mx), static_cast<int>(my), 0);
+        const int mods = sdlModsToRml(input.key_ctrl, input.key_shift,
+                                      input.key_alt, input.key_super);
+
+        ctx_->ProcessMouseMove(static_cast<int>(mx), static_cast<int>(my), mods);
 
         if (input.mouse_clicked[0])
-            ctx_->ProcessMouseButtonDown(0, 0);
+            ctx_->ProcessMouseButtonDown(0, mods);
         if (input.mouse_released[0])
-            ctx_->ProcessMouseButtonUp(0, 0);
+            ctx_->ProcessMouseButtonUp(0, mods);
 
         if (input.mouse_clicked[1]) {
             hide();
@@ -192,7 +195,6 @@ namespace lfs::vis::gui {
         focus.want_capture_mouse = true;
         focus.want_capture_keyboard = true;
 
-        const int mods = sdlModsToRml(input.key_ctrl, input.key_shift, input.key_alt, input.key_super);
         for (const int sc : input.keys_pressed) {
             if (sc == SDL_SCANCODE_ESCAPE) {
                 hide();

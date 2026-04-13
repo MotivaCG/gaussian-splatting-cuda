@@ -616,9 +616,13 @@
     "selection_colors": "선택 영역 시각화 색상",
     "seq_camera_path": "카메라 경로 시각화 전환",
     "seq_first": "첫 번째 키프레임으로 이동",
+    "seq_prev_keyframe": "이전 키프레임으로 이동",
+    "seq_prev": "이전 키프레임으로 이동",
     "seq_stop": "재생 중지",
     "seq_play": "애니메이션 재생",
     "seq_pause": "애니메이션 일시정지",
+    "seq_next_keyframe": "다음 키프레임으로 이동",
+    "seq_next": "다음 키프레임으로 이동",
     "seq_last": "마지막 키프레임으로 이동",
     "seq_loop_off": "반복 재생 활성화",
     "seq_loop_on": "반복 재생 비활성화",
@@ -634,6 +638,8 @@
     "seq_quality": "CRF 품질 (낮을수록 = 높은 품질, 큰 파일)",
     "seq_export": "카메라 경로에서 동영상 내보내기",
     "seq_clear": "모든 키프레임 삭제",
+    "seq_dock": "시퀀서 도킹",
+    "seq_undock": "시퀀서 도킹 해제",
     "seq_interval": "그리드 스냅 간격",
     "seq_preview_size": "PiP 미리보기 배율"
   },
@@ -845,7 +851,8 @@
     "no_image": "이미지 없음",
     "zoom": "줌",
     "fit": "맞춤",
-    "storage_section": "저장소"
+    "storage_section": "저장소",
+    "color_picker": "스포이트"
   },
   "startup": {
     "supported_by": "지원:",

@@ -742,10 +742,12 @@ namespace lfs::python {
 
     void PyDataModelHandle::dirty(const std::string& name) {
         handle_.DirtyVariable(name);
+        request_redraw();
     }
 
     void PyDataModelHandle::dirty_all() {
         handle_.DirtyAllVariables();
+        request_redraw();
     }
 
     bool PyDataModelHandle::is_dirty(const std::string& name) {
@@ -765,6 +767,7 @@ namespace lfs::python {
             return;
         arr_it->second = std::move(updated);
         handle_.DirtyVariable(name);
+        request_redraw();
     }
 
     void PyDataModelHandle::update_record_list(const std::string& name, nb::list items) {
@@ -782,6 +785,7 @@ namespace lfs::python {
             return;
         arr_it->second = std::move(updated);
         handle_.DirtyVariable(name);
+        request_redraw();
     }
 
     // --- PyDataModelConstructor ---

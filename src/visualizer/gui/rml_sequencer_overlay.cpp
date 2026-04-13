@@ -469,7 +469,10 @@ namespace lfs::vis::gui {
         const float mx = input.mouse_x;
         const float my = input.mouse_y;
 
-        rml_context_->ProcessMouseMove(static_cast<int>(mx), static_cast<int>(my), 0);
+        const int mods = gui::sdlModsToRml(input.key_ctrl, input.key_shift,
+                                           input.key_alt, input.key_super);
+
+        rml_context_->ProcessMouseMove(static_cast<int>(mx), static_cast<int>(my), mods);
 
         auto* hover = rml_context_->GetHoverElement();
         const bool over_interactive = hover && hover->GetTagName() != "body" &&
@@ -491,13 +494,13 @@ namespace lfs::vis::gui {
                 skip_next_click_ = false;
             } else {
                 if (input.mouse_clicked[0])
-                    rml_context_->ProcessMouseButtonDown(0, 0);
+                    rml_context_->ProcessMouseButtonDown(0, mods);
                 if (input.mouse_released[0])
-                    rml_context_->ProcessMouseButtonUp(0, 0);
+                    rml_context_->ProcessMouseButtonUp(0, mods);
                 if (input.mouse_clicked[1])
-                    rml_context_->ProcessMouseButtonDown(1, 0);
+                    rml_context_->ProcessMouseButtonDown(1, mods);
                 if (input.mouse_released[1])
-                    rml_context_->ProcessMouseButtonUp(1, 0);
+                    rml_context_->ProcessMouseButtonUp(1, mods);
             }
         }
 
@@ -513,8 +516,6 @@ namespace lfs::vis::gui {
                 rml_manager_ ? rml_manager_->getTextInputHandler() : nullptr;
             const bool composing = text_input_handler && text_input_handler->isComposing();
 
-            const int mods = gui::sdlModsToRml(input.key_ctrl, input.key_shift,
-                                               input.key_alt, input.key_super);
             for (int sc : input.keys_pressed) {
                 if (composing &&
                     (sc == SDL_SCANCODE_RETURN || sc == SDL_SCANCODE_KP_ENTER ||

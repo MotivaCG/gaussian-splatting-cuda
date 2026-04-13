@@ -43,7 +43,11 @@ def test_histogram_compare_locales_define_required_keys():
     locale_dir = project_root / "src" / "visualizer" / "gui" / "resources" / "locales"
 
     for locale_path in sorted(locale_dir.glob("*.json")):
-        histogram = json.loads(locale_path.read_text())["histogram"]
+        data = json.loads(locale_path.read_text())
+        assert "common" in data, f"{locale_path.name} missing common block"
+        assert "close" in data["common"], f"{locale_path.name} missing common.close"
+
+        histogram = data["histogram"]
         assert "bins" in histogram, f"{locale_path.name} missing histogram.bins"
         assert "compare_x_bins" in histogram, f"{locale_path.name} missing histogram.compare_x_bins"
         assert "compare_y_bins" in histogram, f"{locale_path.name} missing histogram.compare_y_bins"

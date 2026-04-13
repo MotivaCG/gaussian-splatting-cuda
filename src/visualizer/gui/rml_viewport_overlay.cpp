@@ -15,6 +15,7 @@
 #include "gui/rmlui/rml_tooltip.hpp"
 #include "gui/rmlui/rmlui_manager.hpp"
 #include "gui/rmlui/rmlui_render_interface.hpp"
+#include "gui/rmlui/sdl_rml_key_mapping.hpp"
 #include "internal/resource_paths.hpp"
 #include "python/python_runtime.hpp"
 #include "python/ui_hooks.hpp"
@@ -261,6 +262,8 @@ namespace lfs::vis::gui {
             return;
         const float mx = input.mouse_x - vp_pos_.x;
         const float my = input.mouse_y - vp_pos_.y;
+        const int mods = sdlModsToRml(input.key_ctrl, input.key_shift,
+                                      input.key_alt, input.key_super);
         const int rml_mx = static_cast<int>(mx);
         const int rml_my = static_cast<int>(my);
         const bool was_inside = mouse_pos_valid_ &&
@@ -274,7 +277,7 @@ namespace lfs::vis::gui {
             last_mouse_x_ = rml_mx;
             last_mouse_y_ = rml_my;
             render_needed_ = true;
-            rml_context_->ProcessMouseMove(rml_mx, rml_my, 0);
+            rml_context_->ProcessMouseMove(rml_mx, rml_my, mods);
         }
 
         auto* hover = rml_context_->GetHoverElement();
@@ -288,23 +291,23 @@ namespace lfs::vis::gui {
 
             if (input.mouse_clicked[0]) {
                 render_needed_ = true;
-                rml_context_->ProcessMouseButtonDown(0, 0);
+                rml_context_->ProcessMouseButtonDown(0, mods);
             }
             if (input.mouse_released[0]) {
                 render_needed_ = true;
-                rml_context_->ProcessMouseButtonUp(0, 0);
+                rml_context_->ProcessMouseButtonUp(0, mods);
             }
             if (input.mouse_clicked[1]) {
                 render_needed_ = true;
-                rml_context_->ProcessMouseButtonDown(1, 0);
+                rml_context_->ProcessMouseButtonDown(1, mods);
             }
             if (input.mouse_released[1]) {
                 render_needed_ = true;
-                rml_context_->ProcessMouseButtonUp(1, 0);
+                rml_context_->ProcessMouseButtonUp(1, mods);
             }
             if (input.mouse_wheel != 0.0f) {
                 render_needed_ = true;
-                rml_context_->ProcessMouseWheel(Rml::Vector2f(0.0f, -input.mouse_wheel), 0);
+                rml_context_->ProcessMouseWheel(Rml::Vector2f(0.0f, -input.mouse_wheel), mods);
             }
 
             RmlPanelHost::setFrameTooltip(resolveRmlTooltip(hover), hover);

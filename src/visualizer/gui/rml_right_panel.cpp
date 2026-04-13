@@ -381,8 +381,11 @@ namespace lfs::vis::gui {
         const float mx = input.mouse_x - layout.pos.x;
         const float my = input.mouse_y - layout.pos.y;
 
+        const int mods = sdlModsToRml(input.key_ctrl, input.key_shift,
+                                      input.key_alt, input.key_super);
+
         if (mouse_moved)
-            rml_context_->ProcessMouseMove(static_cast<int>(mx), static_cast<int>(my), 0);
+            rml_context_->ProcessMouseMove(static_cast<int>(mx), static_cast<int>(my), mods);
 
         auto* hover = rml_context_->GetHoverElement();
         const bool over_interactive = hover && hover->GetTagName() != "body" &&
@@ -455,10 +458,10 @@ namespace lfs::vis::gui {
             } else {
                 if (input.mouse_clicked[0]) {
                     input_dirty_ = true;
-                    rml_context_->ProcessMouseButtonDown(0, 0);
+                    rml_context_->ProcessMouseButtonDown(0, mods);
                 }
                 if (input.mouse_released[0])
-                    rml_context_->ProcessMouseButtonUp(0, 0);
+                    rml_context_->ProcessMouseButtonUp(0, mods);
             }
         } else if (input.mouse_clicked[0]) {
             if (auto* focused = rml_context_->GetFocusElement())
@@ -472,8 +475,6 @@ namespace lfs::vis::gui {
 
         if (rml_input::hasFocusedKeyboardTarget(rml_context_->GetFocusElement()) &&
             !input.viewport_keyboard_focus) {
-            const int mods = sdlModsToRml(input.key_ctrl, input.key_shift,
-                                          input.key_alt, input.key_super);
             for (const int sc : input.keys_pressed) {
                 const auto rml_key = sdlScancodeToRml(static_cast<SDL_Scancode>(sc));
                 if (rml_key != Rml::Input::KI_UNKNOWN) {

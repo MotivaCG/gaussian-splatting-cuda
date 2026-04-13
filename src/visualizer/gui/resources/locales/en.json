@@ -617,8 +617,12 @@
     "selection_colors": "Colors for selection visualization",
     "seq_camera_path": "Toggle camera path visualization",
     "seq_first": "Jump to first keyframe",
+    "seq_prev_keyframe": "Jump to previous keyframe",
+    "seq_prev": "Jump to previous keyframe",
     "seq_stop": "Stop playback",
     "seq_play": "Play animation",
+    "seq_next_keyframe": "Jump to next keyframe",
+    "seq_next": "Jump to next keyframe",
     "seq_pause": "Pause animation",
     "seq_last": "Jump to last keyframe",
     "seq_loop_off": "Enable loop playback",
@@ -635,6 +639,8 @@
     "seq_quality": "CRF quality (lower = better quality, larger file)",
     "seq_export": "Export video from camera path",
     "seq_clear": "Clear all keyframes",
+    "seq_dock": "Dock sequencer",
+    "seq_undock": "Undock sequencer",
     "seq_interval": "Grid snap interval",
     "seq_preview_size": "PiP preview scale",
     "theme_vignette": "Enable viewport edge darkening",
@@ -858,7 +864,8 @@
     "visible": "Visible",
     "hidden": "Hidden",
     "mask_section": "MASK",
-    "storage_section": "STORAGE"
+    "storage_section": "STORAGE",
+    "color_picker": "Pick"
   },
   "startup": {
     "supported_by": "Supported by",

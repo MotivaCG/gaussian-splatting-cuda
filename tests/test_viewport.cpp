@@ -178,15 +178,17 @@ namespace {
                                                        const glm::vec3& translation,
                                                        const glm::ivec2& viewport_size,
                                                        const glm::vec3& world_point,
-                                                       const float focal_length_mm) {
+                                                       const float focal_length_mm,
+                                                       const bool orthographic = false,
+                                                       const float ortho_scale = lfs::rendering::DEFAULT_ORTHO_SCALE) {
         const glm::mat4 view = lfs::rendering::makeViewMatrix(rotation, translation);
         const glm::mat4 projection = lfs::rendering::createProjectionMatrixFromFocal(
             viewport_size,
             focal_length_mm,
-            false,
-            lfs::rendering::DEFAULT_ORTHO_SCALE);
+            orthographic,
+            ortho_scale);
         const glm::vec4 clip = projection * view * glm::vec4(world_point, 1.0f);
-        if (clip.w <= 1e-6f) {
+        if (!orthographic && clip.w <= 1e-6f) {
             return std::nullopt;
         }
 
@@ -534,4 +536,31 @@ TEST(ViewportTest, OpenGLMatrixProjectionMatchesVisualizerProjectionWhenYawed) {
     ASSERT_TRUE(opengl_projection.has_value());
     EXPECT_NEAR(opengl_projection->x, explicit_projection->x, 1e-3f);
     EXPECT_NEAR(opengl_projection->y, explicit_projection->y, 1e-3f);
+}
+
+TEST(ViewportTest, OrthographicProjectionMatchesOpenGLAndIgnoresDepth) {
+    const auto request = makeTestRasterRequest();
+    const glm::mat3 rotation = lfs::rendering::makeVisualizerLookAtRotation(
+        glm::vec3(1.0f, 0.5f, 2.0f),
+        glm::vec3(1.0f, 0.5f, -3.0f));
+    const glm::vec3 translation(1.0f, 0.5f, 2.0f);
+    constexpr float ortho_scale = 75.0f;
+
+    const glm::vec3 near_point(1.5f, 0.8f, -4.0f);
+    const glm::vec3 far_point(1.5f, 0.8f, -12.0f);
+
+    const auto near_projection = lfs::rendering::projectWorldPoint(
+        rotation, translation, request.viewport_size, near_point, request.focal_length_mm, true, ortho_scale);
+    const auto far_projection = lfs::rendering::projectWorldPoint(
+        rotation, translation, request.viewport_size, far_point, request.focal_length_mm, true, ortho_scale);
+    const auto opengl_projection = projectWithOpenGLMatrices(
+        rotation, translation, request.viewport_size, near_point, request.focal_length_mm, true, ortho_scale);
+
+    ASSERT_TRUE(near_projection.has_value());
+    ASSERT_TRUE(far_projection.has_value());
+    ASSERT_TRUE(opengl_projection.has_value());
+    EXPECT_NEAR(near_projection->x, far_projection->x, 1e-4f);
+    EXPECT_NEAR(near_projection->y, far_projection->y, 1e-4f);
+    EXPECT_NEAR(opengl_projection->x, near_projection->x, 1e-3f);
+    EXPECT_NEAR(opengl_projection->y, near_projection->y, 1e-3f);
 }

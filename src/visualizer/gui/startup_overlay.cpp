@@ -292,16 +292,18 @@ namespace lfs::vis::gui {
                              local_x < overlay_w && local_y < overlay_h;
 
         if (hovered) {
+            const int mods = sdlModsToRml(input.key_ctrl, input.key_shift,
+                                          input.key_alt, input.key_super);
             rml_context_->ProcessMouseMove(static_cast<int>(local_x),
-                                           static_cast<int>(local_y), 0);
+                                           static_cast<int>(local_y), mods);
 
             if (input.mouse_clicked[0])
-                rml_context_->ProcessMouseButtonDown(0, 0);
+                rml_context_->ProcessMouseButtonDown(0, mods);
             if (input.mouse_released[0])
-                rml_context_->ProcessMouseButtonUp(0, 0);
+                rml_context_->ProcessMouseButtonUp(0, mods);
 
             if (input.mouse_wheel != 0.0f)
-                rml_context_->ProcessMouseWheel(Rml::Vector2f(0.0f, -input.mouse_wheel), 0);
+                rml_context_->ProcessMouseWheel(Rml::Vector2f(0.0f, -input.mouse_wheel), mods);
         }
 
         bool escape_consumed = false;

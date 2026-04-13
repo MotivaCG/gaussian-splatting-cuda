@@ -617,9 +617,13 @@
     "selection_colors": "Colores para visualización de selección",
     "seq_camera_path": "Alternar visualización de la trayectoria de cámara",
     "seq_first": "Ir al primer fotograma clave",
+    "seq_prev_keyframe": "Ir al fotograma clave anterior",
+    "seq_prev": "Ir al fotograma clave anterior",
     "seq_stop": "Detener reproducción",
     "seq_play": "Reproducir animación",
     "seq_pause": "Pausar animación",
+    "seq_next_keyframe": "Ir al siguiente fotograma clave",
+    "seq_next": "Ir al siguiente fotograma clave",
     "seq_last": "Ir al último fotograma clave",
     "seq_loop_off": "Activar reproducción en bucle",
     "seq_loop_on": "Desactivar reproducción en bucle",
@@ -635,6 +639,8 @@
     "seq_quality": "Calidad CRF (menor = mejor calidad, archivo más grande)",
     "seq_export": "Exportar vídeo desde la trayectoria de cámara",
     "seq_clear": "Eliminar todos los fotogramas clave",
+    "seq_dock": "Acoplar secuenciador",
+    "seq_undock": "Desacoplar secuenciador",
     "seq_interval": "Intervalo de la cuadrícula",
     "seq_preview_size": "Escala de vista previa PiP"
   },
@@ -846,7 +852,8 @@
     "no_image": "Sin imagen",
     "zoom": "Zoom",
     "fit": "Ajustar",
-    "storage_section": "ALMACENAMIENTO"
+    "storage_section": "ALMACENAMIENTO",
+    "color_picker": "Tomar"
   },
   "startup": {
     "supported_by": "Apoyado por",

@@ -227,7 +227,9 @@ class PanelSpace(enum.Enum):
 
     SCENE_HEADER = 4
 
-    STATUS_BAR = 5
+    BOTTOM_DOCK = 5
+
+    STATUS_BAR = 6
 
 class PanelHeightMode(enum.Enum):
     FILL = 0
@@ -1875,6 +1877,11 @@ def open_image_dialog(start_dir: str = '') -> str:
     Open a file dialog to select an image file. Returns empty string if cancelled.
     """
 
+def open_environment_map_dialog(start_dir: str = '') -> str:
+    """
+    Open a file dialog to select an environment map (.hdr, .exr). Returns empty string if cancelled.
+    """
+
 def open_folder_dialog(title: str = 'Select Folder', start_dir: str = '') -> str:
     """
     Open a folder selection dialog. Returns empty string if cancelled. title is accepted for compatibility and currently ignored.
@@ -2134,6 +2141,11 @@ def release_texture(texture_id: int) -> None:
 def get_image_info(path: str) -> tuple:
     """
     Get image dimensions without loading pixel data, returns (width, height, channels)
+    """
+
+def sample_image_color(path: str, x: int, y: int, radius: int = 10) -> tuple:
+    """
+    Sample average color around pixel (x, y) within given radius, returns (r, g, b) in 0..1
     """
 
 def preload_image_async(path: str) -> None:

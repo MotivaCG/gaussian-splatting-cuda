@@ -207,7 +207,21 @@ namespace lfs::vis::gui {
         scene_sync_->setupEvents();
     }
 
-    void SequencerUIManager::render(const UIContext& ctx, const ViewportLayout& viewport) {
+    void SequencerUIManager::setFloating(const bool floating) {
+        if (panel_)
+            panel_->setFloating(floating);
+    }
+
+    float SequencerUIManager::preferredFloatingHeight() const {
+        const float dp = std::max(1.0f, getThemeDpiScale());
+        const float strip_h = ui_state_.show_film_strip ? FilmStripRenderer::STRIP_HEIGHT : 0.0f;
+        return (panel_config::HEIGHT + panel_config::EASING_STRIPE_HEIGHT) * dp + strip_h;
+    }
+
+    void SequencerUIManager::render(const UIContext& ctx, const ViewportLayout& viewport,
+                                    const float panel_x, const float panel_y,
+                                    const float panel_width, const float panel_height,
+                                    const PanelInputState& panel_input) {
         const auto* const gui = viewer_->getGuiManager();
         const bool sequencer_enabled = gui && gui->panelLayout().isShowSequencer();
         if (!sequencer_enabled) {
@@ -266,7 +280,7 @@ namespace lfs::vis::gui {
             renderKeyframeGizmo(ctx, viewport);
         }
         renderKeyframePreview(ctx);
-        renderSequencerPanel(ctx, viewport);
+        renderSequencerPanel(ctx, viewport, panel_x, panel_y, panel_width, panel_height, panel_input);
         {
             const float dp = panel_->cachedDpRatio();
             const float px = panel_->cachedPanelX();
@@ -303,7 +317,11 @@ namespace lfs::vis::gui {
         return overlay_ && (overlay_->isContextMenuOpen() || overlay_->isPopupOpen());
     }
 
-    void SequencerUIManager::renderSequencerPanel(const UIContext& /*ctx*/, const ViewportLayout& viewport) {
+    void SequencerUIManager::renderSequencerPanel(const UIContext& /*ctx*/, const ViewportLayout& viewport,
+                                                  const float panel_x, const float panel_y,
+                                                  const float panel_width, const float panel_height,
+                                                  const PanelInputState& panel_input) {
+        (void)viewport;
         const auto& io = ImGui::GetIO();
         controller_.update(io.DeltaTime);
 
@@ -311,7 +329,7 @@ namespace lfs::vis::gui {
 
         if (auto* const rm = viewer_->getRenderingManager()) {
             rm->setOverlayAnimationActive(is_playing);
-            if (is_playing && ui_state_.follow_playback) {
+            if (is_playing && ui_state_.follow_playback && !ui_state_.show_pip_preview) {
                 rm->markDirty(DirtyFlag::CAMERA);
                 const auto state = controller_.currentCameraState();
                 auto& vp = viewer_->getViewport();
@@ -323,19 +341,12 @@ namespace lfs::vis::gui {
 
         panel_->setFilmStripAttached(ui_state_.show_film_strip);
 
-        lfs::vis::PanelInputState input =
-            buildSequencerPanelInputFromSDL(viewer_->getWindowManager()->frameInput());
-        if (const ImGuiViewport* const main_viewport = ImGui::GetMainViewport()) {
-            input.screen_x = main_viewport->Pos.x;
-            input.screen_y = main_viewport->Pos.y;
-        }
-        input.time = static_cast<float>(ImGui::GetTime());
-        input.delta_time = io.DeltaTime;
-        input.want_capture_mouse = guiFocusState().want_capture_mouse;
+        panel_input_ = toSequencerPanelInput(panel_input);
+        panel_input_.time = static_cast<float>(ImGui::GetTime());
+        panel_input_.delta_time = io.DeltaTime;
+        panel_input_.want_capture_mouse = guiFocusState().want_capture_mouse;
 
-        const float strip_offset = ui_state_.show_film_strip ? FilmStripRenderer::STRIP_HEIGHT : 0.0f;
-        panel_->render(viewport.pos.x, viewport.size.x,
-                       viewport.pos.y + viewport.size.y - strip_offset, input);
+        panel_->render(panel_x, panel_y, panel_width, panel_height, panel_input_);
 
         if (panel_->isHovered())
             guiFocusState().want_capture_mouse = true;
@@ -344,7 +355,7 @@ namespace lfs::vis::gui {
 
         const auto timeline_menu = panel_->consumeContextMenu();
         if (timeline_menu.open) {
-            overlay_->showContextMenu(input.mouse_x, input.mouse_y,
+            overlay_->showContextMenu(panel_input_.mouse_x, panel_input_.mouse_y,
                                       timeline_menu.keyframe, timeline_menu.time, keyframe_gizmo_op_);
         }
 
@@ -381,6 +392,20 @@ namespace lfs::vis::gui {
                     LOG_ERROR("Failed to load camera path from {}", path_utf8);
                 }
             }
+        }
+
+        if (panel_->consumeDockToggleRequest()) {
+            const PanelSpace target = panel_->isFloating() ? PanelSpace::BottomDock : PanelSpace::Floating;
+            if (!PanelRegistry::instance().set_panel_space("native.sequencer", target)) {
+                LOG_ERROR("Failed to move sequencer panel to {}",
+                          target == PanelSpace::Floating ? "floating" : "bottom dock");
+            }
+        }
+
+        if (panel_->consumeClosePanelRequest()) {
+            if (auto* const gui = viewer_->getGuiManager())
+                gui->panelLayout().setShowSequencer(false);
+            setSequencerEnabled(false);
         }
 
         if (panel_->consumeExportRequest() && controller_.timeline().realKeyframeCount() > 0) {
@@ -524,7 +549,9 @@ namespace lfs::vis::gui {
                 vp.getTranslation(),
                 vp_size,
                 pos,
-                settings.focal_length_mm);
+                settings.focal_length_mm,
+                settings.orthographic,
+                settings.ortho_scale);
             if (!projected)
                 return {-10000.0f, -10000.0f};
             return {viewport.pos.x + projected->x,
@@ -537,7 +564,9 @@ namespace lfs::vis::gui {
                 vp.getTranslation(),
                 vp_size,
                 pos,
-                settings.focal_length_mm);
+                settings.focal_length_mm,
+                settings.orthographic,
+                settings.ortho_scale);
             if (!projected)
                 return false;
             const float margin_x = (NDC_CULL_MARGIN - 1.0f) * 0.5f * viewport.size.x;
@@ -949,7 +978,9 @@ namespace lfs::vis::gui {
         if (timeline_width <= 0.0f)
             return;
 
-        const float strip_y = tl_geo_.panel_y + (panel_config::HEIGHT + panel_config::EASING_STRIPE_HEIGHT - panel_config::BORDER_OVERLAP) * tl_geo_.dp;
+        const float strip_y = tl_geo_.panel_y + panel_->cachedHeight() +
+                              panel_config::EASING_STRIPE_HEIGHT * tl_geo_.dp -
+                              panel_config::BORDER_OVERLAP * tl_geo_.dp;
 
         std::optional<float> selected_keyframe_time;
         if (const auto selected = controller_.selectedKeyframe(); selected.has_value()) {
@@ -969,7 +1000,7 @@ namespace lfs::vis::gui {
         options.timeline_x = timeline_x;
         options.timeline_width = timeline_width;
         options.strip_y = strip_y;
-        const auto& input = viewer_->getWindowManager()->frameInput();
+        const auto& input = panel_input_;
         options.mouse_x = input.mouse_x;
         options.mouse_y = input.mouse_y;
         options.zoom_level = panel_->zoomLevel();
@@ -1030,7 +1061,7 @@ namespace lfs::vis::gui {
         if (timeline_width <= 0.0f)
             return;
 
-        const float stripe_y = panel_y + panel_config::HEIGHT * dp;
+        const float stripe_y = panel_y + panel_->cachedHeight();
         const float stripe_h = panel_config::EASING_STRIPE_HEIGHT * dp;
         const float y_center = stripe_y + stripe_h * 0.5f;
 
@@ -1141,7 +1172,7 @@ namespace lfs::vis::gui {
 
         dl->PopClipRect();
 
-        const auto& input = viewer_->getWindowManager()->frameInput();
+        const auto& input = panel_input_;
         const float mx = input.mouse_x;
         const float my = input.mouse_y;
         if (mx >= timeline_x && mx <= timeline_x + timeline_width &&
@@ -1187,7 +1218,9 @@ namespace lfs::vis::gui {
         const float panel_y = tl_geo_.panel_y;
         const float line_top = panel_y + (panel_config::TRANSPORT_ROW_HEIGHT + panel_config::INNER_PADDING) * dp;
         const float strip_offset = ui_state_.show_film_strip ? FilmStripRenderer::STRIP_HEIGHT : 0.0f;
-        const float line_bottom = panel_y + (panel_config::HEIGHT + panel_config::EASING_STRIPE_HEIGHT - panel_config::BORDER_OVERLAP) * dp + strip_offset;
+        const float line_bottom = panel_y + panel_->cachedHeight() +
+                                  (panel_config::EASING_STRIPE_HEIGHT - panel_config::BORDER_OVERLAP) * dp +
+                                  strip_offset;
 
         auto* dl = ImGui::GetForegroundDrawList();
         const auto& t = theme();
@@ -1404,8 +1437,8 @@ namespace lfs::vis::gui {
             }
         }
 
-        if (rm->renderPreviewFrame(sm, cam_rot, cam_pos, cam_focal_length_mm,
-                                   pip_fbo_, pip_texture_, PREVIEW_WIDTH, PREVIEW_HEIGHT)) {
+        if (rm->renderPreviewTexture(sm, cam_rot, cam_pos, cam_focal_length_mm,
+                                     pip_texture_, PREVIEW_WIDTH, PREVIEW_HEIGHT)) {
             pip_last_render_time_ = now;
             if (!is_playing) {
                 pip_last_keyframe_ = selected;
@@ -1436,11 +1469,6 @@ namespace lfs::vis::gui {
         const auto& t = theme();
         const float scale = ui_state_.pip_preview_scale;
         constexpr float MARGIN = 16.0f;
-        const float dp = panel_->cachedDpRatio();
-        const float panel_height = (panel_config::HEIGHT + panel_config::PADDING_BOTTOM +
-                                    panel_config::EASING_STRIPE_HEIGHT) *
-                                       dp +
-                                   (ui_state_.show_film_strip ? FilmStripRenderer::STRIP_HEIGHT : 0.0f);
         constexpr float PADDING = 4.0f;
         constexpr float TITLE_HEIGHT = 18.0f;
         const float scaled_width = static_cast<float>(PREVIEW_WIDTH) * scale;
@@ -1449,7 +1477,7 @@ namespace lfs::vis::gui {
 
         const ImVec2 pos(
             viewport.pos.x + MARGIN,
-            viewport.pos.y + viewport.size.y - panel_height - total_height - MARGIN);
+            panel_->cachedPanelY() - total_height - MARGIN);
         const ImVec2 size(scaled_width + PADDING * 2.0f, total_height);
 
         const ImU32 bg_color = toU32WithAlpha(t.palette.surface, 0.95f);

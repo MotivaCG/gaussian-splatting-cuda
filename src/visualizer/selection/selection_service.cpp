@@ -92,6 +92,8 @@ namespace lfs::vis {
             const std::vector<glm::vec3>& world_points,
             const Viewport& viewport,
             const float focal_mm,
+            const bool orthographic,
+            const float ortho_scale,
             const int render_width,
             const int render_height) {
             auto polygon = core::Tensor::empty({world_points.size(), size_t{2}},
@@ -105,7 +107,9 @@ namespace lfs::vis {
                     viewport.camera.t,
                     render_size,
                     world_points[i],
-                    focal_mm);
+                    focal_mm,
+                    orthographic,
+                    ortho_scale);
                 if (!projected) {
                     return std::nullopt;
                 }
@@ -1463,9 +1467,12 @@ namespace lfs::vis {
         projection_viewport.windowSize = {
             session.viewport_context->info.render_width,
             session.viewport_context->info.render_height};
+        const auto settings = rendering_manager_->getSettings();
         const auto polygon = projectWorldPolygonToRenderSpace(world_points,
                                                               projection_viewport,
-                                                              rendering_manager_->getFocalLengthMm(),
+                                                              settings.focal_length_mm,
+                                                              settings.orthographic,
+                                                              settings.ortho_scale,
                                                               session.viewport_context->info.render_width,
                                                               session.viewport_context->info.render_height);
         if (!polygon) {
@@ -1643,12 +1650,15 @@ namespace lfs::vis {
         const auto& info = session.viewport_context->info;
         Viewport projection_viewport = *session.viewport_context->viewport;
         projection_viewport.windowSize = {info.render_width, info.render_height};
+        const auto settings = rendering_manager_->getSettings();
         const auto projected = rendering::projectWorldPoint(
             projection_viewport.camera.R,
             projection_viewport.camera.t,
             {info.render_width, info.render_height},
             world_point,
-            rendering_manager_->getFocalLengthMm());
+            settings.focal_length_mm,
+            settings.orthographic,
+            settings.ortho_scale);
         if (!projected) {
             return std::nullopt;
         }

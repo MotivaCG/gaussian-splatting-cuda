@@ -616,9 +616,13 @@
     "selection_colors": "选区可视化颜色",
     "seq_camera_path": "切换相机路径可视化",
     "seq_first": "跳转到第一个关键帧",
+    "seq_prev_keyframe": "跳转到上一个关键帧",
+    "seq_prev": "跳转到上一个关键帧",
     "seq_stop": "停止播放",
     "seq_play": "播放动画",
     "seq_pause": "暂停动画",
+    "seq_next_keyframe": "跳转到下一个关键帧",
+    "seq_next": "跳转到下一个关键帧",
     "seq_last": "跳转到最后一个关键帧",
     "seq_loop_off": "启用循环播放",
     "seq_loop_on": "禁用循环播放",
@@ -634,6 +638,8 @@
     "seq_quality": "CRF质量（值越低 = 质量越高，文件越大）",
     "seq_export": "从相机路径导出视频",
     "seq_clear": "删除所有关键帧",
+    "seq_dock": "停靠序列器",
+    "seq_undock": "取消停靠序列器",
     "seq_interval": "网格对齐间隔",
     "seq_preview_size": "画中画预览缩放"
   },
@@ -845,7 +851,8 @@
     "no_image": "无图像",
     "zoom": "缩放",
     "fit": "适配",
-    "storage_section": "存储"
+    "storage_section": "存储",
+    "color_picker": "取色"
   },
   "startup": {
     "supported_by": "支持：",

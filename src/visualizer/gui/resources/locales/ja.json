@@ -616,9 +616,13 @@
     "selection_colors": "選択範囲の可視化色",
     "seq_camera_path": "カメラパスの表示を切り替え",
     "seq_first": "最初のキーフレームに移動",
+    "seq_prev_keyframe": "前のキーフレームに移動",
+    "seq_prev": "前のキーフレームに移動",
     "seq_stop": "再生を停止",
     "seq_play": "アニメーションを再生",
     "seq_pause": "アニメーションを一時停止",
+    "seq_next_keyframe": "次のキーフレームに移動",
+    "seq_next": "次のキーフレームに移動",
     "seq_last": "最後のキーフレームに移動",
     "seq_loop_off": "ループ再生を有効にする",
     "seq_loop_on": "ループ再生を無効にする",
@@ -634,6 +638,8 @@
     "seq_quality": "CRF品質（低い値 = 高品質、ファイルサイズ大）",
     "seq_export": "カメラパスから動画をエクスポート",
     "seq_clear": "すべてのキーフレームを削除",
+    "seq_dock": "シーケンサーをドッキング",
+    "seq_undock": "シーケンサーのドッキングを解除",
     "seq_interval": "グリッドスナップ間隔",
     "seq_preview_size": "PiPプレビュースケール"
   },
@@ -845,7 +851,8 @@
     "no_image": "画像なし",
     "zoom": "ズーム",
     "fit": "フィット",
-    "storage_section": "ストレージ"
+    "storage_section": "ストレージ",
+    "color_picker": "スポイト"
   },
   "startup": {
     "supported_by": "サポート",

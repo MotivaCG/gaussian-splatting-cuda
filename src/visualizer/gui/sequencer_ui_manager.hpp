@@ -37,7 +37,9 @@ namespace lfs::vis {
             ~SequencerUIManager();
 
             void setupEvents();
-            void render(const UIContext& ctx, const ViewportLayout& viewport);
+            void render(const UIContext& ctx, const ViewportLayout& viewport,
+                        float panel_x, float panel_y, float panel_width, float panel_height,
+                        const PanelInputState& panel_input);
             void compositeOverlays(int screen_w, int screen_h) const;
             void setSequencerEnabled(bool enabled);
 
@@ -45,12 +47,16 @@ namespace lfs::vis {
 
             [[nodiscard]] SequencerController& controller() { return controller_; }
             [[nodiscard]] const SequencerController& controller() const { return controller_; }
-            [[nodiscard]] float panelTopY() const { return panel_ ? panel_->cachedPanelY() : -1.0f; }
+            void setFloating(bool floating);
+            [[nodiscard]] float panelTopY() const { return panel_ && !panel_->isFloating() ? panel_->cachedPanelY() : -1.0f; }
             [[nodiscard]] bool blocksPointer(double x, double y) const;
             [[nodiscard]] bool blocksKeyboard() const;
+            [[nodiscard]] float preferredFloatingHeight() const;
 
         private:
-            void renderSequencerPanel(const UIContext& ctx, const ViewportLayout& viewport);
+            void renderSequencerPanel(const UIContext& ctx, const ViewportLayout& viewport,
+                                      float panel_x, float panel_y, float panel_width,
+                                      float panel_height, const PanelInputState& panel_input);
             void renderCameraPath(const ViewportLayout& viewport);
             void renderKeyframeGizmo(const UIContext& ctx, const ViewportLayout& viewport);
             void handleOverlayActions();
@@ -81,6 +87,7 @@ namespace lfs::vis {
             bool edit_entered_mouse_down_ = false;
 
             bool film_strip_scrubbing_ = false;
+            lfs::vis::PanelInputState panel_input_{};
             bool timeline_tooltip_active_ = false;
             ImVec2 timeline_tooltip_pos_{0.0f, 0.0f};
             std::string timeline_tooltip_text_;

@@ -3868,12 +3868,32 @@ namespace lfs::vis {
         auto entry = std::make_unique<op::SceneSnapshot>(*this, "select.invert");
         entry->captureSelection();
 
+        const uint8_t group_id = scene_.getActiveSelectionGroup() != 0 ? scene_.getActiveSelectionGroup() : 1;
         const auto old_mask = scene_.getSelectionMask();
-        const auto ones = lfs::core::Tensor::ones({total}, lfs::core::Device::CUDA, lfs::core::DataType::UInt8);
-        auto new_mask = std::make_shared<lfs::core::Tensor>(
-            (old_mask && old_mask->is_valid()) ? ones - *old_mask : ones);
 
-        scene_.setSelectionMask(new_mask);
+        lfs::core::Tensor new_mask;
+        if (old_mask && old_mask->is_valid()) {
+            // Scene selection masks store selection group ids (uint8). Invert only the active group while
+            // preserving membership in other groups.
+            //
+            // The previous implementation used `ones - old_mask`, which breaks once ids exceed 1.
+            const auto old_u8 = old_mask->cuda().to(lfs::core::DataType::UInt8);
+            const auto active = old_u8.eq(group_id);
+            const auto other_selected = old_u8.gt(0.0f).logical_and(active.logical_not());
+            const auto inverted_active = active.logical_xor(other_selected.logical_not());
+
+            const auto group_tensor = lfs::core::Tensor::full(
+                {total}, static_cast<float>(group_id), lfs::core::Device::CUDA, lfs::core::DataType::UInt8);
+            const auto zeros = lfs::core::Tensor::zeros({total}, lfs::core::Device::CUDA, lfs::core::DataType::UInt8);
+            const auto active_values = group_tensor.where(inverted_active, zeros);
+            new_mask = old_u8.where(other_selected, active_values);
+        } else {
+            // No active selection -> invert becomes select-all (into the active selection group).
+            new_mask = lfs::core::Tensor::full(
+                {total}, static_cast<float>(group_id), lfs::core::Device::CUDA, lfs::core::DataType::UInt8);
+        }
+
+        scene_.setSelectionMask(std::make_shared<lfs::core::Tensor>(std::move(new_mask)));
 
         entry->captureAfter();
         op::pushSceneSnapshotIfChanged(std::move(entry));

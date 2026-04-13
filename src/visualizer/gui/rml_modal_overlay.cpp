@@ -288,21 +288,22 @@ namespace lfs::vis::gui {
         if (has_text_focus)
             focus.want_text_input = true;
 
+        const int mods = sdlModsToRml(input.key_ctrl, input.key_shift,
+                                      input.key_alt, input.key_super);
+
         const float mx = input.mouse_x - input.screen_x;
         const float my = input.mouse_y - input.screen_y;
-        rml_context_->ProcessMouseMove(static_cast<int>(mx), static_cast<int>(my), 0);
+        rml_context_->ProcessMouseMove(static_cast<int>(mx), static_cast<int>(my), mods);
 
         if (input.mouse_clicked[0])
-            rml_context_->ProcessMouseButtonDown(0, 0);
+            rml_context_->ProcessMouseButtonDown(0, mods);
         if (input.mouse_released[0])
-            rml_context_->ProcessMouseButtonUp(0, 0);
+            rml_context_->ProcessMouseButtonUp(0, mods);
 
         auto* const text_input_handler =
             rml_manager_ ? rml_manager_->getTextInputHandler() : nullptr;
         const bool composing = text_input_handler && text_input_handler->isComposing();
 
-        const int mods = sdlModsToRml(input.key_ctrl, input.key_shift,
-                                      input.key_alt, input.key_super);
         bool escape_requested = false;
         for (const int sc : input.keys_pressed) {
             if (!composing && sc == SDL_SCANCODE_ESCAPE) {

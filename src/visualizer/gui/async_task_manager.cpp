@@ -13,8 +13,11 @@
 #include "gui/panel_registry.hpp"
 #include "gui/utils/native_file_dialog.hpp"
 #include "gui/video_export_utils.hpp"
+#include "internal/resource_paths.hpp"
 #include "io/exporter.hpp"
+#include "rendering/environment_renderer.hpp"
 #include "rendering/framebuffer.hpp"
+#include "rendering/image_layout.hpp"
 #include "rendering/mesh2splat.hpp"
 #include "rendering/rendering.hpp"
 #include "rendering/rendering_manager.hpp"
@@ -192,6 +195,82 @@ namespace lfs::vis::gui {
             .background_color = render_settings.background_color};
     }
 
+    struct VideoExportEnvironmentState {
+        lfs::rendering::EnvironmentRenderer renderer;
+        std::string cached_environment_path_value;
+        std::filesystem::path cached_environment_resolved_path;
+        std::string last_environment_error;
+    };
+
+    [[nodiscard]] std::filesystem::path resolveVideoExportEnvironmentPath(
+        VideoExportEnvironmentState& state,
+        const std::string& path_value) {
+        if (path_value == state.cached_environment_path_value) {
+            return state.cached_environment_resolved_path;
+        }
+
+        state.cached_environment_path_value = path_value;
+        const std::filesystem::path requested(path_value);
+        if (requested.empty() || requested.is_absolute()) {
+            state.cached_environment_resolved_path = requested;
+            return state.cached_environment_resolved_path;
+        }
+
+        try {
+            state.cached_environment_resolved_path = getAssetPath(path_value);
+        } catch (const std::exception&) {
+            state.cached_environment_resolved_path = lfs::core::getAssetsDir() / requested;
+        }
+        return state.cached_environment_resolved_path;
+    }
+
+    void renderVideoExportBackground(VideoExportEnvironmentState& environment_state,
+                                     const RenderSettings& render_settings,
+                                     const rendering::FrameView& frame_view) {
+        glClearColor(render_settings.background_color.r,
+                     render_settings.background_color.g,
+                     render_settings.background_color.b,
+                     1.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        if (!environmentBackgroundEnabled(render_settings)) {
+            return;
+        }
+
+        const auto environment_path = resolveVideoExportEnvironmentPath(
+            environment_state, render_settings.environment_map_path);
+        if (auto render_result = environment_state.renderer.render(
+                frame_view,
+                environment_path,
+                render_settings.environment_exposure,
+                render_settings.environment_rotation_degrees,
+                render_settings.equirectangular);
+            !render_result) {
+            if (render_result.error() != environment_state.last_environment_error) {
+                environment_state.last_environment_error = render_result.error();
+                LOG_DEBUG("Video export environment background fallback: {}",
+                          environment_state.last_environment_error);
+            }
+        } else {
+            environment_state.last_environment_error.clear();
+        }
+    }
+
+    lfs::core::Tensor orientVideoExportFrameForEncoder(const lfs::core::Tensor& image) {
+        if (!image.is_valid() || image.ndim() != 3) {
+            return image;
+        }
+
+        const auto layout = lfs::rendering::detectImageLayout(image);
+        if (layout == lfs::rendering::ImageLayout::Unknown) {
+            return image.contiguous();
+        }
+
+        // Match the viewport preview path, which presents textures through OpenGL's
+        // bottom-left texture origin before the user sees them.
+        return lfs::rendering::flipImageVertical(image, layout);
+    }
+
     void applyVideoExportGaussianFilters(rendering::GaussianFilterState& filters,
                                          const VideoExportSceneSnapshot& snapshot,
                                          const RenderSettings& render_settings) {
@@ -278,11 +357,13 @@ namespace lfs::vis::gui {
             .is_emphasized = is_selected,
             .dim_non_emphasized = render_settings.desaturate_unselected && any_selected,
             .flash_intensity = 0.0f,
-            .background_color = render_settings.background_color};
+            .background_color = render_settings.background_color,
+            .transparent_background = environmentBackgroundEnabled(render_settings)};
     }
 
     std::expected<lfs::core::Tensor, std::string> renderVideoExportFrame(
         rendering::RenderingEngine& engine,
+        VideoExportEnvironmentState& environment_state,
         const VideoExportSceneSnapshot& snapshot,
         const RenderSettings& render_settings,
         const lfs::sequencer::CameraState& cam_state,
@@ -290,6 +371,8 @@ namespace lfs::vis::gui {
         const int height) {
         const auto viewport = makeVideoExportViewport(cam_state, render_settings, width, height);
         const auto frame_view = makeVideoExportFrameView(cam_state, render_settings, width, height);
+        const bool render_environment = environmentBackgroundEnabled(render_settings);
+        const bool requires_composite_pass = render_environment || !snapshot.meshes.empty();
 
         std::optional<rendering::GpuFrame> primary_frame;
 
@@ -304,10 +387,11 @@ namespace lfs::vis::gui {
                     .scene =
                         {.model_transforms = &snapshot.model_transforms,
                          .transform_indices = snapshot.transform_indices},
-                    .filters = {}};
+                    .filters = {},
+                    .transparent_background = render_environment};
                 applyVideoExportPointCloudFilters(request.filters, snapshot, render_settings);
 
-                if (snapshot.meshes.empty()) {
+                if (!requires_composite_pass) {
                     auto render_result = engine.renderPointCloudImage(*snapshot.combined_model, request);
                     if (!render_result || !render_result->image) {
                         return std::unexpected(render_result ? "Rendered point cloud frame is invalid"
@@ -350,10 +434,11 @@ namespace lfs::vis::gui {
                                                           : std::vector<bool>{},
                               .dim_non_emphasized = render_settings.desaturate_unselected,
                               .flash_intensity = 0.0f,
-                              .focused_gaussian_id = -1}}};
+                              .focused_gaussian_id = -1}},
+                    .transparent_background = render_environment};
                 applyVideoExportGaussianFilters(request.filters, snapshot, render_settings);
 
-                if (snapshot.meshes.empty()) {
+                if (!requires_composite_pass) {
                     auto render_result = engine.renderGaussiansImage(*snapshot.combined_model, request);
                     if (!render_result || !render_result->image) {
                         return std::unexpected(render_result ? "Rendered frame is invalid"
@@ -380,7 +465,8 @@ namespace lfs::vis::gui {
                 .scene =
                     {.model_transforms = &point_cloud_transforms,
                      .transform_indices = nullptr},
-                .filters = {}};
+                .filters = {},
+                .transparent_background = render_environment};
             applyVideoExportPointCloudFilters(request.filters, snapshot, render_settings);
 
             auto render_result = engine.renderPointCloudGpuFrame(*snapshot.point_cloud, request);
@@ -389,7 +475,7 @@ namespace lfs::vis::gui {
                                                      : render_result.error());
             }
 
-            if (snapshot.meshes.empty()) {
+            if (!requires_composite_pass) {
                 auto readback_result = engine.readbackGpuFrameColor(*render_result);
                 if (!readback_result || !*readback_result) {
                     return std::unexpected(readback_result ? "Rendered point cloud frame is invalid"
@@ -401,7 +487,7 @@ namespace lfs::vis::gui {
             primary_frame = std::move(*render_result);
         }
 
-        if (snapshot.meshes.empty()) {
+        if (!requires_composite_pass) {
             return std::unexpected("No rendered image produced for video export");
         }
 
@@ -418,11 +504,7 @@ namespace lfs::vis::gui {
         composite_fbo.bind();
         glDisable(GL_SCISSOR_TEST);
         glViewport(0, 0, width, height);
-        glClearColor(render_settings.background_color.r,
-                     render_settings.background_color.g,
-                     render_settings.background_color.b,
-                     1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        renderVideoExportBackground(environment_state, render_settings, frame_view);
 
         auto restore_state = [&]() {
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(saved_draw_fbo));
@@ -499,6 +581,10 @@ namespace lfs::vis::gui {
         shutdown();
     }
 
+    void AsyncTaskManager::resetVideoExportEnvironmentState() {
+        video_export_environment_state_.reset();
+    }
+
     void AsyncTaskManager::shutdown() {
         if (export_state_.active.load())
             cancelExport();
@@ -511,6 +597,9 @@ namespace lfs::vis::gui {
         if (video_export_state_.thread && video_export_state_.thread->joinable())
             video_export_state_.thread->join();
         video_export_state_.thread.reset();
+        if (viewer_ && viewer_->isOnViewerThread()) {
+            resetVideoExportEnvironmentState();
+        }
 
         if (import_state_.thread) {
             import_state_.thread->request_stop();
@@ -1110,14 +1199,32 @@ namespace lfs::vis::gui {
             video_export_state_.path = path;
         }
 
+        resetVideoExportEnvironmentState();
+        video_export_environment_state_ = std::make_unique<VideoExportEnvironmentState>();
+
         LOG_INFO("Starting video export: {} frames at {}x{}", total_frames, width, height);
 
         video_export_state_.thread.emplace(
             [this, viewer = viewer_, path, export_options, total_frames, width, height,
              engine, render_settings,
+             environment_state = video_export_environment_state_.get(),
              snapshot = *snapshot_result,
              frame_states = std::move(frame_states)](std::stop_token stop_token) mutable {
                 bool cancelled = false;
+                auto cleanup_environment_state = [this, viewer]() {
+                    if (!video_export_environment_state_) {
+                        return;
+                    }
+                    auto cleanup_result = postToViewerAndWait(
+                        viewer,
+                        [this]() -> std::expected<void, std::string> {
+                            resetVideoExportEnvironmentState();
+                            return {};
+                        });
+                    if (!cleanup_result) {
+                        LOG_DEBUG("Skipping video export environment cleanup: {}", cleanup_result.error());
+                    }
+                };
 
                 auto encoder = lfs::gui::createVideoEncoder();
                 if (!encoder) {
@@ -1130,6 +1237,7 @@ namespace lfs::vis::gui {
                     lfs::core::events::state::VideoExportFailed{
                         .error = "Video encoder not available"}
                         .emit();
+                    cleanup_environment_state();
                     return;
                 }
 
@@ -1150,6 +1258,7 @@ namespace lfs::vis::gui {
                         .error = result.error()}
                         .emit();
                     video_export_state_.active.store(false);
+                    cleanup_environment_state();
                     return;
                 }
 
@@ -1162,10 +1271,10 @@ namespace lfs::vis::gui {
 
                     auto frame_tensor = postToViewerAndWait(
                         viewer,
-                        [engine, snapshot, render_settings, width, height,
+                        [engine, environment_state, snapshot, render_settings, width, height,
                          cam_state = frame_states[frame]]() -> std::expected<lfs::core::Tensor, std::string> {
                             return renderVideoExportFrame(
-                                *engine, snapshot, render_settings, cam_state, width, height);
+                                *engine, *environment_state, snapshot, render_settings, cam_state, width, height);
                         });
 
                     if (!frame_tensor) {
@@ -1179,11 +1288,12 @@ namespace lfs::vis::gui {
                         break;
                     }
 
-                    auto image_hwc = frame_tensor->permute({1, 2, 0}).contiguous();
+                    auto export_frame = orientVideoExportFrameForEncoder(*frame_tensor);
+                    auto image_hwc = export_frame.permute({1, 2, 0}).contiguous();
 
                     if (frame == 0) {
                         LOG_INFO("Video export: CHW shape=[{},{},{}] -> HWC shape=[{},{},{}]",
-                                 frame_tensor->shape()[0], frame_tensor->shape()[1], frame_tensor->shape()[2],
+                                 export_frame.shape()[0], export_frame.shape()[1], export_frame.shape()[2],
                                  image_hwc.shape()[0], image_hwc.shape()[1], image_hwc.shape()[2]);
                     }
 
@@ -1252,6 +1362,7 @@ namespace lfs::vis::gui {
                             .emit();
                     }
                 }
+                cleanup_environment_state();
                 video_export_state_.active.store(false);
             });
     }

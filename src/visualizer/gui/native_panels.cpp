@@ -14,9 +14,11 @@
 #include "python/python_runtime.hpp"
 #include "rendering/coordinate_conventions.hpp"
 #include "rendering/rendering_manager.hpp"
+#include "theme/theme.hpp"
 #include "visualizer/gui/video_widget_interface.hpp"
 #include "visualizer_impl.hpp"
 
+#include <algorithm>
 #include <glm/gtc/type_ptr.hpp>
 #include <imgui.h>
 
@@ -66,8 +68,47 @@ namespace lfs::vis::gui::native_panels {
           layout_(layout) {}
 
     void SequencerPanel::draw(const PanelDrawContext& ctx) {
-        if (ctx.ui && ctx.viewport)
-            seq_->render(*ctx.ui, *ctx.viewport);
+        (void)ctx;
+    }
+
+    void SequencerPanel::preloadDirect(const float w, const float h,
+                                       const PanelDrawContext& ctx,
+                                       const float clip_y_min,
+                                       const float clip_y_max,
+                                       const PanelInputState* input) {
+        (void)w;
+        (void)ctx;
+        (void)clip_y_min;
+        (void)clip_y_max;
+        input_ = input;
+
+        if (seq_)
+            seq_->setFloating(is_floating_);
+
+        if (is_floating_) {
+            const float preferred_h = seq_ ? seq_->preferredFloatingHeight() : 0.0f;
+            direct_draw_height_ = forced_height_ > 0.0f
+                                      ? forced_height_
+                                      : std::min(h, std::max(0.0f, preferred_h));
+        } else {
+            direct_draw_height_ = h;
+        }
+    }
+
+    void SequencerPanel::drawDirect(const float x, const float y,
+                                    const float w, const float h,
+                                    const PanelDrawContext& ctx) {
+        if (seq_)
+            seq_->setFloating(is_floating_);
+
+        if (is_floating_) {
+            direct_draw_height_ = seq_ ? std::max(0.0f, seq_->preferredFloatingHeight()) : h;
+        } else {
+            direct_draw_height_ = h;
+        }
+
+        if (seq_ && ctx.ui && ctx.viewport && input_ && h > 0.0f)
+            seq_->render(*ctx.ui, *ctx.viewport, x, y, w, h, *input_);
     }
 
     bool SequencerPanel::poll(const PanelDrawContext& ctx) {

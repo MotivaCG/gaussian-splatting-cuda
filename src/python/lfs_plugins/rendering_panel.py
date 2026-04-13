@@ -3,6 +3,7 @@
 """Rendering panel - main tab for rendering settings."""
 
 import math
+import os
 
 import lichtfeld as lf
 
@@ -60,7 +61,7 @@ BOOL_PROPS = [
 
 SLIDER_PROPS = [
     "axes_size", "grid_opacity", "camera_frustum_scale", "voxel_size",
-    "focal_length_mm", "render_scale",
+    "focal_length_mm", "render_scale", "environment_exposure", "environment_rotation_degrees",
     "mesh_wireframe_width", "mesh_light_intensity", "mesh_ambient",
     "ppisp_exposure", "ppisp_vignette_strength", "ppisp_gamma_multiplier",
     "ppisp_gamma_red", "ppisp_gamma_green", "ppisp_gamma_blue",
@@ -74,6 +75,8 @@ SCRUB_FIELD_DEFS = {
     "voxel_size": ScrubFieldSpec(0.001, 0.1, 0.001, "%.3f"),
     "focal_length_mm": ScrubFieldSpec(10.0, 200.0, 0.1, "%.1f"),
     "render_scale": ScrubFieldSpec(0.25, 1.0, 0.01, "%.2f"),
+    "environment_exposure": ScrubFieldSpec(-6.0, 6.0, 0.01, "%.2f"),
+    "environment_rotation_degrees": ScrubFieldSpec(-180.0, 180.0, 0.1, "%.1f"),
     "mesh_wireframe_width": ScrubFieldSpec(0.5, 5.0, 0.01, "%.2f"),
     "mesh_light_intensity": ScrubFieldSpec(0.0, 5.0, 0.01, "%.2f"),
     "mesh_ambient": ScrubFieldSpec(0.0, 1.0, 0.01, "%.2f"),
@@ -97,6 +100,13 @@ SCRUB_FIELD_DEFS = {
 SELECT_PROPS = [
     "grid_plane", "sh_degree", "camera_metrics_mode", "mesh_shadow_resolution",
 ]
+
+ENVIRONMENT_PRESET_PATHS = (
+    "environments/kloofendal_48d_partly_cloudy_puresky_1k.hdr",
+    "environments/alps_field_1k.hdr",
+)
+CUSTOM_ENVIRONMENT_PRESET_VALUE = "__custom__"
+DEFAULT_ENVIRONMENT_PRESET_INDEX = 0
 
 CHROM_FLOAT_PROPS = [
     "ppisp_color_red_x", "ppisp_color_red_y",
@@ -233,6 +243,8 @@ class RenderingPanel(Panel):
         self._simplify_progress_value = "0"
         self._simplify_progress_stage = ""
         self._simplify_error_text = ""
+        self._last_environment_state = None
+        self._last_custom_environment_map_path = ""
         self._escape_revert = w.EscapeRevertController()
         self._scrub_fields = ScrubFieldController(
             SCRUB_FIELD_DEFS,
@@ -293,11 +305,27 @@ class RenderingPanel(Panel):
                        lambda p=prop_id: str(getattr(s(), p, "")),
                        lambda v, p=prop_id: setattr(s(), p, v) if s() else None)
 
+        model.bind("environment_mode",
+                   lambda: str(getattr(s(), "environment_mode", "")),
+                   lambda v: self._set_environment_mode(v))
+        model.bind("environment_map_preset",
+                   self._get_environment_map_preset,
+                   self._set_environment_map_preset)
+        model.bind_func("environment_map_is_custom", self._environment_map_is_custom)
+        model.bind_func("environment_map_display_name", self._environment_map_display_name)
+        model.bind_func("environment_map_has_custom_option", self._environment_map_has_custom_option)
+        model.bind_func("environment_map_last_custom_display_name", self._environment_map_last_custom_display_name)
+
         model.bind("ppisp_mode",
                     lambda: str(getattr(s(), "ppisp_mode", "")),
                     lambda v: self._set_ppisp_mode(v))
 
-        all_props = BOOL_PROPS + SLIDER_PROPS + SELECT_PROPS + ["ppisp_mode"] + COLOR_PROPS
+        model.bind_func("environment_enabled",
+                        lambda: s() is not None and getattr(s(), "environment_mode", "") == "EQUIRECTANGULAR")
+
+        all_props = BOOL_PROPS + SLIDER_PROPS + SELECT_PROPS + [
+            "environment_mode", "environment_map_path", "ppisp_mode"
+        ] + COLOR_PROPS
         for prop_id in all_props:
             model.bind_func(f"label_{prop_id}", lambda p=prop_id: _prop_label(p))
 
@@ -347,6 +375,8 @@ class RenderingPanel(Panel):
                          lambda: lf.ui.tr("main_panel.mesh") or "Mesh")
         model.bind_func("label_hdr_post_process",
                          lambda: "Post Processing")
+        model.bind_func("label_environment_map_browse",
+                         lambda: lf.ui.tr("common.browse") or "Browse...")
         model.bind_func("label_simplify_source",
                          lambda: _entry_label(_tr_fallback("rendering_panel.simplify_source", "Source")))
         model.bind_func("label_simplify_select_source",
@@ -435,6 +465,7 @@ class RenderingPanel(Panel):
         model.bind_event("simplify_cancel", self._on_simplify_cancel)
         model.bind_event("toggle_console",
                          lambda h, e, a: lf.ui.toggle_system_console())
+        model.bind_event("browse_environment_map", self._on_browse_environment_map)
 
         self._handle = model.get_handle()
         self._sync_panel_label()
@@ -446,6 +477,7 @@ class RenderingPanel(Panel):
             return False
 
         dirty = False
+        dirty |= self._sync_environment_state()
         for prop_id in COLOR_PROPS:
             val = getattr(s, prop_id)
             key = (prop_id, int(val[0] * 255), int(val[1] * 255), int(val[2] * 255))
@@ -460,6 +492,156 @@ class RenderingPanel(Panel):
         dirty |= self._sync_simplify_task_state(force=False)
         dirty |= self._scrub_fields.sync_all()
         return dirty
+
+    def _environment_state_snapshot(self):
+        settings = lf.get_render_settings()
+        if not settings:
+            return None
+        return (
+            str(getattr(settings, "environment_mode", "")),
+            str(getattr(settings, "environment_map_path", "")),
+        )
+
+    def _dirty_environment_bindings(self):
+        if not self._handle:
+            return
+        self._handle.dirty_all()
+
+    def _sync_environment_state(self):
+        settings = lf.get_render_settings()
+        current_path = str(getattr(settings, "environment_map_path", "") or "") if settings else ""
+        if current_path and current_path not in ENVIRONMENT_PRESET_PATHS:
+            self._remember_custom_environment_map(current_path)
+        state = self._environment_state_snapshot()
+        if state == self._last_environment_state:
+            return False
+        self._last_environment_state = state
+        self._dirty_environment_bindings()
+        return True
+
+    def _set_environment_mode(self, value):
+        settings = lf.get_render_settings()
+        if not settings:
+            return
+        settings.environment_mode = value
+        self._sync_environment_state()
+
+    def _environment_map_is_custom(self):
+        settings = lf.get_render_settings()
+        if not settings:
+            return False
+        current_path = str(getattr(settings, "environment_map_path", "") or "")
+        return bool(current_path) and current_path not in ENVIRONMENT_PRESET_PATHS
+
+    def _environment_map_display_name(self):
+        settings = lf.get_render_settings()
+        if not settings:
+            return ""
+        current_path = str(getattr(settings, "environment_map_path", "") or "")
+        if not current_path or current_path in ENVIRONMENT_PRESET_PATHS:
+            return ""
+        display_name = os.path.basename(current_path)
+        return display_name or current_path
+
+    def _environment_map_has_custom_option(self):
+        return bool(self._last_custom_environment_map_path)
+
+    def _environment_map_last_custom_display_name(self):
+        if not self._last_custom_environment_map_path:
+            return ""
+        display_name = os.path.basename(self._last_custom_environment_map_path)
+        return display_name or self._last_custom_environment_map_path
+
+    def _remember_custom_environment_map(self, path):
+        normalized = str(path or "")
+        if not normalized or normalized in ENVIRONMENT_PRESET_PATHS:
+            return
+        self._last_custom_environment_map_path = normalized
+
+    def _environment_map_dialog_start_dir(self):
+        settings = lf.get_render_settings()
+        if not settings:
+            return ""
+        current_path = str(getattr(settings, "environment_map_path", "") or "")
+        if not current_path:
+            return ""
+        if os.path.isabs(current_path):
+            return os.path.dirname(current_path)
+        return ""
+
+    def _open_environment_map_dialog(self, start_dir):
+        for module in (getattr(lf, "ui", None), lf):
+            if module is None:
+                continue
+            for name in ("open_environment_map_dialog", "open_image_file_dialog", "open_image_dialog"):
+                dialog = getattr(module, name, None)
+                if callable(dialog):
+                    return dialog(start_dir)
+        lf.log.warn("No environment-map file dialog is available in the current Python bindings")
+        return ""
+
+    def _browse_environment_map(self):
+        settings = lf.get_render_settings()
+        if not settings:
+            return
+        selected_path = self._open_environment_map_dialog(self._environment_map_dialog_start_dir())
+        if not selected_path:
+            self._dirty_environment_bindings()
+            return
+        if os.path.splitext(selected_path)[1].lower() not in {".hdr", ".exr"}:
+            lf.log.warn(f"Ignoring unsupported environment map selection: {selected_path}")
+            self._dirty_environment_bindings()
+            return
+        self._remember_custom_environment_map(selected_path)
+        settings.environment_map_path = selected_path
+        self._sync_environment_state()
+
+    def _get_environment_map_preset(self):
+        settings = lf.get_render_settings()
+        if not settings:
+            return str(DEFAULT_ENVIRONMENT_PRESET_INDEX)
+        current_path = str(getattr(settings, "environment_map_path", "") or "")
+        try:
+            return str(ENVIRONMENT_PRESET_PATHS.index(current_path))
+        except ValueError:
+            if current_path:
+                return CUSTOM_ENVIRONMENT_PRESET_VALUE
+            return str(DEFAULT_ENVIRONMENT_PRESET_INDEX)
+
+    def _set_environment_map_preset(self, value):
+        settings = lf.get_render_settings()
+        if not settings:
+            return
+        value = str(value or "")
+        if value == CUSTOM_ENVIRONMENT_PRESET_VALUE:
+            if self._environment_map_is_custom():
+                self._dirty_environment_bindings()
+                return
+            if self._last_custom_environment_map_path:
+                settings.environment_map_path = self._last_custom_environment_map_path
+                self._sync_environment_state()
+            else:
+                self._dirty_environment_bindings()
+            return
+        try:
+            preset_index = int(value)
+        except (TypeError, ValueError):
+            if value:
+                settings.environment_map_path = value
+                self._sync_environment_state()
+            else:
+                self._dirty_environment_bindings()
+            return
+        if preset_index < 0 or preset_index >= len(ENVIRONMENT_PRESET_PATHS):
+            self._dirty_environment_bindings()
+            return
+        preset_path = ENVIRONMENT_PRESET_PATHS[preset_index]
+        settings.environment_map_path = preset_path
+        self._sync_environment_state()
+
+    def _on_browse_environment_map(self, handle, event, args):
+        del handle, event, args
+        self._browse_environment_map()
 
     def on_scene_changed(self, doc):
         if self._handle:
