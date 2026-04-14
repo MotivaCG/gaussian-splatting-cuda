@@ -2931,11 +2931,11 @@ namespace lfs::training::mask_pruning {
         }
 
     
-        ClusterExtremePruningConfig cluster_config;
+        /* ClusterExtremePruningConfig cluster_config;
         auto cluster = prune_by_cluster_and_extremes(strategy, cluster_config);
         if (!cluster) {
             return std::unexpected(cluster.error());
-        }
+        }*/
                 
         auto bound = prune_by_ellipse_boundary(strategy,dataset);
         if (!bound) {

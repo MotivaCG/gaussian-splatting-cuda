@@ -94,8 +94,8 @@ namespace lfs::training {
         constexpr float kPenaltyDecayStart = 0.75f; // Start relaxing alpha pressure toward residual floors.
         constexpr float kPenaltyDecayEnd = 0.85f; // End of decay; residual floors remain until training ends.
 
-        constexpr float kFgPenaltyFloor = 0.15f; // Final FG residual penalty. Kept at 0 to avoid carving holes from mask noise.
-        constexpr float kBgPenaltyFloor = 0.15f; // Final BG residual penalty. Keeps gentle cleanup of late halos/spikes outside the mask.
+        constexpr float kFgPenaltyFloor = 0.0f; // Final FG residual penalty. Kept at 0 to avoid carving holes from mask noise.
+        constexpr float kBgPenaltyFloor = 0.0f; // Final BG residual penalty. Keeps gentle cleanup of late halos/spikes outside the mask.
 
         static_assert(kBgRampEnd < kFgPenaltyStart, "BG spatial ramp must finish before FG penalty starts");
         static_assert(kFgPenaltyEnd <= kBothPenaltyStart, "FG penalty must reach full before BG joins");
@@ -105,8 +105,6 @@ namespace lfs::training {
             step_params.mask_mode = lfs::core::param::MaskMode::None;
             step_params.focused_bg_weight = 1.0f;
         } else if (progress < kBgRampEnd) {
-            const float t = (progress - kNoneEnd) / (kBgRampEnd - kNoneEnd);
-            step_params.focused_bg_weight = 1.0f - t * (1.0f - kBgTarget);
             step_params.mask_opacity_penalty_weight = 0.0f;
             step_params.mask_opacity_penalty_weight_bg = 0.0f;
         } else if (progress < kFgPenaltyStart) {
@@ -134,6 +132,22 @@ namespace lfs::training {
             step_params.mask_opacity_penalty_weight_bg *= kBgPenaltyFloor;
             step_params.focused_bg_weight = kBgTargetFree;
         }
+
+        // Darkness boost schedule: 0 during warmup, ramp up to Max while BG spatial ramp
+        // activates, then decay linearly to Min for the rest of training.
+        constexpr float kDarknessBoostMax = 2.0f;
+        constexpr float kDarknessBoostMin = 2.0f;
+        if (progress < kNoneEnd) {
+            step_params.darkness_boost = 0.0f;
+        } else if (progress < kBgRampEnd) {
+            const float t = (progress - kNoneEnd) / (kBgRampEnd - kNoneEnd);
+            step_params.darkness_boost = kDarknessBoostMax * t;
+        } else {
+            const float t = (progress - kBgRampEnd) / (1.0f - kBgRampEnd);
+            step_params.darkness_boost = kDarknessBoostMax - (kDarknessBoostMax - kDarknessBoostMin) * t;
+        }
+
+
     }
 
     // FocusedSegment photometric loss: full-image L1+SSIM forward (same quality as
@@ -162,7 +176,6 @@ namespace lfs::training {
         (void)raw_rendered;
 
         const float kBgWeight = opt_params.focused_bg_weight; // BG gradient weight relative to FG (1.0)
-        constexpr float kDarknessBoost = 2.0f; // extra FG weight on dark pixels; 0 = disabled
         constexpr float kAlphaFgWeight = 1.5f; // grad_alpha pressure to push FG alpha -> 1
         constexpr float kAlphaBgWeight = 1.0f; // grad_alpha pressure to push BG alpha -> 0
 
@@ -185,7 +198,7 @@ namespace lfs::training {
         // Using GT keeps the weight map stable across iterations - rendered changes every step.
         // BG stays flat at kBgWeight regardless of darkness, avoiding spurious BG gradient boosts.
         Tensor weight_map;
-        if (kDarknessBoost > 0.0f) {
+        if (opt_params.darkness_boost > 0.0f) {
             const bool chw = (gt_image.ndim() == 3 && gt_image.shape()[0] == 3);
             const Tensor r = chw ? gt_image.slice(0, 0, 1).squeeze(0) : gt_image.slice(2, 0, 1).squeeze(2);
             const Tensor g = chw ? gt_image.slice(0, 1, 2).squeeze(0) : gt_image.slice(2, 1, 2).squeeze(2);
@@ -193,7 +206,7 @@ namespace lfs::training {
             const Tensor brightness = r * 0.299f + g * 0.587f + b * 0.114f;
             const Tensor darkness = Tensor::full(brightness.shape(), 1.0f, brightness.device()) - brightness;
             weight_map =
-                mask_2d * (Tensor::full(darkness.shape(), 1.0f, darkness.device()) + darkness * kDarknessBoost) +
+                mask_2d * (Tensor::full(darkness.shape(), 1.0f, darkness.device()) + darkness * opt_params.darkness_boost) +
                 bg_mask * kBgWeight;
         } else {
             weight_map = mask_2d + bg_mask * kBgWeight;
