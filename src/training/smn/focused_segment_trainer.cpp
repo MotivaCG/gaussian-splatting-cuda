@@ -31,7 +31,7 @@ namespace lfs::training {
         //
         // Tune per scene: scenes with fine hair / fur benefit from 3; scenes with
         // clean silhouettes are fine at 0.
-        constexpr int FOCUSED_DENSIFY_DILATE_RADIUS = 3;
+        constexpr int FOCUSED_DENSIFY_DILATE_RADIUS = 1;
 
     } // namespace
 
@@ -85,11 +85,11 @@ namespace lfs::training {
                                                // fine silhouettes (hair) stay sharp.
         step_params.focused_bg_weight = kBgTarget;
 
-        constexpr float kFgAlphaRampStart = 0.40f; // Start ramping FG alpha pressure up.
-        constexpr float kFgAlphaRampEnd = 0.50f; // FG alpha pressure reaches full strength.
+        constexpr float kFgAlphaRampStart = 0.30f; // Start ramping FG alpha pressure up.
+        constexpr float kFgAlphaRampEnd = 0.40f; // FG alpha pressure reaches full strength.
 
-        constexpr float kBgAlphaRampStart = 0.60f; // Start ramping BG alpha pressure up.
-        constexpr float kBgAlphaRampEnd = 0.70f; // BG alpha pressure reaches full strength; both FG+BG fully active.
+        constexpr float kBgAlphaRampStart = 0.50f; // Start ramping BG alpha pressure up.
+        constexpr float kBgAlphaRampEnd = 0.60f; // BG alpha pressure reaches full strength; both FG+BG fully active.
 
         constexpr float kAlphaDecayStart = 0.75f; // Start relaxing alpha pressure toward residual floors.
         constexpr float kAlphaDecayEnd = 0.85f; // End of decay; residual floors remain until training ends.
@@ -135,8 +135,8 @@ namespace lfs::training {
 
         // Darkness boost schedule: 0 during warmup, ramp up to Max while BG spatial ramp
         // activates, then decay linearly to Min for the rest of training.
-        constexpr float kDarknessBoostMax = 2.0f;
-        constexpr float kDarknessBoostMin = 2.0f;
+        constexpr float kDarknessBoostMax = 3.0f;
+        constexpr float kDarknessBoostMin = 1.0f;
         if (progress < kNoneEnd) {
             step_params.darkness_boost = 0.0f;
         } else if (progress < kBgSpatialRampEnd) {
@@ -334,11 +334,10 @@ namespace lfs::training {
         leak_cfg.enabled = true;
         // Main tool for halos - removes elongated Gaussians whose footprint
         // extends outside the mask. Center vote is too permissive for these.
-        leak_cfg.leak_keep_threshold = 0.70f;
-        // 2 of 8 sample points outside counts as a leak per view.
-        // Catches elongated splats extending above heads without being too strict
-        // on border splats that legitimately straddle the mask edge.
-        leak_cfg.per_view_leak_fraction = 0.25f;
+        leak_cfg.leak_keep_threshold = 0.60f;
+        // 1-2 of 8 sample points outside counts as a leak per view.
+        // More sensitive to thin elongated spikes that poke outside the silhouette.
+        leak_cfg.per_view_leak_fraction = 0.20f;
         // Require decisive good/bad leakage evidence in at least 10% of usable cameras.
         leak_cfg.min_visibility_ratio = 0.10f;
         // Low radius - evaluate small/thin elongated splats that caused halos.
@@ -352,6 +351,22 @@ namespace lfs::training {
 
         mask_pruning::IsolationPruningConfig iso_cfg;
         iso_cfg.enabled = true;
+
+        // Ellipse boundary: removes Gaussians whose 2D ellipse boundary points
+        // extend outside an expanded mask. Catches thin spikes that leakage misses
+        // because their center is inside the mask.
+        mask_pruning::EllipseBoundaryPruningConfig ellipse_cfg;
+        ellipse_cfg.enabled = true;
+        ellipse_cfg.mask_expansion_fraction = 0.02f; // ~4px at 2K - tighter than default to catch thin spikes
+        ellipse_cfg.negative_vote_threshold = 0.10f; // remove if >=10% of evaluating cameras flagged leakage
+        ellipse_cfg.min_evaluating_cameras = 3;
+        ellipse_cfg.invert_masks = invert_masks;
+
+        // Cluster + extremes: removes isolated 3D clusters and Gaussians whose
+        // oriented 3D extremes are far from the main point cloud - exactly what spikes are.
+        mask_pruning::ClusterExtremePruningConfig cluster_cfg;
+        cluster_cfg.enabled = true;
+        // default values are ok for dome scenes
 
         LOG_INFO("Running post-training mask-based pruning...");
 
@@ -370,6 +385,27 @@ namespace lfs::training {
                      pruning_result->splats_removed,
                      pruning_result->removal_ratio() * 100.0f);
         }
+
+        // Ellipse boundary pass - catches spikes missed by center-vote and leakage.
+        auto ellipse_result = mask_pruning::prune_by_ellipse_boundary(strategy, train_dataset, ellipse_cfg);
+        if (!ellipse_result) {
+            LOG_WARN("Ellipse boundary pruning failed: {}", ellipse_result.error());
+        } else if (ellipse_result->splats_removed > 0) {
+            LOG_INFO("Ellipse pruning: removed {} splats ({:.1f}%)",
+                     ellipse_result->splats_removed,
+                     ellipse_result->removal_ratio() * 100.0f);
+        }
+
+        // Cluster + extremes pass - removes 3D spikes whose oriented extremes
+        // are far from the main point cloud.
+        /* auto cluster_result = mask_pruning::prune_by_cluster_and_extremes(strategy, cluster_cfg);
+        if (!cluster_result) {
+            LOG_WARN("Cluster/extremes pruning failed: {}", cluster_result.error());
+        } else if (cluster_result->splats_removed > 0) {
+            LOG_INFO("Cluster/extremes pruning: removed {} splats ({:.1f}%)",
+                     cluster_result->splats_removed,
+                     cluster_result->removal_ratio() * 100.0f);
+        }*/
     }
 
 } // namespace lfs::training
