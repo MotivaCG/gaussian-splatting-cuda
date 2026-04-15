@@ -77,7 +77,7 @@ namespace lfs::training {
         }
 
         constexpr float kNoneEnd = 0.15f; // End of warm-up with masking disabled.
-        constexpr float kBgRampEnd = 0.25f; // End of BG spatial weighting ramp.
+        constexpr float kBgSpatialRampEnd = 0.25f; // End of BG spatial weighting ramp.
         constexpr float kBgTarget = 0.05f; // Active-phase BG gradient weight (FG focused)
         constexpr float kBgTargetFree = 0.08f; // Free-refinement BG weight - slightly higher
                                                // than kBgTarget to allow gentle BG refinement
@@ -85,51 +85,51 @@ namespace lfs::training {
                                                // fine silhouettes (hair) stay sharp.
         step_params.focused_bg_weight = kBgTarget;
 
-        constexpr float kFgPenaltyStart = 0.40f; // Start ramping FG alpha pressure up.
-        constexpr float kFgPenaltyEnd = 0.50f; // FG alpha pressure reaches full strength.
+        constexpr float kFgAlphaRampStart = 0.40f; // Start ramping FG alpha pressure up.
+        constexpr float kFgAlphaRampEnd = 0.50f; // FG alpha pressure reaches full strength.
 
-        constexpr float kBothPenaltyStart = 0.60f; // Start ramping BG alpha pressure up.
-        constexpr float kBothPenaltyEnd = 0.70f; // FG+BG alpha pressure both fully active.
+        constexpr float kBgAlphaRampStart = 0.60f; // Start ramping BG alpha pressure up.
+        constexpr float kBgAlphaRampEnd = 0.70f; // BG alpha pressure reaches full strength; both FG+BG fully active.
 
-        constexpr float kPenaltyDecayStart = 0.75f; // Start relaxing alpha pressure toward residual floors.
-        constexpr float kPenaltyDecayEnd = 0.85f; // End of decay; residual floors remain until training ends.
+        constexpr float kAlphaDecayStart = 0.75f; // Start relaxing alpha pressure toward residual floors.
+        constexpr float kAlphaDecayEnd = 0.85f; // End of decay; residual floors remain until training ends.
 
-        constexpr float kFgPenaltyFloor = 0.0f; // Final FG residual penalty. Kept at 0 to avoid carving holes from mask noise.
-        constexpr float kBgPenaltyFloor = 0.0f; // Final BG residual penalty. Keeps gentle cleanup of late halos/spikes outside the mask.
+        constexpr float kFgAlphaFloorValue = 0.0f; // FG residual alpha penalty after decay.
+        constexpr float kBgAlphaFloorValue = 0.0f; // BG residual alpha penalty after decay.
 
-        static_assert(kBgRampEnd < kFgPenaltyStart, "BG spatial ramp must finish before FG penalty starts");
-        static_assert(kFgPenaltyEnd <= kBothPenaltyStart, "FG penalty must reach full before BG joins");
-        static_assert(kBothPenaltyEnd <= kPenaltyDecayStart, "Both at full before decay starts");
+        static_assert(kBgSpatialRampEnd < kFgAlphaRampStart, "BG spatial ramp must finish before FG alpha penalty starts");
+        static_assert(kFgAlphaRampEnd <= kBgAlphaRampStart, "FG alpha penalty must reach full before BG joins");
+        static_assert(kBgAlphaRampEnd <= kAlphaDecayStart, "Both at full before decay starts");
 
         if (progress < kNoneEnd) {
             step_params.mask_mode = lfs::core::param::MaskMode::None;
             step_params.focused_bg_weight = 1.0f;
-        } else if (progress < kBgRampEnd) {
+        } else if (progress < kBgSpatialRampEnd) {
             step_params.mask_opacity_penalty_weight = 0.0f;
             step_params.mask_opacity_penalty_weight_bg = 0.0f;
-        } else if (progress < kFgPenaltyStart) {
+        } else if (progress < kFgAlphaRampStart) {
             step_params.mask_opacity_penalty_weight = 0.0f;
             step_params.mask_opacity_penalty_weight_bg = 0.0f;
-        } else if (progress < kFgPenaltyEnd) {
-            const float t = (progress - kFgPenaltyStart) / (kFgPenaltyEnd - kFgPenaltyStart);
+        } else if (progress < kFgAlphaRampEnd) {
+            const float t = (progress - kFgAlphaRampStart) / (kFgAlphaRampEnd - kFgAlphaRampStart);
             step_params.mask_opacity_penalty_weight *= t;
             step_params.mask_opacity_penalty_weight_bg = 0.0f;
-        } else if (progress < kBothPenaltyEnd) {
-            const float t_bg = (progress - kBothPenaltyStart) / (kBothPenaltyEnd - kBothPenaltyStart);
+        } else if (progress < kBgAlphaRampEnd) {
+            const float t_bg = (progress - kBgAlphaRampStart) / (kBgAlphaRampEnd - kBgAlphaRampStart);
             step_params.mask_opacity_penalty_weight_bg *= std::clamp(t_bg, 0.0f, 1.0f);
-        } else if (progress < kPenaltyDecayEnd) {
+        } else if (progress < kAlphaDecayEnd) {
             const float t_decay = std::clamp(
-                (progress - kPenaltyDecayStart) / (kPenaltyDecayEnd - kPenaltyDecayStart),
+                (progress - kAlphaDecayStart) / (kAlphaDecayEnd - kAlphaDecayStart),
                 0.0f,
                 1.0f);
-            const float fg_factor = 1.0f + (kFgPenaltyFloor - 1.0f) * t_decay;
-            const float bg_factor = 1.0f + (kBgPenaltyFloor - 1.0f) * t_decay;
+            const float fg_factor = 1.0f + (kFgAlphaFloorValue - 1.0f) * t_decay;
+            const float bg_factor = 1.0f + (kBgAlphaFloorValue - 1.0f) * t_decay;
             step_params.mask_opacity_penalty_weight *= fg_factor;
             step_params.mask_opacity_penalty_weight_bg *= bg_factor;
             step_params.focused_bg_weight = kBgTarget * (1.0f - t_decay) + kBgTargetFree * t_decay;
         } else {
-            step_params.mask_opacity_penalty_weight *= kFgPenaltyFloor;
-            step_params.mask_opacity_penalty_weight_bg *= kBgPenaltyFloor;
+            step_params.mask_opacity_penalty_weight *= kFgAlphaFloorValue;
+            step_params.mask_opacity_penalty_weight_bg *= kBgAlphaFloorValue;
             step_params.focused_bg_weight = kBgTargetFree;
         }
 
@@ -139,11 +139,11 @@ namespace lfs::training {
         constexpr float kDarknessBoostMin = 2.0f;
         if (progress < kNoneEnd) {
             step_params.darkness_boost = 0.0f;
-        } else if (progress < kBgRampEnd) {
-            const float t = (progress - kNoneEnd) / (kBgRampEnd - kNoneEnd);
+        } else if (progress < kBgSpatialRampEnd) {
+            const float t = (progress - kNoneEnd) / (kBgSpatialRampEnd - kNoneEnd);
             step_params.darkness_boost = kDarknessBoostMax * t;
         } else {
-            const float t = (progress - kBgRampEnd) / (1.0f - kBgRampEnd);
+            const float t = (progress - kBgSpatialRampEnd) / (1.0f - kBgSpatialRampEnd);
             step_params.darkness_boost = kDarknessBoostMax - (kDarknessBoostMax - kDarknessBoostMin) * t;
         }
 
@@ -233,13 +233,16 @@ namespace lfs::training {
         const float bg_pixels = std::max(total_pixels - fg_pixels, 1.0f);
         loss = loss * (fg_pixels / std::max(total_pixels * weight_mean, 1e-6f));
 
-        // Step 4: alpha pressure via grad_alpha.
+        // Step 4: pixel-based adaptive alpha pressure via grad_alpha.
         // NOTE: modifying the scalar `loss` does NOT affect Gaussian parameters - only
         // grad_image and grad_alpha propagate through rasterize_backward to the optimizer.
         // Alpha pressure is therefore applied purely through grad_alpha.
         //
-        // Each zone (FG/BG) is normalized independently by its pixel count so that pressure
-        // is balanced regardless of how much of the image the mask occupies.
+        // Pressure is proportional to the current rendered alpha error, so it
+        // self-regulates: a BG pixel already at alpha=0 gets no pressure, a BG pixel
+        // at alpha=0.8 gets strong pressure. This avoids over-correction on boundary
+        // Gaussians that are already behaving correctly and reduces halo artifacts
+        // compared to a constant gradient map.
         //
         // Sign convention (gradient descent: param -= lr * grad):
         //   FG: negative grad_alpha  -> alpha_raw increases -> rendered alpha approaches 1
@@ -249,9 +252,10 @@ namespace lfs::training {
         const float w_bg = opt_params.mask_opacity_penalty_weight_bg;
         if (alpha.is_valid() && (w_fg > 0.0f || w_bg > 0.0f)) {
             const Tensor alpha_2d = alpha.ndim() == 3 ? alpha.squeeze(0) : alpha;
+            const Tensor ones = Tensor::full(alpha_2d.shape(), 1.0f, alpha_2d.device());
 
-            grad_alpha = bg_mask * (w_bg * kAlphaBgWeight / bg_pixels)    // BG: push alpha -> 0
-                         - mask_2d * (w_fg * kAlphaFgWeight / fg_pixels); // FG: push alpha -> 1
+            grad_alpha = bg_mask * alpha_2d * (w_bg * kAlphaBgWeight / bg_pixels)          // BG: pressure proportional to current alpha
+                         - mask_2d * (ones - alpha_2d) * (w_fg * kAlphaFgWeight / fg_pixels); // FG: pressure proportional to (1 - alpha)
         }
 
         return Trainer::MaskLossResult{
