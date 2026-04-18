@@ -64,6 +64,9 @@ def save_spz(data: lichtfeld.scene.SplatData, path: str | os.PathLike) -> None:
 def save_usd(data: lichtfeld.scene.SplatData, path: str | os.PathLike) -> None:
     """Save splat data as OpenUSD gaussian file"""
 
+def save_nurec_usdz(data: lichtfeld.scene.SplatData, path: str | os.PathLike) -> None:
+    """Save splat data as NuRec USDZ compatible with PLY_to_USD / Omniverse"""
+
 def export_html(data: lichtfeld.scene.SplatData, path: str | os.PathLike, kmeans_iterations: int = 10, progress: object | None = None) -> None:
     """Export splat data as self-contained HTML viewer"""
 

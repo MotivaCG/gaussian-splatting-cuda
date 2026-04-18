@@ -10,6 +10,7 @@
 #include "core/scene.hpp"
 #include "core/tensor.hpp"
 #include "python/python_runtime.hpp"
+#include "visualizer/scene/scene_manager.hpp"
 
 namespace lfs::python {
 
@@ -138,6 +139,20 @@ namespace lfs::python {
         EXPECT_TRUE(dummy_scene_.getTrainingModelNodeName().empty());
         EXPECT_TRUE(dummy_scene_.getAllCameras().empty());
         EXPECT_EQ(dummy_scene_.getNodeCount(), 0u);
+    }
+
+    TEST_F(SceneValidityTest, SceneManagerEmptyStateKeepsApplicationSceneContext) {
+        lfs::vis::SceneManager scene_manager;
+        EXPECT_EQ(get_application_scene(), &scene_manager.getScene());
+
+        scene_manager.addGroupNode("Bootstrap");
+        ASSERT_GT(scene_manager.getScene().getNodeCount(), 0u);
+
+        ASSERT_TRUE(scene_manager.clear());
+
+        EXPECT_EQ(get_application_scene(), &scene_manager.getScene());
+        EXPECT_EQ(scene_manager.getContentType(), lfs::vis::SceneManager::ContentType::Empty);
+        EXPECT_EQ(scene_manager.getScene().getNodeCount(), 0u);
     }
 
 } // namespace lfs::python

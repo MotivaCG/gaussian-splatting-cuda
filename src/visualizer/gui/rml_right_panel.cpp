@@ -380,6 +380,8 @@ namespace lfs::vis::gui {
 
         const float mx = input.mouse_x - layout.pos.x;
         const float my = input.mouse_y - layout.pos.y;
+        const float dp_ratio = rml_manager_ ? rml_manager_->getDpRatio() : 1.0f;
+        const float resize_handle_half_w = 4.0f * dp_ratio;
 
         const int mods = sdlModsToRml(input.key_ctrl, input.key_shift,
                                       input.key_alt, input.key_super);
@@ -388,10 +390,19 @@ namespace lfs::vis::gui {
             rml_context_->ProcessMouseMove(static_cast<int>(mx), static_cast<int>(my), mods);
 
         auto* hover = rml_context_->GetHoverElement();
+        const bool over_resize_handle_geom =
+            mx >= -resize_handle_half_w &&
+            mx <= resize_handle_half_w &&
+            my >= 0.0f &&
+            my <= layout.size.y;
+        const bool over_resize_handle =
+            over_resize_handle_geom || (hover && isOrHasAncestor(hover, "resize-handle"));
+        const bool over_splitter = hover && isOrHasAncestor(hover, "splitter");
         const bool over_interactive = hover && hover->GetTagName() != "body" &&
                                       hover->GetId() != "rp-body" &&
                                       hover->GetId() != "left-border" &&
                                       hover->GetId() != "tab-separator";
+        const bool over_resize_control = over_resize_handle || over_splitter;
 
         if (over_interactive != last_over_interactive_) {
             input_dirty_ = true;
@@ -436,10 +447,10 @@ namespace lfs::vis::gui {
             return;
         }
 
-        if (over_interactive) {
+        if (over_interactive || over_resize_control) {
             wants_input_ = true;
 
-            if (isOrHasAncestor(hover, "resize-handle")) {
+            if (over_resize_handle) {
                 cursor_request_ = CursorRequest::ResizeEW;
                 if (input.mouse_clicked[0]) {
                     resize_dragging_ = true;
@@ -447,7 +458,7 @@ namespace lfs::vis::gui {
                     if (resize_handle_el_)
                         resize_handle_el_->SetAttribute("class", "dragging");
                 }
-            } else if (isOrHasAncestor(hover, "splitter")) {
+            } else if (over_splitter) {
                 cursor_request_ = CursorRequest::ResizeNS;
                 if (input.mouse_clicked[0]) {
                     splitter_dragging_ = true;

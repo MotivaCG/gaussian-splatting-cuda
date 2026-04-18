@@ -305,6 +305,7 @@ namespace lfs::vis::gui {
             bottom_dock_hovering_edge_ = false;
             bottom_dock_resizing_ = false;
             bottom_dock_visible_ = false;
+            bottom_dock_top_y_ = -1.0f;
             prev_mouse_y_ = input.mouse_y;
             return;
         }
@@ -320,6 +321,7 @@ namespace lfs::vis::gui {
             bottom_dock_hovering_edge_ = false;
             bottom_dock_resizing_ = false;
             bottom_dock_visible_ = false;
+            bottom_dock_top_y_ = -1.0f;
             prev_mouse_y_ = input.mouse_y;
             return;
         }
@@ -383,6 +385,7 @@ namespace lfs::vis::gui {
             reg.preload_panels_direct(PanelSpace::BottomDock, panel_w, panel_h, draw_ctx,
                                       panel_y, panel_y + panel_h, &dock_input);
         bottom_dock_visible_ = preloaded_h > 0.0f;
+        bottom_dock_top_y_ = bottom_dock_visible_ ? panel_y : -1.0f;
         if (!bottom_dock_visible_)
             return;
 
@@ -436,7 +439,8 @@ namespace lfs::vis::gui {
         if (!(show_main_panel && !ui_hidden))
             return screen.work_size.x;
 
-        return std::max(0.0f, screen.work_size.x - right_panel_width_ - console_w - PANEL_GAP);
+        const float viewport_gap = python_console_visible ? PANEL_GAP : 0.0f;
+        return std::max(0.0f, screen.work_size.x - right_panel_width_ - console_w - viewport_gap);
     }
 
     float PanelLayoutManager::computeBottomDockWidth(const bool show_main_panel,
@@ -444,7 +448,7 @@ namespace lfs::vis::gui {
                                                      const ScreenState& screen) const {
         if (!(show_main_panel && !ui_hidden))
             return screen.work_size.x;
-        return std::max(0.0f, screen.work_size.x - right_panel_width_ - PANEL_GAP);
+        return std::max(0.0f, screen.work_size.x - right_panel_width_);
     }
 
     float PanelLayoutManager::computeBottomDockReservedHeight(const bool show_main_panel,

@@ -126,6 +126,28 @@
                 </div>
             </div>
         </div>
+        <div id="easing-stripe">
+            <div id="easing-segments"></div>
+            <div id="easing-curves"></div>
+            <div id="easing-indicators"></div>
+        </div>
+        <div id="film-strip-panel">
+            <div id="film-strip-groove">
+                <div id="film-strip-gaps"></div>
+                <div id="film-strip-thumbs"></div>
+                <div id="film-strip-dividers"></div>
+                <div id="film-strip-markers"></div>
+                <div id="film-strip-sprockets-top"></div>
+                <div id="film-strip-sprockets-bottom"></div>
+            </div>
+        </div>
     </div>
+    <div id="panel-guides">
+        <div id="guide-playhead" class="timeline-guide playhead"></div>
+        <div id="guide-selected" class="timeline-guide selected"></div>
+        <div id="guide-hovered" class="timeline-guide hovered"></div>
+        <div id="guide-strip-hover" class="timeline-guide strip-hover"></div>
+    </div>
+    <div id="timeline-tooltip"></div>
 </body>
 </rml>

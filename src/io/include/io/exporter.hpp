@@ -121,4 +121,18 @@ namespace lfs::io {
      */
     [[nodiscard]] LFS_IO_API Result<void> save_usd(const SplatData& splat_data, const UsdSaveOptions& options);
 
+    // ============================================================================
+    // USDZ Export (NuRec / Omniverse-compatible package)
+    // ============================================================================
+
+    struct NurecUsdzSaveOptions {
+        std::filesystem::path output_path;
+    };
+
+    /**
+     * @brief Save SplatData to NuRec-in-USDZ format compatible with PLY_to_USD / Omniverse
+     * @return Result<void> - success or Error with details
+     */
+    [[nodiscard]] LFS_IO_API Result<void> save_nurec_usdz(const SplatData& splat_data, const NurecUsdzSaveOptions& options);
+
 } // namespace lfs::io

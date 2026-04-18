@@ -324,6 +324,7 @@
     "format.sog_supersplat": "SOG (SuperSplat)",
     "format.spz_niantic": "SPZ (Niantic)",
     "format.usd_openusd": "USD (OpenUSD)",
+    "format.usdz_nurec": "USDZ (NuRec)",
     "format.html_viewer": "HTMLビューアー",
     "select_models": "モデルを選択:",
     "all": "すべて",
@@ -995,7 +996,9 @@
     "confirm_uninstall_message": "「{name}」を本当にアンインストールしますか？",
     "confirm_uninstall_yes": "はい",
     "confirm_uninstall_no": "いいえ",
-    "load_on_startup": "起動時に読み込む"
+    "load_on_startup": "起動時に読み込む",
+    "view.grid": "グリッド表示",
+    "view.list": "リスト表示"
   },
   "sequencer": {
     "edit_focal_length": "焦点距離を編集...",

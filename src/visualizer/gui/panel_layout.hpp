@@ -97,6 +97,7 @@ namespace lfs::vis::gui {
         float getPythonConsoleWidth() const { return python_console_width_; }
         float getBottomDockHeight() const { return bottom_dock_height_; }
         bool isBottomDockVisible() const { return bottom_dock_visible_; }
+        float bottomDockTopY() const { return bottom_dock_top_y_; }
         bool isShowSequencer() const { return show_sequencer_; }
         void setShowSequencer(bool v) { show_sequencer_ = v; }
 
@@ -129,6 +130,7 @@ namespace lfs::vis::gui {
         bool bottom_dock_resizing_ = false;
         bool bottom_dock_hovering_edge_ = false;
         bool bottom_dock_visible_ = false;
+        float bottom_dock_top_y_ = -1.0f;
 
         bool show_sequencer_ = false;
         std::string active_tab_id_;

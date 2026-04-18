@@ -29,6 +29,7 @@ namespace lfs::vis {
     public:
         struct Context {
             const Viewport& viewport;
+            glm::ivec2 logical_screen_size{0, 0};
             const ViewportRegion* viewport_region = nullptr;
             SceneManager* scene_manager = nullptr;
             const lfs::core::SplatData* model = nullptr;

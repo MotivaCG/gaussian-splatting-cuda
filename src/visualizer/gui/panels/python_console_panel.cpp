@@ -989,6 +989,15 @@ namespace lfs::vis::gui::panels {
 
         ImGui::SameLine();
 
+        // Save As button
+        if (ImGui::Button("Save As")) {
+            save_script_dialog(state);
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Save script as...");
+
+        ImGui::SameLine();
+
         // Format button
         if (ImGui::Button("Format")) {
             format_editor_script(state);

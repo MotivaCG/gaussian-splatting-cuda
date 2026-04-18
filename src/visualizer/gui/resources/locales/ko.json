@@ -324,6 +324,7 @@
     "format.sog_supersplat": "SOG (SuperSplat)",
     "format.spz_niantic": "SPZ (Niantic)",
     "format.usd_openusd": "USD (OpenUSD)",
+    "format.usdz_nurec": "USDZ (NuRec)",
     "format.html_viewer": "HTML 뷰어",
     "select_models": "모델 선택:",
     "all": "전체",
@@ -995,7 +996,9 @@
     "confirm_uninstall_message": "\"{name}\" 플러그인을 정말 제거하시겠습니까?",
     "confirm_uninstall_yes": "예",
     "confirm_uninstall_no": "아니요",
-    "load_on_startup": "시작 시 로드"
+    "load_on_startup": "시작 시 로드",
+    "view.grid": "그리드 보기",
+    "view.list": "목록 보기"
   },
   "sequencer": {
     "edit_focal_length": "초점 거리 편집...",

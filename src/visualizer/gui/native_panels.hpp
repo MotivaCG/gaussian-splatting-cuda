@@ -74,6 +74,7 @@ namespace lfs::vis::gui::native_panels {
         float getDirectDrawHeight() const override { return direct_draw_height_; }
         void setInput(const PanelInputState* input) override { input_ = input; }
         void setForcedHeight(float h) override { forced_height_ = h; }
+        bool wantsExternalFloatingShadow() const override { return false; }
         void setPanelSpace(PanelSpace space) override { is_floating_ = space == PanelSpace::Floating; }
 
     private:

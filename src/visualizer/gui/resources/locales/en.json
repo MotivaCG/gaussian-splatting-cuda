@@ -325,6 +325,7 @@
     "format.sog_supersplat": "SOG (SuperSplat)",
     "format.spz_niantic": "SPZ (Niantic)",
     "format.usd_openusd": "USD (OpenUSD)",
+    "format.usdz_nurec": "USDZ (NuRec)",
     "format.html_viewer": "HTML Viewer",
     "select_models": "Select Models:",
     "all": "All",
@@ -1079,7 +1080,9 @@
     "confirm_uninstall_message": "Are you sure you want to uninstall \"{name}\"?",
     "confirm_uninstall_yes": "Yes",
     "confirm_uninstall_no": "No",
-    "load_on_startup": "Load on Startup"
+    "load_on_startup": "Load on Startup",
+    "view.grid": "Grid view",
+    "view.list": "List view"
   },
   "sequencer": {
     "edit_focal_length": "Edit Focal Length...",

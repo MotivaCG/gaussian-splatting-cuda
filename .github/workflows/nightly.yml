@@ -7,14 +7,125 @@ name: Nightly Build
 on:
   schedule:
     - cron: '0 1 * * *'  # 2 AM CET (1 AM UTC)
-  workflow_dispatch:      # Manual trigger
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: Build even if the previous successful nightly already used this commit
+        required: false
+        type: boolean
+        default: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-  build-windows:
+  precheck:
     if: github.repository == 'MrNeRF/LichtFeld-Studio'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      should_build: ${{ steps.decide.outputs.should_build }}
+      reason: ${{ steps.decide.outputs.reason }}
+      previous_sha: ${{ steps.decide.outputs.previous_sha }}
+
+    steps:
+      - name: Decide whether nightly build is needed
+        id: decide
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const forceBuild = context.payload.inputs?.force_build === 'true';
+            const currentSha = context.sha;
+
+            if (forceBuild) {
+              core.setOutput('should_build', 'true');
+              core.setOutput('reason', 'Manual force_build override requested.');
+              core.setOutput('previous_sha', '');
+              return;
+            }
+
+            const params = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'nightly.yml',
+              status: 'success',
+              per_page: 20,
+            };
+
+            if (context.ref.startsWith('refs/heads/')) {
+              params.branch = context.ref.replace('refs/heads/', '');
+            }
+
+            let previousRun;
+            try {
+              const { data } = await github.rest.actions.listWorkflowRuns(params);
+              previousRun = data.workflow_runs.find((run) =>
+                run.id !== context.runId &&
+                ['schedule', 'workflow_dispatch'].includes(run.event)
+              );
+            } catch (error) {
+              core.warning(`Failed to inspect previous nightly runs: ${error.message}`);
+              core.setOutput('should_build', 'true');
+              core.setOutput(
+                'reason',
+                'Failed to inspect previous nightly runs; building to avoid skipping a needed nightly.'
+              );
+              core.setOutput('previous_sha', '');
+              return;
+            }
+
+            if (!previousRun) {
+              core.setOutput('should_build', 'true');
+              core.setOutput('reason', 'No previous successful nightly build was found.');
+              core.setOutput('previous_sha', '');
+              return;
+            }
+
+            core.setOutput('previous_sha', previousRun.head_sha);
+
+            if (previousRun.head_sha === currentSha) {
+              core.setOutput('should_build', 'false');
+              core.setOutput(
+                'reason',
+                `Previous successful nightly already built commit ${currentSha}.`
+              );
+              return;
+            }
+
+            core.setOutput('should_build', 'true');
+            core.setOutput(
+              'reason',
+              `Previous successful nightly used ${previousRun.head_sha}; current commit is ${currentSha}.`
+            );
+
+      - name: Publish precheck summary
+        env:
+          PREVIOUS_SHA: ${{ steps.decide.outputs.previous_sha }}
+          REASON: ${{ steps.decide.outputs.reason }}
+          SHOULD_BUILD: ${{ steps.decide.outputs.should_build }}
+        run: |
+          {
+            echo "### Nightly precheck"
+            echo
+            echo "- Build required: \`${SHOULD_BUILD}\`"
+            echo "- Current commit: \`${GITHUB_SHA}\`"
+            if [ -n "${PREVIOUS_SHA}" ]; then
+              echo "- Previous successful nightly commit: \`${PREVIOUS_SHA}\`"
+            else
+              echo "- Previous successful nightly commit: not found"
+            fi
+            echo "- Decision: ${REASON}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build-windows:
+    needs: precheck
+    if: github.repository == 'MrNeRF/LichtFeld-Studio' && needs.precheck.outputs.should_build == 'true'
     runs-on: windows-2022
     outputs:
       artifact_name: ${{ steps.package.outputs.artifact_name }}
+      nightly_version: ${{ steps.package.outputs.nightly_version }}
       package_name: ${{ steps.package.outputs.package_name }}
       short_sha: ${{ steps.package.outputs.short_sha }}
       full_sha: ${{ steps.package.outputs.full_sha }}
@@ -165,14 +276,31 @@ jobs:
         shell: pwsh
         run: |
           $date = Get-Date -AsUTC -Format "yyyy-MM-dd"
+          $dateStamp = Get-Date -AsUTC -Format "yyyyMMdd"
           $builtAt = Get-Date -AsUTC -Format "yyyy-MM-ddTHH:mm:ssZ"
           $shortSha = (git rev-parse --short HEAD).Trim()
           $fullSha = (git rev-parse HEAD).Trim()
-          $packageName = "LichtFeld-Studio-windows-nightly-$date-$shortSha.zip"
-          $artifactName = "windows-portable-$date-$shortSha"
+          $targetVersionFile = ".github/nightly-target-version.txt"
+          if (-not (Test-Path $targetVersionFile)) {
+            throw "Missing $targetVersionFile."
+          }
+          $nightlyTargetVersion = Get-Content $targetVersionFile |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -and -not $_.StartsWith("#") } |
+            Select-Object -First 1
+          if ([string]::IsNullOrWhiteSpace($nightlyTargetVersion) -or $nightlyTargetVersion -eq "SET_ME") {
+            throw "Set the target version in $targetVersionFile, for example 0.6 or 0.5.2."
+          }
+          if ($nightlyTargetVersion -notmatch '^[0-9]+(\.[0-9]+){1,2}$') {
+            throw "Invalid nightly target version '$nightlyTargetVersion' in $targetVersionFile."
+          }
+          $nightlyVersion = "$nightlyTargetVersion.dev$dateStamp+$shortSha"
+          $packageName = "LichtFeld-Studio-windows-v$nightlyVersion.zip"
+          $artifactName = "windows-portable-v$($nightlyVersion -replace '\+', '-')"
           cmake --install build --prefix dist
           Compress-Archive -Path dist\* -DestinationPath $packageName
           "artifact_name=$artifactName" >> $env:GITHUB_OUTPUT
+          "nightly_version=$nightlyVersion" >> $env:GITHUB_OUTPUT
           "package_name=$packageName" >> $env:GITHUB_OUTPUT
           "short_sha=$shortSha" >> $env:GITHUB_OUTPUT
           "full_sha=$fullSha" >> $env:GITHUB_OUTPUT
@@ -185,11 +313,15 @@ jobs:
           path: ${{ steps.package.outputs.package_name }}
           if-no-files-found: error
 
-  publish:
-    needs: build-windows
+  publish-r2:
+    needs:
+      - precheck
+      - build-windows
+    if: needs.precheck.outputs.should_build == 'true'
     runs-on: ubuntu-latest
+    environment: nightly-publish
     permissions:
-      contents: write
+      contents: read
 
     steps:
       - name: Download artifacts
@@ -197,49 +329,62 @@ jobs:
         with:
           name: ${{ needs.build-windows.outputs.artifact_name }}
 
-      - name: Update nightly release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: nightly
-          name: Nightly Build
-          overwrite_files: true
-          prerelease: true
-          target_commitish: ${{ needs.build-windows.outputs.full_sha }}
-          files: ${{ needs.build-windows.outputs.package_name }}
-          body: |
-            Automated nightly build from `${{ needs.build-windows.outputs.full_sha }}`
-
-            **Built:** ${{ needs.build-windows.outputs.built_at }}
-            **Branch:** ${{ github.event.repository.default_branch }}
-            **Assets retained:** latest 7 builds
-
-            This is an unstable development build. For stable releases, see the [Releases](../../releases) page.
-
-      - name: Trim nightly assets to latest 7 builds
+      - name: Ensure AWS CLI is available
         env:
-          GH_TOKEN: ${{ github.token }}
+          DEBIAN_FRONTEND: noninteractive
         run: |
           set -euo pipefail
+          if ! command -v aws >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y awscli
+          fi
+          aws --version
 
-          release_json=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/nightly")
-          mapfile -t old_assets < <(
-            printf '%s' "$release_json" | jq -r '
-              [.assets[]
-               | select(.name | test("^LichtFeld-Studio-windows-nightly-.*\\.zip$"))
-               | {id, name, created_at}]
-              | sort_by(.created_at)
-              | reverse
-              | .[7:]
-              | .[]
-              | @base64'
-          )
+      - name: Upload nightly to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          FILE_NAME: ${{ needs.build-windows.outputs.package_name }}
+          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          : "${AWS_ACCESS_KEY_ID:?Missing R2_ACCESS_KEY_ID secret}"
+          : "${AWS_SECRET_ACCESS_KEY:?Missing R2_SECRET_ACCESS_KEY secret}"
+          : "${R2_ACCOUNT_ID:?Missing R2_ACCOUNT_ID environment variable}"
+          : "${R2_BUCKET:?Missing R2_BUCKET environment variable}"
+          : "${FILE_NAME:?Missing package name}"
 
-          for encoded in "${old_assets[@]}"; do
-            asset=$(printf '%s' "$encoded" | base64 --decode)
-            asset_id=$(printf '%s' "$asset" | jq -r '.id')
-            asset_name=$(printf '%s' "$asset" | jq -r '.name')
-            echo "Deleting old nightly asset: $asset_name"
-            gh api \
-              --method DELETE \
-              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
-          done
+          endpoint_url="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          versioned_key="windows/nightly/${FILE_NAME}"
+
+          aws s3 cp "$FILE_NAME" "s3://${R2_BUCKET}/${versioned_key}" \
+            --endpoint-url "$endpoint_url" \
+            --content-type application/zip \
+            --only-show-errors
+
+      - name: Publish summary
+        env:
+          FILE_NAME: ${{ needs.build-windows.outputs.package_name }}
+          NIGHTLY_VERSION: ${{ needs.build-windows.outputs.nightly_version }}
+          FULL_SHA: ${{ needs.build-windows.outputs.full_sha }}
+          BUILT_AT: ${{ needs.build-windows.outputs.built_at }}
+          R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Nightly R2 Upload"
+            echo
+            echo "- Uploaded \`${FILE_NAME}\` to Cloudflare R2."
+            echo "- Nightly version: \`v${NIGHTLY_VERSION}\`"
+            echo "- Commit: \`${FULL_SHA}\`"
+            echo "- Built at: \`${BUILT_AT}\`"
+            echo "- Object key: \`windows/nightly/${FILE_NAME}\`"
+            if [ -n "${R2_PUBLIC_BASE_URL:-}" ]; then
+              base_url="${R2_PUBLIC_BASE_URL%/}"
+              echo "- Versioned URL: ${base_url}/windows/nightly/${FILE_NAME}"
+            else
+              echo "- Set the \`R2_PUBLIC_BASE_URL\` environment variable to print public download URLs here."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

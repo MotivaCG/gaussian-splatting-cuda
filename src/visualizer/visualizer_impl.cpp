@@ -308,6 +308,7 @@ namespace lfs::vis {
                                : fmt == core::ExportFormat::SPZ         ? "SPZ"
                                : fmt == core::ExportFormat::HTML_VIEWER ? "HTML"
                                : fmt == core::ExportFormat::USD         ? "USD"
+                               : fmt == core::ExportFormat::NUREC_USDZ  ? "USDZ"
                                                                         : "file";
                 return state;
             },
@@ -856,6 +857,7 @@ namespace lfs::vis {
             RenderingManager::RenderContext ctx{
                 .viewport = viewport_,
                 .settings = rendering_manager_->getSettings(),
+                .logical_screen_size = window_manager_->getWindowSize(),
                 .viewport_region = nullptr,
                 .scene_manager = scene_manager_.get()};
             rendering_manager_->renderFrame(ctx);
@@ -1044,6 +1046,7 @@ namespace lfs::vis {
         RenderingManager::RenderContext context{
             .viewport = viewport_,
             .settings = rendering_manager_->getSettings(),
+            .logical_screen_size = window_manager_->getWindowSize(),
             .viewport_region = has_viewport_region ? &viewport_region : nullptr,
             .scene_manager = scene_manager_.get()};
 
@@ -1455,6 +1458,12 @@ namespace lfs::vis {
         }
         result->apply_step_scaling();
         parameter_manager_->importParams(*result);
+        parameter_manager_->markDirty();
+
+        // Bump scene generation so all panels (e.g. training panel) pick up
+        // the new parameter values.  Without this, importing a config after a
+        // dataset is already loaded leaves the UI showing stale defaults.
+        python::bump_scene_generation();
     }
 
     void VisualizerImpl::handleTrainingCompleted([[maybe_unused]] const state::TrainingCompleted& event) {

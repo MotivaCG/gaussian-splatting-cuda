@@ -324,6 +324,7 @@
     "format.sog_supersplat": "SOG (SuperSplat)",
     "format.spz_niantic": "SPZ (Niantic)",
     "format.usd_openusd": "USD (OpenUSD)",
+    "format.usdz_nurec": "USDZ (NuRec)",
     "format.html_viewer": "HTML Viewer",
     "select_models": "Selecteer Modellen:",
     "all": "Alle",
@@ -995,7 +996,9 @@
     "confirm_uninstall_message": "Weet je zeker dat je \"{name}\" wilt verwijderen?",
     "confirm_uninstall_yes": "Ja",
     "confirm_uninstall_no": "Nee",
-    "load_on_startup": "Laden bij opstarten"
+    "load_on_startup": "Laden bij opstarten",
+    "view.grid": "Rasterweergave",
+    "view.list": "Lijstweergave"
   },
   "sequencer": {
     "edit_focal_length": "Brandpuntsafstand bewerken...",

@@ -204,6 +204,74 @@ namespace {
         return *cc;
     }
 
+    // Thread-local trainer/context override used while a Python hook callback is executing.
+    thread_local lfs::training::Trainer* g_current_trainer = nullptr;
+    thread_local std::optional<TrainingSnapshot> g_active_hook_snapshot;
+
+    TrainingSnapshot snapshot_from_command_center() {
+        if (auto* cc = get_command_center_opt()) {
+            return cc->snapshot();
+        }
+        return {};
+    }
+
+    TrainingSnapshot build_hook_snapshot(const HookContext& ctx) {
+        auto snapshot = snapshot_from_command_center();
+        snapshot.iteration = ctx.iteration;
+        snapshot.loss = ctx.loss;
+        snapshot.num_gaussians = ctx.num_gaussians;
+        snapshot.is_refining = ctx.is_refining;
+        snapshot.trainer = ctx.trainer;
+        return snapshot;
+    }
+
+    TrainingSnapshot current_training_snapshot() {
+        if (g_active_hook_snapshot.has_value()) {
+            return *g_active_hook_snapshot;
+        }
+        return snapshot_from_command_center();
+    }
+
+    struct HookInvocationGuard {
+        explicit HookInvocationGuard(const HookContext& ctx)
+            : prev_trainer_(g_current_trainer),
+              prev_snapshot_(g_active_hook_snapshot) {
+            g_current_trainer = ctx.trainer;
+            g_active_hook_snapshot = build_hook_snapshot(ctx);
+        }
+
+        ~HookInvocationGuard() {
+            g_current_trainer = prev_trainer_;
+            g_active_hook_snapshot = prev_snapshot_;
+        }
+
+    private:
+        lfs::training::Trainer* prev_trainer_ = nullptr;
+        std::optional<TrainingSnapshot> prev_snapshot_;
+    };
+
+    nb::dict build_python_hook_payload(const HookContext& ctx) {
+        nb::dict d;
+        d["iter"] = ctx.iteration;
+        d["iteration"] = ctx.iteration;
+        d["loss"] = ctx.loss;
+        d["num_splats"] = ctx.num_gaussians;
+        d["num_gaussians"] = ctx.num_gaussians;
+        d["is_refining"] = ctx.is_refining;
+        return d;
+    }
+
+    void invoke_python_dict_hook(const nb::object& callback, const ControlHook hook, const HookContext& ctx) {
+        nb::gil_scoped_acquire guard;
+        HookInvocationGuard hook_guard(ctx);
+        LOG_DEBUG("Python hook invoke hook={} iter={}", static_cast<int>(hook), ctx.iteration);
+        try {
+            callback(build_python_hook_payload(ctx));
+        } catch (const std::exception& e) {
+            LOG_ERROR("Python hook threw: {}", e.what());
+        }
+    }
+
     class PyControlSession {
     public:
         PyControlSession() = default;
@@ -233,6 +301,7 @@ namespace {
             nb::object fn_obj = std::move(fn);
             auto cb = [fn_obj](const HookContext& ctx) {
                 nb::gil_scoped_acquire gil;
+                HookInvocationGuard hook_guard(ctx);
                 fn_obj(ctx.iteration, ctx.loss, ctx.num_gaussians, ctx.is_refining);
             };
 
@@ -271,18 +340,8 @@ namespace {
             nb::object fn = nb::cast<nb::object>(cb);
             owned_callbacks_.push_back(fn);
 
-            handler_.subscribe_hook(hook, [fn](const HookContext& ctx) {
-                nb::gil_scoped_acquire gil;
-                try {
-                    nb::dict d;
-                    d["iter"] = ctx.iteration;
-                    d["loss"] = ctx.loss;
-                    d["num_splats"] = ctx.num_gaussians;
-                    d["is_refining"] = ctx.is_refining;
-                    fn(d);
-                } catch (const std::exception& e) {
-                    LOG_ERROR("Python hook error: {}", e.what());
-                }
+            handler_.subscribe_hook(hook, [fn, hook](const HookContext& ctx) {
+                invoke_python_dict_hook(fn, hook, ctx);
             });
         }
 
@@ -293,12 +352,9 @@ namespace {
     class PyContextView {
     public:
         PyContextView() {
-            auto* cc = get_command_center_opt();
-            if (cc) {
-                snapshot_ = cc->snapshot();
-                if (snapshot_.trainer) {
-                    strategy_ = snapshot_.trainer->getParams().optimization.strategy;
-                }
+            snapshot_ = current_training_snapshot();
+            if (snapshot_.trainer) {
+                strategy_ = snapshot_.trainer->getParams().optimization.strategy;
             }
         }
 
@@ -325,14 +381,11 @@ namespace {
         std::string strategy() const { return strategy_; }
 
         void refresh() {
-            auto* cc = get_command_center_opt();
-            if (cc) {
-                snapshot_ = cc->snapshot();
-                if (snapshot_.trainer) {
-                    strategy_ = snapshot_.trainer->getParams().optimization.strategy;
-                } else {
-                    strategy_ = "none";
-                }
+            snapshot_ = current_training_snapshot();
+            if (snapshot_.trainer) {
+                strategy_ = snapshot_.trainer->getParams().optimization.strategy;
+            } else {
+                strategy_ = "none";
             }
         }
 
@@ -343,30 +396,21 @@ namespace {
 
     struct PyGaussiansView {
         std::size_t count() const {
-            auto* cc = get_command_center_opt();
-            if (!cc)
-                return 0;
-            const auto snap = cc->snapshot();
+            const auto snap = current_training_snapshot();
             if (!snap.trainer)
                 return 0;
             return snap.trainer->get_strategy_mutable().get_model().size();
         }
 
         int sh_degree() const {
-            auto* cc = get_command_center_opt();
-            if (!cc)
-                return 0;
-            const auto snap = cc->snapshot();
+            const auto snap = current_training_snapshot();
             if (!snap.trainer)
                 return 0;
             return snap.trainer->get_strategy_mutable().get_model().get_active_sh_degree();
         }
 
         int max_sh_degree() const {
-            auto* cc = get_command_center_opt();
-            if (!cc)
-                return 0;
-            const auto snap = cc->snapshot();
+            const auto snap = current_training_snapshot();
             if (!snap.trainer)
                 return 0;
             return snap.trainer->get_strategy_mutable().get_model().get_max_sh_degree();
@@ -491,15 +535,6 @@ namespace {
         }
     };
 
-    // Thread-local Trainer pointer for get_scene() to access Scene during hooks
-    thread_local lfs::training::Trainer* g_current_trainer = nullptr;
-
-    // RAII guard to set/clear current trainer
-    struct TrainerGuard {
-        TrainerGuard(lfs::training::Trainer* t) { g_current_trainer = t; }
-        ~TrainerGuard() { g_current_trainer = nullptr; }
-    };
-
     // Hook registration helper
     std::size_t register_hook(ControlHook hook, nb::callable cb) {
         if (!cb)
@@ -507,19 +542,7 @@ namespace {
         const nb::object ocb = nb::cast<nb::object>(cb);
         LOG_INFO("Python hook registered for hook {}", static_cast<int>(hook));
         return ControlBoundary::instance().register_callback(hook, [ocb, hook](const HookContext& ctx) {
-            nb::gil_scoped_acquire guard;
-            TrainerGuard trainer_guard(ctx.trainer);
-            LOG_DEBUG("Python hook invoke hook={} iter={}", static_cast<int>(hook), ctx.iteration);
-            try {
-                nb::dict d;
-                d["iter"] = ctx.iteration;
-                d["loss"] = ctx.loss;
-                d["num_splats"] = ctx.num_gaussians;
-                d["is_refining"] = ctx.is_refining;
-                ocb(d);
-            } catch (const std::exception& e) {
-                LOG_ERROR("Python hook threw: {}", e.what());
-            }
+            invoke_python_dict_hook(ocb, hook, ctx);
         });
     }
 
@@ -807,7 +830,7 @@ NB_MODULE(lichtfeld, m) {
             lfs::python::invoke_export(format, path, node_names, sh_degree);
         },
         nb::arg("format"), nb::arg("path"), nb::arg("node_names"), nb::arg("sh_degree"),
-        "Export scene nodes to file. Format: 0=PLY, 1=SOG, 2=SPZ, 3=HTML, 4=USD.");
+        "Export scene nodes to file. Format: 0=PLY, 1=SOG, 2=SPZ, 3=HTML, 4=USD, 5=USDZ NuRec.");
 
     m.def(
         "save_config_file",
@@ -1366,6 +1389,14 @@ NB_MODULE(lichtfeld, m) {
     m.def(
         "toggle_ui", []() { lfs::core::events::ui::ToggleUI{}.emit(); },
         "Toggle UI overlay visibility");
+    m.def(
+        "toggle_independent_split_view", []() {
+            auto* controller = lfs::vis::InputController::instance();
+            if (!controller)
+                return;
+            controller->toggleIndependentSplitView();
+        },
+        "Toggle independent split view");
 
     m.def(
         "get_render_mode", []() -> RenderMode {
@@ -1829,6 +1860,10 @@ Mesh-to-Splat:
 Splat Simplify:
   lf.simplify_splats("name", ratio=..., knn_k=..., merge_cap=..., opacity_prune_threshold=...)
                                     - Simplify a splat node into a new output node
+  lf.simplify_splat_data_with_history(splat_data, ...)
+                                    - Simplify a SplatData value and return output + merge tree
+  lf.build_splat_lod_hierarchy(splat_data, ratio=..., max_levels=..., min_points=...)
+                                    - Build a script-side multi-level LOD hierarchy object
   lf.cancel_splat_simplify()         - Cancel the active simplify job
   lf.is_splat_simplify_active()      - Check if simplification is running
   lf.get_splat_simplify_progress()   - Get progress (0.0-1.0)
@@ -1890,6 +1925,38 @@ Example:
             return std::format("DatasetInfo(base_path='{}', images={}, masks={})",
                                lfs::core::path_to_utf8(i.base_path), i.image_count, i.mask_count);
         });
+
+    m.def(
+        "build_splat_lod_hierarchy",
+        [](nb::object source,
+           double ratio,
+           int knn_k,
+           double merge_cap,
+           float opacity_prune_threshold,
+           std::optional<int> max_levels,
+           int min_points,
+           nb::object progress) {
+            auto helper = nb::module_::import_("lfs_splat_lod_hierarchy").attr("build_splat_lod_hierarchy");
+            nb::object py_max_levels = max_levels ? nb::cast(*max_levels) : nb::none();
+            return helper(
+                std::move(source),
+                ratio,
+                knn_k,
+                merge_cap,
+                opacity_prune_threshold,
+                py_max_levels,
+                min_points,
+                std::move(progress));
+        },
+        nb::arg("source") = nb::none(),
+        nb::arg("ratio") = 0.5,
+        nb::arg("knn_k") = 16,
+        nb::arg("merge_cap") = 0.5,
+        nb::arg("opacity_prune_threshold") = 0.1f,
+        nb::arg("max_levels") = nb::none(),
+        nb::arg("min_points") = 1,
+        nb::arg("progress") = nb::none(),
+        "Build a script-side multi-level LOD hierarchy from SplatData or a scene node.");
 
     m.def(
         "detect_dataset_info",
@@ -1955,7 +2022,7 @@ Example:
         // Core access
         "context", "gaussians", "session", "get_scene",
         // Types
-        "Tensor", "Hook", "ScopedHandler",
+        "Tensor", "Hook", "ScopedHandler", "SplatSimplifyResult", "SplatSimplifyMergeTree",
         // Hook decorators
         "on_training_start", "on_iteration_start",
         "on_post_step", "on_pre_optimizer_step", "on_training_end",
@@ -1963,7 +2030,8 @@ Example:
         "mesh_to_splat", "is_mesh2splat_active",
         "get_mesh2splat_progress", "get_mesh2splat_stage", "get_mesh2splat_error",
         // Splat simplify
-        "simplify_splats", "cancel_splat_simplify", "is_splat_simplify_active",
+        "simplify_splats", "simplify_splat_data_with_history", "build_splat_lod_hierarchy",
+        "cancel_splat_simplify", "is_splat_simplify_active",
         "get_splat_simplify_progress", "get_splat_simplify_stage", "get_splat_simplify_error",
         // Animation
         "on_frame", "stop_animation",

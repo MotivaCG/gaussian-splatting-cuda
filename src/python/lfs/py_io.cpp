@@ -75,7 +75,7 @@ namespace lfs::python {
 
             std::optional<PySplatData> get_splat_data() const {
                 if (splat_data)
-                    return PySplatData(splat_data.get());
+                    return PySplatData(splat_data);
                 return std::nullopt;
             }
 
@@ -328,6 +328,19 @@ namespace lfs::python {
             },
             nb::arg("data"), nb::arg("path"),
             "Save splat data as OpenUSD gaussian file");
+
+        m.def(
+            "save_nurec_usdz",
+            [](const PySplatData& data, const std::filesystem::path& path) {
+                io::NurecUsdzSaveOptions options;
+                options.output_path = path;
+
+                auto result = io::save_nurec_usdz(*data.data(), options);
+                if (!result)
+                    throw std::runtime_error(std::format("Failed to save NuRec USDZ: {}", result.error().format()));
+            },
+            nb::arg("data"), nb::arg("path"),
+            "Save splat data as NuRec USDZ compatible with PLY_to_USD / Omniverse");
 
         m.def(
             "export_html",

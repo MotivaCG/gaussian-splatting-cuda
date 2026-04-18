@@ -1323,7 +1323,7 @@ class AutoSavePlugin:
         if ctx.iteration - self.last_save >= self.interval:
             lf.save_checkpoint()
             self.last_save = ctx.iteration
-            lf.log.info(f"Auto-saved at iteration {ctx.iteration}")
+            lf.log.info(f"Auto-save requested at iteration {ctx.iteration}")
 
 _auto_save = None
 
@@ -1337,6 +1337,8 @@ def on_unload():
     global _auto_save
     _auto_save = None
 ```
+
+`lf.log.info(...)` writes to the main LichtFeld application log. Use `print(...)` if you want temporary debug output in the integrated Python console output panel, or call both if you want messages in both places.
 
 ---
 
@@ -1356,6 +1358,8 @@ lf.log.warn("Warning message")
 lf.log.error("Error message")
 lf.log.debug("Debug message")    # Only visible with --log-level debug
 ```
+
+`lf.log.*()` messages go to the main application log. `print(...)` and Python tracebacks go to the integrated Python console output.
 
 ### Plugin state inspection
 

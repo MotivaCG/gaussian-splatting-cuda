@@ -799,6 +799,50 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMENT "Copying locale files"
 )
 
+# OpenUSD runtime resources (schema/file-format plugin metadata).
+# Copy them beside the app under ../lib/usd and register that path at startup.
+set(_USD_PLUGIN_SOURCE_DIR "")
+foreach(_candidate
+    "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib/usd"
+    "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin/usd"
+    "${CMAKE_BINARY_DIR}/src/python/usd")
+    if(NOT _USD_PLUGIN_SOURCE_DIR AND EXISTS "${_candidate}")
+        set(_USD_PLUGIN_SOURCE_DIR "${_candidate}")
+    endif()
+endforeach()
+
+set(_USD_ROOT_INDEX "")
+foreach(_candidate
+    "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib/usd/plugInfo.json"
+    "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin/usd/plugInfo.json"
+    "${CMAKE_BINARY_DIR}/src/python/usd/plugInfo.json")
+    if(NOT _USD_ROOT_INDEX AND EXISTS "${_candidate}")
+        set(_USD_ROOT_INDEX "${_candidate}")
+    endif()
+endforeach()
+
+set(_USD_PLUGIN_DEST "$<TARGET_FILE_DIR:${PROJECT_NAME}>/../lib/usd")
+
+if(EXISTS "${_USD_PLUGIN_SOURCE_DIR}")
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${_USD_PLUGIN_DEST}"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
+            "${_USD_PLUGIN_SOURCE_DIR}"
+            "${_USD_PLUGIN_DEST}"
+        COMMENT "Copying OpenUSD plugin resources (per-module)"
+    )
+    message(STATUS "Post-build: OpenUSD plugin resources will be copied from ${_USD_PLUGIN_SOURCE_DIR}")
+endif()
+
+if(EXISTS "${_USD_ROOT_INDEX}")
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_USD_ROOT_INDEX}"
+            "${_USD_PLUGIN_DEST}/plugInfo.json"
+        COMMENT "Copying OpenUSD root plugin index"
+    )
+endif()
+
 message(STATUS "Post-build: Resources will be copied to \${BUILD_DIR}/resources/")
 
 # Platform-specific settings
@@ -1013,6 +1057,16 @@ install(FILES "${CMAKE_SOURCE_DIR}/src/visualizer/gui/assets/volinga-logo.png" D
 install(FILES "${CMAKE_SOURCE_DIR}/src/visualizer/gui/assets/volinga-logo-dark.png" DESTINATION "${INSTALL_RESOURCE_DIR}/assets")
 install(DIRECTORY "${CMAKE_SOURCE_DIR}/src/visualizer/gui/rmlui/resources/" DESTINATION "${INSTALL_RESOURCE_DIR}/assets/rmlui")
 install(DIRECTORY "${CMAKE_SOURCE_DIR}/src/visualizer/gui/resources/locales" DESTINATION "${INSTALL_RESOURCE_DIR}")
+
+# OpenUSD plugin resources (schema definitions + plugInfo.json files)
+if(EXISTS "${_USD_PLUGIN_SOURCE_DIR}")
+    install(DIRECTORY "${_USD_PLUGIN_SOURCE_DIR}/" DESTINATION "${CMAKE_INSTALL_LIBDIR}/usd"
+            PATTERN "__pycache__" EXCLUDE
+            PATTERN "*.pyc" EXCLUDE)
+endif()
+if(EXISTS "${_USD_ROOT_INDEX}")
+    install(FILES "${_USD_ROOT_INDEX}" DESTINATION "${CMAKE_INSTALL_LIBDIR}/usd")
+endif()
 
 # Plugin development documentation
 set(DOC_INSTALL_DIR "${CMAKE_INSTALL_DATADIR}/doc/LichtFeld-Studio")

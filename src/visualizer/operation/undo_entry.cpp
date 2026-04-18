@@ -2091,7 +2091,7 @@ namespace lfs::vis::op {
 
             if (scene.getNodeCount() == 0 &&
                 desired.context->content_type == static_cast<int>(SceneManager::ContentType::Empty)) {
-                python::set_application_scene(nullptr);
+                python::set_application_scene(&scene);
                 SceneCleared{.from_history = true}.emit();
             } else {
                 python::set_application_scene(&scene);

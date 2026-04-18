@@ -959,12 +959,47 @@ _repl_out.close()
         static constexpr const char* FORMAT_CODE = R"(
 def _lfs_format_code(code):
     import importlib
+    import re
     import textwrap
     importlib.invalidate_caches()
     try:
         import black
     except ImportError as e:
         return (None, f"ImportError: {e}")
+
+    def _looks_like_code_line(stripped):
+        if not stripped:
+            return False
+        if stripped.startswith('#'):
+            return True
+        if stripped.startswith((
+            'import ', 'from ', 'def ', 'class ', '@',
+            'if ', 'for ', 'while ', 'try', 'with ',
+            'async ', 'match ', 'case ', 'return ',
+            'raise ', 'pass', 'break', 'continue',
+            'global ', 'nonlocal ', 'assert ', 'yield ',
+            'del ', 'elif ', 'else:', 'except', 'finally:'
+        )):
+            return True
+        if stripped[:1] in ('"', "'", '(', '[', '{'):
+            return True
+        if re.match(r'[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*\\s*[:=([{.]', stripped):
+            return True
+        return False
+
+    def _comment_leading_preamble(source):
+        lines = source.split('\n')
+        changed = False
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if _looks_like_code_line(stripped):
+                break
+            indent = line[:len(line) - len(line.lstrip(' '))]
+            lines[i] = indent + '# ' + stripped
+            changed = True
+        return ('\n'.join(lines), changed)
 
     def _indent_width(line):
         return len(line) - len(line.lstrip(' '))
@@ -1021,6 +1056,8 @@ def _lfs_format_code(code):
 
                 lines[idx] = new_line
                 changed = True
+            except SyntaxError:
+                break
 
         return ('\n'.join(lines), changed)
 
@@ -1054,6 +1091,7 @@ def _lfs_format_code(code):
 
     # Convert tabs to spaces consistently
     cleaned = '\n'.join(line.replace('\t', '    ') for line in lines)
+    cleaned, _ = _comment_leading_preamble(cleaned)
 
     try:
         return (black.format_str(cleaned, mode=black.Mode()), None)
@@ -1094,10 +1132,19 @@ def _lfs_format_code(code):
 
         FormatResult result{code, "", false};
         PyObject* const py_code = PyUnicode_FromString(code.c_str());
+        if (!py_code) {
+            result.error = consume_python_error_detailed();
+            return result;
+        }
         PyObject* const py_result = PyObject_CallFunctionObjArgs(format_func, py_code, nullptr);
         Py_DECREF(py_code);
 
-        if (py_result && PyTuple_Check(py_result) && PyTuple_Size(py_result) == 2) {
+        if (!py_result) {
+            result.error = consume_python_error_detailed();
+            return result;
+        }
+
+        if (PyTuple_Check(py_result) && PyTuple_Size(py_result) == 2) {
             PyObject* formatted = PyTuple_GetItem(py_result, 0);
             PyObject* error = PyTuple_GetItem(py_result, 1);
 
@@ -1119,10 +1166,9 @@ def _lfs_format_code(code):
 
             Py_DECREF(py_result);
         } else {
-            if (PyErr_Occurred()) {
-                PyErr_Clear();
-            }
-            result.error = "Format function returned unexpected result";
+            result.error = std::format("Format function returned unexpected result of type {}",
+                                       Py_TYPE(py_result)->tp_name ? Py_TYPE(py_result)->tp_name : "<unknown>");
+            Py_DECREF(py_result);
         }
 
         return result;

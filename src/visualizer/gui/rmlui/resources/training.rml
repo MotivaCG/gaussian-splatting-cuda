@@ -220,13 +220,15 @@
           <option value="3">{{label_bg_option_random}}</option>
         </select>
       </div>
-      <div class="setting-row" data-if="dep_bg_color">
-        <span class="prop-label">{{label_bg_color}}</span>
-        <span class="color-comp">{{bg_color_r}}</span>
-        <span class="color-comp">{{bg_color_g}}</span>
-        <span class="color-comp">{{bg_color_b}}</span>
-        <div class="color-swatch" id="swatch-bg_color" data-event-click="color_click('bg_color')"></div>
-        <input type="text" class="color-hex" data-value="bg_color_hex" />
+      <div class="setting-row setting-row--aligned" data-if="dep_bg_color">
+        <span class="setting-row__label-col">{{label_bg_color}}</span>
+        <div class="setting-row__control-col setting-row__control-col--color">
+          <span class="color-comp">{{bg_color_r}}</span>
+          <span class="color-comp">{{bg_color_g}}</span>
+          <span class="color-comp">{{bg_color_b}}</span>
+          <div class="color-swatch" id="swatch-bg_color" data-event-click="color_click('bg_color')"></div>
+          <input type="text" class="color-hex" data-value="bg_color_hex" />
+        </div>
       </div>
       <div data-if="dep_bg_image">
         <div class="setting-row">

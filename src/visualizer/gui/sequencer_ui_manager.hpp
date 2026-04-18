@@ -9,6 +9,7 @@
 #include "gui/keyframe_scene_sync.hpp"
 #include "gui/panel_layout.hpp"
 #include "gui/sequencer_ui_state.hpp"
+#include "gui/sequencer_viewport_edit_mode.hpp"
 #include "gui/ui_context.hpp"
 #include "rendering/gl_resources.hpp"
 #include "sequencer/rml_sequencer_panel.hpp"
@@ -18,8 +19,6 @@
 #include <glm/gtc/quaternion.hpp>
 #include <memory>
 #include <optional>
-#include <imgui.h>
-#include <ImGuizmo.h>
 
 namespace lfs::vis::gui {
     class RmlSequencerOverlay;
@@ -40,7 +39,7 @@ namespace lfs::vis {
             void render(const UIContext& ctx, const ViewportLayout& viewport,
                         float panel_x, float panel_y, float panel_width, float panel_height,
                         const PanelInputState& panel_input);
-            void compositeOverlays(int screen_w, int screen_h) const;
+            void compositeOverlays(int screen_w, int screen_h);
             void setSequencerEnabled(bool enabled);
 
             void destroyGLResources();
@@ -58,16 +57,12 @@ namespace lfs::vis {
                                       float panel_x, float panel_y, float panel_width,
                                       float panel_height, const PanelInputState& panel_input);
             void renderCameraPath(const ViewportLayout& viewport);
-            void renderKeyframeGizmo(const UIContext& ctx, const ViewportLayout& viewport);
             void handleOverlayActions();
             void renderKeyframeEditOverlay(const ViewportLayout& viewport);
-            void renderFilmStrip(const UIContext& ctx);
-            void drawTimelineGuides();
-            void drawTimelineTooltip();
-            void drawEasingCurves();
             void initPipPreview();
             void renderKeyframePreview(const UIContext& ctx);
-            void drawPipPreviewWindow(const ViewportLayout& viewport);
+            void syncPipPreviewWindow(const ViewportLayout& viewport);
+            void finalizeViewportTransformDrag(bool emit_change_event);
             void beginViewportKeyframeEdit(size_t keyframe_index);
             void endViewportKeyframeEdit();
             [[nodiscard]] sequencer::CameraState currentViewportCameraState() const;
@@ -82,15 +77,20 @@ namespace lfs::vis {
             GLLineRenderer line_renderer_;
             FilmStripRenderer film_strip_;
 
-            ImGuizmo::OPERATION keyframe_gizmo_op_ = ImGuizmo::OPERATION(0);
-            bool keyframe_gizmo_active_ = false;
+            SequencerViewportEditMode viewport_edit_mode_ = SequencerViewportEditMode::None;
+            bool viewport_transform_drag_active_ = false;
+            bool viewport_transform_drag_changed_ = false;
+            glm::vec2 viewport_transform_drag_start_mouse_{0.0f, 0.0f};
+            glm::vec3 viewport_transform_drag_start_position_{0.0f, 0.0f, 0.0f};
+            glm::quat viewport_transform_drag_start_rotation_{1.0f, 0.0f, 0.0f, 0.0f};
+            glm::vec3 viewport_transform_drag_world_offset_{0.0f, 0.0f, 0.0f};
+            float viewport_transform_drag_view_depth_ = 1.0f;
+            float viewport_transform_drag_focal_length_mm_ = 0.0f;
             bool edit_entered_mouse_down_ = false;
 
-            bool film_strip_scrubbing_ = false;
             lfs::vis::PanelInputState panel_input_{};
-            bool timeline_tooltip_active_ = false;
-            ImVec2 timeline_tooltip_pos_{0.0f, 0.0f};
-            std::string timeline_tooltip_text_;
+            std::chrono::steady_clock::time_point last_panel_frame_time_ = std::chrono::steady_clock::now();
+            float panel_elapsed_time_ = 0.0f;
 
             static constexpr int PREVIEW_WIDTH = 320;
             static constexpr int PREVIEW_HEIGHT = 180;
@@ -105,16 +105,6 @@ namespace lfs::vis {
             bool last_equirectangular_ = false;
             std::chrono::steady_clock::time_point pip_last_render_time_ = std::chrono::steady_clock::now();
             std::optional<sequencer::Keyframe> viewport_keyframe_edit_snapshot_;
-
-            struct TimelineGeometry {
-                float timeline_x = 0.0f;
-                float timeline_width = 0.0f;
-                float panel_x = 0.0f;
-                float panel_width = 0.0f;
-                float panel_y = 0.0f;
-                float dp = 1.0f;
-            };
-            TimelineGeometry tl_geo_;
         };
 
     } // namespace gui

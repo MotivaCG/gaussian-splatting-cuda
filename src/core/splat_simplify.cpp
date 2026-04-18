@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/splat_simplify.hpp"
+#include "core/splat_simplify_history.hpp"
 
 #include "core/logger.hpp"
 #include "core/splat_data.hpp"
@@ -95,6 +96,11 @@ namespace lfs::core {
             std::vector<std::pair<int, int>> pairs;
         };
 
+        struct SimplifyHistoryState {
+            SplatSimplifyMergeTree tree;
+            std::vector<int32_t> current_node_ids;
+        };
+
         [[nodiscard]] Tensor flatten_sh_like_ply(const Tensor& sh) {
             if (!sh.is_valid())
                 return Tensor{};
@@ -178,6 +184,35 @@ namespace lfs::core {
             result->set_active_sh_degree(workset.active_sh_degree);
             result->set_max_sh_degree(workset.max_sh_degree);
             return result;
+        }
+
+        [[nodiscard]] SimplifyHistoryState make_history_state(const SplatSimplifyWorkset& input,
+                                                              const SplatSimplifyOptions& options,
+                                                              const int target_count) {
+            SimplifyHistoryState history;
+            history.tree.source_means = input.means.contiguous();
+            history.tree.source_sh0 = unflatten_sh_like_ply(input.appearance.slice(1, 0, 3).contiguous(), 1);
+            if (input.shn_coeffs > 0) {
+                history.tree.source_shN = unflatten_sh_like_ply(
+                    input.appearance.slice(1, 3, 3 + input.shn_coeffs * 3).contiguous(),
+                    input.shn_coeffs);
+            }
+            history.tree.source_scaling = input.scaling.contiguous();
+            history.tree.source_rotation = input.rotation.contiguous();
+            history.tree.source_opacity = input.opacity.contiguous();
+            history.tree.source_active_sh_degree = input.active_sh_degree;
+            history.tree.source_max_sh_degree = input.max_sh_degree;
+            history.tree.source_scene_scale = input.scene_scale;
+            history.tree.target_count = target_count;
+            history.tree.requested_ratio = options.ratio;
+            history.tree.requested_knn_k = options.knn_k;
+            history.tree.requested_merge_cap = options.merge_cap;
+            history.tree.requested_opacity_prune_threshold = options.opacity_prune_threshold;
+
+            history.current_node_ids.resize(static_cast<size_t>(input.size()));
+            for (int i = 0; i < input.size(); ++i)
+                history.current_node_ids[static_cast<size_t>(i)] = static_cast<int32_t>(i);
+            return history;
         }
 
         [[nodiscard]] bool report_progress(const SplatSimplifyProgressCallback& progress,
@@ -375,7 +410,9 @@ namespace lfs::core {
             return 0.5f * (values[mid - 1] + values[mid]);
         }
 
-        [[nodiscard]] NativeRows prune_by_opacity(const NativeRows& input, const float requested_threshold) {
+        [[nodiscard]] NativeRows prune_by_opacity(const NativeRows& input,
+                                                  const float requested_threshold,
+                                                  std::vector<int>* keep_idx_out = nullptr) {
             if (input.count == 0)
                 return input;
 
@@ -388,6 +425,8 @@ namespace lfs::core {
                 if (input.opacity[static_cast<size_t>(i)] >= threshold)
                     keep_idx.push_back(i);
             }
+            if (keep_idx_out)
+                *keep_idx_out = keep_idx;
 
             NativeRows out;
             out.count = static_cast<int>(keep_idx.size());
@@ -872,7 +911,8 @@ namespace lfs::core {
         [[nodiscard]] std::expected<SplatSimplifyWorkset, std::string> simplify_workset(
             const SplatSimplifyWorkset& input,
             const SplatSimplifyOptions& options,
-            SplatSimplifyProgressCallback progress) {
+            SplatSimplifyProgressCallback progress,
+            SimplifyHistoryState* history = nullptr) {
             try {
                 NativeRows current = rows_from_workset(input);
                 if (current.count == 0)
@@ -882,14 +922,45 @@ namespace lfs::core {
                 const int target_count = target_count_for(input_count, options.ratio);
                 const int pass_merge_cap = pass_merge_cap_for(input_count, options.merge_cap);
                 SimplifyScratch scratch;
+                if (history)
+                    *history = make_history_state(input, options, target_count);
 
                 if (!report_progress(progress, 0.0f, "Pruning opacity"))
                     return std::unexpected("Cancelled");
-                current = prune_by_opacity(current, options.opacity_prune_threshold);
+                current = prune_by_opacity(
+                    current,
+                    options.opacity_prune_threshold,
+                    history ? &scratch.keep_idx : nullptr);
 
                 if (current.count == 0)
                     return std::unexpected("Splat simplify: input has no visible gaussians");
+                if (history) {
+                    std::vector<int32_t> kept_ids;
+                    std::vector<int32_t> pruned_ids;
+                    kept_ids.reserve(static_cast<size_t>(current.count));
+                    pruned_ids.reserve(history->current_node_ids.size());
+
+                    std::vector<uint8_t> kept_mask(history->current_node_ids.size(), uint8_t{0});
+                    for (const int idx : scratch.keep_idx) {
+                        if (idx >= 0 && static_cast<size_t>(idx) < kept_mask.size())
+                            kept_mask[static_cast<size_t>(idx)] = 1;
+                    }
+                    for (size_t i = 0; i < history->current_node_ids.size(); ++i) {
+                        const int32_t node_id = history->current_node_ids[i];
+                        if (i < kept_mask.size() && kept_mask[i]) {
+                            kept_ids.push_back(node_id);
+                        } else if (node_id >= 0) {
+                            pruned_ids.push_back(node_id);
+                        }
+                    }
+
+                    history->tree.post_prune_count = current.count;
+                    history->tree.pruned_leaf_ids = std::move(pruned_ids);
+                    history->current_node_ids = std::move(kept_ids);
+                }
                 if (current.count <= target_count) {
+                    if (history)
+                        history->tree.final_roots = history->current_node_ids;
                     (void)report_progress(progress, 1.0f, "Complete");
                     return workset_from_rows(current, input);
                 }
@@ -935,9 +1006,25 @@ namespace lfs::core {
                         return std::unexpected("Cancelled");
                     build_cache(current, scratch.cache);
                     current = merge_pairs(current, scratch.cache, scratch.pairs, scratch.used_rows, scratch.keep_idx);
+                    if (history) {
+                        std::vector<int32_t> next_ids;
+                        next_ids.reserve(static_cast<size_t>(current.count));
+                        for (const int keep_row : scratch.keep_idx) {
+                            next_ids.push_back(history->current_node_ids[static_cast<size_t>(keep_row)]);
+                        }
+                        for (const auto [left_row, right_row] : scratch.pairs) {
+                            history->tree.merge_left.push_back(history->current_node_ids[static_cast<size_t>(left_row)]);
+                            history->tree.merge_right.push_back(history->current_node_ids[static_cast<size_t>(right_row)]);
+                            history->tree.merge_pass.push_back(pass);
+                            next_ids.push_back(input_count + history->tree.merge_count() - 1);
+                        }
+                        history->current_node_ids = std::move(next_ids);
+                    }
                     ++pass;
                 }
 
+                if (history)
+                    history->tree.final_roots = history->current_node_ids;
                 (void)report_progress(progress, 1.0f, "Complete");
                 return workset_from_rows(current, input);
             } catch (const std::exception& e) {
@@ -962,6 +1049,30 @@ namespace lfs::core {
             return make_splat_from_workset(*result, Device::CUDA);
         } catch (const std::exception& e) {
             LOG_ERROR("simplify_splats failed: {}", e.what());
+            return std::unexpected(e.what());
+        }
+    }
+
+    std::expected<SplatSimplifyResult, std::string> simplify_splats_with_history(
+        const SplatData& input,
+        const SplatSimplifyOptions& options,
+        SplatSimplifyProgressCallback progress) {
+        try {
+            if (!input.means_raw().is_valid() || input.size() == 0)
+                return std::unexpected("Splat simplify: input splat is empty");
+
+            auto workset = make_workset_from_input(input, Device::CPU);
+            SimplifyHistoryState history;
+            auto result = simplify_workset(workset, options, std::move(progress), &history);
+            if (!result)
+                return std::unexpected(result.error());
+
+            SplatSimplifyResult out;
+            out.splat = make_splat_from_workset(*result, Device::CUDA);
+            out.merge_tree = std::move(history.tree);
+            return out;
+        } catch (const std::exception& e) {
+            LOG_ERROR("simplify_splats_with_history failed: {}", e.what());
             return std::unexpected(e.what());
         }
     }

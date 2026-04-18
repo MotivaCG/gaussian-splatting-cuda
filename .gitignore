@@ -17,6 +17,7 @@ data
 *.py
 !scripts/lichtfeld_mcp_bridge.py
 !src/python/_lfs_panel_contract.py
+!src/python/lfs_splat_lod_hierarchy.py
 !src/python/lfs_plugins/**/*.py
 !src/python/scripts/manage_stubs.py
 !tests/python/**/*.py

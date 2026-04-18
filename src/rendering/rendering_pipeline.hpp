@@ -116,6 +116,9 @@ namespace lfs::rendering {
             bool depth_is_ndc = false;         // True if depth is already NDC (0-1), e.g., from OpenGL
             GLuint external_depth_texture = 0; // If set, use this OpenGL texture directly (zero-copy)
             glm::vec2 depth_texcoord_scale{1.0f, 1.0f};
+            // Presentation orientation for the screen quad. GUT/3DGUT outputs are produced
+            // in top-left image coordinates, while the viewer presents OpenGL-style textures.
+            bool flip_y = false;
             // Depth conversion parameters (needed for view-space to NDC conversion)
             float near_plane = DEFAULT_NEAR_PLANE;
             float far_plane = DEFAULT_FAR_PLANE;

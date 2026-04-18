@@ -6,6 +6,7 @@
 #include "core/data_loading_service.hpp"
 #include "core/events.hpp"
 #include "core/logger.hpp"
+#include "core/parameters.hpp"
 #include "core/path_utils.hpp"
 #include "core/scene.hpp"
 #include "gui/gui_manager.hpp"
@@ -39,17 +40,6 @@
 namespace lfs::vis::gui {
 
     using ExportFormat = lfs::core::ExportFormat;
-
-    [[nodiscard]] std::filesystem::path defaultDatasetOutputPath(
-        const std::filesystem::path& dataset_path) {
-        auto base_path = dataset_path;
-        auto ext = dataset_path.extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-        if (ext == ".json") {
-            base_path = dataset_path.parent_path();
-        }
-        return base_path / "output";
-    }
 
     [[nodiscard]] const char* getDatasetTypeName(const std::filesystem::path& path) {
         switch (lfs::io::Loader::getDatasetType(path)) {
@@ -633,7 +623,7 @@ namespace lfs::vis::gui {
             params.init_path = std::nullopt;
             params.resume_checkpoint = std::nullopt;
             params.dataset.output_path =
-                cmd.output_path.empty() ? defaultDatasetOutputPath(cmd.path) : cmd.output_path;
+                cmd.output_path.empty() ? lfs::core::param::default_dataset_output_path(cmd.path) : cmd.output_path;
             if (!cmd.init_path.empty())
                 params.init_path = lfs::core::path_to_utf8(cmd.init_path);
             startAsyncImport(cmd.path, params);
@@ -767,80 +757,101 @@ namespace lfs::vis::gui {
                 bool success = false;
                 std::string error_msg;
 
-                switch (format) {
-                case ExportFormat::PLY: {
-                    update_progress(0.1f, "Writing PLY");
-                    const lfs::io::PlySaveOptions options{
-                        .output_path = path,
-                        .binary = true,
-                        .async = false,
-                        .extra_attributes = {}};
-                    if (auto result = lfs::io::save_ply(*splat_data, options); result) {
-                        success = true;
-                        update_progress(1.0f, "Complete");
-                    } else {
-                        error_msg = result.error().message;
-                        if (result.error().code == lfs::io::ErrorCode::INSUFFICIENT_DISK_SPACE) {
-                            lfs::core::events::state::DiskSpaceSaveFailed{
-                                .iteration = 0,
-                                .path = path,
-                                .error = result.error().message,
-                                .required_bytes = result.error().required_bytes,
-                                .available_bytes = result.error().available_bytes,
-                                .is_disk_space_error = true,
-                                .is_checkpoint = false}
-                                .emit();
+                try {
+
+                    switch (format) {
+                    case ExportFormat::PLY: {
+                        update_progress(0.1f, "Writing PLY");
+                        const lfs::io::PlySaveOptions options{
+                            .output_path = path,
+                            .binary = true,
+                            .async = false,
+                            .extra_attributes = {}};
+                        if (auto result = lfs::io::save_ply(*splat_data, options); result) {
+                            success = true;
+                            update_progress(1.0f, "Complete");
+                        } else {
+                            error_msg = result.error().message;
+                            if (result.error().code == lfs::io::ErrorCode::INSUFFICIENT_DISK_SPACE) {
+                                lfs::core::events::state::DiskSpaceSaveFailed{
+                                    .iteration = 0,
+                                    .path = path,
+                                    .error = result.error().message,
+                                    .required_bytes = result.error().required_bytes,
+                                    .available_bytes = result.error().available_bytes,
+                                    .is_disk_space_error = true,
+                                    .is_checkpoint = false}
+                                    .emit();
+                            }
                         }
+                        break;
                     }
-                    break;
-                }
-                case ExportFormat::SOG: {
-                    const lfs::io::SogSaveOptions options{
-                        .output_path = path,
-                        .kmeans_iterations = 10,
-                        .progress_callback = update_progress};
-                    if (auto result = lfs::io::save_sog(*splat_data, options); result) {
-                        success = true;
-                    } else {
-                        error_msg = result.error().message;
+                    case ExportFormat::SOG: {
+                        const lfs::io::SogSaveOptions options{
+                            .output_path = path,
+                            .kmeans_iterations = 10,
+                            .progress_callback = update_progress};
+                        if (auto result = lfs::io::save_sog(*splat_data, options); result) {
+                            success = true;
+                        } else {
+                            error_msg = result.error().message;
+                        }
+                        break;
                     }
-                    break;
-                }
-                case ExportFormat::SPZ: {
-                    update_progress(0.1f, "Writing SPZ");
-                    const lfs::io::SpzSaveOptions options{.output_path = path};
-                    if (auto result = lfs::io::save_spz(*splat_data, options); result) {
-                        success = true;
-                        update_progress(1.0f, "Complete");
-                    } else {
-                        error_msg = result.error().message;
+                    case ExportFormat::SPZ: {
+                        update_progress(0.1f, "Writing SPZ");
+                        const lfs::io::SpzSaveOptions options{.output_path = path};
+                        if (auto result = lfs::io::save_spz(*splat_data, options); result) {
+                            success = true;
+                            update_progress(1.0f, "Complete");
+                        } else {
+                            error_msg = result.error().message;
+                        }
+                        break;
                     }
-                    break;
-                }
-                case ExportFormat::HTML_VIEWER: {
-                    const HtmlViewerExportOptions options{
-                        .output_path = path,
-                        .progress_callback = [&update_progress](float p, const std::string& s) {
-                            update_progress(p, s);
-                        }};
-                    if (auto result = export_html_viewer(*splat_data, options); result) {
-                        success = true;
-                    } else {
-                        error_msg = result.error();
+                    case ExportFormat::HTML_VIEWER: {
+                        const HtmlViewerExportOptions options{
+                            .output_path = path,
+                            .progress_callback = [&update_progress](float p, const std::string& s) {
+                                update_progress(p, s);
+                            }};
+                        if (auto result = export_html_viewer(*splat_data, options); result) {
+                            success = true;
+                        } else {
+                            error_msg = result.error();
+                        }
+                        break;
                     }
-                    break;
-                }
-                case ExportFormat::USD: {
-                    update_progress(0.1f, "Writing USD");
-                    const lfs::io::UsdSaveOptions options{.output_path = path};
-                    if (auto result = lfs::io::save_usd(*splat_data, options); result) {
-                        success = true;
-                        update_progress(1.0f, "Complete");
-                    } else {
-                        error_msg = result.error().message;
+                    case ExportFormat::USD: {
+                        update_progress(0.1f, "Writing USD");
+                        const lfs::io::UsdSaveOptions options{.output_path = path};
+                        if (auto result = lfs::io::save_usd(*splat_data, options); result) {
+                            success = true;
+                            update_progress(1.0f, "Complete");
+                        } else {
+                            error_msg = result.error().message;
+                        }
+                        break;
                     }
-                    break;
-                }
+                    case ExportFormat::NUREC_USDZ: {
+                        update_progress(0.1f, "Writing USDZ");
+                        const lfs::io::NurecUsdzSaveOptions options{.output_path = path};
+                        if (auto result = lfs::io::save_nurec_usdz(*splat_data, options); result) {
+                            success = true;
+                            update_progress(1.0f, "Complete");
+                        } else {
+                            error_msg = result.error().message;
+                        }
+                        break;
+                    }
+                    }
+
+                } catch (const std::exception& e) {
+                    error_msg = std::string("Export crashed with exception: ") + e.what();
+                    LOG_ERROR("{}", error_msg);
+                } catch (...) {
+                    error_msg = "Export crashed with unknown exception";
+                    LOG_ERROR("{}", error_msg);
                 }
 
                 if (success) {

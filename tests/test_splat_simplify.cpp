@@ -3,6 +3,7 @@
 
 #include "core/splat_data.hpp"
 #include "core/splat_simplify.hpp"
+#include "core/splat_simplify_history.hpp"
 #include "core/tensor.hpp"
 
 #include <gtest/gtest.h>
@@ -878,6 +879,199 @@ TEST(SplatSimplify, AllowsOpacityPruneToFinishBelowTarget) {
     auto result = lfs::core::simplify_splats(*source, options, {});
     ASSERT_TRUE(result) << result.error();
     ASSERT_EQ((*result)->size(), 2u);
+}
+
+TEST(SplatSimplify, HistoryTracksMultiPassMergeTree) {
+    RefInput input{
+        .means = {
+            0.00,
+            0.00,
+            0.00,
+            0.02,
+            0.00,
+            0.00,
+            1.00,
+            0.00,
+            0.00,
+            1.02,
+            0.00,
+            0.00,
+        },
+        .scaling_raw = {
+            std::log(0.10),
+            std::log(0.10),
+            std::log(0.10),
+            std::log(0.10),
+            std::log(0.10),
+            std::log(0.10),
+            std::log(0.10),
+            std::log(0.10),
+            std::log(0.10),
+            std::log(0.10),
+            std::log(0.10),
+            std::log(0.10),
+        },
+        .rotation_raw = {
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+        },
+        .opacity_raw = {
+            0.8,
+            0.8,
+            0.8,
+            0.8,
+        },
+        .appearance = {
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        },
+        .app_dim = 3,
+    };
+
+    auto source = make_test_splat(input, 0);
+    SplatSimplifyOptions options;
+    options.ratio = 0.25f;
+    options.knn_k = 16;
+    options.merge_cap = 0.5f;
+    options.opacity_prune_threshold = 0.0f;
+
+    auto result = lfs::core::simplify_splats_with_history(*source, options, {});
+    ASSERT_TRUE(result) << result.error();
+    ASSERT_NE(result->splat, nullptr);
+    ASSERT_EQ(result->splat->size(), 1u);
+
+    const auto& tree = result->merge_tree;
+    EXPECT_EQ(tree.leaf_count(), 4);
+    EXPECT_EQ(tree.target_count, 1);
+    EXPECT_EQ(tree.post_prune_count, 4);
+    EXPECT_TRUE(tree.pruned_leaf_ids.empty());
+    EXPECT_EQ(tree.merge_count(), 3);
+    EXPECT_EQ(tree.merge_pass, (std::vector<int32_t>{0, 0, 1}));
+    ASSERT_EQ(tree.merge_left.size(), 3u);
+    ASSERT_EQ(tree.merge_right.size(), 3u);
+    std::vector<std::pair<int32_t, int32_t>> first_pass_pairs = {
+        {tree.merge_left[0], tree.merge_right[0]},
+        {tree.merge_left[1], tree.merge_right[1]},
+    };
+    std::sort(first_pass_pairs.begin(), first_pass_pairs.end());
+    EXPECT_EQ(first_pass_pairs, (std::vector<std::pair<int32_t, int32_t>>{{0, 1}, {2, 3}}));
+    EXPECT_EQ(tree.merge_left[2], 4);
+    EXPECT_EQ(tree.merge_right[2], 5);
+    EXPECT_EQ(tree.final_roots, (std::vector<int32_t>{6}));
+}
+
+TEST(SplatSimplify, HistoryTracksOpacityPrunedLeaves) {
+    RefInput input{
+        .means = {
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            2.0,
+            0.0,
+            0.0,
+            3.0,
+            0.0,
+            0.0,
+        },
+        .scaling_raw = {
+            std::log(0.10),
+            std::log(0.10),
+            std::log(0.10),
+            std::log(0.10),
+            std::log(0.10),
+            std::log(0.10),
+            std::log(0.10),
+            std::log(0.10),
+            std::log(0.10),
+            std::log(0.10),
+            std::log(0.10),
+            std::log(0.10),
+        },
+        .rotation_raw = {
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+        },
+        .opacity_raw = {
+            std::log(0.01 / (1.0 - 0.01)),
+            std::log(0.02 / (1.0 - 0.02)),
+            std::log(0.8 / (1.0 - 0.8)),
+            std::log(0.9 / (1.0 - 0.9)),
+        },
+        .appearance = {
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        },
+        .app_dim = 3,
+    };
+
+    auto source = make_test_splat(input, 0);
+    SplatSimplifyOptions options;
+    options.ratio = 0.75f;
+    options.knn_k = 16;
+
+    auto result = lfs::core::simplify_splats_with_history(*source, options, {});
+    ASSERT_TRUE(result) << result.error();
+    ASSERT_NE(result->splat, nullptr);
+    ASSERT_EQ(result->splat->size(), 2u);
+
+    const auto& tree = result->merge_tree;
+    EXPECT_EQ(tree.leaf_count(), 4);
+    EXPECT_EQ(tree.target_count, 3);
+    EXPECT_EQ(tree.post_prune_count, 2);
+    EXPECT_EQ(tree.merge_count(), 0);
+    EXPECT_EQ(tree.pruned_leaf_ids, (std::vector<int32_t>{0, 1}));
+    EXPECT_EQ(tree.final_roots, (std::vector<int32_t>{2, 3}));
 }
 
 TEST(SplatSimplify, UsesNativeBackendProgressStages) {

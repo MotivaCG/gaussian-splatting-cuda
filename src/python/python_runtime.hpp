@@ -6,7 +6,7 @@
 
 #include "core/mesh2splat.hpp"
 #include "core/modal_request.hpp"
-#include "core/splat_simplify.hpp"
+#include "core/splat_simplify_types.hpp"
 #include "visualizer/gui/panel_height_mode.hpp"
 #include "visualizer/gui/panel_space.hpp"
 

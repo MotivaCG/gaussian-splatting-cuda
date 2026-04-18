@@ -60,6 +60,7 @@ namespace lfs::vis {
         struct RenderContext {
             const Viewport& viewport;
             const RenderSettings& settings;
+            glm::ivec2 logical_screen_size{0, 0};
             const ViewportRegion* viewport_region = nullptr;
             SceneManager* scene_manager = nullptr;
         };

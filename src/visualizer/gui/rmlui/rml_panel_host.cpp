@@ -9,6 +9,7 @@
 #include "gui/rmlui/rml_panel_host.hpp"
 #include "core/logger.hpp"
 #include "gui/panel_layout.hpp"
+#include "gui/rmlui/rml_document_utils.hpp"
 #include "gui/rmlui/rml_input_utils.hpp"
 #include "gui/rmlui/rml_text_input_handler.hpp"
 #include "gui/rmlui/rml_theme.hpp"
@@ -35,6 +36,7 @@
 #include <format>
 #include <imgui_impl_opengl3.h>
 #include <imgui_internal.h>
+#include <string_view>
 
 namespace lfs::vis::gui {
 
@@ -434,7 +436,7 @@ namespace lfs::vis::gui {
             const auto full_path = requested_path.is_absolute()
                                        ? requested_path
                                        : lfs::vis::getAssetPath(rml_path_);
-            document_ = rml_context_->LoadDocument(full_path.string());
+            document_ = rml_documents::loadDocument(rml_context_, full_path);
             if (document_) {
                 syncThemeProperties();
                 document_->Show();

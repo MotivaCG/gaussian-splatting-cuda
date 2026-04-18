@@ -495,6 +495,17 @@ namespace lfs::vis::gui {
         return result;
     }
 
+    std::filesystem::path SaveUsdzFileDialog(const std::string& defaultName,
+                                             const std::filesystem::path& defaultPath) {
+        std::filesystem::path result;
+        runDialog(makeSaveFileRequest(singleExtensionFilter("USDZ Files", ".usdz"),
+                                      defaultPath,
+                                      defaultName,
+                                      ".usdz"),
+                  result);
+        return result;
+    }
+
     std::filesystem::path SaveHtmlFileDialog(const std::string& defaultName,
                                              const std::filesystem::path& defaultPath) {
         std::filesystem::path result;

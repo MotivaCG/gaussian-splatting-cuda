@@ -65,6 +65,7 @@ namespace lfs::rendering {
                 .depth_is_ndc = metadata.depth_is_ndc,
                 .external_depth_texture = metadata.external_depth_texture,
                 .depth_texcoord_scale = metadata.depth_texcoord_scale,
+                .flip_y = metadata.flip_y,
                 .near_plane = metadata.near_plane,
                 .far_plane = metadata.far_plane,
                 .orthographic = metadata.orthographic};

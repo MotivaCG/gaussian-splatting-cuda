@@ -325,6 +325,7 @@
     "format.sog_supersplat": "SOG (SuperSplat)",
     "format.spz_niantic": "SPZ (Niantic)",
     "format.usd_openusd": "USD (OpenUSD)",
+    "format.usdz_nurec": "USDZ (NuRec)",
     "format.html_viewer": "Visor HTML",
     "select_models": "Seleccionar Modelos:",
     "all": "Todos",
@@ -853,7 +854,7 @@
     "zoom": "Zoom",
     "fit": "Ajustar",
     "storage_section": "ALMACENAMIENTO",
-    "color_picker": "Tomar"
+    "color_picker": "cuentagotas"
   },
   "startup": {
     "supported_by": "Apoyado por",
@@ -996,7 +997,9 @@
     "confirm_uninstall_message": "¿Seguro que deseas desinstalar \"{name}\"?",
     "confirm_uninstall_yes": "Sí",
     "confirm_uninstall_no": "No",
-    "load_on_startup": "Cargar al inicio"
+    "load_on_startup": "Cargar al inicio",
+    "view.grid": "Vista de cuadrícula",
+    "view.list": "Vista de lista"
   },
   "sequencer": {
     "edit_focal_length": "Editar distancia focal...",

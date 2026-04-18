@@ -128,6 +128,8 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         # Sequencer (camera animation)
         sequencer/sequencer_controller.cpp
         sequencer/rml_sequencer_panel.cpp
+        sequencer/rml_sequencer_panel_timeline.cpp
+        sequencer/rml_sequencer_panel_timeline_input.cpp
 
         # Operator system (Blender-style)
         operator/operator_context.cpp
@@ -169,6 +171,7 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         gui/rmlui/rmlui_gl3_backend.cpp
         gui/rmlui/rmlui_manager.cpp
         gui/rmlui/rml_fbo.cpp
+        gui/rmlui/rml_document_utils.cpp
         gui/rmlui/rml_panel_host.cpp
         gui/rmlui/rml_theme.cpp
         gui/rmlui/elements/chromaticity_element.cpp
@@ -182,6 +185,17 @@ set_source_files_properties(
         ${CMAKE_CURRENT_SOURCE_DIR}/gui/rmlui/rmlui_gl3_backend.cpp
         PROPERTIES COMPILE_DEFINITIONS "RMLUI_GL3_CUSTOM_LOADER=<glad/glad.h>"
 )
+
+# MSVC 14.44 ICEs (C1001 in msc1.cpp:1589) on the sequencer panel TUs under
+# /std:c++latest in both Debug (/Od /RTC1) and Release (/O2 /Ob2). Pin them to
+# /std:c++23 (not "latest") and add /bigobj for the heavy tensor + RmlUI + fmt instantiations.
+if(MSVC)
+    set_source_files_properties(
+            ${CMAKE_CURRENT_SOURCE_DIR}/sequencer/rml_sequencer_panel.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/sequencer/rml_sequencer_panel_timeline.cpp
+            PROPERTIES COMPILE_OPTIONS "/std:c++23;/bigobj"
+    )
+endif()
 
 # Set include directories
 target_include_directories(lfs_visualizer

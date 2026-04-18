@@ -20,11 +20,12 @@ namespace lfs::core {
     class Scene;
 
     // Export format enum
-    enum class ExportFormat { PLY,
-                              SOG,
-                              SPZ,
-                              HTML_VIEWER,
-                              USD };
+    enum class ExportFormat { PLY = 0,
+                              SOG = 1,
+                              SPZ = 2,
+                              HTML_VIEWER = 3,
+                              USD = 4,
+                              NUREC_USDZ = 5 };
 
 // Event macro using shared event bridge (solves singleton duplication between exe and Python module)
 #define EVENT(Name, ...)                                   \

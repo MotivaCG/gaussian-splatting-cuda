@@ -209,6 +209,8 @@ namespace lfs::rendering {
         bool depth_is_ndc = false;               // True if depth is already NDC (0-1), e.g., from OpenGL
         unsigned int external_depth_texture = 0; // If set, use this OpenGL texture directly (zero-copy)
         glm::vec2 depth_texcoord_scale{1.0f, 1.0f};
+        // Presentation orientation for the screen quad.
+        bool flip_y = false;
         float near_plane = DEFAULT_NEAR_PLANE;
         float far_plane = DEFAULT_FAR_PLANE;
         bool orthographic = false;

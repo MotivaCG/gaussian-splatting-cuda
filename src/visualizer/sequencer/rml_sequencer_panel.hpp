@@ -20,10 +20,13 @@ namespace Rml {
 } // namespace Rml
 
 namespace lfs::vis::gui {
+    class FilmStripRenderer;
     class RmlUIManager;
 } // namespace lfs::vis::gui
 
 namespace lfs::vis {
+    class RenderingManager;
+    class SceneManager;
 
     struct Theme;
 
@@ -116,7 +119,11 @@ namespace lfs::vis {
         RmlSequencerPanel& operator=(const RmlSequencerPanel&) = delete;
 
         void render(float panel_x, float panel_y, float panel_width, float total_height,
-                    const PanelInputState& input);
+                    const PanelInputState& input,
+                    RenderingManager* rm, SceneManager* sm,
+                    gui::FilmStripRenderer& film_strip);
+        void compositeToScreen(int screen_w, int screen_h);
+        void clearPendingComposite();
 
         void setFilmStripAttached(bool attached) { film_strip_attached_ = attached; }
         void setFloating(bool floating) { floating_ = floating; }
@@ -151,8 +158,6 @@ namespace lfs::vis {
         [[nodiscard]] TimeEditRequest consumeTimeEditRequest();
         [[nodiscard]] FocalEditRequest consumeFocalEditRequest();
 
-        [[nodiscard]] std::string consumeTooltip();
-
         void destroyGLResources();
 
     private:
@@ -168,6 +173,19 @@ namespace lfs::vis {
         void updateTransportSettings();
         void rebuildKeyframes();
         void rebuildRuler();
+        void rebuildEasingStripe(float timeline_x, float timeline_width);
+        void rebuildFilmStrip(float timeline_x, float timeline_width,
+                              float strip_y, const PanelInputState& input,
+                              RenderingManager* rm, SceneManager* sm,
+                              gui::FilmStripRenderer& film_strip);
+        void rebuildFilmStripDecor(float timeline_width);
+        void ensureFilmThumbPool(size_t count);
+        void clearFilmThumbPool();
+        void unregisterFilmStripSources();
+        void updateTimelineGuides(float timeline_x, float timeline_width,
+                                  const gui::FilmStripRenderer& film_strip);
+        void updateTimelineTooltip(const gui::FilmStripRenderer& film_strip,
+                                   const PanelInputState& input);
         void forwardInput(const PanelInputState& input);
 
         struct Vec2 {
@@ -176,6 +194,11 @@ namespace lfs::vis {
 
         void handleTimelineInteraction(const Vec2& pos, float width, float height,
                                        const PanelInputState& input);
+        void handleEasingStripeInteraction(float timeline_x, float timeline_width,
+                                           const PanelInputState& input);
+        void handleFilmStripInteraction(float timeline_x, float timeline_width,
+                                        const PanelInputState& input,
+                                        gui::FilmStripRenderer& film_strip);
 
         void clampPanOffset();
         [[nodiscard]] float timeToX(float time, float timeline_x, float timeline_width) const;
@@ -227,6 +250,25 @@ namespace lfs::vis {
         Rml::Element* el_play_icon_ = nullptr;
         Rml::Element* el_btn_loop_ = nullptr;
         Rml::Element* el_timeline_ = nullptr;
+        Rml::Element* el_header_ = nullptr;
+        Rml::Element* el_easing_stripe_ = nullptr;
+        Rml::Element* el_easing_segments_ = nullptr;
+        Rml::Element* el_easing_curves_ = nullptr;
+        Rml::Element* el_easing_indicators_ = nullptr;
+        Rml::Element* el_film_strip_panel_ = nullptr;
+        Rml::Element* el_film_strip_groove_ = nullptr;
+        Rml::Element* el_film_strip_gaps_ = nullptr;
+        Rml::Element* el_film_strip_thumbs_ = nullptr;
+        Rml::Element* el_film_strip_markers_ = nullptr;
+        Rml::Element* el_film_strip_dividers_ = nullptr;
+        Rml::Element* el_film_strip_sprockets_top_ = nullptr;
+        Rml::Element* el_film_strip_sprockets_bottom_ = nullptr;
+        Rml::Element* el_panel_guides_ = nullptr;
+        Rml::Element* el_guide_playhead_ = nullptr;
+        Rml::Element* el_guide_selected_ = nullptr;
+        Rml::Element* el_guide_hovered_ = nullptr;
+        Rml::Element* el_guide_strip_hover_ = nullptr;
+        Rml::Element* el_timeline_tooltip_ = nullptr;
 
         // Transport settings elements
         Rml::Element* el_btn_camera_path_ = nullptr;
@@ -254,6 +296,8 @@ namespace lfs::vis {
 
         // Keyframe element pool
         std::vector<Rml::Element*> keyframe_elements_;
+        std::vector<Rml::Element*> film_thumb_elements_;
+        std::set<std::string> registered_film_strip_sources_;
 
         // Dirty tracking
         size_t last_keyframe_count_ = 0;
@@ -278,17 +322,24 @@ namespace lfs::vis {
         bool playhead_in_range_ = false;
         float cached_dp_ratio_ = 1.0f;
         float cached_height_ = panel_config::HEIGHT;
+        float cached_total_height_ = panel_config::HEIGHT + panel_config::EASING_STRIPE_HEIGHT;
 
         gui::RmlFBO fbo_;
+        bool pending_foreground_composite_ = false;
+        float pending_composite_x_ = 0.0f;
+        float pending_composite_y_ = 0.0f;
+        float pending_composite_width_ = 0.0f;
+        float pending_composite_height_ = 0.0f;
 
         // Interaction state
         bool dragging_playhead_ = false;
         bool dragging_keyframe_ = false;
         bool dragged_keyframe_changed_ = false;
+        bool film_strip_scrubbing_ = false;
         sequencer::KeyframeId dragged_keyframe_id_ = sequencer::INVALID_KEYFRAME_ID;
         float drag_start_mouse_x_ = 0.0f;
         std::optional<size_t> hovered_keyframe_;
-        std::set<sequencer::KeyframeId> selected_keyframes_;
+        std::vector<sequencer::KeyframeId> selected_keyframes_;
 
         float zoom_level_ = 1.0f;
         float pan_offset_ = 0.0f;
@@ -332,7 +383,6 @@ namespace lfs::vis {
         bool hovered_ = false;
         bool wants_keyboard_ = false;
         bool last_hovered_ = false;
-        std::string tooltip_;
         std::string last_language_;
     };
 

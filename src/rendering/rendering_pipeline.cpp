@@ -469,6 +469,7 @@ namespace lfs::rendering {
                     .image = std::move(render_output.image),
                     .depth = std::move(render_output.depth),
                     .valid = true,
+                    .flip_y = true,
                     .far_plane = request.far_plane,
                     .orthographic = request.orthographic,
                     .color_has_alpha = request.transparent_background};
@@ -898,9 +899,13 @@ namespace lfs::rendering {
     Result<lfs::core::Camera> RenderingPipeline::createCamera(const RasterRequest& request) {
         LOG_TIMER_TRACE("RenderingPipeline::createCamera");
 
-        const glm::mat3 raster_camera_to_world =
-            rasterCameraToWorldFromVisualizerRotation(request.view_rotation);
-        const glm::mat3 world_to_camera = glm::transpose(raster_camera_to_world);
+        // GUT / equirectangular camera models use dataset-style (+Y down) camera coordinates,
+        // while the standard viewer raster path uses the rasterizer basis (+Y up).
+        const glm::mat3 camera_to_world =
+            (request.gut || request.equirectangular)
+                ? dataCameraToWorldFromVisualizerRotation(request.view_rotation)
+                : rasterCameraToWorldFromVisualizerRotation(request.view_rotation);
+        const glm::mat3 world_to_camera = glm::transpose(camera_to_world);
         const glm::vec3 translation = -world_to_camera * request.view_translation;
 
         std::vector<float> R_data;

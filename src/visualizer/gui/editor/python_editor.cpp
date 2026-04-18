@@ -8,6 +8,8 @@
 #include "gui/gui_focus_state.hpp"
 #include "theme/theme.hpp"
 
+#include <SDL3/SDL_clipboard.h>
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -22,6 +24,7 @@
 #include <imgui.h>
 
 #include <zep/buffer.h>
+#include <zep/commands.h>
 #include <zep/imgui/display_imgui.h>
 #include <zep/imgui/editor_imgui.h>
 #include <zep/mode.h>
@@ -67,6 +70,21 @@ namespace lfs::vis::editor {
 
         ImVec4 with_alpha(const ImVec4& color, float alpha) {
             return {color.x, color.y, color.z, alpha};
+        }
+
+        std::string get_system_clipboard_text() {
+            char* clipboard = SDL_GetClipboardText();
+            if (clipboard == nullptr) {
+                return {};
+            }
+
+            std::string text = clipboard;
+            SDL_free(clipboard);
+            return text;
+        }
+
+        void set_system_clipboard_text(const std::string& text) {
+            SDL_SetClipboardText(text.c_str());
         }
 
         std::string rstrip_lines(const std::string& text) {
@@ -424,17 +442,13 @@ namespace lfs::vis::editor {
 
             void Notify(std::shared_ptr<Zep::ZepMessage> message) override {
                 if (message->messageId == Zep::Msg::GetClipBoard) {
-                    if (const char* clipboard = ImGui::GetClipboardText()) {
-                        message->str = clipboard;
-                    } else {
-                        message->str.clear();
-                    }
+                    message->str = get_system_clipboard_text();
                     message->handled = true;
                     return;
                 }
 
                 if (message->messageId == Zep::Msg::SetClipBoard) {
-                    ImGui::SetClipboardText(message->str.c_str());
+                    set_system_clipboard_text(message->str);
                     message->handled = true;
                     return;
                 }
@@ -1687,6 +1701,213 @@ namespace lfs::vis::editor {
             editor->RequestRefresh();
         }
 
+        std::optional<Zep::GlyphRange> currentSelectionRange() const {
+            if (buffer == nullptr || !buffer->HasSelection()) {
+                return std::nullopt;
+            }
+
+            auto range = buffer->GetInclusiveSelection();
+            if (!range.first.Valid() || !range.second.Valid()) {
+                return std::nullopt;
+            }
+
+            if (range.second < range.first) {
+                std::swap(range.first, range.second);
+            }
+
+            return range;
+        }
+
+        Zep::GlyphIterator selectionEndExclusive(const Zep::GlyphRange& range) const {
+            auto end = range.second;
+            if (buffer == nullptr) {
+                return end;
+            }
+
+            const auto buffer_end = buffer->End();
+            if (end < buffer_end) {
+                end = end.Peek(1);
+            }
+            return end;
+        }
+
+        bool hasEditableSelection() const {
+            const auto range = currentSelectionRange();
+            if (!range.has_value()) {
+                return false;
+            }
+
+            const auto end = selectionEndExclusive(*range);
+            return range->first.Valid() && end.Valid() && range->first < end;
+        }
+
+        void syncRegistersToClipboard(const std::string& text) {
+            if (editor == nullptr) {
+                set_system_clipboard_text(text);
+                return;
+            }
+
+            editor->SetRegister('"', Zep::Register(text));
+            editor->SetRegister('*', Zep::Register(text));
+            editor->SetRegister('+', Zep::Register(text));
+        }
+
+        void focusEditor() {
+            request_focus = true;
+            force_unfocused = false;
+        }
+
+        void copySelectionToClipboard() {
+            if (buffer == nullptr) {
+                return;
+            }
+
+            const auto range = currentSelectionRange();
+            if (!range.has_value()) {
+                return;
+            }
+
+            const auto end = selectionEndExclusive(*range);
+            if (!(range->first < end)) {
+                return;
+            }
+
+            syncRegistersToClipboard(buffer->GetBufferText(range->first, end));
+        }
+
+        void clearSelectionAndReturnToDefaultMode() {
+            if (buffer != nullptr) {
+                buffer->ClearSelection();
+            }
+            if (auto* mode = buffer != nullptr ? buffer->GetMode() : nullptr) {
+                mode->SwitchMode(mode->DefaultMode());
+            }
+            if (editor != nullptr) {
+                editor->RequestRefresh();
+            }
+        }
+
+        void cutSelectionToClipboard() {
+            if (read_only || buffer == nullptr || editor == nullptr) {
+                return;
+            }
+
+            const auto range = currentSelectionRange();
+            if (!range.has_value()) {
+                return;
+            }
+
+            const auto end = selectionEndExclusive(*range);
+            if (!(range->first < end)) {
+                return;
+            }
+
+            copySelectionToClipboard();
+
+            auto* window = editor->GetActiveWindow();
+            auto* mode = buffer->GetMode();
+            if (window == nullptr || mode == nullptr) {
+                return;
+            }
+
+            const auto cursor_before = window->GetBufferCursor();
+            mode->AddCommand(std::make_shared<Zep::ZepCommand_GroupMarker>(*buffer));
+            mode->AddCommand(std::make_shared<Zep::ZepCommand_DeleteRange>(
+                *buffer, range->first, end, cursor_before, range->first));
+
+            clearSelectionAndReturnToDefaultMode();
+            focusEditor();
+        }
+
+        void pasteFromClipboard() {
+            if (read_only || buffer == nullptr || editor == nullptr) {
+                return;
+            }
+
+            const std::string text = get_system_clipboard_text();
+            if (text.empty()) {
+                return;
+            }
+
+            syncRegistersToClipboard(text);
+
+            auto* window = editor->GetActiveWindow();
+            auto* mode = buffer->GetMode();
+            if (window == nullptr || mode == nullptr) {
+                return;
+            }
+
+            const auto cursor_before = window->GetBufferCursor();
+            mode->AddCommand(std::make_shared<Zep::ZepCommand_GroupMarker>(*buffer));
+
+            const auto range = currentSelectionRange();
+            if (range.has_value()) {
+                const auto end = selectionEndExclusive(*range);
+                mode->AddCommand(std::make_shared<Zep::ZepCommand_ReplaceRange>(
+                    *buffer,
+                    Zep::ReplaceRangeMode::Replace,
+                    range->first,
+                    end,
+                    text,
+                    cursor_before,
+                    range->first.PeekByteOffset(static_cast<long>(text.size()))));
+            } else {
+                mode->AddCommand(std::make_shared<Zep::ZepCommand_Insert>(
+                    *buffer,
+                    cursor_before,
+                    text,
+                    cursor_before,
+                    cursor_before.PeekByteOffset(static_cast<long>(text.size()))));
+            }
+
+            clearSelectionAndReturnToDefaultMode();
+            focusEditor();
+        }
+
+        void selectAll() {
+            if (buffer == nullptr || editor == nullptr) {
+                return;
+            }
+
+            const auto begin = buffer->Begin();
+            const auto end = buffer->End();
+            if (!begin.Valid() || !end.Valid() || !(begin < end)) {
+                return;
+            }
+
+            buffer->SetSelection(Zep::GlyphRange(begin, end));
+            if (auto* window = editor->GetActiveWindow()) {
+                window->SetBufferCursor(end);
+            }
+            if (auto* mode = buffer->GetMode()) {
+                mode->SwitchMode(Zep::EditorMode::Visual);
+            }
+            editor->RequestRefresh();
+            focusEditor();
+        }
+
+        void undo() {
+            if (buffer == nullptr) {
+                return;
+            }
+            if (auto* mode = buffer->GetMode()) {
+                mode->Undo();
+            }
+            clearSelectionAndReturnToDefaultMode();
+            focusEditor();
+        }
+
+        void redo() {
+            if (buffer == nullptr) {
+                return;
+            }
+            if (auto* mode = buffer->GetMode()) {
+                mode->Redo();
+            }
+            clearSelectionAndReturnToDefaultMode();
+            focusEditor();
+        }
+
         std::unique_ptr<Zep::ZepEditor_ImGui> editor;
         Zep::ZepBuffer* buffer = nullptr;
         Host host;
@@ -1817,6 +2038,34 @@ namespace lfs::vis::editor {
             if (impl_->completion.visible && !impl_->completion.hovered &&
                 !child_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 impl_->completion.clear();
+            }
+
+            if (ImGui::BeginPopupContextWindow("##python_editor_context",
+                                               ImGuiPopupFlags_MouseButtonRight)) {
+                const bool has_selection = impl_->hasEditableSelection();
+                const bool can_modify = !impl_->read_only;
+
+                if (ImGui::MenuItem("Undo", "Ctrl+Z", false, can_modify)) {
+                    impl_->undo();
+                }
+                if (ImGui::MenuItem("Redo", "Ctrl+Y", false, can_modify)) {
+                    impl_->redo();
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Cut", "Ctrl+X", false, can_modify && has_selection)) {
+                    impl_->cutSelectionToClipboard();
+                }
+                if (ImGui::MenuItem("Copy", "Ctrl+C", false, has_selection)) {
+                    impl_->copySelectionToClipboard();
+                }
+                if (ImGui::MenuItem("Paste", "Ctrl+V", false, can_modify)) {
+                    impl_->pasteFromClipboard();
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Select All", "Ctrl+A")) {
+                    impl_->selectAll();
+                }
+                ImGui::EndPopup();
             }
 
             impl_->request_focus = false;

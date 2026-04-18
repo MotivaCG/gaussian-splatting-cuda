@@ -13,6 +13,7 @@
 #include "theme/theme.hpp"
 #include "training/trainer.hpp"
 #include "training/training_manager.hpp"
+#include "viewport_region_utils.hpp"
 #include <glad/glad.h>
 #include <optional>
 #include <shared_mutex>
@@ -66,11 +67,11 @@ namespace lfs::vis {
             }
         }
 
-        glm::ivec2 current_size = context.viewport.windowSize;
+        const auto framebuffer_region =
+            resolveFramebufferViewportRegion(context.viewport, context.logical_screen_size, context.viewport_region);
+        glm::ivec2 current_size = context.viewport.frameBufferSize;
         if (context.viewport_region) {
-            current_size = glm::ivec2(
-                static_cast<int>(context.viewport_region->width),
-                static_cast<int>(context.viewport_region->height));
+            current_size = framebuffer_region.size;
         }
 
         if (current_size.x <= 0 || current_size.y <= 0) {
@@ -142,24 +143,24 @@ namespace lfs::vis {
         glClearColor(shell_bg.x, shell_bg.y, shell_bg.z, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
-        if (context.viewport_region) {
-            const GLint x = static_cast<GLint>(context.viewport_region->x);
-            const GLint y = context.viewport.frameBufferSize.y -
-                            static_cast<GLint>(context.viewport_region->y + context.viewport_region->height);
-            const GLsizei w = static_cast<GLsizei>(context.viewport_region->width);
-            const GLsizei h = static_cast<GLsizei>(context.viewport_region->height);
-            glViewport(x, y, w, h);
-            glScissor(x, y, w, h);
+        if (context.viewport_region && framebuffer_region.valid()) {
+            glViewport(framebuffer_region.gl_pos.x,
+                       framebuffer_region.gl_pos.y,
+                       framebuffer_region.size.x,
+                       framebuffer_region.size.y);
+            glScissor(framebuffer_region.gl_pos.x,
+                      framebuffer_region.gl_pos.y,
+                      framebuffer_region.size.x,
+                      framebuffer_region.size.y);
             glEnable(GL_SCISSOR_TEST);
         }
 
         DirtyMask frame_dirty = dirty_mask_.exchange(0);
-        if (frame_dirty == 0 &&
-            !has_renderable_content &&
+        if (!has_renderable_content &&
             !splitViewEnabled(settings_.split_view_mode)) {
-            // GUI-only animation frames still clear the shell background first. When the scene is
-            // empty, force the viewport background pass so the empty startup view keeps its own
-            // black clear + grid instead of flashing the UI shell color.
+            // The shell is cleared before render passes run. When the scene is empty, always run
+            // the viewport background pass as well so GUI/layout-only frames cannot leak the shell
+            // theme color into the viewport region.
             frame_dirty |= DirtyFlag::BACKGROUND;
         }
         RenderFrameCoordinator frame_coordinator{
@@ -173,6 +174,7 @@ namespace lfs::vis {
              .render_count = render_count_}};
         const auto frame_result = frame_coordinator.execute(
             {.viewport = context.viewport,
+             .logical_screen_size = context.logical_screen_size,
              .viewport_region = context.viewport_region,
              .scene_manager = scene_manager,
              .model = model,

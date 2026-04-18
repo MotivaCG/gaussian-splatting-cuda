@@ -324,6 +324,7 @@
     "format.sog_supersplat": "SOG（SuperSplat）",
     "format.spz_niantic": "SPZ（Niantic）",
     "format.usd_openusd": "USD (OpenUSD)",
+    "format.usdz_nurec": "USDZ (NuRec)",
     "format.html_viewer": "HTML查看器",
     "select_models": "选择模型：",
     "all": "全部",
@@ -995,7 +996,9 @@
     "sort.popularity_desc": "热门优先",
     "sort.popularity_asc": "冷门优先",
     "downloads": "下载量",
-    "load_on_startup": "启动时加载"
+    "load_on_startup": "启动时加载",
+    "view.grid": "网格视图",
+    "view.list": "列表视图"
   },
   "sequencer": {
     "edit_focal_length": "编辑焦距...",

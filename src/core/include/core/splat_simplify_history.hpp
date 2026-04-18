@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "core/splat_simplify.hpp"
 #include "core/tensor.hpp"
 
 #include <cstdint>
@@ -44,5 +45,15 @@ namespace lfs::core {
             return static_cast<int>(merge_left.size());
         }
     };
+
+    struct SplatSimplifyResult {
+        std::unique_ptr<SplatData> splat;
+        SplatSimplifyMergeTree merge_tree;
+    };
+
+    LFS_CORE_API std::expected<SplatSimplifyResult, std::string> simplify_splats_with_history(
+        const SplatData& input,
+        const SplatSimplifyOptions& options = {},
+        SplatSimplifyProgressCallback progress = {});
 
 } // namespace lfs::core

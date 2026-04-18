@@ -26,9 +26,6 @@ def register_builtin_panels():
         from . import selection_groups
         selection_groups.register()
 
-        from . import transform_controls
-        transform_controls.register()
-
         from . import operators
         operators.register()
 

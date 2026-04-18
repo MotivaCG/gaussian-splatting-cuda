@@ -11,6 +11,7 @@
 #include "core/image_io.hpp"
 #include "core/logger.hpp"
 #include "gui/gui_focus_state.hpp"
+#include "gui/rmlui/rml_document_utils.hpp"
 #include "gui/rmlui/rml_input_utils.hpp"
 #include "gui/rmlui/rml_theme.hpp"
 #include "gui/rmlui/rmlui_manager.hpp"
@@ -96,7 +97,7 @@ namespace lfs::vis::gui {
 
         try {
             const auto rml_path = lfs::vis::getAssetPath("rmlui/startup.rml");
-            document_ = rml_context_->LoadDocument(rml_path.string());
+            document_ = rml_documents::loadDocument(rml_context_, rml_path);
             if (!document_) {
                 LOG_ERROR("StartupOverlay: failed to load startup.rml");
                 return;
@@ -238,7 +239,7 @@ namespace lfs::vis::gui {
             is_light ? "lichtfeld-splash-logo-dark.png" : "lichtfeld-splash-logo.png");
         auto* logo = document_->GetElementById("logo");
         if (logo) {
-            logo->SetAttribute("src", logo_path.string());
+            logo->SetAttribute("src", rml_theme::pathToRmlImageSource(logo_path));
             auto [w, h, c] = lfs::core::get_image_info(logo_path);
             if (w > 0 && h > 0) {
                 logo->SetProperty("width", std::format("{:.0f}dp", w * 1.3f));
@@ -250,7 +251,7 @@ namespace lfs::vis::gui {
             is_light ? "core11-logo-dark.png" : "core11-logo.png");
         auto* core11 = document_->GetElementById("core11-logo");
         if (core11) {
-            core11->SetAttribute("src", core11_path.string());
+            core11->SetAttribute("src", rml_theme::pathToRmlImageSource(core11_path));
             auto [w, h, c] = lfs::core::get_image_info(core11_path);
             if (w > 0 && h > 0) {
                 core11->SetProperty("width", std::format("{:.0f}dp", w * 0.5f));
@@ -262,7 +263,7 @@ namespace lfs::vis::gui {
             is_light ? "volinga-logo-dark.png" : "volinga-logo.png");
         auto* volinga = document_->GetElementById("volinga-logo");
         if (volinga) {
-            volinga->SetAttribute("src", volinga_path.string());
+            volinga->SetAttribute("src", rml_theme::pathToRmlImageSource(volinga_path));
             auto [w, h, c] = lfs::core::get_image_info(volinga_path);
             if (w > 0 && h > 0) {
                 constexpr float TARGET_HEIGHT_DP = 24.0f;

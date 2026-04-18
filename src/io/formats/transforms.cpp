@@ -306,6 +306,17 @@ namespace lfs::io {
                 Tensor fixMat = createYRotationMatrix(static_cast<float>(M_PI));
                 w2c = w2c.mm(fixMat);
 
+                // In the post-efd822c4 coordinate refactor, transforms datasets convert their point cloud
+                // into the repo's "data/COLMAP" world basis by flipping Y/Z. To keep cameras and points
+                // consistent for training (especially GUT/3DGRUT which assumes OpenCV-style camera coords),
+                // apply the same world-basis flip to the camera extrinsics.
+                //
+                // This is a world-basis change, so it must be right-multiplied into the world->camera matrix.
+                Tensor worldAxesFlip = lfs::core::Tensor::eye(4, Device::CPU);
+                worldAxesFlip[1][1] = -1.0f;
+                worldAxesFlip[2][2] = -1.0f;
+                w2c = w2c.mm(worldAxesFlip);
+
                 // Extract rotation matrix R (transposed due to 'glm' in CUDA code)
                 // R = np.transpose(w2c[:3,:3])
                 lfs::core::Tensor R = w2c.slice(0, 0, 3).slice(1, 0, 3);

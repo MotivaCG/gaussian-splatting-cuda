@@ -6,7 +6,9 @@
 
 #include "core/export.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <expected>
 #include <filesystem>
 #include <string>
@@ -39,6 +41,19 @@ namespace lfs::core {
         inline constexpr std::string_view kStrategyMNRFLegacy = "mnrf";
         inline constexpr std::string_view kStrategyLFSLegacy = "lfs";
         inline constexpr std::string_view kStrategyIGSPlus = "igs+";
+
+        [[nodiscard]] inline std::filesystem::path default_dataset_output_path(
+            const std::filesystem::path& dataset_path) {
+            auto base_path = dataset_path;
+            auto ext = dataset_path.extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](const unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            if (ext == ".json") {
+                base_path = dataset_path.parent_path();
+            }
+            return base_path / "output";
+        }
 
         [[nodiscard]] inline constexpr std::string_view canonical_strategy_name(const std::string_view strategy) noexcept {
             if (strategy == kStrategyMCMC)

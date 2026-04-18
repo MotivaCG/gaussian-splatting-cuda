@@ -1937,6 +1937,11 @@ def save_usd_file_dialog(default_name: str = 'export') -> str:
     Open a save file dialog for USD files. Returns empty string if cancelled.
     """
 
+def save_usdz_file_dialog(default_name: str = 'export') -> str:
+    """
+    Open a save file dialog for USDZ files. Returns empty string if cancelled.
+    """
+
 def save_html_file_dialog(default_name: str = 'viewer') -> str:
     """
     Open a save file dialog for HTML viewer files. Returns empty string if cancelled.

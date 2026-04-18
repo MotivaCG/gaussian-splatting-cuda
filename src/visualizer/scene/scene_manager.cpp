@@ -764,9 +764,9 @@ namespace lfs::vis {
 
         selection_.clearNodeSelection();
         selection_.invalidateNodeMask();
-        python::set_application_scene(nullptr);
         clearAppearanceModel();
         scene_.clear();
+        python::set_application_scene(&scene_);
 
         if (lfs::io::CacheLoader::hasInstance()) {
             lfs::io::CacheLoader::getInstance().reset_cache();

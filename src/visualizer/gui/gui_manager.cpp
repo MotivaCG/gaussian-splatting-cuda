@@ -145,6 +145,45 @@ namespace lfs::vis::gui {
                 SDL_StopTextInput(window);
         }
 
+        SDL_Cursor* systemCursorForImGuiCursor(const ImGuiMouseCursor cursor) {
+            switch (cursor) {
+            case ImGuiMouseCursor_TextInput: {
+                static SDL_Cursor* const value = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_TEXT);
+                return value;
+            }
+            case ImGuiMouseCursor_Hand: {
+                static SDL_Cursor* const value = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_POINTER);
+                return value;
+            }
+            case ImGuiMouseCursor_ResizeEW: {
+                static SDL_Cursor* const value = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_EW_RESIZE);
+                return value;
+            }
+            case ImGuiMouseCursor_ResizeNS: {
+                static SDL_Cursor* const value = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_NS_RESIZE);
+                return value;
+            }
+            case ImGuiMouseCursor_ResizeNWSE: {
+                static SDL_Cursor* const value = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_NWSE_RESIZE);
+                return value;
+            }
+            case ImGuiMouseCursor_ResizeNESW: {
+                static SDL_Cursor* const value = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_NESW_RESIZE);
+                return value;
+            }
+            case ImGuiMouseCursor_ResizeAll: {
+                static SDL_Cursor* const value = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_MOVE);
+                return value;
+            }
+            case ImGuiMouseCursor_NotAllowed: {
+                static SDL_Cursor* const value = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_NOT_ALLOWED);
+                return value;
+            }
+            default:
+                return nullptr;
+            }
+        }
+
         void drawFrameTooltip(const std::string& tip, int screen_w, int screen_h) {
             if (tip.empty())
                 return;
@@ -1508,6 +1547,8 @@ namespace lfs::vis::gui {
             applyRmlCursorRequest(rmlui_manager_.consumeCursorRequest());
         apply_cursor(rml_right_panel_.getCursorRequest());
         apply_cursor(panel_layout_.getCursorRequest());
+        if (SDL_Cursor* const cursor = systemCursorForImGuiCursor(ImGui::GetMouseCursor()))
+            SDL_SetCursor(cursor);
         syncWindowTextInput(viewer_->getWindow());
 
         ImGui::Render();
@@ -1644,6 +1685,23 @@ namespace lfs::vis::gui {
                 return ImVec2(panel_ctx.x + x * render_to_screen_x,
                               panel_ctx.y + y * render_to_screen_y);
             };
+            // Keep preview overlays inside the live viewport region so docked panels stay in front.
+            const auto push_preview_clip = [&](const PreviewPanelContext& panel_ctx) {
+                const ImVec2 clip_min(panel_ctx.x, panel_ctx.y);
+                float clip_bottom = panel_ctx.y + panel_ctx.height;
+                const float bottom_dock_top = panel_layout_.bottomDockTopY();
+                if (bottom_dock_top > 0.0f) {
+                    clip_bottom = std::min(clip_bottom, bottom_dock_top);
+                }
+
+                const ImVec2 clip_max(panel_ctx.x + panel_ctx.width, clip_bottom);
+                if (clip_max.x <= clip_min.x || clip_max.y <= clip_min.y) {
+                    return false;
+                }
+
+                draw_list->PushClipRect(clip_min, clip_max, true);
+                return true;
+            };
 
             if (rm && rm->isCursorPreviewActive()) {
                 const auto& t = theme();
@@ -1661,8 +1719,11 @@ namespace lfs::vis::gui {
                 const ImU32 brush_color = add_mode
                                               ? toU32WithAlpha(t.palette.success, 0.8f)
                                               : toU32WithAlpha(t.palette.error, 0.8f);
-                draw_list->AddCircle(screen_pos, screen_radius, brush_color, 32, 2.0f);
-                draw_list->AddCircleFilled(screen_pos, 3.0f, brush_color);
+                if (push_preview_clip(panel_ctx)) {
+                    draw_list->AddCircle(screen_pos, screen_radius, brush_color, 32, 2.0f);
+                    draw_list->AddCircleFilled(screen_pos, 3.0f, brush_color);
+                    draw_list->PopClipRect();
+                }
             }
 
             if (rm && rm->isRectPreviewActive()) {
@@ -1682,8 +1743,11 @@ namespace lfs::vis::gui {
                                                ? toU32WithAlpha(t.palette.success, 0.8f)
                                                : toU32WithAlpha(t.palette.error, 0.8f);
 
-                draw_list->AddRectFilled(p0, p1, fill_color);
-                draw_list->AddRect(p0, p1, border_color, 0.0f, 0, 2.0f);
+                if (push_preview_clip(panel_ctx)) {
+                    draw_list->AddRectFilled(p0, p1, fill_color);
+                    draw_list->AddRect(p0, p1, border_color, 0.0f, 0, 2.0f);
+                    draw_list->PopClipRect();
+                }
             }
 
             if (rm && rm->isPolygonPreviewActive()) {
@@ -1750,90 +1814,81 @@ namespace lfs::vis::gui {
                         }
                     }
 
-                    const ImVec2 clip_min(panel_ctx.x, panel_ctx.y);
-                    float clip_bottom = panel_ctx.y + panel_ctx.height;
-                    if (panel_layout_.isShowSequencer()) {
-                        const float seq_top = sequencer_ui_.panelTopY();
-                        if (seq_top > 0.0f) {
-                            clip_bottom = std::min(clip_bottom, seq_top);
+                    if (push_preview_clip(panel_ctx)) {
+                        if (closed && screen_points.size() >= 3) {
+                            draw_list->AddConvexPolyFilled(screen_points.data(), static_cast<int>(screen_points.size()), fill_color);
                         }
-                    }
-                    const ImVec2 clip_max(panel_ctx.x + panel_ctx.width, clip_bottom);
-                    draw_list->PushClipRect(clip_min, clip_max, true);
 
-                    if (closed && screen_points.size() >= 3) {
-                        draw_list->AddConvexPolyFilled(screen_points.data(), static_cast<int>(screen_points.size()), fill_color);
-                    }
-
-                    for (size_t i = 0; i + 1 < screen_points.size(); ++i) {
-                        draw_list->AddLine(screen_points[i], screen_points[i + 1], line_color, 2.0f);
-                    }
-                    if (closed && screen_points.size() >= 3) {
-                        draw_list->AddLine(screen_points.back(), screen_points.front(), line_color, 2.0f);
-                    }
-
-                    const ImVec2 mouse_pos =
-                        s_frame_input
-                            ? ImVec2(s_frame_input->mouse_x, s_frame_input->mouse_y)
-                            : ImVec2(viewport_layout_.pos.x, viewport_layout_.pos.y);
-                    constexpr float CLOSE_THRESHOLD = 12.0f;
-                    constexpr float VERTEX_RADIUS = 5.0f;
-                    const auto distance_sq = [](const ImVec2 a, const ImVec2 b) {
-                        const float dx = a.x - b.x;
-                        const float dy = a.y - b.y;
-                        return dx * dx + dy * dy;
-                    };
-                    const bool can_close = !closed && screen_points.size() >= 3 &&
-                                           distance_sq(mouse_pos, screen_points.front()) <
-                                               CLOSE_THRESHOLD * CLOSE_THRESHOLD;
-                    int hovered_idx = -1;
-                    for (size_t i = 0; i < screen_points.size(); ++i) {
-                        if (distance_sq(mouse_pos, screen_points[i]) <= VERTEX_RADIUS * VERTEX_RADIUS) {
-                            hovered_idx = static_cast<int>(i);
-                            break;
+                        for (size_t i = 0; i + 1 < screen_points.size(); ++i) {
+                            draw_list->AddLine(screen_points[i], screen_points[i + 1], line_color, 2.0f);
                         }
-                    }
-
-                    if (!closed) {
-                        draw_list->AddLine(screen_points.back(), mouse_pos, line_to_mouse_color, 1.0f);
-
-                        if (can_close) {
-                            draw_list->AddCircle(screen_points.front(), 9.0f, close_hint_color, 16, 2.0f);
+                        if (closed && screen_points.size() >= 3) {
+                            draw_list->AddLine(screen_points.back(), screen_points.front(), line_color, 2.0f);
                         }
-                    }
 
-                    for (size_t i = 0; i < screen_points.size(); ++i) {
-                        const ImU32 color = (static_cast<int>(i) == hovered_idx || (can_close && i == 0))
-                                                ? vertex_hover_color
-                                                : vertex_color;
-                        draw_list->AddCircleFilled(screen_points[i], VERTEX_RADIUS, color);
-                        draw_list->AddCircle(screen_points[i], VERTEX_RADIUS, line_color, 16, 1.5f);
-                    }
-
-                    if (!screen_points.empty()) {
-                        const float initial_ring_radius = can_close ? 9.0f : 8.0f;
-                        const float initial_ring_thickness = can_close ? 2.0f : 1.5f;
-                        draw_list->AddCircle(screen_points.front(), initial_ring_radius,
-                                             close_hint_color, 24, initial_ring_thickness);
-                    }
-
-                    if (closed && screen_points.size() >= 3) {
-                        float cx = 0.0f, cy = 0.0f;
-                        for (const auto& sp : screen_points) {
-                            cx += sp.x;
-                            cy += sp.y;
+                        const ImVec2 mouse_pos =
+                            s_frame_input
+                                ? ImVec2(s_frame_input->mouse_x, s_frame_input->mouse_y)
+                                : ImVec2(viewport_layout_.pos.x, viewport_layout_.pos.y);
+                        constexpr float CLOSE_THRESHOLD = 12.0f;
+                        constexpr float VERTEX_RADIUS = 5.0f;
+                        const auto distance_sq = [](const ImVec2 a, const ImVec2 b) {
+                            const float dx = a.x - b.x;
+                            const float dy = a.y - b.y;
+                            return dx * dx + dy * dy;
+                        };
+                        const bool can_close = !closed && screen_points.size() >= 3 &&
+                                               distance_sq(mouse_pos, screen_points.front()) <
+                                                   CLOSE_THRESHOLD * CLOSE_THRESHOLD;
+                        int hovered_idx = -1;
+                        for (size_t i = 0; i < screen_points.size(); ++i) {
+                            if (distance_sq(mouse_pos, screen_points[i]) <= VERTEX_RADIUS * VERTEX_RADIUS) {
+                                hovered_idx = static_cast<int>(i);
+                                break;
+                            }
                         }
-                        cx /= static_cast<float>(screen_points.size());
-                        cy /= static_cast<float>(screen_points.size());
 
-                        const char* hint = "Enter to confirm\nShift-click edge: add\nCtrl-click vertex: remove";
-                        const ImVec2 text_size = ImGui::CalcTextSize(hint);
-                        draw_list->AddText(
-                            ImVec2(cx - text_size.x * 0.5f, cy - text_size.y * 0.5f),
-                            toU32WithAlpha(t.palette.text, 0.9f), hint);
+                        if (!closed && !screen_points.empty()) {
+                            draw_list->AddLine(screen_points.back(), mouse_pos, line_to_mouse_color, 1.0f);
+
+                            if (can_close) {
+                                draw_list->AddCircle(screen_points.front(), 9.0f, close_hint_color, 16, 2.0f);
+                            }
+                        }
+
+                        for (size_t i = 0; i < screen_points.size(); ++i) {
+                            const ImU32 color = (static_cast<int>(i) == hovered_idx || (can_close && i == 0))
+                                                    ? vertex_hover_color
+                                                    : vertex_color;
+                            draw_list->AddCircleFilled(screen_points[i], VERTEX_RADIUS, color);
+                            draw_list->AddCircle(screen_points[i], VERTEX_RADIUS, line_color, 16, 1.5f);
+                        }
+
+                        if (!screen_points.empty()) {
+                            const float initial_ring_radius = can_close ? 9.0f : 8.0f;
+                            const float initial_ring_thickness = can_close ? 2.0f : 1.5f;
+                            draw_list->AddCircle(screen_points.front(), initial_ring_radius,
+                                                 close_hint_color, 24, initial_ring_thickness);
+                        }
+
+                        if (closed && screen_points.size() >= 3) {
+                            float cx = 0.0f, cy = 0.0f;
+                            for (const auto& sp : screen_points) {
+                                cx += sp.x;
+                                cy += sp.y;
+                            }
+                            cx /= static_cast<float>(screen_points.size());
+                            cy /= static_cast<float>(screen_points.size());
+
+                            const char* hint = "Enter to confirm\nShift-click edge: add\nCtrl-click vertex: remove";
+                            const ImVec2 text_size = ImGui::CalcTextSize(hint);
+                            draw_list->AddText(
+                                ImVec2(cx - text_size.x * 0.5f, cy - text_size.y * 0.5f),
+                                toU32WithAlpha(t.palette.text, 0.9f), hint);
+                        }
+
+                        draw_list->PopClipRect();
                     }
-
-                    draw_list->PopClipRect();
                 }
             }
 
@@ -1848,11 +1903,14 @@ namespace lfs::vis::gui {
                                                  ? toU32WithAlpha(t.palette.success, 0.8f)
                                                  : toU32WithAlpha(t.palette.error, 0.8f);
 
-                    ImVec2 prev = render_to_screen(panel_ctx, points[0].first, points[0].second);
-                    for (size_t i = 1; i < points.size(); ++i) {
-                        ImVec2 curr = render_to_screen(panel_ctx, points[i].first, points[i].second);
-                        draw_list->AddLine(prev, curr, line_color, 2.0f);
-                        prev = curr;
+                    if (push_preview_clip(panel_ctx)) {
+                        ImVec2 prev = render_to_screen(panel_ctx, points[0].first, points[0].second);
+                        for (size_t i = 1; i < points.size(); ++i) {
+                            ImVec2 curr = render_to_screen(panel_ctx, points[i].first, points[i].second);
+                            draw_list->AddLine(prev, curr, line_color, 2.0f);
+                            prev = curr;
+                        }
+                        draw_list->PopClipRect();
                     }
                 }
             }

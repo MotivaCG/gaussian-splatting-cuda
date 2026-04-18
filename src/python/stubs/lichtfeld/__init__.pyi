@@ -263,7 +263,7 @@ def force_exit() -> None:
 
 def export_scene(format: int, path: str, node_names: Sequence[str], sh_degree: int) -> None:
     """
-    Export scene nodes to file. Format: 0=PLY, 1=SOG, 2=SPZ, 3=HTML, 4=USD.
+    Export scene nodes to file. Format: 0=PLY, 1=SOG, 2=SPZ, 3=HTML, 4=USD, 5=USDZ NuRec.
     """
 
 def save_config_file(path: str) -> None:
@@ -424,6 +424,9 @@ def is_fullscreen() -> bool:
 
 def toggle_ui() -> None:
     """Toggle UI overlay visibility"""
+
+def toggle_independent_split_view() -> None:
+    """Toggle independent split view"""
 
 def get_render_mode() -> RenderMode:
     """Get current render mode (Splats, Points, Rings, Centers)"""
@@ -1018,8 +1021,109 @@ def get_mesh2splat_error() -> str:
     Get error message from last mesh-to-splat conversion (empty on success)
     """
 
+class SplatSimplifyMergeTree:
+    @property
+    def source_means(self) -> Tensor:
+        """Filtered source means tensor [N, 3]"""
+
+    @property
+    def source_sh0(self) -> Tensor:
+        """Filtered source SH0 tensor [N, 1, 3]"""
+
+    @property
+    def source_shN(self) -> Tensor:
+        """Filtered source higher-order SH tensor [N, K, 3]"""
+
+    @property
+    def source_scaling(self) -> Tensor:
+        """Filtered source scaling tensor [N, 3] in log-space"""
+
+    @property
+    def source_rotation(self) -> Tensor:
+        """Filtered source rotation tensor [N, 4]"""
+
+    @property
+    def source_opacity(self) -> Tensor:
+        """Filtered source opacity tensor [N, 1] in logit-space"""
+
+    @property
+    def source_active_sh_degree(self) -> int:
+        """Active SH degree of the filtered source splat"""
+
+    @property
+    def source_max_sh_degree(self) -> int:
+        """Maximum SH degree of the filtered source splat"""
+
+    @property
+    def source_scene_scale(self) -> float:
+        """Scene scale of the filtered source splat"""
+
+    @property
+    def target_count(self) -> int:
+        """Requested target count before pruning"""
+
+    @property
+    def post_prune_count(self) -> int:
+        """Count remaining after opacity pruning"""
+
+    @property
+    def requested_ratio(self) -> float:
+        """Requested simplify ratio"""
+
+    @property
+    def requested_knn_k(self) -> int:
+        """Requested kNN neighborhood size"""
+
+    @property
+    def requested_merge_cap(self) -> float:
+        """Requested per-pass merge cap"""
+
+    @property
+    def requested_opacity_prune_threshold(self) -> float:
+        """Requested opacity prune threshold"""
+
+    @property
+    def final_roots(self) -> list[int]:
+        """Tree node ids that survive into the simplified output"""
+
+    @property
+    def pruned_leaf_ids(self) -> list[int]:
+        """Leaf ids removed during the initial opacity prune"""
+
+    @property
+    def merge_left(self) -> list[int]:
+        """Left child id for each merge node"""
+
+    @property
+    def merge_right(self) -> list[int]:
+        """Right child id for each merge node"""
+
+    @property
+    def merge_pass(self) -> list[int]:
+        """Zero-based simplify pass index for each merge node"""
+
+    def leaf_count(self) -> int:
+        """Number of source leaves in the tree"""
+
+    def merge_count(self) -> int:
+        """Number of merge nodes in the tree"""
+
+class SplatSimplifyResult:
+    @property
+    def splat_data(self) -> scene.SplatData:
+        """Simplified output splat data"""
+
+    @property
+    def merge_tree(self) -> SplatSimplifyMergeTree:
+        """Merge tree describing how the output was formed"""
+
 def simplify_splats(source_name: str, ratio: float = 0.1, knn_k: int = 16, merge_cap: float = 0.5, opacity_prune_threshold: float = 0.10000000149011612) -> None:
     """Simplify a splat node asynchronously and create a new output node."""
+
+def simplify_splat_data_with_history(source: scene.SplatData, ratio: float = 0.1, knn_k: int = 16, merge_cap: float = 0.5, opacity_prune_threshold: float = 0.10000000149011612, progress: object | None = None) -> SplatSimplifyResult:
+    """
+    Synchronously simplify SplatData and return both the simplified output and its merge tree.
+    """
 
 def cancel_splat_simplify() -> None:
     """Cancel the active splat simplification job"""
@@ -1081,11 +1185,11 @@ def render_view(rotation: Tensor, translation: Tensor, width: int, height: int, 
     Render scene from arbitrary camera parameters.
 
     Args:
-        rotation: [3, 3] camera rotation matrix
-        translation: [3] camera position
+        rotation: [3, 3] camera-to-world rotation in visualizer coordinates
+        translation: [3] camera position in visualizer world coordinates
         width: Render width in pixels
         height: Render height in pixels
-        fov: Field of view in degrees (default: 60)
+        fov: Vertical field of view in degrees (default: 60)
         bg_color: Optional [3] RGB background color
 
     Returns:
@@ -1097,18 +1201,18 @@ def compute_screen_positions(rotation: Tensor, translation: Tensor, width: int, 
     Compute screen positions of all Gaussians for a given camera view.
 
     Args:
-        rotation: [3, 3] camera rotation matrix
-        translation: [3] camera position
+        rotation: [3, 3] camera-to-world rotation in visualizer coordinates
+        translation: [3] camera position in visualizer world coordinates
         width: Viewport width in pixels
         height: Viewport height in pixels
-        fov: Field of view in degrees (default: 60)
+        fov: Vertical field of view in degrees (default: 60)
 
     Returns:
         Tensor [N, 2] with (x, y) pixel coordinates for each Gaussian
     """
 
 def get_current_view() -> ViewInfo | None:
-    """Get current viewport camera info (None if not available)"""
+    """Get current viewport camera pose (None if not available)"""
 
 class CameraState:
     @property
@@ -1136,7 +1240,7 @@ def set_camera_fov(fov: float) -> None:
 
 def look_at(eye: tuple[float, float, float], target: tuple[float, float, float], up: tuple[float, float, float] = (0.0, 1.0, 0.0)) -> tuple[Tensor, Tensor]:
     """
-    Compute (rotation, translation) camera matrices for render_view from eye/target position.
+    Compute a visualizer camera pose tuple (rotation, translation) for render_view from eye/target.
     """
 
 def render_at(eye: tuple[float, float, float], target: tuple[float, float, float], width: int, height: int, fov: float = 60.0, up: tuple[float, float, float] = (0.0, 1.0, 0.0), bg_color: Tensor | None = None) -> Tensor | None:
@@ -1852,6 +1956,11 @@ class DatasetInfo:
 
     def __repr__(self) -> str: ...
 
+def build_splat_lod_hierarchy(source: object | None = None, ratio: float = 0.5, knn_k: int = 16, merge_cap: float = 0.5, opacity_prune_threshold: float = 0.10000000149011612, max_levels: int | None = None, min_points: int = 1, progress: object | None = None) -> object:
+    """
+    Build a script-side multi-level LOD hierarchy from SplatData or a scene node.
+    """
+
 def detect_dataset_info(path: str) -> DatasetInfo:
     """Detect dataset information from a directory path"""
 
@@ -1889,4 +1998,4 @@ class CheckpointParams:
 def read_checkpoint_params(path: str) -> CheckpointParams | None:
     """Read training parameters from a checkpoint (None if failed)"""
 
-__all__: tuple = ('context', 'gaussians', 'session', 'get_scene', 'Tensor', 'Hook', 'ScopedHandler', 'on_training_start', 'on_iteration_start', 'on_post_step', 'on_pre_optimizer_step', 'on_training_end', 'mesh_to_splat', 'is_mesh2splat_active', 'get_mesh2splat_progress', 'get_mesh2splat_stage', 'get_mesh2splat_error', 'simplify_splats', 'cancel_splat_simplify', 'is_splat_simplify_active', 'get_splat_simplify_progress', 'get_splat_simplify_stage', 'get_splat_simplify_error', 'on_frame', 'stop_animation', 'run', 'list_scene', 'mat4', 'colormap', 'help', 'scene', 'io', 'packages', 'mcp')
+__all__: tuple = ('context', 'gaussians', 'session', 'get_scene', 'Tensor', 'Hook', 'ScopedHandler', 'SplatSimplifyResult', 'SplatSimplifyMergeTree', 'on_training_start', 'on_iteration_start', 'on_post_step', 'on_pre_optimizer_step', 'on_training_end', 'mesh_to_splat', 'is_mesh2splat_active', 'get_mesh2splat_progress', 'get_mesh2splat_stage', 'get_mesh2splat_error', 'simplify_splats', 'simplify_splat_data_with_history', 'build_splat_lod_hierarchy', 'cancel_splat_simplify', 'is_splat_simplify_active', 'get_splat_simplify_progress', 'get_splat_simplify_stage', 'get_splat_simplify_error', 'on_frame', 'stop_animation', 'run', 'list_scene', 'mat4', 'colormap', 'help', 'scene', 'io', 'packages', 'mcp')
