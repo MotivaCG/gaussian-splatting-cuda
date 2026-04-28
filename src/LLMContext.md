@@ -29,6 +29,7 @@ Target principal CMake: `LichtFeld-Studio` en el `CMakeLists.txt` raiz.
   - Mascaras imperfectas: las mascaras se generan con IA y algunas pueden ser incorrectas. El sistema debe ser robusto a mascaras erroneas aisladas, dejando que la mayoria correcta compense.
 - No interesan plugins Python ni UI salvo que el usuario lo pida explicitamente. Evitar gastar tokens en esas zonas para tareas normales de CLI/training/calidad.
 - Todo lo que este dentro de `training/smn/` pertenece al fork del usuario, no al proyecto principal upstream.
+- Minimizar cambios en archivos del branch original (upstream). Cuando sea posible, colocar la logica nueva en archivos de `training/smn/` y dejar solo one-liners de llamada en los archivos upstream (ej. `trainer.cpp`). Esto reduce conflictos al hacer merge con upstream.
 - Comunicacion con el usuario: respuestas y comentarios explicativos en Espanol. Codigo, nombres tecnicos y comentarios dentro del codigo siempre en ingles.
 - Evitar quemar tokens en bucles contradictorios o exploraciones circulares. Si hay informacion conflictiva, resumir el conflicto, elegir la hipotesis mas probable con la evidencia disponible y avanzar; pedir aclaracion solo si el riesgo de equivocarse es alto.
 - Evitar alucinaciones: no inventar APIs, flags, formatos, rutas ni comportamientos. Verificar en el codigo/docs locales antes de afirmar o implementar.
