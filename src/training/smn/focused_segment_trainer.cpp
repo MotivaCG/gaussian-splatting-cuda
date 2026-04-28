@@ -5,6 +5,7 @@
 #include "training/trainer.hpp"
 
 #include "core/logger.hpp"
+#include "optimizer/adam_optimizer.hpp"
 #include "smn/mask_pruning.hpp"
 
 #include <algorithm>
@@ -31,7 +32,12 @@ namespace lfs::training {
         //
         // Tune per scene: scenes with fine hair / fur benefit from 3; scenes with
         // clean silhouettes are fine at 0.
-        constexpr int FOCUSED_DENSIFY_DILATE_RADIUS = 1;
+        //
+        // For dome captures of people, 3 provides enough border coverage for
+        // concave zones (between legs, armpits) to accumulate densification error
+        // and spawn small splats that define the silhouette precisely. The
+        // post-training prune removes any excess.
+        constexpr int FOCUSED_DENSIFY_DILATE_RADIUS = 3;
 
     } // namespace
 
@@ -94,8 +100,11 @@ namespace lfs::training {
         constexpr float kAlphaDecayStart = 0.75f; // Start relaxing alpha pressure toward residual floors.
         constexpr float kAlphaDecayEnd = 0.85f; // End of decay; residual floors remain until training ends.
 
-        constexpr float kFgAlphaFloorValue = 0.0f; // FG residual alpha penalty after decay.
-        constexpr float kBgAlphaFloorValue = 0.0f; // BG residual alpha penalty after decay.
+        constexpr float kFgAlphaFloorValue = 0.0f;  // FG residual alpha penalty after decay.
+        constexpr float kBgAlphaFloorValue = 0.20f; // BG residual alpha penalty after decay.
+                                                     // Prevents BG opacity from creeping back
+                                                     // in concave regions (between legs, armpits)
+                                                     // during the free refinement phase.
 
         static_assert(kBgSpatialRampEnd < kFgAlphaRampStart, "BG spatial ramp must finish before FG alpha penalty starts");
         static_assert(kFgAlphaRampEnd <= kBgAlphaRampStart, "FG alpha penalty must reach full before BG joins");
@@ -286,6 +295,171 @@ namespace lfs::training {
         } else {
             error_map.mul_(mask_tile).contiguous();
         }
+    }
+
+    // =========================================================================
+    // Per-splat center-based opacity penalty.
+    //
+    // Projects each Gaussian center to 2D, samples the mask, and directly
+    // pushes opacity down for splats whose center lands outside the mask.
+    //
+    // This complements the pixel-level grad_alpha in focused_segment_compute_loss:
+    //  - grad_alpha:     pixel-level, distributed to splats by rasterizer backward.
+    //                    Large splats spanning FG/BG get mixed signals.
+    //  - center_penalty: per-splat, based only on the center projection.
+    //                    A large splat with center outside the mask gets a direct
+    //                    unambiguous "reduce opacity" gradient.
+    //
+    // This targets concave mask zones (between legs, armpits) where large
+    // gaussians with centers in the gap create false opacity.
+    // =========================================================================
+    void Trainer::focused_segment_apply_center_penalty(
+        const lfs::core::Tensor& mask,
+        const lfs::core::Camera& cam,
+        const lfs::core::param::OptimizationParameters& step_params) {
+
+        using namespace lfs::core;
+
+        if (step_params.mask_mode != param::MaskMode::FocusedSegment)
+            return;
+
+        const float w_bg = step_params.mask_opacity_penalty_weight_bg;
+        if (w_bg <= 0.0f)
+            return;
+
+        if (!mask.is_valid() || mask.numel() == 0)
+            return;
+
+        auto& model = strategy_->get_model();
+        auto& optimizer = strategy_->get_optimizer();
+        const size_t N = model.size();
+        if (N == 0)
+            return;
+
+        const int imgW = cam.image_width();
+        const int imgH = cam.image_height();
+        if (imgW <= 0 || imgH <= 0)
+            return;
+        const size_t W = static_cast<size_t>(imgW);
+        const size_t H = static_cast<size_t>(imgH);
+
+        // ---- 1. Project means3D to camera space ----
+        auto means3d = model.get_means(); // [N, 3] CUDA
+        auto wvt = cam.world_view_transform(); // [4, 4] or [1, 4, 4] CUDA
+        if (wvt.ndim() == 3)
+            wvt = wvt.squeeze(0); // ensure [4, 4]
+
+        // Homogeneous coords: [N, 4]
+        auto means_h = Tensor::cat(
+            {means3d, Tensor::ones({N, size_t(1)}, Device::CUDA)}, 1);
+
+        // Camera space: cam = means_h @ W2V^T -> [N, 4]
+        auto cam_space = means_h.mm(wvt.t());
+
+        // Depth: z coordinate
+        auto depth = cam_space.slice(1, 2, 3).squeeze(1); // [N]
+
+        // Visible: depth > near_plane
+        constexpr float kNearPlane = 0.01f;
+        auto visible_mask = depth.gt(kNearPlane); // [N] bool
+
+        // ---- 2. Pinhole projection to 2D pixel coords ----
+        const float fx = cam.focal_x();
+        const float fy = cam.focal_y();
+        const float cx = cam.center_x();
+        const float cy = cam.center_y();
+
+        auto depth_safe = depth.clamp_min(kNearPlane); // avoid div-by-zero
+        auto x_proj = cam_space.slice(1, 0, 1).squeeze(1) * fx / depth_safe + cx; // [N]
+        auto y_proj = cam_space.slice(1, 1, 2).squeeze(1) * fy / depth_safe + cy; // [N]
+
+        const float Wf = static_cast<float>(W);
+        const float Hf = static_cast<float>(H);
+
+        // Clamp to image bounds for safe indexing
+        auto x_px = x_proj.round().clamp(0.0f, Wf - 1.0f); // [N]
+        auto y_px = y_proj.round().clamp(0.0f, Hf - 1.0f); // [N]
+
+        // Also mask out splats that project outside the image
+        auto in_bounds = x_proj.ge(0.0f) * x_proj.lt(Wf)
+                       * y_proj.ge(0.0f) * y_proj.lt(Hf);
+        auto valid = visible_mask * in_bounds; // [N] bool: visible AND in-bounds
+
+        // ---- 3. Sample mask at projected centers ----
+        auto lin_idx = (y_px * Wf + x_px).to(DataType::Int64); // [N] int64
+        auto mask_flat = mask.reshape({static_cast<int>(H * W)}); // [H*W]
+        auto is_inside = mask_flat.gather(0, lin_idx); // [N] float {0..1}
+
+        // ---- 4. Compute opacity gradient ----
+        // For splats outside the mask: positive gradient pushes raw opacity down (sigmoid decreases).
+        // For splats inside the mask: small negative gradient fills transparency holes.
+        constexpr float kOutWeight = 1.5f;  // BG center penalty strength
+        constexpr float kInWeight = 0.05f;  // gentle FG fill (most work done by grad_alpha)
+
+        auto is_outside = (Tensor::full({N}, 1.0f, Device::CUDA) - is_inside);
+        auto valid_f = valid.to(DataType::Float32); // [N] float {0, 1}
+
+        // Gradient w.r.t. activated opacity (sigmoid output)
+        auto grad_activated = valid_f *
+            (is_outside * kOutWeight - is_inside * kInWeight) *
+            (w_bg / static_cast<float>(N));  // normalize by splat count
+
+        // Chain rule: d(loss)/d(raw) = d(loss)/d(sigmoid) * sigmoid'(raw)
+        //           = grad_activated * sigmoid(raw) * (1 - sigmoid(raw))
+        auto opacity_raw = model.opacity_raw(); // [N, 1]
+        auto raw_1d = opacity_raw.ndim() == 2 ? opacity_raw.squeeze(1) : opacity_raw; // [N]
+        auto sig = raw_1d.sigmoid(); // [N]
+        auto grad_raw = grad_activated * sig * (Tensor::full({N}, 1.0f, Device::CUDA) - sig);
+
+        // ---- 5. Accumulate into optimizer gradient buffer ----
+        auto& opacity_grad = optimizer.get_grad(ParamType::Opacity); // [N, 1]
+        if (opacity_grad.ndim() == 2 && grad_raw.ndim() == 1) {
+            opacity_grad.add_(grad_raw.unsqueeze(1));
+        } else {
+            opacity_grad.add_(grad_raw);
+        }
+    }
+
+    // =========================================================================
+    // Post-backward hook: resolves the mask and dispatches per-splat penalties.
+    //
+    // This is the single call site from trainer.cpp (one-liner), keeping the
+    // upstream file minimal. All mask resolution and penalty logic stays here.
+    // =========================================================================
+    void Trainer::focused_segment_post_backward(
+        const lfs::core::Tensor& pipelined_mask,
+        lfs::core::Camera& cam,
+        int iter,
+        int num_tiles) {
+
+        if (params_.optimization.mask_mode != lfs::core::param::MaskMode::FocusedSegment)
+            return;
+
+        // Center penalty only makes sense with full image (single tile)
+        if (num_tiles != 1)
+            return;
+
+        lfs::core::Tensor full_mask;
+        if (pipelined_mask.is_valid() && pipelined_mask.numel() > 0) {
+            full_mask = pipelined_mask;
+        } else {
+            full_mask = cam.load_and_get_mask(
+                params_.dataset.resize_factor,
+                params_.dataset.max_width,
+                params_.optimization.invert_masks,
+                params_.optimization.mask_threshold);
+        }
+
+        if (!full_mask.is_valid() || full_mask.numel() == 0)
+            return;
+
+        // Build step_params with schedule applied for this iteration
+        lfs::core::param::OptimizationParameters step_params = params_.optimization;
+        const float progress = static_cast<float>(iter) /
+                               static_cast<float>(params_.optimization.iterations);
+        focused_segment_apply_schedule(step_params, progress);
+
+        focused_segment_apply_center_penalty(full_mask, cam, step_params);
     }
 
     // Post-training mask-based pruning for FocusedSegment mode.

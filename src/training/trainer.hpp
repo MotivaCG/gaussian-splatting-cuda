@@ -528,8 +528,27 @@ namespace lfs::training {
             bool invert_masks,
             lfs::training::IStrategy& strategy,
             lfs::training::CameraDataset& train_dataset);
-            
-        // **********************************************************************************/    
+
+        /// Post-backward hook for FocusedSegment mode.
+        /// Called once per iteration after rasterize_backward, before regularization.
+        /// Dispatches to center penalty and any future per-splat hooks.
+        /// Only active in non-tiled mode (single tile per iteration).
+        void focused_segment_post_backward(
+            const lfs::core::Tensor& pipelined_mask,
+            lfs::core::Camera& cam,
+            int iter,
+            int num_tiles);
+
+        /// Per-splat opacity penalty based on projected center vs mask.
+        /// Directly penalizes gaussians whose center projects outside the mask,
+        /// complementing the pixel-level grad_alpha which can send mixed signals
+        /// to large gaussians straddling concave mask boundaries (between legs, etc).
+        void focused_segment_apply_center_penalty(
+            const lfs::core::Tensor& mask,
+            const lfs::core::Camera& cam,
+            const lfs::core::param::OptimizationParameters& step_params);
+
+        // **********************************************************************************/
         // End FocusedSegment-specific helpers.
         // **********************************************************************************/
     };

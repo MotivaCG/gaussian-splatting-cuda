@@ -3286,6 +3286,10 @@ namespace lfs::training {
             } else {
                 // Normal phase: regularization losses + optimizer steps for all components
 
+                // FocusedSegment post-backward hook (center penalty, etc.)
+                // Implementation in training/smn/focused_segment_trainer.cpp
+                focused_segment_post_backward(pipelined_mask_, *cam, iter, num_tiles);
+
                 if (params_.optimization.scale_reg > 0.0f) {
                     nvtxRangePush("compute_scale_reg_loss");
                     auto scale_loss_result = compute_scale_reg_loss(strategy_->get_model(), strategy_->get_optimizer(), params_.optimization);
