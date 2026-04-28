@@ -18,8 +18,6 @@
 namespace lfs::training {
 
     namespace {
-        constexpr size_t SH_CHANNELS = 3;
-
         std::shared_ptr<lfs::core::PointCloud> createRandomPointCloud() {
             constexpr size_t N = 10000;
             auto positions = lfs::core::Tensor::rand({N, 3}, lfs::core::Device::CPU) * 2.0f - 1.0f;
@@ -27,22 +25,19 @@ namespace lfs::training {
             return std::make_shared<lfs::core::PointCloud>(positions, colors);
         }
 
-        void truncateSHDegree(lfs::core::SplatData& splat, const int target_degree) {
-            if (target_degree < 0 || target_degree >= splat.get_max_sh_degree())
-                return;
+        lfs::io::CentralizeDataset parse_centralize(const std::string& s) {
+            if (s == "by_pointcloud")
+                return lfs::io::CentralizeDataset::ByPointCloud;
+            if (s == "by_cameras")
+                return lfs::io::CentralizeDataset::ByCameras;
+            return lfs::io::CentralizeDataset::Off;
+        }
 
-            if (target_degree == 0) {
-                splat.shN() = lfs::core::Tensor{};
-            } else {
-                const size_t keep = static_cast<size_t>((target_degree + 1) * (target_degree + 1) - 1);
-                auto& shN = splat.shN();
-                if (shN.is_valid() && shN.ndim() >= 2 && shN.shape()[1] > keep) {
-                    const auto slice_end = static_cast<int64_t>(shN.ndim() == 3 ? keep : keep * SH_CHANNELS);
-                    shN = shN.slice(1, 0, slice_end).contiguous();
-                }
+        void applyTrainingSHDegree(lfs::core::SplatData& splat, const int target_degree) {
+            const int before = splat.get_max_sh_degree();
+            if (splat.set_sh_degree(target_degree)) {
+                LOG_INFO("Adjusted training model SH degree: {} -> {}", before, splat.get_max_sh_degree());
             }
-            splat.set_max_sh_degree(target_degree);
-            splat.set_active_sh_degree(target_degree);
         }
     } // namespace
 
@@ -58,6 +53,7 @@ namespace lfs::training {
             .max_width = params.dataset.max_width,
             .images_folder = params.dataset.images,
             .validate_only = false,
+            .centralize = parse_centralize(params.dataset.centralize_dataset),
             .progress = [&data_path](float percentage, const std::string& message) {
                 LOG_DEBUG("[{:5.1f}%] {}", percentage, message);
                 lfs::core::events::state::DatasetLoadProgress{
@@ -80,6 +76,7 @@ namespace lfs::training {
 
             if constexpr (std::is_same_v<T, std::shared_ptr<lfs::core::SplatData>>) {
                 auto model = std::make_unique<lfs::core::SplatData>(std::move(*data));
+                applyTrainingSHDegree(*model, params.optimization.sh_degree);
                 scene.addSplat("loaded_model", std::move(model));
                 scene.setTrainingModelNode("loaded_model");
                 LOG_INFO("Loaded PLY directly into scene");
@@ -137,11 +134,7 @@ namespace lfs::training {
                             auto splat_data = std::move(*std::get<std::shared_ptr<lfs::core::SplatData>>(load_result->data));
                             auto model = std::make_unique<lfs::core::SplatData>(std::move(splat_data));
 
-                            const int target_sh = params.optimization.sh_degree;
-                            if (target_sh >= 0 && target_sh < model->get_max_sh_degree()) {
-                                LOG_INFO("Truncating SH: {} -> {}", model->get_max_sh_degree(), target_sh);
-                                truncateSHDegree(*model, target_sh);
-                            }
+                            applyTrainingSHDegree(*model, params.optimization.sh_degree);
 
                             LOG_INFO("Loaded {} Gaussians from {} (sh={})",
                                      model->size(), lfs::core::path_to_utf8(init_file.filename()), model->get_max_sh_degree());
@@ -171,7 +164,9 @@ namespace lfs::training {
                 size_t val_count = 0;
                 size_t mask_count = 0;
                 for (size_t i = 0; i < cameras.size(); ++i) {
-                    if (enable_eval && (i % test_every) == 0) {
+                    const bool is_eval = enable_eval && (i % test_every) == 0;
+                    cameras[i]->set_split(is_eval ? lfs::core::CameraSplit::Eval : lfs::core::CameraSplit::Train);
+                    if (is_eval) {
                         val_count++;
                     } else {
                         train_count++;
@@ -233,7 +228,9 @@ namespace lfs::training {
         const lfs::core::param::TrainingParameters& params,
         lfs::core::Scene& scene) {
 
-        if (scene.getTrainingModel() != nullptr) {
+        if (auto* model = scene.getTrainingModel()) {
+            applyTrainingSHDegree(*model, params.optimization.sh_degree);
+            scene.notifyMutation(lfs::core::Scene::MutationType::MODEL_CHANGED);
             return {};
         }
 
@@ -403,6 +400,7 @@ namespace lfs::training {
 
             if constexpr (std::is_same_v<T, std::shared_ptr<lfs::core::SplatData>>) {
                 auto model = std::make_unique<lfs::core::SplatData>(std::move(*data));
+                applyTrainingSHDegree(*model, params.optimization.sh_degree);
                 scene.addSplat("loaded_model", std::move(model));
                 scene.setTrainingModelNode("loaded_model");
                 return {};
@@ -439,6 +437,13 @@ namespace lfs::training {
                             return std::unexpected(std::format("Init failed: {}", splat_result.error()));
                         }
 
+                        const int max_cap = params.optimization.max_cap;
+                        if (max_cap > 0 && max_cap < static_cast<int>(splat_result->size())) {
+                            LOG_WARN("Max cap ({}) is less than initial splat count ({}), randomly selecting {} splats",
+                                     max_cap, splat_result->size(), max_cap);
+                            lfs::core::random_choose(*splat_result, max_cap);
+                        }
+
                         auto model = std::make_unique<lfs::core::SplatData>(std::move(*splat_result));
                         LOG_INFO("Init {} gaussians from {} (sh={})",
                                  model->size(), lfs::core::path_to_utf8(init_file.filename()), model->get_max_sh_degree());
@@ -456,10 +461,7 @@ namespace lfs::training {
                             auto splat_data = std::move(*std::get<std::shared_ptr<lfs::core::SplatData>>(init_result->data));
                             auto model = std::make_unique<lfs::core::SplatData>(std::move(splat_data));
 
-                            const int target_sh = params.optimization.sh_degree;
-                            if (target_sh >= 0 && target_sh < model->get_max_sh_degree()) {
-                                truncateSHDegree(*model, target_sh);
-                            }
+                            applyTrainingSHDegree(*model, params.optimization.sh_degree);
 
                             LOG_INFO("Loaded {} gaussians from {} (sh={})",
                                      model->size(), lfs::core::path_to_utf8(init_file.filename()), model->get_max_sh_degree());
@@ -482,6 +484,7 @@ namespace lfs::training {
                 size_t train_count = 0, val_count = 0, mask_count = 0;
                 for (size_t i = 0; i < cameras.size(); ++i) {
                     const bool is_val = enable_eval && (i % test_every) == 0;
+                    cameras[i]->set_split(is_val ? lfs::core::CameraSplit::Eval : lfs::core::CameraSplit::Train);
                     is_val ? ++val_count : ++train_count;
                     if (cameras[i]->has_mask())
                         ++mask_count;

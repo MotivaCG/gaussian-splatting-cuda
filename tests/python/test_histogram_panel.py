@@ -35,12 +35,25 @@ class _SceneSelectionStub:
     def __init__(self, selection_mask=None):
         self.selection_mask = selection_mask
         self.clear_calls = 0
+        self.preview_mask_calls = 0
+        self.commit_preview_calls = 0
+        self.cancel_preview_calls = 0
 
     def is_valid(self):
         return True
 
     def set_selection_mask(self, mask):
         self.selection_mask = (mask.reshape([-1]) != 0).contiguous()
+
+    def preview_selection_mask(self, mask):
+        self.preview_mask_calls += 1
+        self.set_selection_mask(mask)
+
+    def commit_selection_preview(self):
+        self.commit_preview_calls += 1
+
+    def cancel_selection_preview(self):
+        self.cancel_preview_calls += 1
 
     def clear_selection(self):
         self.selection_mask = None
@@ -124,7 +137,44 @@ def histogram_panel_module():
 def test_histogram_metrics_include_positions_volume_anisotropy_and_erank(histogram_panel_module):
     metric_ids = {metric.id for metric in histogram_panel_module.METRICS}
 
-    assert {"position_x", "position_y", "position_z", "volume", "anisotropy", "erank"} <= metric_ids
+    assert {"position_x", "position_y", "position_z", "volume", "anisotropy", "erank", "world_distance"} <= metric_ids
+
+
+def test_histogram_world_distance_metric_measures_from_origin(histogram_panel_module, lf, numpy):
+    panel = histogram_panel_module.HistogramPanel()
+    # Two Gaussians at local positions (1,0,0) and (0,3,4).
+    # With a translation of (2,0,0) applied the world positions become (3,0,0) and (2,3,4).
+    # Expected distances from origin: 3.0 and sqrt(4+9+16)=sqrt(29).
+    model = _ModelStub(
+        lf,
+        numpy.array([[1.0, 0.0, 0.0], [0.0, 3.0, 4.0]], dtype=numpy.float32),
+        numpy.array([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], dtype=numpy.float32),
+    )
+
+    splat_type = getattr(getattr(lf, "NodeType", None), "SPLAT", None)
+    if splat_type is None:
+        splat_type = lf.scene.NodeType.SPLAT
+
+    scene = SimpleNamespace(
+        get_nodes=lambda: [
+            SimpleNamespace(
+                id=1,
+                parent_id=-1,
+                visible=True,
+                type=splat_type,
+                gaussian_count=2,
+                world_transform=_translation_matrix(2.0, 0.0, 0.0),
+            )
+        ]
+    )
+
+    panel._metric_id = "world_distance"
+    result = panel._extract_metric_values(scene, model).cpu().numpy()
+    numpy.testing.assert_allclose(
+        result,
+        numpy.array([3.0, numpy.sqrt(29.0)], dtype=numpy.float32),
+        rtol=1e-5,
+    )
 
 
 def test_histogram_position_metrics_use_world_space_means(histogram_panel_module, lf, numpy):
@@ -310,6 +360,43 @@ def test_histogram_drag_can_expand_across_multiple_bins(histogram_panel_module, 
 
     assert panel._marked_bounds() == (1, 5)
     assert panel._marked_count == 2
+
+
+def test_histogram_drag_live_updates_scene_selection_before_mouseup(histogram_panel_module, lf, numpy, monkeypatch):
+    panel = histogram_panel_module.HistogramPanel()
+    panel._show_chart = True
+    panel._metric_id = "opacity"
+    panel._chart_el = SimpleNamespace(absolute_left=0.0, absolute_width=160.0)
+
+    values = lf.Tensor.from_numpy(numpy.array([0.05, 0.15, 0.35], dtype=numpy.float32))
+    finite_mask = values.isfinite()
+    panel._primary_values = values
+    panel._primary_finite_mask = finite_mask
+    panel._primary_valid_values = values[finite_mask]
+    panel._primary_histogram_min = 0.0
+    panel._primary_histogram_max = 1.0
+    panel._histogram_bin_count = 16
+    panel._rebuild_histogram_from_cache()
+
+    scene = _SceneSelectionStub()
+    monkeypatch.setattr(lf, "get_scene", lambda: scene)
+
+    panel._on_chart_mousedown(_MouseEventStub(mouse_x=1.0))
+
+    assert scene.preview_mask_calls == 1
+    assert scene.commit_preview_calls == 0
+    numpy.testing.assert_array_equal(scene.selection_mask.cpu().numpy(), numpy.array([True, False, False]))
+
+    panel._on_document_mousemove(_MouseEventStub(mouse_x=51.0))
+
+    assert scene.preview_mask_calls == 2
+    assert scene.commit_preview_calls == 0
+    numpy.testing.assert_array_equal(scene.selection_mask.cpu().numpy(), numpy.array([True, True, True]))
+
+    panel._on_document_mouseup(_MouseEventStub(mouse_x=51.0))
+
+    assert scene.commit_preview_calls == 1
+    numpy.testing.assert_array_equal(scene.selection_mask.cpu().numpy(), numpy.array([True, True, True]))
 
 
 def test_histogram_selection_geometry_accounts_for_bar_gaps(histogram_panel_module):

@@ -29,13 +29,13 @@ namespace lfs::vis::gui {
     public:
         void init(RmlUIManager* mgr);
         void shutdown();
+        void reloadResources();
         void render(const PanelDrawContext& ctx, float x, float y, float w, float h,
                     int screen_w, int screen_h);
 
     private:
         bool updateContent(const PanelDrawContext& ctx, bool force_refresh);
         bool updateTheme();
-        std::string generateThemeRCSS(const lfs::vis::Theme& t) const;
         void setModelString(const char* name, std::string& field, std::string value);
         void setModelBool(const char* name, bool& field, bool value);
 
@@ -79,6 +79,8 @@ namespace lfs::vis::gui {
             std::string step_value;
             std::string loss_label;
             std::string loss_value;
+            bool show_eval_metrics = false;
+            std::string eval_metrics_value;
             std::string gaussians_label;
             std::string gaussians_value;
             std::string time_value;

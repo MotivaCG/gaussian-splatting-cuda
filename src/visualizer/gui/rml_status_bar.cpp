@@ -173,6 +173,8 @@ namespace lfs::vis::gui {
         ctor.Bind("step_value", &model_.step_value);
         ctor.Bind("loss_label", &model_.loss_label);
         ctor.Bind("loss_value", &model_.loss_value);
+        ctor.Bind("show_eval_metrics", &model_.show_eval_metrics);
+        ctor.Bind("eval_metrics_value", &model_.eval_metrics_value);
         ctor.Bind("gaussians_label", &model_.gaussians_label);
         ctor.Bind("gaussians_value", &model_.gaussians_value);
         ctor.Bind("time_value", &model_.time_value);
@@ -244,29 +246,39 @@ namespace lfs::vis::gui {
         document_ = nullptr;
     }
 
-    std::string RmlStatusBar::generateThemeRCSS(const lfs::vis::Theme& t) const {
-        const auto& p = t.palette;
+    void RmlStatusBar::reloadResources() {
+        if (!rml_context_)
+            return;
 
-        const auto text = colorToRml(p.text);
-        const auto text_dim = colorToRml(p.text_dim);
-        const auto surface_bright = colorToRml(p.surface_bright);
-        const auto primary = colorToRml(p.primary);
-        const auto success = colorToRml(p.success);
-        const auto warning = colorToRml(p.warning);
-        const auto error = colorToRml(p.error);
-        const auto info = colorToRml(p.info);
+        if (document_) {
+            rml_context_->UnloadDocument(document_);
+            rml_context_->Update();
+        }
 
-        auto surface_bright_half = colorToRmlAlpha(p.surface_bright, 0.5f);
+        document_ = nullptr;
+        base_rcss_.clear();
+        has_theme_signature_ = false;
+        model_dirty_ = true;
+        animation_active_ = true;
+        last_render_w_ = 0;
+        last_render_h_ = 0;
+        last_document_h_ = 0;
+        next_refresh_at_ = {};
 
-        return std::format(
-            "body {{ color: {0}; }}\n"
-            ".dim {{ color: {1}; }}\n"
-            ".separator {{ color: {1}; }}\n"
-            "#progress-container {{ background-color: {2}; }}\n"
-            "#progress-fill {{ background-color: {3}; }}\n"
-            "#progress-text {{ color: {0}; }}\n"
-            "#gpu-icon {{ image-color: {1}; }}\n",
-            text, text_dim, surface_bright_half, primary);
+        try {
+            const auto rml_path = lfs::vis::getAssetPath("rmlui/statusbar.rml");
+            document_ = rml_documents::loadDocument(rml_context_, rml_path);
+            if (!document_) {
+                LOG_ERROR("RmlStatusBar: failed to reload statusbar.rml");
+                return;
+            }
+            document_->Show();
+        } catch (const std::exception& e) {
+            LOG_ERROR("RmlStatusBar: resource not found during reload: {}", e.what());
+            return;
+        }
+
+        updateTheme();
     }
 
     bool RmlStatusBar::updateTheme() {
@@ -282,7 +294,7 @@ namespace lfs::vis::gui {
         if (base_rcss_.empty())
             base_rcss_ = rml_theme::loadBaseRCSS("rmlui/statusbar.rcss");
 
-        rml_theme::applyTheme(document_, base_rcss_, rml_theme::generateAllThemeMedia([this](const auto& th) { return generateThemeRCSS(th); }));
+        rml_theme::applyTheme(document_, base_rcss_, rml_theme::loadBaseRCSS("rmlui/statusbar.theme.rcss"));
         model_dirty_ = true;
         return true;
     }
@@ -420,11 +432,26 @@ namespace lfs::vis::gui {
                            std::format("{}/{}", fmtCount(num_splats), fmtCount(max_g)));
             setModelString("time_value", model_.time_value, fmtTime(elapsed));
             setModelString("eta_value", model_.eta_value, fmtTime(eta));
+
+            const auto eval_metrics = tm->getLastEvaluationMetrics();
+            setModelBool("show_eval_metrics", model_.show_eval_metrics, eval_metrics.has_value());
+            if (eval_metrics) {
+                setModelString("eval_metrics_value", model_.eval_metrics_value,
+                               std::format("{} {:.2f} / {} {:.4f}",
+                                           LOC(lichtfeld::Strings::Status::PSNR),
+                                           eval_metrics->psnr,
+                                           LOC(lichtfeld::Strings::Status::SSIM),
+                                           eval_metrics->ssim));
+            } else {
+                setModelString("eval_metrics_value", model_.eval_metrics_value, "");
+            }
         } else {
             setModelString("progress_width", model_.progress_width, "0%");
             setModelString("progress_text", model_.progress_text, "");
             setModelString("step_value", model_.step_value, "");
             setModelString("loss_value", model_.loss_value, "");
+            setModelBool("show_eval_metrics", model_.show_eval_metrics, false);
+            setModelString("eval_metrics_value", model_.eval_metrics_value, "");
             setModelString("gaussians_value", model_.gaussians_value, "");
             setModelString("time_value", model_.time_value, "");
             setModelString("eta_value", model_.eta_value, "");

@@ -12,6 +12,10 @@ else()
     set(LFS_VIS_LIB_TYPE STATIC)
 endif()
 
+option(LFS_DEV_IMPORT_SOURCE_RESOURCES
+        "Load RmlUI resources and locales from source in non-portable builds"
+        ON)
+
 add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         # Core
         visualizer.cpp
@@ -64,6 +68,10 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         gui/native_panels.cpp
         gui/layout_state.cpp
         gui/async_task_manager.cpp
+        gui/bounds_gizmo.cpp
+        gui/rotation_gizmo.cpp
+        gui/scale_gizmo.cpp
+        gui/translation_gizmo.cpp
         gui/video_export_utils.cpp
         gui/startup_overlay.cpp
         gui/rml_menu_bar.cpp
@@ -90,6 +98,7 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         gui/panels/python_scripts_panel.cpp
         gui/editor/python_lsp_client.cpp
         gui/editor/python_editor.cpp
+        gui/editor/zep_rml_display.cpp
         gui/editor/stdio_process.cpp
 
         # Terminal emulator
@@ -178,7 +187,9 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         gui/rmlui/elements/color_picker_element.cpp
         gui/rmlui/elements/crf_curve_element.cpp
         gui/rmlui/elements/loss_graph_element.cpp
+        gui/rmlui/elements/python_editor_element.cpp
         gui/rmlui/elements/scene_graph_element.cpp
+        gui/rmlui/elements/terminal_element.cpp
 )
 
 set_source_files_properties(
@@ -224,7 +235,6 @@ target_link_libraries(lfs_visualizer
         SDL3::SDL3
         imgui::imgui
         implot::implot
-        imguizmo::imguizmo
         Zep::Zep
         glm::glm
         TBB::tbb
@@ -284,17 +294,26 @@ endif()
 # Set C++ standard
 target_compile_features(lfs_visualizer PUBLIC cxx_std_23)
 
+set_target_properties(lfs_visualizer PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+)
 if(WIN32)
     set_target_properties(lfs_visualizer PROPERTIES
         POSITION_INDEPENDENT_CODE ON
         CXX_VISIBILITY_PRESET hidden
         VISIBILITY_INLINES_HIDDEN ON
-        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-        RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR}
-        RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}
-        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO ${CMAKE_BINARY_DIR}
-        RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL ${CMAKE_BINARY_DIR}
+    )
+endif()
+get_property(_IS_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(WIN32 AND _IS_MULTI_CONFIG)
+    set_target_properties(lfs_visualizer PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY              ${CMAKE_BINARY_DIR}/$<CONFIG>
+        RUNTIME_OUTPUT_DIRECTORY              ${CMAKE_BINARY_DIR}/$<CONFIG>
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG        ${CMAKE_BINARY_DIR}/Debug
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE      ${CMAKE_BINARY_DIR}/Release
+        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO ${CMAKE_BINARY_DIR}/RelWithDebInfo
+        RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL   ${CMAKE_BINARY_DIR}/MinSizeRel
     )
 endif()
 
@@ -382,6 +401,8 @@ foreach (RMLUI_FILE ${RMLUI_RESOURCE_FILES})
     configure_file(${RMLUI_FILE} "${VISUALIZER_BUILD_RESOURCE_DIR}/assets/rmlui/${RMLUI_NAME}" COPYONLY)
 endforeach ()
 add_custom_target(copy_rmlui_resources ALL
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${VISUALIZER_BUILD_RESOURCE_DIR}/assets/rmlui"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${VISUALIZER_BUILD_RESOURCE_DIR}/assets/rmlui"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${RMLUI_RESOURCE_FILES}
         "${VISUALIZER_BUILD_RESOURCE_DIR}/assets/rmlui/"
@@ -397,6 +418,16 @@ foreach (LOCALE_FILE ${LOCALE_FILES})
     configure_file(${LOCALE_FILE} "${VISUALIZER_BUILD_RESOURCE_DIR}/locales/${LOCALE_NAME}" COPYONLY)
 endforeach ()
 
+set(LFS_VISUALIZER_DEV_RESOURCE_DEFINITIONS)
+if(LFS_DEV_IMPORT_SOURCE_RESOURCES AND NOT BUILD_PORTABLE)
+    list(APPEND LFS_VISUALIZER_DEV_RESOURCE_DEFINITIONS
+            LFS_DEV_RMLUI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/gui/rmlui/resources"
+            LFS_DEV_LOCALE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/gui/resources/locales"
+    )
+    message(STATUS "Resource dev mode: RmlUI imports from ${CMAKE_CURRENT_SOURCE_DIR}/gui/rmlui/resources")
+    message(STATUS "Resource dev mode: locales import from ${CMAKE_CURRENT_SOURCE_DIR}/gui/resources/locales")
+endif()
+
 # Compile definitions
 target_compile_definitions(lfs_visualizer PRIVATE
         LFS_VIS_EXPORTS
@@ -407,6 +438,7 @@ target_compile_definitions(lfs_visualizer PRIVATE
         VISUALIZER_LOCALE_PATH="${VISUALIZER_BUILD_RESOURCE_DIR}/locales"
         VISUALIZER_SOURCE_SHADER_PATH="${VISUALIZER_SOURCE_RESOURCE_DIR}/shaders"
         VISUALIZER_SOURCE_ASSET_PATH="${VISUALIZER_SOURCE_RESOURCE_DIR}/assets"
+        ${LFS_VISUALIZER_DEV_RESOURCE_DEFINITIONS}
         $<$<CONFIG:Debug>:DEBUG_BUILD>
         $<$<CONFIG:Release>:RELEASE_BUILD>
 )

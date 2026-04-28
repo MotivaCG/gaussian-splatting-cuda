@@ -1008,6 +1008,9 @@ def request_redraw() -> None:
 def consume_redraw_request() -> bool:
     """Consume and return pending redraw request flag"""
 
+def schedule_on_ui_thread(callback: Callable) -> None:
+    """Schedule a Python callable on the UI thread"""
+
 class Event:
     def __init__(self) -> None:
         """Create a default Event"""
@@ -1947,6 +1950,11 @@ def save_html_file_dialog(default_name: str = 'viewer') -> str:
     Open a save file dialog for HTML viewer files. Returns empty string if cancelled.
     """
 
+def save_rad_file_dialog(default_name: str = 'export') -> str:
+    """
+    Open a save file dialog for RAD files. Returns empty string if cancelled.
+    """
+
 def open_dataset_folder_dialog() -> str:
     """
     Open a folder dialog to select a dataset. Returns empty string if cancelled.
@@ -2096,6 +2104,22 @@ def execute_mirror(axis: str) -> None:
 
 def go_to_camera_view(cam_uid: int) -> None:
     """Go to camera view by UID"""
+
+def open_camera_preview(cam_uid: int) -> None:
+    """Open the image preview panel for a camera UID"""
+
+def toggle_gt_comparison() -> None:
+    """Toggle ground-truth comparison split view"""
+
+def is_gt_comparison_active() -> bool:
+    """
+    Returns true if ground-truth comparison split view is currently enabled.
+    """
+
+def reveal_in_file_manager(path: str) -> bool:
+    """
+    Reveal a file or directory in the OS file manager. Returns true on success.
+    """
 
 def apply_cropbox() -> None:
     """Apply the selected cropbox"""
@@ -2414,14 +2438,13 @@ def get_invert_masks() -> bool:
     """Get whether masks are inverted"""
 
 def set_theme(name: str) -> None:
-    """
-    Set theme ('dark', 'light', 'gruvbox', 'catppuccin_mocha', 'catppuccin_latte', or 'nord')
-    """
+    """Set theme by stable theme id"""
 
 def get_theme() -> str:
-    """
-    Get current theme name (e.g. 'Dark', 'Light', 'Gruvbox', 'Catppuccin Mocha', 'Catppuccin Latte', or 'Nord')
-    """
+    """Get current stable theme id"""
+
+def themes() -> list:
+    """Get available theme presets with stable ids and UI metadata"""
 
 def set_ui_scale(scale: float) -> None:
     """Set UI scale (0.0 = auto from OS, or 1.0-4.0)"""

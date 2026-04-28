@@ -370,6 +370,50 @@ class Viewport {
             return glm::mat3(right, up, back);
         }
 
+        [[nodiscard]] static glm::vec3 normalizedOr(const glm::vec3& value, const glm::vec3& fallback) {
+            const float length = glm::length(value);
+            if (!std::isfinite(length) || length <= 1e-6f) {
+                return fallback;
+            }
+            return value / length;
+        }
+
+        [[nodiscard]] static glm::mat3 makeRollStableOrbitRotation(const glm::vec3& eye,
+                                                                   const glm::vec3& target,
+                                                                   const glm::vec3& transported_right,
+                                                                   const glm::mat3& fallback_rotation) {
+            constexpr glm::vec3 WORLD_UP(0.0f, 1.0f, 0.0f);
+
+            const glm::vec3 view = target - eye;
+            const float view_length = glm::length(view);
+            if (!std::isfinite(view_length) || view_length <= 1e-6f) {
+                return orthonormalizeRotation(fallback_rotation);
+            }
+
+            const glm::vec3 forward = view / view_length;
+            glm::vec3 right = glm::cross(forward, WORLD_UP);
+
+            if (glm::length2(right) <= 1e-8f) {
+                right = transported_right - forward * glm::dot(transported_right, forward);
+            }
+            if (glm::length2(right) <= 1e-8f) {
+                const glm::vec3 fallback_up = lfs::rendering::chooseFallbackUp(forward);
+                right = glm::cross(forward, fallback_up);
+            }
+            right = normalizedOr(right, glm::vec3(1.0f, 0.0f, 0.0f));
+
+            const glm::vec3 continuity_right =
+                transported_right - forward * glm::dot(transported_right, forward);
+            if (glm::length2(continuity_right) > 1e-8f &&
+                glm::dot(right, continuity_right) < 0.0f) {
+                right = -right;
+            }
+
+            const glm::vec3 backward = -forward;
+            const glm::vec3 up = normalizedOr(glm::cross(backward, right), glm::vec3(0.0f, 1.0f, 0.0f));
+            return glm::mat3(right, up, backward);
+        }
+
         void applyRotationAroundCenter(const float yaw, const float pitch) {
             constexpr glm::vec3 WORLD_UP(0.0f, 1.0f, 0.0f);
             constexpr float MAX_VERTICAL_DOT = 0.98f;
@@ -412,14 +456,33 @@ class Viewport {
         }
 
         void applyTrackballRotationAroundCenter(const float yaw, const float pitch) {
-            const glm::vec3 local_up = glm::normalize(R[1]);
-            const glm::vec3 local_right = glm::normalize(R[0]);
+            const glm::vec3 orbit_offset = t - pivot;
+            const float orbit_distance = glm::length(orbit_offset);
+            if (!std::isfinite(orbit_distance) || orbit_distance <= 1e-6f) {
+                R = orthonormalizeRotation(R);
+                return;
+            }
+
+            const glm::vec3 local_up = normalizedOr(R[1], glm::vec3(0.0f, 1.0f, 0.0f));
+            const glm::vec3 local_right = normalizedOr(R[0], glm::vec3(1.0f, 0.0f, 0.0f));
             const glm::mat3 Ry = glm::mat3(glm::rotate(glm::mat4(1.0f), yaw, local_up));
-            const glm::mat3 Rp = glm::mat3(glm::rotate(glm::mat4(1.0f), pitch, local_right));
+            const glm::vec3 pitch_axis = normalizedOr(Ry * local_right, local_right);
+            const glm::mat3 Rp = glm::mat3(glm::rotate(glm::mat4(1.0f), pitch, pitch_axis));
             const glm::mat3 U = Rp * Ry;
 
-            t = pivot + U * (t - pivot);
-            R = orthonormalizeRotation(U * R);
+            const glm::vec3 rotated_offset = U * orbit_offset;
+            const float rotated_distance = glm::length(rotated_offset);
+            if (!std::isfinite(rotated_distance) || rotated_distance <= 1e-6f) {
+                R = orthonormalizeRotation(R);
+                return;
+            }
+
+            t = pivot + (rotated_offset / rotated_distance) * orbit_distance;
+            R = makeRollStableOrbitRotation(
+                t,
+                pivot,
+                U * local_right,
+                U * R);
         }
     };
 

@@ -44,6 +44,14 @@ namespace lfs::vis::gui::rml_input {
         return element && element->GetTagName() != "body";
     }
 
+    inline bool isCustomTextInputElement(Rml::Element* element) {
+        return element && element->GetAttribute<Rml::String>("data-text-input", "") == "true";
+    }
+
+    inline bool wantsTextInput(Rml::Element* element) {
+        return isTextEditableElement(element) || isCustomTextInputElement(element);
+    }
+
     inline bool isSingleLineTextInput(Rml::Element* element) {
         return element && element->GetTagName() == "input" && isTextEditableElement(element);
     }
@@ -85,7 +93,10 @@ namespace lfs::vis::gui::rml_input {
         using RestoreCallback = std::function<void(Rml::Element&)>;
 
         ~TextInputEscapeRevertController() override {
-            clear();
+            if (Rml::GetSystemInterface())
+                clear();
+            else
+                bindings_.clear();
         }
 
         void bind(Rml::Element* element, RestoreCallback restore_callback = {}) {

@@ -7,6 +7,7 @@
 
 #include "gui/rml_overlay_context.hpp"
 #include "core/logger.hpp"
+#include "gui/rmlui/rml_document_utils.hpp"
 #include "gui/rmlui/rml_theme.hpp"
 #include "gui/rmlui/rmlui_manager.hpp"
 #include "gui/rmlui/rmlui_render_interface.hpp"
@@ -45,7 +46,7 @@ namespace lfs::vis::gui {
 
         try {
             const auto full_path = lfs::vis::getAssetPath(rml_path_);
-            doc_ = ctx_->LoadDocument(full_path.string());
+            doc_ = rml_documents::loadDocument(ctx_, full_path);
             if (doc_) {
                 doc_->Show();
             } else {
@@ -78,30 +79,7 @@ namespace lfs::vis::gui {
             base_rcss_ = rml_theme::loadBaseRCSS(rcss_path);
         }
 
-        rml_theme::applyTheme(doc_, base_rcss_, rml_theme::generateAllThemeMedia([this](const auto& th) { return generateThemeRCSS(th); }));
-    }
-
-    std::string RmlOverlayContext::generateThemeRCSS(const lfs::vis::Theme& t) const {
-        const auto& p = t.palette;
-
-        using rml_theme::colorToRml;
-        using rml_theme::colorToRmlAlpha;
-
-        const auto surface = colorToRmlAlpha(p.surface, 0.95f);
-        const auto border = colorToRmlAlpha(p.border, 0.4f);
-        const auto text = colorToRml(p.text);
-        const auto text_dim = colorToRml(p.text_dim);
-        const auto primary = colorToRml(p.primary);
-        const int rounding = static_cast<int>(t.sizes.window_rounding);
-
-        return std::format(
-            ".overlay-panel {{ background-color: {}; border-width: 1dp; border-color: {}; "
-            "border-radius: {}dp; }}\n"
-            ".overlay-text {{ color: {}; }}\n"
-            ".overlay-text-dim {{ color: {}; }}\n"
-            ".overlay-primary {{ color: {}; }}\n",
-            surface, border, rounding,
-            text, text_dim, primary);
+        rml_theme::applyTheme(doc_, base_rcss_, rml_theme::loadBaseRCSS("rmlui/overlay_context.theme.rcss"));
     }
 
     void RmlOverlayContext::update() {

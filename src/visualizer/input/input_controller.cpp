@@ -6,9 +6,13 @@
 #include "core/event_bridge/localization_manager.hpp"
 #include "core/logger.hpp"
 #include "core/path_utils.hpp"
+#include "gui/bounds_gizmo.hpp"
 #include "gui/gui_focus_state.hpp"
 #include "gui/gui_manager.hpp"
+#include "gui/rotation_gizmo.hpp"
+#include "gui/scale_gizmo.hpp"
 #include "gui/string_keys.hpp"
+#include "gui/translation_gizmo.hpp"
 #include "input/input_router.hpp"
 #include "input/key_codes.hpp"
 #include "input/sdl_key_mapping.hpp"
@@ -35,7 +39,6 @@
 #include <format>
 #include <limits>
 #include <imgui.h>
-#include <ImGuizmo.h>
 
 namespace lfs::vis {
 
@@ -45,6 +48,24 @@ namespace lfs::vis {
         constexpr float kWasdShiftSpeedBonus = 20.0f;
         constexpr double kCameraContextMenuDragThreshold = 4.0;
         namespace string_keys = lichtfeld::Strings;
+
+        [[nodiscard]] bool isTransformGizmoOverOrUsing() {
+            return gui::isBoundsGizmoHovered() ||
+                   gui::isBoundsGizmoActive() ||
+                   gui::isRotationGizmoHovered() ||
+                   gui::isRotationGizmoActive() ||
+                   gui::isScaleGizmoHovered() ||
+                   gui::isScaleGizmoActive() ||
+                   gui::isTranslationGizmoHovered() ||
+                   gui::isTranslationGizmoActive();
+        }
+
+        [[nodiscard]] bool isTransformGizmoUsing() {
+            return gui::isBoundsGizmoActive() ||
+                   gui::isRotationGizmoActive() ||
+                   gui::isScaleGizmoActive() ||
+                   gui::isTranslationGizmoActive();
+        }
 
         [[nodiscard]] bool isEnvironmentMapExtension(const std::string_view ext) {
             return ext == ".hdr" || ext == ".exr";
@@ -277,6 +298,7 @@ namespace lfs::vis {
         window_focus_lost_handler_id_ = internal::WindowFocusLost::when([this](const auto&) {
             drag_mode_ = DragMode::None;
             clearSelectedCameraContextMenuGesture();
+            press_selected_camera_frustum_ = false;
             std::fill(std::begin(keys_movement_), std::end(keys_movement_), false);
             hovered_camera_id_ = -1;
 
@@ -428,6 +450,15 @@ namespace lfs::vis {
     // Core handlers
     void InputController::handleMouseButton(int button, int action, double x, double y) {
         auto* gui = services().guiOrNull();
+        const bool is_left_button = button == static_cast<int>(input::AppMouseButton::LEFT);
+        const bool press_consumed_camera_frustum =
+            action == input::ACTION_RELEASE &&
+            is_left_button &&
+            press_selected_camera_frustum_;
+        if (action == input::ACTION_PRESS && is_left_button)
+            press_selected_camera_frustum_ = false;
+        if (action == input::ACTION_RELEASE && is_left_button)
+            press_selected_camera_frustum_ = false;
         const bool over_gizmo = gui && gui->gizmo().isPositionInViewportGizmo(x, y);
         const bool over_gui = isPointerOverBlockingUi(x, y);
         const bool over_gui_hover = isPointerOverUiHover(x, y);
@@ -453,7 +484,7 @@ namespace lfs::vis {
 
         // Check for splitter drag FIRST
         if (!over_gui &&
-            button == static_cast<int>(input::AppMouseButton::LEFT) &&
+            is_left_button &&
             action == input::ACTION_PRESS) {
             if (isInViewport(x, y) && isIndependentSplitViewActive()) {
                 focusSplitPanel(splitPanelForScreenX(x));
@@ -485,6 +516,7 @@ namespace lfs::vis {
                 last_click_pos_ = {x, y};
                 last_clicked_camera_id_ = hovered_camera_id_;
                 selectCameraByUid(hovered_camera_id_);
+                press_selected_camera_frustum_ = true;
             } else {
                 last_click_time_ = std::chrono::steady_clock::time_point();
                 last_click_pos_ = {-1000, -1000};
@@ -544,8 +576,8 @@ namespace lfs::vis {
                 return;
             }
 
-            // Block if ImGuizmo is being used or hovered
-            if (ImGuizmo::IsOver() || ImGuizmo::IsUsing()) {
+            // Block if a transform gizmo is being used or hovered
+            if (isTransformGizmoOverOrUsing()) {
                 return;
             }
 
@@ -662,7 +694,7 @@ namespace lfs::vis {
             case input::Action::SELECTION_ADD:
             case input::Action::SELECTION_REMOVE:
                 if (!over_gui && !over_gizmo && tool_context_ &&
-                    !ImGuizmo::IsOver() && !ImGuizmo::IsUsing()) {
+                    !isTransformGizmoOverOrUsing()) {
                     if (selection_tool_ && selection_tool_->isEnabled()) {
                         // Invoke selection stroke operator
                         auto* gm = services().guiOrNull();
@@ -725,7 +757,7 @@ namespace lfs::vis {
                     }
                 }
 
-                // Node picking (controlled by bindings, skips if ImGuizmo active)
+                // Node picking (controlled by bindings, skips if a transform gizmo is active)
                 const input::ToolMode input_mode = getCurrentToolMode();
                 const input::Action pick_action = bindings_.getActionForMouseButton(
                     input_mode, input::MouseButton::LEFT, mods);
@@ -734,8 +766,8 @@ namespace lfs::vis {
                 const bool has_node_binding = (pick_action == input::Action::NODE_PICK ||
                                                drag_action == input::Action::NODE_RECT_SELECT);
 
-                if (!over_gui && !over_gizmo && button == static_cast<int>(input::AppMouseButton::LEFT) && tool_context_ &&
-                    !ImGuizmo::IsOver() && !ImGuizmo::IsUsing() && has_node_binding) {
+                if (!over_gui && !over_gizmo && is_left_button && tool_context_ &&
+                    !isTransformGizmoOverOrUsing() && has_node_binding) {
                     is_node_rect_dragging_ = true;
                     node_rect_panel_ = splitPanelForScreenX(x);
                     node_rect_start_ = glm::vec2(static_cast<float>(x), static_cast<float>(y));
@@ -795,9 +827,9 @@ namespace lfs::vis {
             }
 
             // Node picking on release
-            if (is_node_rect_dragging_ && button == static_cast<int>(input::AppMouseButton::LEFT)) {
+            if (is_node_rect_dragging_ && is_left_button) {
                 is_node_rect_dragging_ = false;
-                if (tool_context_ && !isPointerOverBlockingUi(x, y)) {
+                if (!press_consumed_camera_frustum && tool_context_ && !isPointerOverBlockingUi(x, y)) {
                     auto* scene_manager = tool_context_->getSceneManager();
                     if (scene_manager) {
                         constexpr float CLICK_THRESHOLD_PX = 5.0f;
@@ -1010,9 +1042,9 @@ namespace lfs::vis {
         glm::vec2 pos(x, y);
         last_mouse_pos_ = current_pos;
 
-        // Node rectangle dragging - cancel if ImGuizmo takes over
+        // Node rectangle dragging - cancel if a transform gizmo takes over
         if (is_node_rect_dragging_) {
-            if (ImGuizmo::IsUsing()) {
+            if (isTransformGizmoUsing()) {
                 is_node_rect_dragging_ = false;
             } else {
                 node_rect_end_ = glm::vec2(static_cast<float>(x), static_cast<float>(y));
@@ -1021,8 +1053,8 @@ namespace lfs::vis {
             }
         }
 
-        // Block camera dragging if ImGuizmo is being used
-        if (ImGuizmo::IsUsing()) {
+        // Block camera dragging if a transform gizmo is being used
+        if (isTransformGizmoUsing()) {
             return;
         }
 
@@ -1520,6 +1552,7 @@ namespace lfs::vis {
             !isMouseButtonPressed(static_cast<int>(input::AppMouseButton::LEFT))) {
             drag_mode_ = DragMode::None;
             drag_button_ = -1;
+            press_selected_camera_frustum_ = false;
             SDL_SetCursor(SDL_GetDefaultCursor());
         }
 
@@ -1711,6 +1744,8 @@ namespace lfs::vis {
             LOG_ERROR("Camera ID {} not found", event.cam_id);
             return;
         }
+        if (input_router_)
+            input_router_->focusViewportKeyboard();
 
         // Get rotation and translation tensors and ensure they're on CPU
         auto R_tensor = cam_data->R().cpu();
@@ -2062,6 +2097,7 @@ namespace lfs::vis {
         drag_viewport_ = nullptr;
         drag_split_panel_ = SplitViewPanelId::Left;
         clearSelectedCameraContextMenuGesture();
+        press_selected_camera_frustum_ = false;
 
         if (was_camera_drag) {
             onCameraMovementEnd();
@@ -2073,24 +2109,16 @@ namespace lfs::vis {
             return false;
         }
 
-        const auto* const trainer = services().trainerOrNull();
-        if (!trainer || trainer->getState() != TrainingState::Ready) {
-            return false;
-        }
-
         const auto* const scene_manager = tool_context_->getSceneManager();
         if (!scene_manager) {
             return false;
         }
 
         const auto& scene = scene_manager->getScene();
-        for (const auto& selected_name : scene_manager->getSelectedNodeNames()) {
-            const auto* const node = scene.getNode(selected_name);
-            if (node && node->type == core::NodeType::CAMERA && node->camera_uid == hovered_camera_uid) {
+        for (const auto* const node : scene.getNodes()) {
+            if (node && node->type == core::NodeType::CAMERA && node->camera_uid == hovered_camera_uid)
                 return true;
-            }
         }
-
         return false;
     }
 
@@ -2127,33 +2155,34 @@ namespace lfs::vis {
             return;
         }
 
-        const auto selected_names = scene_manager->getSelectedNodeNames();
-        if (selected_names.empty()) {
+        auto& scene = scene_manager->getScene();
+        const core::SceneNode* hovered_node = nullptr;
+        for (const auto* const node : scene.getNodes()) {
+            if (node && node->type == core::NodeType::CAMERA && node->camera_uid == hovered_camera_uid) {
+                hovered_node = node;
+                break;
+            }
+        }
+        if (!hovered_node) {
             return;
         }
 
-        auto& scene = scene_manager->getScene();
-        const core::SceneNode* hovered_node = nullptr;
+        const auto selected_names = scene_manager->getSelectedNodeNames();
+        bool hovered_in_selection = false;
         bool all_selected_cameras = selected_names.size() > 1;
-
         for (const auto& selected_name : selected_names) {
             const auto* const node = scene.getNode(selected_name);
             if (!node || node->type != core::NodeType::CAMERA) {
                 all_selected_cameras = false;
                 continue;
             }
-
-            if (node->camera_uid == hovered_camera_uid) {
-                hovered_node = node;
-            }
+            if (node->camera_uid == hovered_camera_uid)
+                hovered_in_selection = true;
         }
-
-        if (!hovered_node) {
-            return;
-        }
+        const bool use_multi_menu = all_selected_cameras && hovered_in_selection;
 
         std::vector<gui::ContextMenuItem> items;
-        if (all_selected_cameras) {
+        if (use_multi_menu) {
             items.push_back({
                 .label = LOC(string_keys::Scene::ENABLE_ALL_TRAINING),
                 .action = "enable_all_train",
@@ -2180,6 +2209,21 @@ namespace lfs::vis {
             .action = "go_to_camera",
         });
         items.push_back({
+            .label = LOC(string_keys::Scene::GO_TO_IMAGE),
+            .action = "go_to_image",
+        });
+        items.push_back({
+            .label = LOC(string_keys::Scene::OPEN_IN_GT_COMPARE),
+            .action = "open_in_gt_compare",
+        });
+        const std::string image_path = hovered_node->image_path;
+        if (!image_path.empty()) {
+            items.push_back({
+                .label = LOC(string_keys::Scene::SHOW_IN_FILE_MANAGER),
+                .action = "show_in_file_manager",
+            });
+        }
+        items.push_back({
             .label = hovered_node->training_enabled
                          ? LOC(string_keys::Scene::DISABLE_FOR_TRAINING)
                          : LOC(string_keys::Scene::ENABLE_FOR_TRAINING),
@@ -2190,9 +2234,27 @@ namespace lfs::vis {
         const std::string camera_name = hovered_node->name;
         gui->globalContextMenu().request(
             std::move(items), screen_x, screen_y,
-            [this, camera_name, hovered_camera_uid](std::string_view action) {
+            [this, camera_name, hovered_camera_uid, image_path](std::string_view action) {
                 if (action == "go_to_camera") {
                     cmd::GoToCamView{.cam_id = hovered_camera_uid}.emit();
+                    return;
+                }
+                if (action == "go_to_image") {
+                    cmd::OpenCameraPreview{.cam_id = hovered_camera_uid}.emit();
+                    return;
+                }
+                if (action == "open_in_gt_compare") {
+                    cmd::GoToCamView{.cam_id = hovered_camera_uid}.emit();
+                    auto* const rm = services().renderingOrNull();
+                    if (!rm || !rm->isGTComparisonActive())
+                        cmd::ToggleGTComparison{}.emit();
+                    return;
+                }
+                if (action == "show_in_file_manager") {
+                    if (!image_path.empty() &&
+                        !lfs::core::reveal_in_file_manager(lfs::core::utf8_to_path(image_path))) {
+                        LOG_WARN("Failed to reveal image in file manager: {}", image_path);
+                    }
                     return;
                 }
 

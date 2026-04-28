@@ -35,7 +35,6 @@
     "help.about": "Informazioni su LichtFeld Studio"
   },
   "window": {
-    "getting_started": "Inizia",
     "about": "Informazioni su LichtFeld Studio",
     "input_settings": "Impostazioni di Input",
     "debug_info": "Info di Debug",
@@ -47,18 +46,16 @@
     "histogram": "Histogram"
   },
   "getting_started": {
-    "title": "GUIDA RAPIDA",
+    "title": "Inizia",
     "description": "Impara a preparare i dataset e iniziare con LichtFeld Studio:",
     "wiki_section": "WIKI & FAQ",
+    "video_automotive": "3dgs for automotive marketing",
     "video_intro": "Training su Immagini Equirettangolari 360",
     "video_latest": "LichtFeld v0.3.0 Panoramica Funzionalità",
     "video_reality_scan": "Dataset Reality Scan",
     "video_colmap": "Tutorial COLMAP",
     "video_lichtfeld": "Tutorial LichtFeld",
-    "video_masks": "Tutorial Maschere",
-    "loading": "Caricamento...",
-    "wiki_label": "Wiki:",
-    "watch_tooltip": "Guarda: {title}"
+    "video_masks": "Tutorial Maschere"
   },
   "about": {
     "title": "LICHTFELD STUDIO",
@@ -94,7 +91,7 @@
     "section.losses": "Parametri di Perdita",
     "section.initialization": "Inizializzazione",
     "section.thresholds": "Soglie",
-    "section.save_steps": "Passi di Salvataggio",
+    "section.save_steps": "Passi di Salvataggio/Valutazione",
     "section.basic_params": "Parametri di Addestramento",
     "section.advanced_params": "Parametri Avanzati di Addestramento",
     "section.sparsity": "Impostazioni di Sparsità",
@@ -106,6 +103,7 @@
     "dataset.cpu_cache": "CPU Cache:",
     "dataset.fs_cache": "FS Cache:",
     "dataset.output": "Output:",
+    "dataset.test_every": "Test Every:",
     "opt.strategy": "Strategy:",
     "opt.learning_rates": "Learning Rates:",
     "opt.iterations": "Iterations:",
@@ -181,7 +179,9 @@
     "tooltip.max_width": "Larghezza massima immagine in pixel",
     "tooltip.cpu_cache": "Cache immagini decodificate in RAM",
     "tooltip.fs_cache": "Cache immagini decodificate su disco",
-    "tooltip.save_steps": "Iterazioni per salvare checkpoint",
+    "tooltip.test_every": "Usa ogni N-esima immagine come set di test",
+    "tooltip.enable_eval": "Abilita la valutazione durante l'allenamento (calcola PSNR/SSIM sul set di test). Riduce leggermente la velocità di allenamento.",
+    "tooltip.save_steps": "Iterazioni per salvare checkpoint ED eseguire la valutazione (se Abilita Valutazione è attivo). La valutazione viene sempre eseguita alle stesse iterazioni dei checkpoint.",
     "tooltip.lr_position": "Tasso di apprendimento per posizioni",
     "tooltip.lr_sh_coeff": "Tasso di apprendimento per armoniche sferiche",
     "tooltip.lr_opacity": "Tasso di apprendimento per opacità",
@@ -264,7 +264,74 @@
     "options.bg.color": "Colore",
     "options.bg.modulation": "Modulazione",
     "options.bg.image": "Immagine",
-    "options.bg.random": "Casuale"
+    "options.bg.random": "Casuale",
+    "tooltip": {
+      "btn_switch_edit": "Passa alla modalità modifica per la scena addestrata",
+      "ppisp_freeze_from_sidecar": "Carica i pesi PPISP da un file sidecar",
+      "ppisp_sidecar_path": "Percorso del file sidecar PPISP",
+      "ppisp_sidecar_browse": "Sfoglia per un file sidecar PPISP",
+      "ppisp_sidecar_clear": "Rimuovi il sidecar PPISP selezionato",
+      "bg_color": "Colore di sfondo uniforme usato durante il training",
+      "bg_image_path": "Percorso dell'immagine di sfondo usata durante il training",
+      "bg_image_browse": "Sfoglia per un'immagine di sfondo",
+      "bg_image_clear": "Rimuovi l'immagine di sfondo selezionata",
+      "dataset_path": "Percorso del dataset caricato",
+      "dataset_images": "Numero di immagini nel dataset",
+      "dataset_output": "Directory di output per gli artefatti addestrati",
+      "opt_strategy_display": "Strategia di densificazione attiva",
+      "bilateral_grid_x": "Risoluzione X della griglia bilaterale",
+      "bilateral_grid_y": "Risoluzione Y della griglia bilaterale",
+      "bilateral_grid_w": "Bin di colore/intensità della griglia bilaterale",
+      "bilateral_grid_lr": "Learning rate della griglia bilaterale",
+      "prune_opacity": "Elimina le Gaussiane sotto questa opacità",
+      "revised_opacity": "Usa la formulazione di opacità rivista",
+      "min_opacity": "Soglia minima di opacità per il pruning",
+      "grow_scale_3d": "Densifica quando la scala 3D supera questo valore",
+      "grow_scale_2d": "Densifica quando la scala 2D in screen-space supera questo valore",
+      "prune_scale_3d": "Pota quando la scala 3D supera questo valore",
+      "prune_scale_2d": "Pota quando la scala 2D in screen-space supera questo valore",
+      "pause_refine_after_reset": "Iterazioni di pausa raffinamento dopo il reset di opacità",
+      "sparsify_steps": "Numero di passi di sparsificazione",
+      "init_rho": "Penalità iniziale di sparsity (rho)",
+      "prune_ratio": "Frazione finale di Gaussiane da potare al termine della sparsificazione",
+      "opt": {
+        "strategy": {
+          "mrnf": "Strategia 3DGS standard con raffinamento MRNF",
+          "igs_plus": "3DGS+ migliorato con crescita/pruning raffinati",
+          "mcmc": "Strategia MCMC con densificazione basata su campionamento"
+        },
+        "sh_degree": {
+          "0": "Solo diffuso — più veloce, nessun colore vista-dipendente",
+          "1": "SH del primo ordine — spunti speculari di base",
+          "2": "SH del secondo ordine — migliore colore vista-dipendente",
+          "3": "SH del terzo ordine — massima qualità, più VRAM"
+        },
+        "tile_mode": {
+          "full": "Rasterizzazione a piena risoluzione",
+          "half": "Rasterizzazione a metà risoluzione (~4× più veloce)",
+          "quarter": "Rasterizzazione a un quarto di risoluzione (~16× più veloce)"
+        },
+        "mask_mode": {
+          "none": "Allena su tutta l'immagine, nessuna maschera",
+          "segment": "Usa la maschera di segmentazione per il primo piano",
+          "ignore": "Ignora i pixel mascherati nella loss",
+          "alpha_consistent": "Imponi consistenza alpha con la maschera"
+        },
+        "bg_mode": {
+          "color": "Usa un colore di sfondo fisso",
+          "modulation": "Modula lo sfondo con l'alpha ricostruito",
+          "image": "Usa un'immagine di sfondo",
+          "random": "Randomizza il colore di sfondo a ogni passo"
+        },
+        "resize_factor": {
+          "auto": "Scegli automaticamente il fattore di ridimensionamento in base alla VRAM",
+          "1": "Allena alla risoluzione originale dell'immagine",
+          "2": "Allena a metà risoluzione dell'immagine",
+          "4": "Allena a un quarto della risoluzione dell'immagine",
+          "8": "Allena a un ottavo della risoluzione dell'immagine"
+        }
+      }
+    }
   },
   "scene": {
     "add_ply": "Aggiungi PLY...",
@@ -316,7 +383,10 @@
     "keyframe_easing.ease_out": "Uscita morbida",
     "keyframe_easing.ease_in_out": "Ingresso/Uscita morbidi",
     "keyframe_label": "Fotogramma chiave {index}  ({time:.2f}s)",
-    "search": "Cerca"
+    "search": "Cerca",
+    "show_in_file_manager": "Mostra nel file manager",
+    "go_to_image": "Vai all'immagine",
+    "open_in_gt_compare": "Apri nel confronto GT"
   },
   "export": {
     "title": "Esporta",
@@ -326,6 +396,7 @@
     "format.usd_openusd": "USD (OpenUSD)",
     "format.usdz_nurec": "USDZ (NuRec)",
     "format.html_viewer": "Visualizzatore HTML",
+    "format.rad_random_access": "RAD (SparkJS)",
     "select_models": "Seleziona Modelli:",
     "all": "Tutti",
     "none": "Nessuno",
@@ -336,7 +407,13 @@
     "writing_spz": "Scrittura SPZ",
     "complete": "Completato",
     "failed": "Fallito",
-    "select_at_least_one": "Seleziona almeno un modello"
+    "select_at_least_one": "Seleziona almeno un modello",
+    "tooltip": {
+      "rad_lod_input": "Percentuale LOD (1-100). Predefinito: 100",
+      "rad_lod_add": "Aggiungi questo livello LOD",
+      "rad_lod_remove": "Rimuovi questo livello LOD",
+      "rad_lod_select": "Seleziona il livello LOD da rimuovere"
+    }
   },
   "common": {
     "ok": "OK",
@@ -374,6 +451,8 @@
     "step": "Passo",
     "loss": "Perdita",
     "eta": "Tempo Rimasto",
+    "psnr": "PSNR",
+    "ssim": "SSIM",
     "unknown": "Sconosciuto",
     "dataset_no_trainer": "Dataset (Senza Trainer)",
     "dataset_ready": "Dataset (Pronto)",
@@ -558,7 +637,8 @@
     "idle": "Inattivo",
     "running": "In Esecuzione",
     "finished": "Completato",
-    "save_steps": "Passi di Salvataggio",
+    "save_steps": "Passi di Salvataggio/Valutazione",
+    "save_eval_steps": "Passi di Salvataggio/Valutazione",
     "new_step": "Nuovo Passo",
     "no_save_steps": "Nessun passo di salvataggio configurato",
     "sparsity": "Impostazioni di Sparsità",
@@ -642,7 +722,72 @@
     "seq_dock": "Aggancia il sequencer",
     "seq_undock": "Sgancia il sequencer",
     "seq_interval": "Intervallo della griglia",
-    "seq_preview_size": "Scala anteprima PiP"
+    "seq_preview_size": "Scala anteprima PiP",
+    "transform_position_axis": "Trasla la selezione lungo questo asse",
+    "transform_rotation_axis": "Ruota la selezione attorno a questo asse (gradi)",
+    "transform_scale_axis": "Scala la selezione lungo questo asse",
+    "transform_scale_uniform": "Scala uniforme su tutti gli assi",
+    "transform_reset": "Reimposta la trasformazione all'identità",
+    "environment_mode": "Fonte sfondo: tinta unita o HDRI",
+    "environment_map_path": "Scegli una mappa ambientale HDRI",
+    "environment_exposure": "Esposizione HDRI in stop EV",
+    "environment_rotation": "Ruota HDRI attorno all'asse verticale",
+    "voxel_size": "Dimensione cella voxel per query spaziali",
+    "axes_size": "Lunghezza delle linee degli assi di coordinate",
+    "grid_plane": "Piano su cui è disegnata la griglia",
+    "grid_opacity": "Opacità delle linee della griglia",
+    "camera_frustum_scale": "Scala visiva dei frustum della camera",
+    "camera_metrics_mode": "Metriche di qualità immagine mostrate sulle camere di training",
+    "selection_color_committed": "Colore usato per le selezioni confermate",
+    "selection_color_preview": "Colore per l'anteprima di selezione",
+    "selection_color_center_marker": "Colore del marcatore centrale della selezione",
+    "mesh_wireframe": "Renderizza la mesh come wireframe",
+    "mesh_wireframe_color": "Colore delle linee wireframe",
+    "mesh_wireframe_width": "Larghezza delle linee wireframe",
+    "mesh_light_intensity": "Intensità della luce sulla mesh",
+    "mesh_ambient": "Contributo della luce ambientale alla mesh",
+    "mesh_backface_culling": "Salta il rendering dei triangoli rivolti all'indietro",
+    "mesh_shadow_enabled": "Proietta e riceve ombre sulla mesh",
+    "mesh_shadow_resolution": "Risoluzione della shadow map",
+    "ppisp_vignette_enabled": "Applica vignettatura come parte della correzione",
+    "ppisp_vignette_strength": "Scurimento della vignettatura agli angoli",
+    "opt": {
+      "environment_mode": {
+        "solid_color": "Renderizza con un colore di sfondo uniforme",
+        "equirect": "Renderizza con una mappa ambientale HDR a 360°"
+      },
+      "environment_map_preset": {
+        "kloofendal": "Integrato: Kloofendal Pure Sky",
+        "alps": "Integrato: Alps Field",
+        "custom": "Ultimo HDRI personalizzato caricato"
+      },
+      "grid_plane": {
+        "yz": "Mostra griglia sul piano YZ (vista destra)",
+        "xz": "Mostra griglia sul piano XZ (vista dall'alto)",
+        "xy": "Mostra griglia sul piano XY (vista frontale)"
+      },
+      "sh_degree": {
+        "0": "Solo diffuso — nessuna illuminazione vista-dipendente",
+        "1": "SH del primo ordine — illuminazione vista-dipendente di base",
+        "2": "SH del secondo ordine — più dettaglio direzionale",
+        "3": "SH del terzo ordine — massima qualità vista-dipendente"
+      },
+      "camera_metrics": {
+        "off": "Nascondi metriche di qualità",
+        "psnr": "Mostra PSNR per camera di training",
+        "psnr_ssim": "Mostra PSNR e SSIM per camera di training"
+      },
+      "shadow_resolution": {
+        "512": "Shadow map 512×512 (bassa qualità, veloce)",
+        "1024": "Shadow map 1024×1024 (bilanciato)",
+        "2048": "Shadow map 2048×2048 (alta qualità)",
+        "4096": "Shadow map 4096×4096 (massima qualità, lento)"
+      },
+      "ppisp_mode": {
+        "manual": "Manuale: regola i cursori di correzione direttamente",
+        "auto": "Auto: usa il controller addestrato per la correzione"
+      }
+    }
   },
   "exit_popup": {
     "title": "Uscire dall'Applicazione?",
@@ -659,7 +804,11 @@
     "output_dir": "Output:  ",
     "init_file": "Init file (opzionale, sostituisce points3D):",
     "help_text": "I checkpoint, i log e i modelli esportati saranno salvati nella cartella di output.",
-    "ppisp_sidecar": "PPISP Sidecar:"
+    "ppisp_sidecar": "PPISP Sidecar:",
+    "centralize_dataset": "Centralizza dataset",
+    "centralize_off": "Disattivato",
+    "centralize_by_pointcloud": "Per nuvola di punti",
+    "centralize_by_cameras": "Per telecamere"
   },
   "notification": {
     "cannot_open": "Impossibile aprire",
@@ -674,7 +823,11 @@
     "models": "MODELLI",
     "no_models": "Nessun modello nella scena",
     "sh_degree": "SH DEGREE",
-    "export_merged": "Esporta Unito..."
+    "export_merged": "Esporta Unito...",
+    "rad_customize_lod": "Personalizza LOD",
+    "rad_lod_levels": "Livelli LOD",
+    "no_lod_settings": "Nessuna impostazione LOD (uso valori predefiniti)",
+    "rad_flip_y": "Inverti asse Y"
   },
   "selection_group": {
     "lock": "Blocca",
@@ -792,7 +945,8 @@
     "ppisp_freeze_gaussians": "Congela Gaussiani:",
     "disabled": "Disabilitato",
     "ppisp_freeze_from_sidecar": "Frozen Sidecar:",
-    "ppisp_sidecar_path": "Sidecar Path:"
+    "ppisp_sidecar_path": "Sidecar Path:",
+    "enable_eval": "Enable Eval:"
   },
   "image_preview": {
     "title": "Anteprima immagine",
@@ -853,7 +1007,9 @@
     "zoom": "Zoom",
     "fit": "Adatta",
     "storage_section": "ARCHIVIAZIONE",
-    "color_picker": "Preleva"
+    "color_picker": "Preleva",
+    "rotate_left": "Ruota 90° a sinistra",
+    "rotate_right": "Ruota 90° a destra"
   },
   "startup": {
     "supported_by": "Supportato da",
@@ -1256,7 +1412,11 @@
       },
       "distance": {
         "label": "Distance",
-        "description": "Distance from the current scene center."
+        "description": "Distance from the current splat center."
+      },
+      "world_distance": {
+        "label": "World Distance",
+        "description": "Distance from the world origin."
       }
     },
     "undo": "Undo",

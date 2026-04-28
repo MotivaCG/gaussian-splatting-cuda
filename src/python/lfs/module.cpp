@@ -782,17 +782,20 @@ NB_MODULE(lichtfeld, m) {
     m.def(
         "load_file",
         [](const std::string& path, const bool is_dataset,
-           const std::string& output_path, const std::string& init_path) {
+           const std::string& output_path, const std::string& init_path,
+           const std::string& centralize_dataset) {
             nb::gil_scoped_release release;
             lfs::core::events::cmd::LoadFile{
                 .path = python_utf8_path(path),
                 .is_dataset = is_dataset,
                 .output_path = python_utf8_path(output_path),
-                .init_path = python_utf8_path(init_path)}
+                .init_path = python_utf8_path(init_path),
+                .centralize_dataset = centralize_dataset}
                 .emit();
         },
         nb::arg("path"), nb::arg("is_dataset") = false,
         nb::arg("output_path") = "", nb::arg("init_path") = "",
+        nb::arg("centralize_dataset") = "off",
         "Load a file (PLY, checkpoint) or dataset into the scene.");
 
     m.def(
@@ -826,11 +829,18 @@ NB_MODULE(lichtfeld, m) {
 
     m.def(
         "export_scene",
-        [](int format, const std::string& path, const std::vector<std::string>& node_names, int sh_degree) {
-            lfs::python::invoke_export(format, path, node_names, sh_degree);
+        [](int format, const std::string& path, const std::vector<std::string>& node_names, int sh_degree,
+           const std::optional<std::vector<float>>& rad_lod_ratios, bool rad_flip_y) {
+            std::vector<float> lod_ratios;
+            if (rad_lod_ratios.has_value()) {
+                lod_ratios = rad_lod_ratios.value();
+            }
+            lfs::python::invoke_export(format, path, node_names, sh_degree, lod_ratios, rad_flip_y);
         },
         nb::arg("format"), nb::arg("path"), nb::arg("node_names"), nb::arg("sh_degree"),
-        "Export scene nodes to file. Format: 0=PLY, 1=SOG, 2=SPZ, 3=HTML, 4=USD, 5=USDZ NuRec.");
+        nb::arg("rad_lod_ratios") = nb::none(),
+        nb::arg("rad_flip_y") = false,
+        "Export scene nodes to file. Format: 0=PLY, 1=SOG, 2=SPZ, 3=HTML, 4=USD, 5=USDZ NuRec, 6=RAD.");
 
     m.def(
         "save_config_file",
@@ -880,6 +890,31 @@ NB_MODULE(lichtfeld, m) {
             return nb::make_tuple(lg->getDataMin(), lg->getDataMax());
         },
         "Push loss data to a loss-graph element, returns (data_min, data_max)");
+
+    m.def(
+        "psnr_buffer", []() -> std::vector<float> {
+            const auto* const tm = lfs::python::get_trainer_manager();
+            if (!tm)
+                return {};
+            auto psnr_deque = tm->getPSNRBuffer();
+            return std::vector<float>(psnr_deque.begin(), psnr_deque.end());
+        },
+        "Get the recent PSNR history as a list of floats");
+
+    m.def(
+        "push_psnr_to_element",
+        [](lfs::python::PyRmlElement& elem, const std::vector<float>& data) -> nb::tuple {
+            auto* raw = elem.raw();
+            if (!raw)
+                return nb::make_tuple(0.0f, 1.0f);
+            auto* lg = dynamic_cast<lfs::vis::gui::LossGraphElement*>(raw);
+            if (!lg)
+                return nb::make_tuple(0.0f, 1.0f);
+            std::deque<float> deque(data.begin(), data.end());
+            lg->setData(deque);
+            return nb::make_tuple(lg->getDataMin(), lg->getDataMax());
+        },
+        "Push PSNR data to a psnr-graph element, returns (data_min, data_max)");
 
     // Trainer status bar bindings
     m.def(

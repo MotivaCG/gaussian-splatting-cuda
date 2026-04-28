@@ -275,7 +275,7 @@ namespace lfs::python {
                         "Initial rho for sparsity optimization")
             .int_prop(&OptimizationParameters::tile_mode,
                       "tile_mode", "Tile Mode", 1, 1, 4,
-                      "Tile mode (1, 2, or 4)")
+                      "Tile mode for 3DGUT training only (1, 2, or 4; ignored for 3DGS/FastGS)")
             .float_prop(&OptimizationParameters::steps_scaler,
                         "steps_scaler", "Steps Scaler", 1.0f, 0.0f, 10.0f,
                         "Scale training step counts")
@@ -399,7 +399,7 @@ namespace lfs::python {
             [](DatasetConfig& c, int v) { c.resize_factor = v; });
 
         add_int(
-            "test_every", "Test Every", 8, 1, 100, "Use every Nth image for testing", true,
+            "test_every", "Test Every", 8, 1, 10000, "Use every Nth image for testing", true,
             [](const DatasetConfig& c) { return c.test_every; });
 
         add_int(
@@ -1098,10 +1098,15 @@ namespace lfs::python {
                 "headless", [](PyOptimizationParams& self) { return self.params().headless; },
                 "Whether running without visualization")
             .def_prop_rw(
+                "enable_eval",
+                [](PyOptimizationParams& self) { return self.params().enable_eval; },
+                [](PyOptimizationParams&, bool v) { modify_params([v](auto& p) { p.enable_eval = v; }); },
+                "Enable evaluation during training")
+            .def_prop_rw(
                 "tile_mode",
                 [](PyOptimizationParams& self) { return self.params().tile_mode; },
                 [](PyOptimizationParams&, int v) { modify_params([v](auto& p) { p.tile_mode = v; }); },
-                "Tile mode (1, 2, or 4)")
+                "Tile mode for 3DGUT training only (1, 2, or 4; ignored for 3DGS/FastGS)")
             .def_prop_rw(
                 "steps_scaler",
                 [](PyOptimizationParams& self) { return self.params().steps_scaler; },
@@ -1274,7 +1279,40 @@ namespace lfs::python {
                 [](PyOptimizationParams&) {
                     modify_params([](auto& p) { p.save_steps.clear(); });
                 },
-                "Clear all save steps");
+                "Clear all save steps")
+            .def_prop_ro(
+                "eval_steps",
+                [](PyOptimizationParams& self) -> std::vector<size_t> {
+                    return self.params().eval_steps;
+                },
+                "List of iterations at which to run evaluation")
+            .def(
+                "add_eval_step",
+                [](PyOptimizationParams&, size_t step) {
+                    modify_params([step](auto& p) {
+                        if (std::find(p.eval_steps.begin(), p.eval_steps.end(), step) == p.eval_steps.end()) {
+                            p.eval_steps.push_back(step);
+                            std::sort(p.eval_steps.begin(), p.eval_steps.end());
+                        }
+                    });
+                },
+                nb::arg("step"),
+                "Add an eval step (ignored if duplicate)")
+            .def(
+                "remove_eval_step",
+                [](PyOptimizationParams&, size_t step) {
+                    modify_params([step](auto& p) {
+                        p.eval_steps.erase(std::remove(p.eval_steps.begin(), p.eval_steps.end(), step), p.eval_steps.end());
+                    });
+                },
+                nb::arg("step"),
+                "Remove an eval step")
+            .def(
+                "clear_eval_steps",
+                [](PyOptimizationParams&) {
+                    modify_params([](auto& p) { p.eval_steps.clear(); });
+                },
+                "Clear all eval steps");
 
         m.def(
             "optimization_params", []() { return PyOptimizationParams{}; },
@@ -1303,8 +1341,16 @@ namespace lfs::python {
             .def_prop_ro(
                 "images", [](const PyDatasetConfig& self) { return self.params().images; },
                 "Subfolder name containing images")
-            .def_prop_ro(
-                "test_every", [](const PyDatasetConfig& self) { return self.params().test_every; },
+            .def_prop_rw(
+                "test_every",
+                [](const PyDatasetConfig& self) { return self.params().test_every; },
+                [](PyDatasetConfig& self, int v) {
+                    if (!self.can_edit())
+                        throw std::runtime_error("Cannot edit dataset params during training");
+                    if (v < 1)
+                        throw std::invalid_argument("test_every must be at least 1");
+                    self.params().test_every = v;
+                },
                 "Use every Nth image for testing")
             .def_prop_rw(
                 "resize_factor",
@@ -1343,7 +1389,11 @@ namespace lfs::python {
                         throw std::runtime_error("Cannot edit dataset params during training");
                     self.params().loading_params.use_fs_cache = v;
                 },
-                "Use filesystem cache for images");
+                "Use filesystem cache for images")
+            .def_prop_ro(
+                "centralize_dataset",
+                [](const PyDatasetConfig& self) { return self.params().centralize_dataset; },
+                "Dataset centralization mode used for the last load: 'none', 'auto', 'by_pointcloud', 'by_cameras'");
 
         m.def(
             "dataset_params", []() { return PyDatasetConfig{}; },

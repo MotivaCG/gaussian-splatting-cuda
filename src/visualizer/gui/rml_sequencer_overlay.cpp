@@ -11,6 +11,7 @@
 #include "core/events.hpp"
 #include "core/logger.hpp"
 #include "gui/gui_focus_state.hpp"
+#include "gui/rmlui/rml_document_utils.hpp"
 #include "gui/rmlui/rml_text_input_handler.hpp"
 #include "gui/rmlui/rml_theme.hpp"
 #include "gui/rmlui/rmlui_manager.hpp"
@@ -72,7 +73,7 @@ namespace lfs::vis::gui {
 
         try {
             const auto rml_path = lfs::vis::getAssetPath("rmlui/sequencer_overlay.rml");
-            document_ = rml_context_->LoadDocument(rml_path.string());
+            document_ = rml_documents::loadDocument(rml_context_, rml_path);
             if (!document_) {
                 LOG_ERROR("RmlSequencerOverlay: failed to load sequencer_overlay.rml");
                 return;
@@ -103,6 +104,68 @@ namespace lfs::vis::gui {
 
         syncTheme();
         return true;
+    }
+
+    void RmlSequencerOverlay::reloadResources() {
+        if (!rml_context_)
+            return;
+
+        hideContextMenu();
+        hideEditOverlay();
+        hidePreviewWindow();
+        time_edit_active_ = false;
+        focal_edit_active_ = false;
+        wants_input_ = false;
+        has_text_focus_ = false;
+
+        if (document_) {
+            rml_context_->UnloadDocument(document_);
+            rml_context_->Update();
+        }
+
+        document_ = nullptr;
+        el_menu_backdrop_ = nullptr;
+        el_context_menu_ = nullptr;
+        el_popup_backdrop_ = nullptr;
+        el_time_popup_ = nullptr;
+        el_focal_popup_ = nullptr;
+        el_time_input_ = nullptr;
+        el_focal_input_ = nullptr;
+        el_edit_overlay_ = nullptr;
+        el_edit_label_ = nullptr;
+        el_edit_delta_ = nullptr;
+        el_edit_apply_ = nullptr;
+        el_edit_revert_ = nullptr;
+        el_preview_window_ = nullptr;
+        el_preview_title_ = nullptr;
+        el_preview_image_ = nullptr;
+        el_time_popup_title_ = nullptr;
+        el_focal_popup_title_ = nullptr;
+        el_time_ok_ = nullptr;
+        el_time_cancel_ = nullptr;
+        el_focal_ok_ = nullptr;
+        el_focal_cancel_ = nullptr;
+        elements_cached_ = false;
+        base_rcss_.clear();
+        has_theme_signature_ = false;
+        width_ = 0;
+        height_ = 0;
+
+        try {
+            const auto rml_path = lfs::vis::getAssetPath("rmlui/sequencer_overlay.rml");
+            document_ = rml_documents::loadDocument(rml_context_, rml_path);
+            if (!document_) {
+                LOG_ERROR("RmlSequencerOverlay: failed to reload sequencer_overlay.rml");
+                return;
+            }
+            document_->Show();
+            cacheElements();
+        } catch (const std::exception& e) {
+            LOG_ERROR("RmlSequencerOverlay: resource not found during reload: {}", e.what());
+            return;
+        }
+
+        syncTheme();
     }
 
     void RmlSequencerOverlay::cacheElements() {
@@ -161,38 +224,6 @@ namespace lfs::vis::gui {
         el_focal_popup_->AddEventListener(Rml::EventId::Click, &listener_);
     }
 
-    std::string RmlSequencerOverlay::generateThemeRCSS(const lfs::vis::Theme& t) const {
-        using rml_theme::colorToRml;
-        using rml_theme::colorToRmlAlpha;
-        const auto& p = t.palette;
-
-        const auto surface = colorToRmlAlpha(p.surface, 0.95f);
-        const auto border = colorToRmlAlpha(p.border, 0.4f);
-        const auto text = colorToRml(p.text);
-        const auto text_dim = colorToRml(p.text_dim);
-        const auto primary = colorToRml(p.primary);
-        const auto primary_border = colorToRmlAlpha(p.primary, 0.6f);
-        const auto error = colorToRml(p.error);
-        const auto sep_color = colorToRmlAlpha(p.border, 0.5f);
-        const int rounding = static_cast<int>(t.sizes.window_rounding);
-
-        return fmt::format(
-            ".overlay-panel {{ background-color: {}; border-color: {}; border-radius: {}dp; }}\n"
-            ".overlay-text {{ color: {}; }}\n"
-            ".overlay-text-dim {{ color: {}; }}\n"
-            "#pip-preview-window {{ border-color: {}; border-radius: {}dp; }}\n"
-            "#pip-preview-window.playing {{ border-color: {}; }}\n"
-            ".edit-popup {{ background-color: {}; border-color: {}; border-radius: {}dp; }}\n"
-            ".popup-title {{ color: {}; }}\n"
-            ".popup-sep {{ background-color: {}; }}\n",
-            surface, border, rounding,
-            text, text_dim,
-            primary_border, rounding,
-            error,
-            surface, border, rounding,
-            text, sep_color);
-    }
-
     void RmlSequencerOverlay::syncTheme() {
         if (!document_)
             return;
@@ -206,7 +237,7 @@ namespace lfs::vis::gui {
         if (base_rcss_.empty())
             base_rcss_ = rml_theme::loadBaseRCSS("rmlui/sequencer_overlay.rcss");
 
-        rml_theme::applyTheme(document_, base_rcss_, rml_theme::generateAllThemeMedia([this](const auto& th) { return generateThemeRCSS(th); }));
+        rml_theme::applyTheme(document_, base_rcss_, rml_theme::loadBaseRCSS("rmlui/sequencer_overlay.theme.rcss"));
         syncLocalization();
     }
 
@@ -243,7 +274,7 @@ namespace lfs::vis::gui {
 
         using namespace lichtfeld::Strings;
         html += fmt::format(
-            R"(<div class="context-menu-item" id="ctx-add">{}<span class="context-menu-label" style="float: right; display: inline; padding: 0;">K</span></div>)",
+            R"(<div class="context-menu-item" id="ctx-add">{}<span class="context-menu-label context-menu-shortcut">K</span></div>)",
             LOC(Sequencer::ADD_KEYFRAME_HERE));
 
         if (keyframe.has_value() && *keyframe < timeline.size()) {
@@ -256,7 +287,7 @@ namespace lfs::vis::gui {
 
             html += R"(<div class="context-menu-separator"></div>)";
             html += fmt::format(
-                R"(<div class="context-menu-item" id="ctx-update">{}<span class="context-menu-label" style="float: right; display: inline; padding: 0;">U</span></div>)",
+                R"(<div class="context-menu-item" id="ctx-update">{}<span class="context-menu-label context-menu-shortcut">U</span></div>)",
                 LOC(Sequencer::UPDATE_TO_CURRENT_VIEW));
             html += fmt::format(
                 R"(<div class="context-menu-item" id="ctx-goto">{}</div>)",
@@ -301,7 +332,7 @@ namespace lfs::vis::gui {
                     LOC(Sequencer::DELETE_KEYFRAME));
             else
                 html += fmt::format(
-                    R"(<div class="context-menu-item" id="ctx-delete">{}<span class="context-menu-label" style="float: right; display: inline; padding: 0;">Del</span></div>)",
+                    R"(<div class="context-menu-item" id="ctx-delete">{}<span class="context-menu-label context-menu-shortcut">Del</span></div>)",
                     LOC(Sequencer::DELETE_KEYFRAME));
         }
 

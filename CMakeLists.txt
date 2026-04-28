@@ -30,7 +30,26 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
 endif()
 
-project(LichtFeld-Studio LANGUAGES CUDA CXX C)
+project(LichtFeld-Studio VERSION 0.5.2 LANGUAGES CUDA CXX C)
+
+# On Windows with a multi-config generator (MSVC/Visual Studio, Ninja Multi-Config),
+# route all build outputs to build/<Config>/ so Debug and Release binaries are
+# separated. Single-config generators (Ninja, NMake) use a flat binary dir —
+# the selected CMAKE_BUILD_TYPE is baked in at configure time, so no subdirectory
+# is needed; each target's per-target RUNTIME_OUTPUT_DIRECTORY (set to
+# ${CMAKE_BINARY_DIR}) ensures a flat layout under build/.
+# Linux: same per-target convention applies; no override needed here.
+# The else() branch explicitly sets to "" to override any stale cached value.
+get_property(_IS_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(WIN32 AND _IS_MULTI_CONFIG)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>")
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>")
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>")
+else()
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "")
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "")
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "")
+endif()
 
 # Disable C++20 module scanning
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
@@ -558,7 +577,6 @@ target_include_directories(${PROJECT_NAME}
         ${CMAKE_CURRENT_SOURCE_DIR}/src/visualizer   # For internal visualizer headers used by GUI MCP
         ${CMAKE_CURRENT_SOURCE_DIR}/src/rendering/include  # For rendering headers (MCP GUI tools)
         ${CMAKE_CURRENT_SOURCE_DIR}/external         # For external headers
-        ${CMAKE_CURRENT_SOURCE_DIR}/external/imguizmo
 
         ${CUDAToolkit_INCLUDE_DIRS}
         ${OPENGL_INCLUDE_DIRS}
@@ -666,6 +684,61 @@ if(WIN32 AND CUDAToolkit_FOUND)
         endif()
     endforeach()
     message(STATUS "Post-build: CUDA DLLs will be copied from ${CUDAToolkit_BIN_DIR}")
+endif()
+
+# =============================================================================
+# VCPKG DLL COPYING - Ensure all vcpkg DLLs are available at runtime
+# =============================================================================
+# vcpkg's VCPKG_APPLOCAL_DEPS feature may not copy all needed DLLs.
+# This explicitly copies vcpkg DLLs to ensure they're available at runtime.
+# 
+# IMPORTANT: For Release builds, copy ONLY release DLLs to avoid loading debug CRT.
+# For Debug builds, copy both because some vcpkg packages (e.g., zlib) are release-only.
+if(WIN32 AND DEFINED VCPKG_TARGET_TRIPLET)
+    set(_vcpkg_debug_bin_dir "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/debug/bin")
+    set(_vcpkg_release_bin_dir "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin")
+    file(GLOB _vcpkg_release_dlls CONFIGURE_DEPENDS "${_vcpkg_release_bin_dir}/*.dll")
+    file(GLOB _vcpkg_debug_dlls CONFIGURE_DEPENDS "${_vcpkg_debug_bin_dir}/*.dll")
+    
+    # Always copy release DLLs - needed for both Release and Debug builds
+    if(_vcpkg_release_dlls)
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${_vcpkg_release_dlls}
+                "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
+            COMMENT "Copying vcpkg release DLLs"
+        )
+    endif()
+    
+    # Only copy debug DLLs for Debug builds (they link to debug CRT which breaks Release)
+    # For single-config generators (Ninja, Makefiles): check CMAKE_BUILD_TYPE
+    # For multi-config generators (VS, Xcode): use generator expression
+    get_property(_is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if(_is_multi_config)
+        # Multi-config: use generator expression to conditionally copy
+        if(_vcpkg_debug_dlls)
+            add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E $<IF:$<CONFIG:Debug>,copy_if_different,true>
+                    ${_vcpkg_debug_dlls}
+                    "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
+                COMMENT "Copying vcpkg debug DLLs (Debug config only)"
+            )
+        endif()
+        message(STATUS "Post-build: vcpkg DLLs - release always, debug for Debug config only (multi-config)")
+    else()
+        # Single-config: check CMAKE_BUILD_TYPE at configure time
+        if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND _vcpkg_debug_dlls)
+            add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${_vcpkg_debug_dlls}
+                    "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
+                COMMENT "Copying vcpkg debug DLLs"
+            )
+            message(STATUS "Post-build: vcpkg DLLs - copying both release and debug (Debug build)")
+        else()
+            message(STATUS "Post-build: vcpkg DLLs - copying release only (${CMAKE_BUILD_TYPE} build)")
+        endif()
+    endif()
 endif()
 
 # Before extension post-build copying: remove stale 'extensions' file if present (prevent mkdir failure)
@@ -791,22 +864,27 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMENT "Copying application assets"
 )
 
-# Copy locale files
-add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+# Copy locale files (named target so it can be run without rebuilding the exe)
+add_custom_target(copy_locale_files
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${RESOURCE_DIR}/locales"
     COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
         "${CMAKE_SOURCE_DIR}/src/visualizer/gui/resources/locales"
         "${RESOURCE_DIR}/locales"
-    COMMENT "Copying locale files"
+    COMMENT "Syncing locale files"
 )
+add_dependencies(${PROJECT_NAME} copy_locale_files)
 
 # OpenUSD runtime resources (schema/file-format plugin metadata).
-# Copy them beside the app under ../lib/usd and register that path at startup.
+# On Windows: copy to <exe>/usd/ so that relative LibraryPaths resolve to the
+# DLL copies already loaded from the exe directory.
+# On Linux: copy to <exe>/../lib/usd/ (conventional layout).
 set(_USD_PLUGIN_SOURCE_DIR "")
 foreach(_candidate
     "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib/usd"
     "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin/usd"
     "${CMAKE_BINARY_DIR}/src/python/usd")
-    if(NOT _USD_PLUGIN_SOURCE_DIR AND EXISTS "${_candidate}")
+    # Require an actual plugin sub-directory (not just the root index).
+    if(NOT _USD_PLUGIN_SOURCE_DIR AND EXISTS "${_candidate}/ar/resources/plugInfo.json")
         set(_USD_PLUGIN_SOURCE_DIR "${_candidate}")
     endif()
 endforeach()
@@ -821,7 +899,11 @@ foreach(_candidate
     endif()
 endforeach()
 
-set(_USD_PLUGIN_DEST "$<TARGET_FILE_DIR:${PROJECT_NAME}>/../lib/usd")
+if(WIN32)
+    set(_USD_PLUGIN_DEST "$<TARGET_FILE_DIR:${PROJECT_NAME}>/usd")
+else()
+    set(_USD_PLUGIN_DEST "$<TARGET_FILE_DIR:${PROJECT_NAME}>/../lib/usd")
+endif()
 
 if(EXISTS "${_USD_PLUGIN_SOURCE_DIR}")
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
@@ -844,6 +926,18 @@ if(EXISTS "${_USD_ROOT_INDEX}")
 endif()
 
 message(STATUS "Post-build: Resources will be copied to \${BUILD_DIR}/resources/")
+
+# Per-config output directory variants for the exe: multi-config only.
+# Single-config Ninja on Windows uses the flat binary dir (build/).
+get_property(_exe_is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(WIN32 AND _exe_is_multi_config)
+    set_target_properties(${PROJECT_NAME} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG        "${CMAKE_BINARY_DIR}/Debug"
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE      "${CMAKE_BINARY_DIR}/Release"
+        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/RelWithDebInfo"
+        RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL   "${CMAKE_BINARY_DIR}/MinSizeRel"
+    )
+endif()
 
 # Platform-specific settings
 if(UNIX)
@@ -898,15 +992,14 @@ if(UNIX)
     endif()
 
 elseif(WIN32)
-    # On Windows, DLLs in the same directory as the .exe are automatically found
-    # For multi-config generators (MSVC), set all configs to same directory
-    set_target_properties(${PROJECT_NAME} PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
-            RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}"
-            RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}"
-            RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}"
-            RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_BINARY_DIR}"
-    )
+    # On Windows, DLLs in the same directory as the .exe are automatically found.
+    # Multi-config generators use $<CONFIG> subdir; single-config (Ninja) uses
+    # the flat binary dir (build/) set via the global CMAKE_RUNTIME_OUTPUT_DIRECTORY.
+    if(_exe_is_multi_config)
+        set_target_properties(${PROJECT_NAME} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY              "${CMAKE_BINARY_DIR}/$<CONFIG>"
+        )
+    endif()
     if(MSVC)
         target_compile_options(${PROJECT_NAME} PRIVATE /bigobj)
     endif()
@@ -961,6 +1054,12 @@ configure_build_type(lfs_visualizer)
 configure_build_type(lfs_io)
 configure_build_type(lfs_geometry)
 configure_build_type(${PROJECT_NAME})
+
+# Set the default startup project in Visual Studio to LichtFeld-Studio
+# (without this, VS defaults to ALL_BUILD when opening the solution)
+if(MSVC)
+    set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${PROJECT_NAME})
+endif()
 
 # =============================================================================
 # TESTING (Optional)
@@ -1059,13 +1158,20 @@ install(DIRECTORY "${CMAKE_SOURCE_DIR}/src/visualizer/gui/rmlui/resources/" DEST
 install(DIRECTORY "${CMAKE_SOURCE_DIR}/src/visualizer/gui/resources/locales" DESTINATION "${INSTALL_RESOURCE_DIR}")
 
 # OpenUSD plugin resources (schema definitions + plugInfo.json files)
+# On Windows configure_usd_plugins() looks for <exe_dir>/usd → install next to the exe (bin/usd).
+# On Linux it looks for <exe_dir>/../lib/usd → install in lib/usd (unchanged).
+if(WIN32)
+    set(_USD_INSTALL_DEST "${CMAKE_INSTALL_BINDIR}/usd")
+else()
+    set(_USD_INSTALL_DEST "${CMAKE_INSTALL_LIBDIR}/usd")
+endif()
 if(EXISTS "${_USD_PLUGIN_SOURCE_DIR}")
-    install(DIRECTORY "${_USD_PLUGIN_SOURCE_DIR}/" DESTINATION "${CMAKE_INSTALL_LIBDIR}/usd"
+    install(DIRECTORY "${_USD_PLUGIN_SOURCE_DIR}/" DESTINATION "${_USD_INSTALL_DEST}"
             PATTERN "__pycache__" EXCLUDE
             PATTERN "*.pyc" EXCLUDE)
 endif()
 if(EXISTS "${_USD_ROOT_INDEX}")
-    install(FILES "${_USD_ROOT_INDEX}" DESTINATION "${CMAKE_INSTALL_LIBDIR}/usd")
+    install(FILES "${_USD_ROOT_INDEX}" DESTINATION "${_USD_INSTALL_DEST}")
 endif()
 
 # Plugin development documentation
@@ -1112,9 +1218,15 @@ if(BUILD_PORTABLE)
             [[.*libnvimgcodec.*]] [[.*libnvjpeg_ext.*]])
 
     # Search directories for runtime dependencies (quoted for paths with spaces on Windows)
-    set(_SEARCH_DIRS_STR "\"${CMAKE_BINARY_DIR}\" \"${CMAKE_BINARY_DIR}/external/nvImageCodec\" \"${CUDAToolkit_BIN_DIR}\" \"${CUDAToolkit_LIBRARY_DIR}\"")
+    set(_SEARCH_DIRS_STR "\"${CMAKE_BINARY_DIR}\" \"${CMAKE_BINARY_DIR}/Release\" \"${CMAKE_BINARY_DIR}/external/nvImageCodec\" \"${CUDAToolkit_BIN_DIR}\" \"${CUDAToolkit_LIBRARY_DIR}\"")
 
-    # Helper: bundle runtime dependencies for a target
+    # Helper: bundle runtime dependencies for a target.
+    # On Windows DLLs must live beside the exe (bin/); on Linux they go in lib/.
+    if(WIN32)
+        set(_BUNDLE_DEST "${CMAKE_INSTALL_BINDIR}")
+    else()
+        set(_BUNDLE_DEST "${CMAKE_INSTALL_LIBDIR}")
+    endif()
     function(bundle_runtime_deps TARGET_FILE IS_LIBRARY)
         if(IS_LIBRARY)
             set(_type "LIBRARIES")
@@ -1122,7 +1234,6 @@ if(BUILD_PORTABLE)
             set(_type "EXECUTABLES")
         endif()
         install(CODE "
-            set(_lib \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}\")
             file(GET_RUNTIME_DEPENDENCIES
                 ${_type} \"${TARGET_FILE}\"
                 RESOLVED_DEPENDENCIES_VAR _deps
@@ -1130,7 +1241,7 @@ if(BUILD_PORTABLE)
                 PRE_EXCLUDE_REGEXES ${_PRE_EXCLUDE}
                 POST_EXCLUDE_REGEXES ${_POST_EXCLUDE})
             foreach(_d IN LISTS _deps)
-                file(INSTALL \"\${_d}\" DESTINATION \"\${_lib}\" FOLLOW_SYMLINK_CHAIN)
+                file(INSTALL \"\${_d}\" DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${_BUNDLE_DEST}\" FOLLOW_SYMLINK_CHAIN)
             endforeach()
         " COMPONENT runtime)
     endfunction()
@@ -1147,13 +1258,7 @@ if(BUILD_PORTABLE)
                 @ONLY)
         install(PROGRAMS "${CMAKE_BINARY_DIR}/run_lichtfeld.sh" DESTINATION ${CMAKE_INSTALL_BINDIR})
     elseif(WIN32)
-        # Copy DLLs to bin/ for Windows search path
         install(CODE "
-            # Copy all DLLs from lib/ to bin/
-            file(GLOB _dlls \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/*.dll\")
-            foreach(_d IN LISTS _dlls)
-                file(INSTALL \"\${_d}\" DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}\")
-            endforeach()
             # Copy extensions/ from build to dist/extensions/
             # Handle both single-config (Ninja) and multi-config (VS) generators
             foreach(_cfg IN ITEMS \"\" \"Release\" \"Debug\" \"RelWithDebInfo\" \"MinSizeRel\")

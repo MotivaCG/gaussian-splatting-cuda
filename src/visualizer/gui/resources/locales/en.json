@@ -35,7 +35,6 @@
     "help.about": "About LichtFeld Studio"
   },
   "window": {
-    "getting_started": "Getting Started",
     "about": "About LichtFeld Studio",
     "input_settings": "Input Settings",
     "debug_info": "Debug Info",
@@ -47,18 +46,16 @@
     "histogram": "Histogram"
   },
   "getting_started": {
-    "title": "QUICK START GUIDE",
+    "title": "Getting Started",
     "description": "Learn how to prepare datasets and get started with LichtFeld Studio:",
     "wiki_section": "WIKI & FAQ",
-    "wiki_label": "Wiki:",
-    "watch_tooltip": "Watch: {title}",
+    "video_automotive": "3dgs for automotive marketing",
     "video_intro": "Training on 360 Equirectangular Images",
     "video_latest": "LichtFeld v0.3.0 Feature Overview",
     "video_reality_scan": "Reality Scan Dataset",
     "video_colmap": "COLMAP Tutorial",
     "video_lichtfeld": "LichtFeld Tutorial",
-    "video_masks": "Masks Tutorial",
-    "loading": "Loading..."
+    "video_masks": "Masks Tutorial"
   },
   "about": {
     "title": "LICHTFELD STUDIO",
@@ -94,7 +91,7 @@
     "section.losses": "Loss Parameters",
     "section.initialization": "Initialization",
     "section.thresholds": "Thresholds",
-    "section.save_steps": "Save Steps",
+    "section.save_steps": "Save/Eval Steps",
     "section.basic_params": "Training Parameters",
     "section.advanced_params": "Advanced Training Parameters",
     "section.sparsity": "Sparsity Settings",
@@ -106,6 +103,7 @@
     "dataset.cpu_cache": "CPU Cache:",
     "dataset.fs_cache": "FS Cache:",
     "dataset.output": "Output:",
+    "dataset.test_every": "Test Every:",
     "opt.strategy": "Strategy:",
     "opt.learning_rates": "Learning Rates:",
     "opt.iterations": "Iterations:",
@@ -154,7 +152,7 @@
     "tooltip.iterations": "Total training iterations",
     "tooltip.max_gaussians": "Maximum number of Gaussians",
     "tooltip.sh_degree": "Spherical harmonics degree (0-3)",
-    "tooltip.tile_mode": "Use tiled rendering for large images",
+    "tooltip.tile_mode": "Use tiled rendering for large images in 3DGUT training.",
     "tooltip.steps_scaler": "Scale training steps. Auto-set from image count (1.0 for <=300 images, images/300 for more)",
     "tooltip.bilateral_grid": "Appearance embedding for exposure/color correction",
     "tooltip.sparsity": "Enable pruning for model compression",
@@ -181,7 +179,9 @@
     "tooltip.max_width": "Maximum image width in pixels",
     "tooltip.cpu_cache": "Cache decoded images in RAM",
     "tooltip.fs_cache": "Cache decoded images on disk",
-    "tooltip.save_steps": "Iterations at which to save checkpoints",
+    "tooltip.test_every": "Use every Nth image as test set",
+    "tooltip.enable_eval": "Enable evaluation during training (computes PSNR/SSIM on test set). Slightly reduces training speed.",
+    "tooltip.save_steps": "Iterations at which to save checkpoints AND run evaluation (if Enable Eval is checked). Evaluation always runs at the same iterations as checkpoints.",
     "tooltip.lr_position": "Learning rate for Gaussian positions",
     "tooltip.lr_sh_coeff": "Learning rate for spherical harmonics",
     "tooltip.lr_opacity": "Learning rate for opacity values",
@@ -244,9 +244,9 @@
     "options.strategy.mcmc": "MCMC",
     "options.strategy.mrnf": "MRNF",
     "options.strategy.igs_plus": "IGS+",
-    "options.tile.full": "1 (Full)",
-    "options.tile.half": "2 (Half)",
-    "options.tile.quarter": "4 (Quarter)",
+    "options.tile.full": "1 tile",
+    "options.tile.half": "2 tiles (3DGUT)",
+    "options.tile.quarter": "4 tiles (3DGUT)",
     "options.mask.none": "None",
     "options.mask.segment": "Segment",
     "options.mask.ignore": "Ignore",
@@ -265,7 +265,74 @@
     "button.save_checkpoint": "Save Checkpoint",
     "button.switch_edit_mode": "Edit Mode",
     "button.add": "Add",
-    "button.remove": "Remove"
+    "button.remove": "Remove",
+    "tooltip": {
+      "btn_switch_edit": "Switch to edit mode for the trained scene",
+      "ppisp_freeze_from_sidecar": "Load PPISP weights from a sidecar file",
+      "ppisp_sidecar_path": "Path to the PPISP sidecar file",
+      "ppisp_sidecar_browse": "Browse for a PPISP sidecar file",
+      "ppisp_sidecar_clear": "Clear the selected PPISP sidecar",
+      "bg_color": "Solid background color used during training",
+      "bg_image_path": "Path to the background image used during training",
+      "bg_image_browse": "Browse for a background image",
+      "bg_image_clear": "Clear the selected background image",
+      "dataset_path": "Path to the loaded dataset",
+      "dataset_images": "Number of images in the dataset",
+      "dataset_output": "Output directory for trained artifacts",
+      "opt_strategy_display": "Active densification strategy",
+      "bilateral_grid_x": "Bilateral grid X resolution",
+      "bilateral_grid_y": "Bilateral grid Y resolution",
+      "bilateral_grid_w": "Bilateral grid color/intensity bins",
+      "bilateral_grid_lr": "Bilateral grid learning rate",
+      "prune_opacity": "Prune Gaussians below this opacity",
+      "revised_opacity": "Use the revised opacity formulation",
+      "min_opacity": "Minimum opacity threshold for pruning",
+      "grow_scale_3d": "Densify when 3D scale exceeds this",
+      "grow_scale_2d": "Densify when 2D screen-space scale exceeds this",
+      "prune_scale_3d": "Prune when 3D scale exceeds this",
+      "prune_scale_2d": "Prune when 2D screen-space scale exceeds this",
+      "pause_refine_after_reset": "Iterations to pause refinement after opacity reset",
+      "sparsify_steps": "Number of sparsification steps",
+      "init_rho": "Initial sparsity penalty (rho)",
+      "prune_ratio": "Final fraction of Gaussians to prune at the end of sparsification",
+      "opt": {
+        "strategy": {
+          "mrnf": "Default 3DGS strategy with MRNF refinement",
+          "igs_plus": "Improved 3DGS+ with refined growing/pruning",
+          "mcmc": "MCMC strategy with sampling-based densification"
+        },
+        "sh_degree": {
+          "0": "Diffuse only — fastest, no view-dependent color",
+          "1": "First-order SH — basic specular cues",
+          "2": "Second-order SH — better view-dependent color",
+          "3": "Third-order SH — best quality, most VRAM"
+        },
+        "tile_mode": {
+          "full": "Full image (1 tile)",
+          "half": "2 tiles (3DGUT only)",
+          "quarter": "4 tiles (3DGUT only)"
+        },
+        "mask_mode": {
+          "none": "Train on the entire image, no masking",
+          "segment": "Use the segmentation mask for foreground",
+          "ignore": "Ignore masked pixels in the loss",
+          "alpha_consistent": "Enforce alpha consistency with the mask"
+        },
+        "bg_mode": {
+          "color": "Use a fixed background color",
+          "modulation": "Modulate background with reconstructed alpha",
+          "image": "Use a background image",
+          "random": "Randomize background color each step"
+        },
+        "resize_factor": {
+          "auto": "Auto-pick resize factor for VRAM",
+          "1": "Train at original image resolution",
+          "2": "Train at half image resolution",
+          "4": "Train at quarter image resolution",
+          "8": "Train at one-eighth image resolution"
+        }
+      }
+    }
   },
   "scene": {
     "add_ply": "Add PLY...",
@@ -317,7 +384,10 @@
     "keyframe_easing.ease_out": "Ease Out",
     "keyframe_easing.ease_in_out": "Ease In-Out",
     "keyframe_label": "Keyframe {index}  ({time:.2f}s)",
-    "search": "Search"
+    "search": "Search",
+    "show_in_file_manager": "Show in File Manager",
+    "go_to_image": "Go to Image",
+    "open_in_gt_compare": "Open in GT Compare"
   },
   "export": {
     "title": "Export",
@@ -327,6 +397,7 @@
     "format.usd_openusd": "USD (OpenUSD)",
     "format.usdz_nurec": "USDZ (NuRec)",
     "format.html_viewer": "HTML Viewer",
+    "format.rad_random_access": "RAD (SparkJS)",
     "select_models": "Select Models:",
     "all": "All",
     "none": "None",
@@ -337,7 +408,13 @@
     "writing_spz": "Writing SPZ",
     "complete": "Complete",
     "failed": "Failed",
-    "select_at_least_one": "Select at least one model"
+    "select_at_least_one": "Select at least one model",
+    "tooltip": {
+      "rad_lod_input": "LOD percentage (1-100). Default: 100",
+      "rad_lod_add": "Add this LOD level",
+      "rad_lod_remove": "Remove this LOD level",
+      "rad_lod_select": "Select LOD level to remove"
+    }
   },
   "common": {
     "ok": "OK",
@@ -375,6 +452,8 @@
     "step": "Step",
     "loss": "Loss",
     "eta": "ETA",
+    "psnr": "PSNR",
+    "ssim": "SSIM",
     "unknown": "Unknown",
     "dataset_no_trainer": "Dataset (No Trainer)",
     "dataset_ready": "Dataset (Ready)",
@@ -571,7 +650,8 @@
     "idle": "Idle",
     "running": "Running",
     "finished": "Finished",
-    "save_steps": "Save Steps",
+    "save_steps": "Save/Eval Steps",
+    "save_eval_steps": "Save/Eval Steps",
     "new_step": "New Step",
     "no_save_steps": "No save steps configured",
     "no_trainer_loaded": "No trainer loaded",
@@ -655,7 +735,72 @@
     "simplify_opacity_prune": "Prune Gaussians below this opacity threshold before merging",
     "simplify_output": "Name of the new simplified splat node that will be added to the scene",
     "simplify_apply": "Create a new simplified splat node from the selected source",
-    "simplify_cancel": "Cancel the active splat simplify job"
+    "simplify_cancel": "Cancel the active splat simplify job",
+    "transform_position_axis": "Translate the selection along this axis",
+    "transform_rotation_axis": "Rotate the selection around this axis (degrees)",
+    "transform_scale_axis": "Scale the selection along this axis",
+    "transform_scale_uniform": "Uniform scale across all axes",
+    "transform_reset": "Reset the transform to identity",
+    "environment_mode": "Background source: solid color or HDRI",
+    "environment_map_path": "Choose an HDRI environment map",
+    "environment_exposure": "HDRI exposure in EV stops",
+    "environment_rotation": "Rotate HDRI around the vertical axis",
+    "voxel_size": "Voxel grid cell size for spatial queries",
+    "axes_size": "Length of the coordinate axis lines",
+    "grid_plane": "Plane on which the grid is drawn",
+    "grid_opacity": "Grid line opacity",
+    "camera_frustum_scale": "Visual scale of the camera frustums",
+    "camera_metrics_mode": "Image-quality metrics shown over training cameras",
+    "selection_color_committed": "Color used for committed selections",
+    "selection_color_preview": "Color used for selection preview",
+    "selection_color_center_marker": "Color used for the selection center marker",
+    "mesh_wireframe": "Render the mesh as wireframe",
+    "mesh_wireframe_color": "Wireframe line color",
+    "mesh_wireframe_width": "Wireframe line width",
+    "mesh_light_intensity": "Mesh light intensity",
+    "mesh_ambient": "Mesh ambient light contribution",
+    "mesh_backface_culling": "Skip rendering back-facing triangles",
+    "mesh_shadow_enabled": "Cast and receive shadows on mesh",
+    "mesh_shadow_resolution": "Shadow map resolution",
+    "ppisp_vignette_enabled": "Apply vignette as part of correction",
+    "ppisp_vignette_strength": "Vignette darkening at the corners",
+    "opt": {
+      "environment_mode": {
+        "solid_color": "Render with a flat background color",
+        "equirect": "Render with a 360° HDR environment map"
+      },
+      "environment_map_preset": {
+        "kloofendal": "Built-in: Kloofendal Pure Sky",
+        "alps": "Built-in: Alps Field",
+        "custom": "Last loaded custom HDRI"
+      },
+      "grid_plane": {
+        "yz": "Show grid on the YZ plane (right view)",
+        "xz": "Show grid on the XZ plane (top view)",
+        "xy": "Show grid on the XY plane (front view)"
+      },
+      "sh_degree": {
+        "0": "Diffuse only — no view-dependent lighting",
+        "1": "First-order SH — basic view-dependent lighting",
+        "2": "Second-order SH — more directional detail",
+        "3": "Third-order SH — full view-dependent quality"
+      },
+      "camera_metrics": {
+        "off": "Hide quality metrics",
+        "psnr": "Show PSNR per training camera",
+        "psnr_ssim": "Show PSNR and SSIM per training camera"
+      },
+      "shadow_resolution": {
+        "512": "512×512 shadow map (low quality, fast)",
+        "1024": "1024×1024 shadow map (balanced)",
+        "2048": "2048×2048 shadow map (high quality)",
+        "4096": "4096×4096 shadow map (best quality, slow)"
+      },
+      "ppisp_mode": {
+        "manual": "Manual: adjust correction sliders directly",
+        "auto": "Auto: use the trained controller for correction"
+      }
+    }
   },
   "exit_popup": {
     "title": "Exit Application?",
@@ -672,7 +817,11 @@
     "output_dir": "Output:  ",
     "init_file": "Init file (optional, replaces points3D):",
     "help_text": "Training checkpoints, logs, and exported models will be saved to the output directory.",
-    "ppisp_sidecar": "PPISP Sidecar:"
+    "ppisp_sidecar": "PPISP Sidecar:",
+    "centralize_dataset": "Centralize Dataset",
+    "centralize_off": "Off",
+    "centralize_by_pointcloud": "By PointCloud",
+    "centralize_by_cameras": "By Cameras"
   },
   "notification": {
     "cannot_open": "Cannot Open",
@@ -687,7 +836,11 @@
     "models": "MODELS",
     "no_models": "No models in scene",
     "sh_degree": "SH DEGREE",
-    "export_merged": "Export Merged..."
+    "export_merged": "Export Merged...",
+    "rad_customize_lod": "Customize LOD",
+    "rad_lod_levels": "LOD Levels",
+    "no_lod_settings": "No LOD settings (using defaults)",
+    "rad_flip_y": "Flip Y axis"
   },
   "selection_group": {
     "lock": "Lock",
@@ -805,7 +958,8 @@
     "ppisp_freeze_gaussians": "Freeze Gaussians:",
     "disabled": "Disabled",
     "ppisp_freeze_from_sidecar": "Frozen Sidecar:",
-    "ppisp_sidecar_path": "Sidecar Path:"
+    "ppisp_sidecar_path": "Sidecar Path:",
+    "enable_eval": "Enable Eval:"
   },
   "image_preview": {
     "title": "Image Preview",
@@ -866,7 +1020,9 @@
     "hidden": "Hidden",
     "mask_section": "MASK",
     "storage_section": "STORAGE",
-    "color_picker": "Pick"
+    "color_picker": "Pick",
+    "rotate_left": "Rotate 90° Left",
+    "rotate_right": "Rotate 90° Right"
   },
   "startup": {
     "supported_by": "Supported by",
@@ -1257,7 +1413,11 @@
       },
       "distance": {
         "label": "Distance",
-        "description": "Distance from the current scene center."
+        "description": "Distance from the current splat center."
+      },
+      "world_distance": {
+        "label": "World Distance",
+        "description": "Distance from the world origin."
       }
     },
     "undo": "Undo",

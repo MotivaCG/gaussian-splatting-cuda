@@ -364,7 +364,10 @@ namespace lfs::vis {
 
         // Handle node selection from scene panel (both PLYs and Groups)
         ui::NodeSelected::when([this](const auto& event) {
-            if (services().trainerOrNull() && services().trainerOrNull()->isRunning()) {
+            const bool camera_navigation_selection = event.type == "Camera";
+            if (!camera_navigation_selection &&
+                services().trainerOrNull() &&
+                services().trainerOrNull()->isRunning()) {
                 return;
             }
 
@@ -2214,6 +2217,8 @@ namespace lfs::vis {
             cached_params_ = checkpoint_params;
 
             // === Phase 3: Load data ===
+            // Clear init_path to prevent loading the initial PLY again - we use the checkpoint model instead
+            checkpoint_params.init_path = std::nullopt;
             const auto load_result = lfs::training::loadTrainingDataIntoScene(checkpoint_params, scene_);
             if (!load_result) {
                 throw std::runtime_error("Failed to load training data: " + load_result.error());
@@ -4084,6 +4089,42 @@ namespace lfs::vis {
             return {false, 0, "Selection service not initialized"};
 
         return selection_service_->applyMask(mask, SelectionMode::Replace);
+    }
+
+    void SceneManager::beginSelectionPreview() {
+        if (selection_preview_snapshot_)
+            return;
+
+        selection_preview_before_ = scene_.captureSelectionState();
+        selection_preview_snapshot_ = std::make_unique<op::SceneSnapshot>(*this, "selection.histogram");
+        selection_preview_snapshot_->captureSelection();
+    }
+
+    SelectionResult SceneManager::previewSelectionMask(const lfs::core::Tensor& mask) {
+        if (!selection_service_)
+            return {false, 0, "Selection service not initialized"};
+
+        beginSelectionPreview();
+        return selection_service_->previewMask(mask, SelectionMode::Replace);
+    }
+
+    void SceneManager::commitSelectionPreview() {
+        if (!selection_preview_snapshot_)
+            return;
+
+        selection_preview_snapshot_->captureAfter();
+        op::pushSceneSnapshotIfChanged(std::move(selection_preview_snapshot_));
+        selection_preview_before_.reset();
+    }
+
+    void SceneManager::cancelSelectionPreview() {
+        if (selection_preview_before_) {
+            scene_.restoreSelectionState(*selection_preview_before_);
+            if (auto* rm = services().renderingOrNull())
+                rm->markDirty(DirtyFlag::SELECTION);
+        }
+        selection_preview_snapshot_.reset();
+        selection_preview_before_.reset();
     }
 
 } // namespace lfs::vis

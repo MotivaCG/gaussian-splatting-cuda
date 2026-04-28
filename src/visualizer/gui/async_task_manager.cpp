@@ -71,25 +71,7 @@ namespace lfs::vis::gui {
     }
 
     void truncateSHDegree(lfs::core::SplatData& splat, const int target_degree) {
-        if (target_degree >= splat.get_max_sh_degree())
-            return;
-
-        if (target_degree == 0) {
-            splat.shN() = lfs::core::Tensor{};
-        } else {
-            const size_t keep_coeffs = static_cast<size_t>((target_degree + 1) * (target_degree + 1) - 1);
-            auto& shN = splat.shN();
-            if (shN.is_valid() && shN.ndim() >= 2 && shN.shape()[1] > keep_coeffs) {
-                if (shN.ndim() == 3) {
-                    shN = shN.slice(1, 0, static_cast<int64_t>(keep_coeffs)).contiguous();
-                } else {
-                    constexpr size_t CHANNELS = 3;
-                    shN = shN.slice(1, 0, static_cast<int64_t>(keep_coeffs * CHANNELS)).contiguous();
-                }
-            }
-        }
-        splat.set_max_sh_degree(target_degree);
-        splat.set_active_sh_degree(target_degree);
+        splat.set_sh_degree(target_degree);
     }
 
     template <typename F>
@@ -626,6 +608,8 @@ namespace lfs::vis::gui {
                 cmd.output_path.empty() ? lfs::core::param::default_dataset_output_path(cmd.path) : cmd.output_path;
             if (!cmd.init_path.empty())
                 params.init_path = lfs::core::path_to_utf8(cmd.init_path);
+            if (!cmd.centralize_dataset.empty())
+                params.dataset.centralize_dataset = cmd.centralize_dataset;
             startAsyncImport(cmd.path, params);
         });
 
@@ -686,7 +670,9 @@ namespace lfs::vis::gui {
     }
 
     void AsyncTaskManager::performExport(ExportFormat format, const std::filesystem::path& path,
-                                         const std::vector<std::string>& node_names, int sh_degree) {
+                                         const std::vector<std::string>& node_names, int sh_degree,
+                                         const std::vector<float>& rad_lod_ratios,
+                                         bool rad_flip_y) {
         if (isExporting())
             return;
 
@@ -712,6 +698,13 @@ namespace lfs::vis::gui {
 
         if (sh_degree < merged->get_max_sh_degree()) {
             truncateSHDegree(*merged, sh_degree);
+        }
+
+        // Store RAD LOD ratios and flip_y for use during export
+        {
+            const std::lock_guard lock(export_state_.mutex);
+            export_state_.rad_lod_ratios = rad_lod_ratios;
+            export_state_.rad_flip_y = rad_flip_y;
         }
 
         startAsyncExport(format, path, std::move(merged));
@@ -844,6 +837,27 @@ namespace lfs::vis::gui {
                         }
                         break;
                     }
+                    case ExportFormat::RAD: {
+                        std::vector<float> lod_ratios;
+                        bool flip_y = false;
+                        {
+                            const std::lock_guard lock(export_state_.mutex);
+                            lod_ratios = export_state_.rad_lod_ratios;
+                            flip_y = export_state_.rad_flip_y;
+                        }
+                        const lfs::io::RadSaveOptions options{
+                            .output_path = path,
+                            .compression_level = 6,
+                            .lod_ratios = lod_ratios,
+                            .flip_y = flip_y,
+                            .progress_callback = update_progress};
+                        if (auto result = lfs::io::save_rad(*splat_data, options); result) {
+                            success = true;
+                        } else {
+                            error_msg = result.error().message;
+                        }
+                        break;
+                    }
                     }
 
                 } catch (const std::exception& e) {
@@ -963,11 +977,21 @@ namespace lfs::vis::gui {
                     local_params = import_state_.params;
                 }
 
+                const auto parse_centralize = [](const std::string& s) {
+                    if (s == "off")
+                        return lfs::io::CentralizeDataset::Off;
+                    if (s == "by_pointcloud")
+                        return lfs::io::CentralizeDataset::ByPointCloud;
+                    if (s == "by_cameras")
+                        return lfs::io::CentralizeDataset::ByCameras;
+                    return lfs::io::CentralizeDataset::Off;
+                };
                 const lfs::io::LoadOptions load_options{
                     .resize_factor = local_params.dataset.resize_factor,
                     .max_width = local_params.dataset.max_width,
                     .images_folder = local_params.dataset.images,
                     .validate_only = false,
+                    .centralize = parse_centralize(local_params.dataset.centralize_dataset),
                     .progress = [this, &stop_token](const float pct, const std::string& msg) {
                         if (stop_token.stop_requested())
                             return;
