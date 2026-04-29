@@ -1494,6 +1494,8 @@ class MaskMode(enum.Enum):
 
     ALPHA_CONSISTENT = 3
 
+    FOCUSED_SEGMENT = 4
+
 class BackgroundMode(enum.Enum):
     SOLID_COLOR = 0
 
