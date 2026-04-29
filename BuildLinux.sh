@@ -34,3 +34,4 @@ cmake -B LinuxBuild -G Ninja -DBUILD_CUDA_FATBIN=ON
 cmake -B LinuxBuild -G Ninja -DBUILD_PORTABLE=ON -DBUILD_CUDA_FATBIN=ON
 cmake --build LinuxBuild
 cmake --install LinuxBuild --prefix ./dist
+./dist/bin/LichtFeld-Studio
