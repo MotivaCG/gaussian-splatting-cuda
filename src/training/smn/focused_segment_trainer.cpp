@@ -5,6 +5,7 @@
 #include "training/trainer.hpp"
 
 #include "core/logger.hpp"
+#include "lfs/kernels/ssim.cuh"
 #include "optimizer/adam_optimizer.hpp"
 #include "smn/mask_pruning.hpp"
 
@@ -182,32 +183,63 @@ namespace lfs::training {
 
         using namespace lfs::core;
 
-        (void)raw_rendered;
-
         const float kBgWeight = opt_params.focused_bg_weight; // BG gradient weight relative to FG (1.0)
         constexpr float kAlphaFgWeight = 1.5f; // grad_alpha pressure to push FG alpha -> 1
         constexpr float kAlphaBgWeight = 1.0f; // grad_alpha pressure to push BG alpha -> 0
 
-        // Normalize mask dtype to Float32. The dispatcher passes whatever the loader produced,
-        // which can be UInt8/Bool on some platforms (Linux) and Float32 on others (Windows).
-        // All downstream ops (.item<float>(), arithmetic with float tensors) require Float32.
-        const Tensor mask_2d = (mask_in.dtype() == DataType::UInt8 || mask_in.dtype() == DataType::Bool)
-                                   ? mask_in.to(DataType::Float32)
-                                   : mask_in;
+        // Normalize mask to Float32 in [0,1]. Loaders deliver different formats per OS:
+        //   - Linux (NvCodec): UInt8 [0,255]
+        //   - Windows (cache_image_loader): Float32 [0,1]
+        // Without rescaling UInt8, downstream ops break: bg_mask = 1 - mask becomes
+        // [-254, 1], weight_map blows up, fg_pixels = sum() is ~255x off, and gradients
+        // diverge to NaN. Upstream's mask_as_float lambda only converts dtype and shares
+        // this latent bug; we fix it locally to keep the fork minimal.
+        Tensor mask_2d;
+        if (mask_in.dtype() == DataType::UInt8) {
+            mask_2d = mask_in.to(DataType::Float32) * (1.0f / 255.0f);
+        } else if (mask_in.dtype() == DataType::Bool) {
+            mask_2d = mask_in.to(DataType::Float32);
+        } else {
+            mask_2d = mask_in;
+        }
+        mask_2d = mask_2d.clamp(0.0f, 1.0f);
 
         const Tensor bg_mask = Tensor::full(mask_2d.shape(), 1.0f, mask_2d.device()) - mask_2d;
 
-        // Step 1: full-image L1+SSIM forward - identical to None mode.
-        // Produces correct grad_image and populates fused_workspace ssim_map for
-        // pixel-error-based densification. No gradient approximation here.
-        losses::PhotometricLoss::Params params{.lambda_dssim = opt_params.lambda_dssim};
-        auto full_result = photometric_loss_.forward(corrected, gt_image, params);
-        if (!full_result) {
-            return std::unexpected(full_result.error());
+        // Step 1: photometric loss forward+backward.
+        // When raw_rendered is provided (PPISP / bilateral grid active), use the decoupled
+        // L1/SSIM path so that L1 grad goes through `corrected` (-> PPISP backward) and
+        // SSIM grad goes through `raw` (bypassing PPISP). Without this split, the PPISP
+        // backward amplifies the SSIM gradient and destabilises the transition from
+        // None mode (decoupled) to FocusedSegment, producing NaN/Inf around iter ~kNoneEnd.
+        const bool use_decoupled = raw_rendered.is_valid() &&
+                                   raw_rendered.numel() > 0 &&
+                                   opt_params.lambda_dssim > 0.0f;
+        Tensor grad;
+        Tensor grad_raw;
+        Tensor loss;
+        if (use_decoupled) {
+            auto [loss_tensor, ctx] = lfs::training::kernels::decoupled_fused_l1_ssim_forward(
+                corrected, raw_rendered, gt_image, opt_params.lambda_dssim, decoupled_fused_workspace_,
+                /*apply_valid_padding=*/true);
+            auto grads = lfs::training::kernels::decoupled_fused_l1_ssim_backward(ctx, decoupled_fused_workspace_);
+            if (corrected.ndim() == 3) {
+                grads.grad_corrected = grads.grad_corrected.squeeze(0);
+                grads.grad_raw = grads.grad_raw.squeeze(0);
+            }
+            grad = grads.grad_corrected;
+            grad_raw = grads.grad_raw;
+            loss = loss_tensor;
+        } else {
+            losses::PhotometricLoss::Params params{.lambda_dssim = opt_params.lambda_dssim};
+            auto full_result = photometric_loss_.forward(corrected, gt_image, params);
+            if (!full_result) {
+                return std::unexpected(full_result.error());
+            }
+            auto [full_loss, fp_ctx] = *full_result;
+            grad = fp_ctx.grad_image;
+            loss = full_loss;
         }
-        auto [full_loss, ctx] = *full_result;
-        Tensor grad = ctx.grad_image;
-        Tensor loss = full_loss;
 
         // Step 2: spatial weight map - FG=1.0, BG=kBgWeight.
         // Darkness bonus applied to FG only (Rec.601 perceptual luminance from GT, not rendered).
@@ -236,10 +268,15 @@ namespace lfs::training {
         // Step 3: apply spatial weights to gradient.
         // Multiplying grad post-hoc is exact for L1 (pixel-wise) and a good approximation
         // for SSIM (window-based). In practice this outperforms discarding SSIM gradient entirely.
+        // When decoupled, both grad (L1 path on corrected) and grad_raw (SSIM path on raw)
+        // get the same spatial weighting so the per-pixel emphasis stays consistent.
         const Tensor weight_3d = (corrected.ndim() == 3 && corrected.shape()[0] == 3)
                                      ? weight_map.unsqueeze(0)
                                      : weight_map.unsqueeze(2);
         grad = grad * weight_3d;
+        if (grad_raw.is_valid() && grad_raw.numel() > 0) {
+            grad_raw = grad_raw * weight_3d;
+        }
 
         // Scale scalar loss to reflect FG-focused weighting.
         // This ensures the logged loss is representative of FG reconstruction quality,
@@ -277,7 +314,7 @@ namespace lfs::training {
         return Trainer::MaskLossResult{
             .loss = loss,
             .grad_corrected = grad,
-            .grad_raw = {},
+            .grad_raw = grad_raw,
             .grad_alpha = grad_alpha};
     }
 
@@ -460,11 +497,16 @@ namespace lfs::training {
         if (!full_mask.is_valid() || full_mask.numel() == 0)
             return;
 
-        // Normalize mask dtype: loader can return UInt8 on Linux, Float32 on Windows.
-        if (full_mask.dtype() == lfs::core::DataType::UInt8 ||
-            full_mask.dtype() == lfs::core::DataType::Bool) {
+        // Normalize mask to Float32 [0,1]. Loader output differs per OS:
+        // Linux (NvCodec) returns UInt8 [0,255]; Windows returns Float32 [0,1].
+        // Center penalty samples mask values via gather(), which would otherwise
+        // produce 255-valued "is_inside" weights and break the gradient sign logic.
+        if (full_mask.dtype() == lfs::core::DataType::UInt8) {
+            full_mask = full_mask.to(lfs::core::DataType::Float32) * (1.0f / 255.0f);
+        } else if (full_mask.dtype() == lfs::core::DataType::Bool) {
             full_mask = full_mask.to(lfs::core::DataType::Float32);
         }
+        full_mask = full_mask.clamp(0.0f, 1.0f);
 
         // Build step_params with schedule applied for this iteration
         lfs::core::param::OptimizationParameters step_params = params_.optimization;
