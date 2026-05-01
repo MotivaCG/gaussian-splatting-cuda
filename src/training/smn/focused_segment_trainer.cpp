@@ -176,7 +176,7 @@ namespace lfs::training {
         const lfs::core::Tensor& corrected,
         const lfs::core::Tensor& raw_rendered,
         const lfs::core::Tensor& gt_image,
-        const lfs::core::Tensor& mask_2d,
+        const lfs::core::Tensor& mask_in,
         const lfs::core::Tensor& alpha,
         const lfs::core::param::OptimizationParameters& opt_params) {
 
@@ -187,6 +187,13 @@ namespace lfs::training {
         const float kBgWeight = opt_params.focused_bg_weight; // BG gradient weight relative to FG (1.0)
         constexpr float kAlphaFgWeight = 1.5f; // grad_alpha pressure to push FG alpha -> 1
         constexpr float kAlphaBgWeight = 1.0f; // grad_alpha pressure to push BG alpha -> 0
+
+        // Normalize mask dtype to Float32. The dispatcher passes whatever the loader produced,
+        // which can be UInt8/Bool on some platforms (Linux) and Float32 on others (Windows).
+        // All downstream ops (.item<float>(), arithmetic with float tensors) require Float32.
+        const Tensor mask_2d = (mask_in.dtype() == DataType::UInt8 || mask_in.dtype() == DataType::Bool)
+                                   ? mask_in.to(DataType::Float32)
+                                   : mask_in;
 
         const Tensor bg_mask = Tensor::full(mask_2d.shape(), 1.0f, mask_2d.device()) - mask_2d;
 
@@ -452,6 +459,12 @@ namespace lfs::training {
 
         if (!full_mask.is_valid() || full_mask.numel() == 0)
             return;
+
+        // Normalize mask dtype: loader can return UInt8 on Linux, Float32 on Windows.
+        if (full_mask.dtype() == lfs::core::DataType::UInt8 ||
+            full_mask.dtype() == lfs::core::DataType::Bool) {
+            full_mask = full_mask.to(lfs::core::DataType::Float32);
+        }
 
         // Build step_params with schedule applied for this iteration
         lfs::core::param::OptimizationParameters step_params = params_.optimization;
