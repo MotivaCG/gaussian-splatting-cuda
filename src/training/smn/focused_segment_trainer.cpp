@@ -268,11 +268,19 @@ namespace lfs::training {
         // BG stays flat at kBgWeight regardless of darkness, avoiding spurious BG gradient boosts.
         Tensor weight_map;
         if (opt_params.darkness_boost > 0.0f) {
-            const bool chw = (gt_image.ndim() == 3 && gt_image.shape()[0] == 3);
-            const Tensor r = chw ? gt_image.slice(0, 0, 1).squeeze(0) : gt_image.slice(2, 0, 1).squeeze(2);
-            const Tensor g = chw ? gt_image.slice(0, 1, 2).squeeze(0) : gt_image.slice(2, 1, 2).squeeze(2);
-            const Tensor b = chw ? gt_image.slice(0, 2, 3).squeeze(0) : gt_image.slice(2, 2, 3).squeeze(2);
-            const Tensor brightness = r * 0.299f + g * 0.587f + b * 0.114f;
+            // Normalize gt to [0,1] before computing brightness. Same OS-dependent loader
+            // mismatch as the mask: Linux delivers UInt8 [0,255], Windows Float32 [0,1].
+            // If brightness > 1 (uint8 not normalized), darkness = 1 - brightness is very
+            // negative, weight_map ends up negative, and gradients invert their sign for
+            // hundreds of iterations until splats explode -> NaN.
+            const Tensor gt_norm = (gt_image.dtype() == DataType::UInt8)
+                                       ? (gt_image.to(DataType::Float32) * (1.0f / 255.0f)).contiguous()
+                                       : gt_image;
+            const bool chw = (gt_norm.ndim() == 3 && gt_norm.shape()[0] == 3);
+            const Tensor r = chw ? gt_norm.slice(0, 0, 1).squeeze(0) : gt_norm.slice(2, 0, 1).squeeze(2);
+            const Tensor g = chw ? gt_norm.slice(0, 1, 2).squeeze(0) : gt_norm.slice(2, 1, 2).squeeze(2);
+            const Tensor b = chw ? gt_norm.slice(0, 2, 3).squeeze(0) : gt_norm.slice(2, 2, 3).squeeze(2);
+            const Tensor brightness = (r * 0.299f + g * 0.587f + b * 0.114f).clamp(0.0f, 1.0f);
             const Tensor darkness = Tensor::full(brightness.shape(), 1.0f, brightness.device()) - brightness;
             weight_map =
                 mask_2d * (Tensor::full(darkness.shape(), 1.0f, darkness.device()) + darkness * opt_params.darkness_boost) +
