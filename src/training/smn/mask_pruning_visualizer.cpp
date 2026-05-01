@@ -42,6 +42,19 @@ namespace lfs::training::mask_pruning::visualizer {
             return (rx > 0) && (ry > 0);
         }
 
+        static lfs::core::Tensor mask_to_float01(const lfs::core::Tensor& mask) {
+            using namespace lfs::core;
+
+            if (!mask.is_valid()) {
+                return {};
+            }
+
+            const Tensor mask_f = mask.to(DataType::Float32);
+            const Tensor normalized_binary = mask_f.ge(0.5f).to(DataType::Float32);
+            const Tensor image_binary = mask_f.ge(127.5f).to(DataType::Float32);
+            return Tensor::where(mask_f.le(1.0f), normalized_binary, image_binary).contiguous();
+        }
+
         // Dataset sizing helper (copied from mask_pruning.cpp)
         struct DatasetSizing {
             int resize_factor = 1;
@@ -76,7 +89,7 @@ namespace lfs::training::mask_pruning::visualizer {
     void Canvas::set_mask_background(const lfs::core::Tensor& mask, float alpha) {
         using namespace lfs::core;
 
-        Tensor mask_cpu = mask.cpu().contiguous();
+        Tensor mask_cpu = mask_to_float01(mask).cpu().contiguous();
         auto mask_acc = mask_cpu.accessor<float, 2>();
 
         for (int y = 0; y < height_; ++y) {
@@ -236,7 +249,7 @@ namespace lfs::training::mask_pruning::visualizer {
         const lfs::core::Tensor& mask,
         const ProjectionResult& proj_result,
         int camera_index)
-        : camera_(camera), mask_(mask.cpu().contiguous()) // Remove const, copy to CPU
+        : camera_(camera), mask_(mask_to_float01(mask).cpu().contiguous()) // Remove const, copy to CPU
           ,
           proj_(proj_result),
           camera_index_(camera_index),

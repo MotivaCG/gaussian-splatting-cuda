@@ -39,6 +39,33 @@ namespace lfs::training {
         // post-training prune removes any excess.
         constexpr int FOCUSED_DENSIFY_DILATE_RADIUS = 3;
 
+        lfs::core::Tensor focused_segment_mask_float(const lfs::core::Tensor& mask) {
+            using namespace lfs::core;
+
+            if (!mask.is_valid()) {
+                return {};
+            }
+
+            const Tensor mask_f = mask.to(DataType::Float32);
+            const Tensor normalized_binary = mask_f.ge(0.5f).to(DataType::Float32);
+            const Tensor image_binary = mask_f.ge(127.5f).to(DataType::Float32);
+            return Tensor::where(mask_f.le(1.0f), normalized_binary, image_binary).contiguous();
+        }
+
+        lfs::core::Tensor focused_segment_image_float01(const lfs::core::Tensor& image) {
+            using namespace lfs::core;
+
+            if (!image.is_valid()) {
+                return {};
+            }
+
+            if (image.dtype() == DataType::UInt8) {
+                return (image.to(DataType::Float32) * (1.0f / 255.0f)).contiguous();
+            }
+
+            return image.to(DataType::Float32).clamp(0.0f, 1.0f).contiguous();
+        }
+
     } // namespace
 
     // =========================================================================
@@ -188,7 +215,8 @@ namespace lfs::training {
         constexpr float kAlphaFgWeight = 1.5f; // grad_alpha pressure to push FG alpha -> 1
         constexpr float kAlphaBgWeight = 1.0f; // grad_alpha pressure to push BG alpha -> 0
 
-        const Tensor bg_mask = Tensor::full(mask_2d.shape(), 1.0f, mask_2d.device()) - mask_2d;
+        const Tensor mask_f = focused_segment_mask_float(mask_2d);
+        const Tensor bg_mask = Tensor::full(mask_f.shape(), 1.0f, mask_f.device()) - mask_f;
 
         // Step 1: full-image L1+SSIM forward - identical to None mode.
         // Produces correct grad_image and populates fused_workspace ssim_map for
@@ -208,17 +236,18 @@ namespace lfs::training {
         // BG stays flat at kBgWeight regardless of darkness, avoiding spurious BG gradient boosts.
         Tensor weight_map;
         if (opt_params.darkness_boost > 0.0f) {
-            const bool chw = (gt_image.ndim() == 3 && gt_image.shape()[0] == 3);
-            const Tensor r = chw ? gt_image.slice(0, 0, 1).squeeze(0) : gt_image.slice(2, 0, 1).squeeze(2);
-            const Tensor g = chw ? gt_image.slice(0, 1, 2).squeeze(0) : gt_image.slice(2, 1, 2).squeeze(2);
-            const Tensor b = chw ? gt_image.slice(0, 2, 3).squeeze(0) : gt_image.slice(2, 2, 3).squeeze(2);
+            const Tensor gt_norm = focused_segment_image_float01(gt_image);
+            const bool chw = (gt_norm.ndim() == 3 && gt_norm.shape()[0] == 3);
+            const Tensor r = chw ? gt_norm.slice(0, 0, 1).squeeze(0) : gt_norm.slice(2, 0, 1).squeeze(2);
+            const Tensor g = chw ? gt_norm.slice(0, 1, 2).squeeze(0) : gt_norm.slice(2, 1, 2).squeeze(2);
+            const Tensor b = chw ? gt_norm.slice(0, 2, 3).squeeze(0) : gt_norm.slice(2, 2, 3).squeeze(2);
             const Tensor brightness = r * 0.299f + g * 0.587f + b * 0.114f;
             const Tensor darkness = Tensor::full(brightness.shape(), 1.0f, brightness.device()) - brightness;
             weight_map =
-                mask_2d * (Tensor::full(darkness.shape(), 1.0f, darkness.device()) + darkness * opt_params.darkness_boost) +
+                mask_f * (Tensor::full(darkness.shape(), 1.0f, darkness.device()) + darkness * opt_params.darkness_boost) +
                 bg_mask * kBgWeight;
         } else {
-            weight_map = mask_2d + bg_mask * kBgWeight;
+            weight_map = mask_f + bg_mask * kBgWeight;
         }
 
         // Normalize weight_map by its mean so the global gradient magnitude stays
@@ -237,8 +266,8 @@ namespace lfs::training {
         // Scale scalar loss to reflect FG-focused weighting.
         // This ensures the logged loss is representative of FG reconstruction quality,
         // not diluted by the large BG area. fg_pixels is cached to avoid a second GPU sync.
-        const float total_pixels = static_cast<float>(mask_2d.numel());
-        const float fg_pixels = std::max(mask_2d.sum().item<float>(), 1.0f);
+        const float total_pixels = static_cast<float>(mask_f.numel());
+        const float fg_pixels = std::max(mask_f.sum().item<float>(), 1.0f);
         const float bg_pixels = std::max(total_pixels - fg_pixels, 1.0f);
         loss = loss * (fg_pixels / std::max(total_pixels * weight_mean, 1e-6f));
 
@@ -264,7 +293,7 @@ namespace lfs::training {
             const Tensor ones = Tensor::full(alpha_2d.shape(), 1.0f, alpha_2d.device());
 
             grad_alpha = bg_mask * alpha_2d * (w_bg * kAlphaBgWeight / bg_pixels)          // BG: pressure proportional to current alpha
-                         - mask_2d * (ones - alpha_2d) * (w_fg * kAlphaFgWeight / fg_pixels); // FG: pressure proportional to (1 - alpha)
+                         - mask_f * (ones - alpha_2d) * (w_fg * kAlphaFgWeight / fg_pixels); // FG: pressure proportional to (1 - alpha)
         }
 
         return Trainer::MaskLossResult{
@@ -288,12 +317,12 @@ namespace lfs::training {
         if constexpr (FOCUSED_DENSIFY_DILATE_RADIUS > 0) {
             constexpr int kDensifyDilateRadius = FOCUSED_DENSIFY_DILATE_RADIUS;
             constexpr int kDensifyDilateKernel = 2 * kDensifyDilateRadius + 1;
-            auto mask_4d = mask_tile.unsqueeze(0).unsqueeze(0); // [1,1,H,W]
+            auto mask_4d = focused_segment_mask_float(mask_tile).unsqueeze(0).unsqueeze(0); // [1,1,H,W]
             auto dilated = mask_4d.max_pool2d(kDensifyDilateKernel, 1, kDensifyDilateRadius);
             auto dilated_2d = dilated.squeeze(0).squeeze(0); // [H,W]
             error_map.mul_(dilated_2d).contiguous();
         } else {
-            error_map.mul_(mask_tile).contiguous();
+            error_map.mul_(focused_segment_mask_float(mask_tile)).contiguous();
         }
     }
 
@@ -387,7 +416,7 @@ namespace lfs::training {
 
         // ---- 3. Sample mask at projected centers ----
         auto lin_idx = (y_px * Wf + x_px).to(DataType::Int64); // [N] int64
-        auto mask_flat = mask.reshape({static_cast<int>(H * W)}); // [H*W]
+        auto mask_flat = focused_segment_mask_float(mask).reshape({static_cast<int>(H * W)}); // [H*W]
         auto is_inside = mask_flat.gather(0, lin_idx); // [N] float {0..1}
 
         // ---- 4. Compute opacity gradient ----
@@ -439,6 +468,19 @@ namespace lfs::training {
         if (num_tiles != 1)
             return;
 
+        // Build step_params with schedule applied for this iteration before
+        // touching the mask cache. Most early FocusedSegment phases do not apply
+        // the center penalty, so loading a mask there is wasted work.
+        lfs::core::param::OptimizationParameters step_params = params_.optimization;
+        const float progress = static_cast<float>(iter) /
+                               static_cast<float>(params_.optimization.iterations);
+        focused_segment_apply_schedule(step_params, progress);
+
+        if (step_params.mask_mode != lfs::core::param::MaskMode::FocusedSegment ||
+            step_params.mask_opacity_penalty_weight_bg <= 0.0f) {
+            return;
+        }
+
         lfs::core::Tensor full_mask;
         if (pipelined_mask.is_valid() && pipelined_mask.numel() > 0) {
             full_mask = pipelined_mask;
@@ -452,12 +494,6 @@ namespace lfs::training {
 
         if (!full_mask.is_valid() || full_mask.numel() == 0)
             return;
-
-        // Build step_params with schedule applied for this iteration
-        lfs::core::param::OptimizationParameters step_params = params_.optimization;
-        const float progress = static_cast<float>(iter) /
-                               static_cast<float>(params_.optimization.iterations);
-        focused_segment_apply_schedule(step_params, progress);
 
         focused_segment_apply_center_penalty(full_mask, cam, step_params);
     }

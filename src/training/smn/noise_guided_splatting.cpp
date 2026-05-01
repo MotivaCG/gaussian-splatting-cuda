@@ -9,6 +9,7 @@
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <format>
 
@@ -176,7 +177,9 @@ namespace lfs::training {
 
             // Skip first line
             while (ptr < end && *ptr != '\n') ++ptr;
-            ++ptr;
+            if (ptr < end) {
+                ++ptr;
+            }
 
             while (ptr < end) {
                 const char* line_start = ptr;
@@ -222,22 +225,45 @@ namespace lfs::training {
         }
 
         file.seekg(0, std::ios::end);
-        std::vector<char> buffer(file.tellg());
+        const std::streampos end_pos = file.tellg();
+        if (end_pos <= 0) {
+            return std::unexpected("Cannot determine PLY file size");
+        }
+
+        std::vector<char> buffer(static_cast<size_t>(end_pos));
         file.seekg(0);
-        file.read(buffer.data(), buffer.size());
+        if (!file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()))) {
+            return std::unexpected("Failed to read complete PLY file");
+        }
 
         auto header = parse_header(buffer.data(), buffer.size());
         if (!header) return std::unexpected(header.error());
 
         auto [offset, layout] = *header;
-        if (layout.pos_x == SIZE_MAX) return std::unexpected("Missing position data");
+        const size_t pos_offsets[] = {layout.pos_x, layout.pos_y, layout.pos_z};
+        if (!std::all_of(std::begin(pos_offsets), std::end(pos_offsets),
+                         [](size_t value) { return value != SIZE_MAX; })) {
+            return std::unexpected("Missing position data");
+        }
 
         const char* vdata = buffer.data() + offset;
         const size_t N = layout.vertex_count;
         const size_t stride = layout.vertex_stride;
+        if (stride == 0) {
+            return std::unexpected("PLY vertex stride is zero");
+        }
+        if (N > (buffer.size() - offset) / stride) {
+            return std::unexpected("PLY file is truncated for declared vertex count");
+        }
+
+        const auto has_all = [](const size_t* offsets, size_t count) {
+            return std::all_of(offsets, offsets + count, [](size_t value) { return value != SIZE_MAX; });
+        };
 
         auto read_float = [&](size_t i, size_t off) {
-            return *reinterpret_cast<const float*>(vdata + i * stride + off);
+            float value = 0.0f;
+            std::memcpy(&value, vdata + i * stride + off, sizeof(float));
+            return value;
         };
 
         std::vector<float> means(N * 3), scaling(N * 3), rotation(N * 4), opacity(N);
@@ -247,7 +273,7 @@ namespace lfs::training {
             means[i * 3 + 1] = read_float(i, layout.pos_y);
             means[i * 3 + 2] = read_float(i, layout.pos_z);
 
-            if (layout.scale[0] != SIZE_MAX) {
+            if (has_all(layout.scale, 3)) {
                 scaling[i * 3 + 0] = read_float(i, layout.scale[0]);
                 scaling[i * 3 + 1] = read_float(i, layout.scale[1]);
                 scaling[i * 3 + 2] = read_float(i, layout.scale[2]);
@@ -255,7 +281,7 @@ namespace lfs::training {
                 scaling[i * 3 + 0] = scaling[i * 3 + 1] = scaling[i * 3 + 2] = -5.0f;
             }
 
-            if (layout.rot[0] != SIZE_MAX) {
+            if (has_all(layout.rot, 4)) {
                 rotation[i * 4 + 0] = read_float(i, layout.rot[0]);
                 rotation[i * 4 + 1] = read_float(i, layout.rot[1]);
                 rotation[i * 4 + 2] = read_float(i, layout.rot[2]);

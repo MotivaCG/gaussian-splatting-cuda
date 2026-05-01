@@ -67,6 +67,37 @@ namespace lfs::training::mask_pruning {
             return (rx > 0) && (ry > 0);
         }
 
+        static lfs::core::Tensor mask_to_float01(const lfs::core::Tensor& mask) {
+            using namespace lfs::core;
+
+            if (!mask.is_valid()) {
+                return {};
+            }
+
+            const Tensor mask_f = mask.to(DataType::Float32);
+            const Tensor normalized_binary = mask_f.ge(0.5f).to(DataType::Float32);
+            const Tensor image_binary = mask_f.ge(127.5f).to(DataType::Float32);
+            return Tensor::where(mask_f.le(1.0f), normalized_binary, image_binary).contiguous();
+        }
+
+        static void preload_masks_sequential(
+            const std::vector<std::shared_ptr<lfs::core::Camera>>& cams,
+            const DatasetSizing& sizing,
+            bool invert_masks) {
+
+            for (const auto& cam_ptr : cams) {
+                if (!cam_ptr || !cam_ptr->has_mask()) {
+                    continue;
+                }
+
+                (void)cam_ptr->load_and_get_mask(
+                    sizing.resize_factor,
+                    sizing.max_width,
+                    invert_masks,
+                    0.5f);
+            }
+        }
+
         // Integral image for fast square-window dilation queries on a binary mask.
         struct IntegralImage {
             int H = 0;
@@ -503,6 +534,8 @@ namespace lfs::training::mask_pruning {
         const int num_threads = std::min(n_cams, omp_get_max_threads());
         LOG_INFO("[prune_by_center_vote] Using {} OpenMP threads for {} cameras", num_threads, n_cams);
 
+        preload_masks_sequential(cams, *sizing, config.invert_masks);
+
 #pragma omp parallel num_threads(num_threads)
         {
             std::vector<int> local_tot(static_cast<size_t>(N), 0);
@@ -555,7 +588,7 @@ namespace lfs::training::mask_pruning {
 
                 Tensor radii_cpu = proj->radii.cpu().contiguous();     // [N,2] int32
                 Tensor means2d_cpu = proj->means2d.cpu().contiguous(); // [N,2] float
-                Tensor mask_cpu = mask.cpu().contiguous();             // [H,W] float/bool
+                Tensor mask_cpu = mask_to_float01(mask).cpu().contiguous(); // [H,W] float
 
                 auto r_acc = radii_cpu.accessor<int32_t, 2>();
                 auto m_acc = means2d_cpu.accessor<float, 2>();
@@ -1315,6 +1348,8 @@ namespace lfs::training::mask_pruning {
         const int num_threads_leak = std::min(n_cams, omp_get_max_threads());
         LOG_INFO("[prune_by_mask_leakage] Using {} OpenMP threads for {} cameras", num_threads_leak, n_cams);
 
+        preload_masks_sequential(cams, *sizing, config.invert_masks);
+
 #pragma omp parallel num_threads(num_threads_leak)
         {
             std::vector<int> local_good_votes(static_cast<size_t>(N), 0);
@@ -1361,7 +1396,7 @@ namespace lfs::training::mask_pruning {
                     continue;
                 }
 
-                Tensor mask_cpu = mask.cpu().contiguous();
+                Tensor mask_cpu = mask_to_float01(mask).cpu().contiguous();
                 auto mask_acc = mask_cpu.accessor<float, 2>();
 
                 // Exact binary mask
@@ -1753,6 +1788,8 @@ namespace lfs::training::mask_pruning {
         const int num_threads = std::min(n_cams, omp_get_max_threads());
         LOG_INFO("[prune_by_alpha_consensus] Using {} OpenMP threads", num_threads);
 
+        preload_masks_sequential(cams, *sizing, config.invert_masks);
+
         #pragma omp parallel num_threads(num_threads)
         {
             std::vector<double> local_sum(static_cast<size_t>(N), 0.0);
@@ -1800,7 +1837,7 @@ namespace lfs::training::mask_pruning {
                 Tensor radii_cpu = proj->radii.cpu().contiguous();     // [N, 2] int32
                 Tensor means2d_cpu = proj->means2d.cpu().contiguous(); // [N, 2] float
                 Tensor conics_cpu = proj->conics.cpu().contiguous();   // [N, 3] float
-                Tensor mask_cpu = mask.cpu().contiguous();             // [H, W] float
+                Tensor mask_cpu = mask_to_float01(mask).cpu().contiguous(); // [H, W] float
 
                 auto r_acc = radii_cpu.accessor<int32_t, 2>();
                 auto m_acc = means2d_cpu.accessor<float, 2>();
@@ -2017,6 +2054,8 @@ namespace lfs::training::mask_pruning {
         const int num_threads = std::min(n_cams, omp_get_max_threads());
         LOG_INFO("[prune_by_ellipse_boundary] Using {} OpenMP threads", num_threads);
 
+        preload_masks_sequential(cams, *sizing, config.invert_masks);
+
 #pragma omp parallel num_threads(num_threads)
         {
             std::vector<int> local_negative(static_cast<size_t>(N), 0);
@@ -2062,7 +2101,7 @@ namespace lfs::training::mask_pruning {
                 // Expansion radius = mask_expansion_fraction * max(W, H)
                 // Use integral image for O(1) box queries.
                 // ---------------------------------------------------------
-                Tensor mask_cpu = mask.cpu().contiguous();
+                Tensor mask_cpu = mask_to_float01(mask).cpu().contiguous();
                 auto mask_acc = mask_cpu.accessor<float, 2>();
 
                 const int expand_px = static_cast<int>(
