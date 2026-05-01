@@ -200,15 +200,30 @@ namespace lfs::training {
         // [-254, 1], weight_map blows up, fg_pixels = sum() is ~255x off, and gradients
         // diverge to NaN. Upstream's mask_as_float lambda only converts dtype and shares
         // this latent bug; we fix it locally to keep the fork minimal.
+        // Force .contiguous() to materialise the lazy expression - without it, chained
+        // operations on UInt8 tensors can interact unexpectedly with later ops.
         Tensor mask_2d;
         if (mask_in.dtype() == DataType::UInt8) {
-            mask_2d = mask_in.to(DataType::Float32) * (1.0f / 255.0f);
+            mask_2d = (mask_in.to(DataType::Float32) * (1.0f / 255.0f)).contiguous();
         } else if (mask_in.dtype() == DataType::Bool) {
-            mask_2d = mask_in.to(DataType::Float32);
+            mask_2d = mask_in.to(DataType::Float32).contiguous();
         } else {
             mask_2d = mask_in;
         }
         mask_2d = mask_2d.clamp(0.0f, 1.0f);
+
+        // Sanity check on the normalized mask - if values are not in [0,1] or contain NaN,
+        // weight_map and gradients downstream will produce NaN. Diagnose before that happens.
+        {
+            const float mmin = mask_2d.min().item<float>();
+            const float mmax = mask_2d.max().item<float>();
+            if (!std::isfinite(mmin) || !std::isfinite(mmax) || mmin < -1e-3f || mmax > 1.0f + 1e-3f) {
+                LOG_WARN("[FocusedSegment] mask out-of-range after normalize: min={}, max={}, "
+                         "dtype_in={}, shape=[{}], numel={}",
+                         mmin, mmax, static_cast<int>(mask_in.dtype()),
+                         mask_in.ndim(), mask_in.numel());
+            }
+        }
 
         const Tensor bg_mask = Tensor::full(mask_2d.shape(), 1.0f, mask_2d.device()) - mask_2d;
 
@@ -270,8 +285,22 @@ namespace lfs::training {
         // comparable to None mode - prevents scale drift when mask size varies across scenes.
         const float weight_mean = weight_map.mean().item<float>();
         if (!std::isfinite(weight_mean) || weight_mean <= 0.0f) {
-            LOG_WARN("[FocusedSegment] non-finite weight_mean={} (mask dtype={}, bg_w={}, darkness_boost={})",
-                     weight_mean, static_cast<int>(mask_in.dtype()), kBgWeight, opt_params.darkness_boost);
+            // Diagnose where the NaN/inf came from. These extra .item() syncs only run
+            // on failure, so they don't slow down the happy path.
+            const float mask_min = mask_2d.min().item<float>();
+            const float mask_max = mask_2d.max().item<float>();
+            const float gt_min = gt_image.dtype() == DataType::Float32
+                                     ? gt_image.min().item<float>() : -1.0f;
+            const float gt_max = gt_image.dtype() == DataType::Float32
+                                     ? gt_image.max().item<float>() : -1.0f;
+            const float wmap_min = weight_map.min().item<float>();
+            const float wmap_max = weight_map.max().item<float>();
+            LOG_WARN("[FocusedSegment] non-finite weight_mean={} | mask[min={}, max={}, dtype={}] "
+                     "| gt[min={}, max={}, dtype={}] | weight_map[min={}, max={}] "
+                     "| bg_w={}, darkness_boost={}",
+                     weight_mean, mask_min, mask_max, static_cast<int>(mask_in.dtype()),
+                     gt_min, gt_max, static_cast<int>(gt_image.dtype()),
+                     wmap_min, wmap_max, kBgWeight, opt_params.darkness_boost);
         }
         weight_map = weight_map * (1.0f / std::max(weight_mean, 1e-4f));
 
