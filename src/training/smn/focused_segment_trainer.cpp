@@ -448,17 +448,29 @@ namespace lfs::training {
         const float Wf = static_cast<float>(W);
         const float Hf = static_cast<float>(H);
 
-        // Clamp to image bounds for safe indexing
-        auto x_px = x_proj.round().clamp(0.0f, Wf - 1.0f); // [N]
-        auto y_px = y_proj.round().clamp(0.0f, Hf - 1.0f); // [N]
+        // Build "valid" Bool mask: visible AND finite AND in-bounds.
+        // .gt/.lt return false for NaN, so finite check is implicit. Without it,
+        // NaN coords (from exploded splats) pass through .clamp() unchanged
+        // (CUDA NaN comparisons all return false), then NaN -> Int64 gives garbage
+        // indices, gather() reads OOB GPU memory -> cudaErrorIllegalAddress.
+        auto in_x = x_proj.ge(0.0f).logical_and(x_proj.lt(Wf));
+        auto in_y = y_proj.ge(0.0f).logical_and(y_proj.lt(Hf));
+        auto in_bounds = in_x.logical_and(in_y);
+        auto valid = visible_mask.logical_and(in_bounds); // [N] Bool
 
-        // Also mask out splats that project outside the image
-        auto in_bounds = x_proj.ge(0.0f) * x_proj.lt(Wf)
-                       * y_proj.ge(0.0f) * y_proj.lt(Hf);
-        auto valid = visible_mask * in_bounds; // [N] bool: visible AND in-bounds
+        // For invalid splats, substitute coords with 0 before indexing. Their gather
+        // output doesn't matter (grad_activated multiplies by valid_f=0 below), but we
+        // need the indices to be in [0, H*W) so gather() doesn't access OOB memory.
+        auto zero_n = Tensor::zeros({N}, Device::CUDA);
+        auto x_safe = Tensor::where(valid, x_proj, zero_n);
+        auto y_safe = Tensor::where(valid, y_proj, zero_n);
+
+        // Clamp to image bounds for safe indexing (defence-in-depth)
+        auto x_px = x_safe.round().clamp(0.0f, Wf - 1.0f); // [N]
+        auto y_px = y_safe.round().clamp(0.0f, Hf - 1.0f); // [N]
 
         // ---- 3. Sample mask at projected centers ----
-        auto lin_idx = (y_px * Wf + x_px).to(DataType::Int64); // [N] int64
+        auto lin_idx = (y_px * Wf + x_px).to(DataType::Int64); // [N] int64, all in [0, H*W)
         auto mask_flat = mask.reshape({static_cast<int>(H * W)}); // [H*W]
         auto is_inside = mask_flat.gather(0, lin_idx); // [N] float {0..1}
 
