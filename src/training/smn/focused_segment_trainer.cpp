@@ -115,6 +115,12 @@ namespace lfs::training {
             step_params.mask_mode = lfs::core::param::MaskMode::None;
             step_params.focused_bg_weight = 1.0f;
         } else if (progress < kBgSpatialRampEnd) {
+            // Smoothly ramp BG weight 1.0 -> kBgTarget over [kNoneEnd, kBgSpatialRampEnd].
+            // A step change here (1.0 -> 0.05 in one iter) caused gradient explosion / NaN
+            // when combined with PPISP backward, since the spatial gradient scale jumped 20x
+            // overnight. The ramp matches the schedule comment ("BG spatial ramp").
+            const float t = (progress - kNoneEnd) / (kBgSpatialRampEnd - kNoneEnd);
+            step_params.focused_bg_weight = 1.0f + (kBgTarget - 1.0f) * t;
             step_params.mask_opacity_penalty_weight = 0.0f;
             step_params.mask_opacity_penalty_weight_bg = 0.0f;
         } else if (progress < kFgAlphaRampStart) {
@@ -263,6 +269,10 @@ namespace lfs::training {
         // Normalize weight_map by its mean so the global gradient magnitude stays
         // comparable to None mode - prevents scale drift when mask size varies across scenes.
         const float weight_mean = weight_map.mean().item<float>();
+        if (!std::isfinite(weight_mean) || weight_mean <= 0.0f) {
+            LOG_WARN("[FocusedSegment] non-finite weight_mean={} (mask dtype={}, bg_w={}, darkness_boost={})",
+                     weight_mean, static_cast<int>(mask_in.dtype()), kBgWeight, opt_params.darkness_boost);
+        }
         weight_map = weight_map * (1.0f / std::max(weight_mean, 1e-4f));
 
         // Step 3: apply spatial weights to gradient.
@@ -282,9 +292,19 @@ namespace lfs::training {
         // This ensures the logged loss is representative of FG reconstruction quality,
         // not diluted by the large BG area. fg_pixels is cached to avoid a second GPU sync.
         const float total_pixels = static_cast<float>(mask_2d.numel());
-        const float fg_pixels = std::max(mask_2d.sum().item<float>(), 1.0f);
+        const float fg_pixels_raw = mask_2d.sum().item<float>();
+        const float fg_pixels = std::max(fg_pixels_raw, 1.0f);
         const float bg_pixels = std::max(total_pixels - fg_pixels, 1.0f);
-        loss = loss * (fg_pixels / std::max(total_pixels * weight_mean, 1e-6f));
+        const float loss_multiplier = fg_pixels / std::max(total_pixels * weight_mean, 1e-6f);
+        // Reuses the syncs that already happened above (weight_mean, fg_pixels_raw) - no extra cost.
+        if (!std::isfinite(loss_multiplier) || !std::isfinite(fg_pixels_raw) ||
+            fg_pixels_raw < 0.0f || fg_pixels_raw > total_pixels + 1.0f) {
+            LOG_WARN("[FocusedSegment] suspicious values: multiplier={}, fg_pixels_raw={}, "
+                     "weight_mean={}, total_pixels={}, mask_dtype={}, bg_w={}, darkness={}",
+                     loss_multiplier, fg_pixels_raw, weight_mean, total_pixels,
+                     static_cast<int>(mask_in.dtype()), kBgWeight, opt_params.darkness_boost);
+        }
+        loss = loss * loss_multiplier;
 
         // Step 4: pixel-based adaptive alpha pressure via grad_alpha.
         // NOTE: modifying the scalar `loss` does NOT affect Gaussian parameters - only
