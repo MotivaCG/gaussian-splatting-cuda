@@ -212,7 +212,7 @@ namespace lfs::training {
         }
         mask_2d = mask_2d.clamp(0.0f, 1.0f);
 
-        const Tensor bg_mask = Tensor::full(mask_2d.shape(), 1.0f, mask_2d.device()) - mask_2d;
+        const Tensor bg_mask = (-mask_2d) + 1.0f;
 
         // Step 1: photometric loss forward+backward.
         // When raw_rendered is provided (PPISP / bilateral grid active), use the decoupled
@@ -268,9 +268,9 @@ namespace lfs::training {
             const Tensor g = chw ? gt_norm.slice(0, 1, 2).squeeze(0) : gt_norm.slice(2, 1, 2).squeeze(2);
             const Tensor b = chw ? gt_norm.slice(0, 2, 3).squeeze(0) : gt_norm.slice(2, 2, 3).squeeze(2);
             const Tensor brightness = (r * 0.299f + g * 0.587f + b * 0.114f).clamp(0.0f, 1.0f);
-            const Tensor darkness = Tensor::full(brightness.shape(), 1.0f, brightness.device()) - brightness;
+            const Tensor darkness = (-brightness) + 1.0f;
             weight_map =
-                mask_2d * (Tensor::full(darkness.shape(), 1.0f, darkness.device()) + darkness * opt_params.darkness_boost) +
+                mask_2d * (darkness * opt_params.darkness_boost + 1.0f) +
                 bg_mask * kBgWeight;
         } else {
             weight_map = mask_2d + bg_mask * kBgWeight;
@@ -333,10 +333,10 @@ namespace lfs::training {
         const float w_bg = opt_params.mask_opacity_penalty_weight_bg;
         if (alpha.is_valid() && (w_fg > 0.0f || w_bg > 0.0f)) {
             const Tensor alpha_2d = alpha.ndim() == 3 ? alpha.squeeze(0) : alpha;
-            const Tensor ones = Tensor::full(alpha_2d.shape(), 1.0f, alpha_2d.device());
+            const Tensor inv_alpha = (-alpha_2d) + 1.0f; // (1 - alpha)
 
-            grad_alpha = bg_mask * alpha_2d * (w_bg * kAlphaBgWeight / bg_pixels)          // BG: pressure proportional to current alpha
-                         - mask_2d * (ones - alpha_2d) * (w_fg * kAlphaFgWeight / fg_pixels); // FG: pressure proportional to (1 - alpha)
+            grad_alpha = bg_mask * alpha_2d * (w_bg * kAlphaBgWeight / bg_pixels)        // BG: pressure proportional to current alpha
+                         - mask_2d * inv_alpha * (w_fg * kAlphaFgWeight / fg_pixels);    // FG: pressure proportional to (1 - alpha)
         }
 
         return Trainer::MaskLossResult{
@@ -468,7 +468,7 @@ namespace lfs::training {
         constexpr float kOutWeight = 1.5f;  // BG center penalty strength
         constexpr float kInWeight = 0.05f;  // gentle FG fill (most work done by grad_alpha)
 
-        auto is_outside = (Tensor::full({N}, 1.0f, Device::CUDA) - is_inside);
+        auto is_outside = (-is_inside) + 1.0f; // (1 - is_inside)
         auto valid_f = valid.to(DataType::Float32); // [N] float {0, 1}
 
         // Gradient w.r.t. activated opacity (sigmoid output)
@@ -481,7 +481,8 @@ namespace lfs::training {
         auto opacity_raw = model.opacity_raw(); // [N, 1]
         auto raw_1d = opacity_raw.ndim() == 2 ? opacity_raw.squeeze(1) : opacity_raw; // [N]
         auto sig = raw_1d.sigmoid(); // [N]
-        auto grad_raw = grad_activated * sig * (Tensor::full({N}, 1.0f, Device::CUDA) - sig);
+        auto inv_sig = (-sig) + 1.0f; // (1 - sigmoid)
+        auto grad_raw = grad_activated * sig * inv_sig;
 
         // ---- 5. Accumulate into optimizer gradient buffer ----
         auto& opacity_grad = optimizer.get_grad(ParamType::Opacity); // [N, 1]

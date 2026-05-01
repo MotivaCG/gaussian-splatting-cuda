@@ -53,6 +53,36 @@ namespace lfs::training::mask_pruning {
             return (v < lo) ? lo : (v > hi ? hi : v);
         }
 
+        // Normalise mask to Float32 in [0,1]. Image loaders deliver different formats per OS:
+        //   - Linux (NvCodec): UInt8 [0,255]
+        //   - Windows (cache_image_loader): Float32 [0,1]
+        // Without this, accessor<float,2>() reinterprets bytes -> wrong values or segfault.
+        static inline lfs::core::Tensor mask_as_float01(const lfs::core::Tensor& mask) {
+            using namespace lfs::core;
+            if (mask.dtype() == DataType::UInt8) {
+                return (mask.to(DataType::Float32) * (1.0f / 255.0f)).contiguous();
+            }
+            if (mask.dtype() == DataType::Bool) {
+                return mask.to(DataType::Float32).contiguous();
+            }
+            return mask;
+        }
+
+        // Sequentially warmup mask cache before parallel prune loops. Avoids segfault
+        // from concurrent lazy initialisation of cache_image_loader / nvImageCodec backend
+        // when multiple OpenMP threads call cam.load_and_get_mask() simultaneously.
+        static inline void warmup_mask_cache(const CameraDataset& dataset,
+                                             const DatasetSizing& sizing,
+                                             bool invert_masks) {
+            const auto& cams = dataset.get_cameras();
+            for (const auto& cam_ptr : cams) {
+                if (cam_ptr && cam_ptr->has_mask()) {
+                    (void)cam_ptr->load_and_get_mask(sizing.resize_factor, sizing.max_width,
+                                                     invert_masks, 0.5f);
+                }
+            }
+        }
+
         static inline int required_views_from_ratio(int usable_cameras, float min_visibility_ratio) {
             const int usable = std::max(0, usable_cameras);
             const float ratio = std::clamp(min_visibility_ratio, 0.0f, 1.0f);
@@ -500,6 +530,8 @@ namespace lfs::training::mask_pruning {
 
         LOG_INFO("[prune_by_center_vote] Starting: {} splats, {} cameras", N, n_cams);
 
+        warmup_mask_cache(dataset, *sizing, config.invert_masks);
+
         const int num_threads = std::min(n_cams, omp_get_max_threads());
         LOG_INFO("[prune_by_center_vote] Using {} OpenMP threads for {} cameras", num_threads, n_cams);
 
@@ -555,7 +587,7 @@ namespace lfs::training::mask_pruning {
 
                 Tensor radii_cpu = proj->radii.cpu().contiguous();     // [N,2] int32
                 Tensor means2d_cpu = proj->means2d.cpu().contiguous(); // [N,2] float
-                Tensor mask_cpu = mask.cpu().contiguous();             // [H,W] float/bool
+                Tensor mask_cpu = mask_as_float01(mask).cpu().contiguous(); // [H,W] float [0,1]
 
                 auto r_acc = radii_cpu.accessor<int32_t, 2>();
                 auto m_acc = means2d_cpu.accessor<float, 2>();
@@ -990,7 +1022,7 @@ namespace lfs::training::mask_pruning {
                 }
 
                 // Prepare CPU binary mask01 - usando buffer local del thread
-                Tensor mask_cpu = mask.cpu().contiguous();
+                Tensor mask_cpu = mask_as_float01(mask).cpu().contiguous();
                 auto mask_acc = mask_cpu.accessor<float, 2>();
 
                 local_mask01.assign(static_cast<size_t>(H) * static_cast<size_t>(W), 0);
@@ -1312,6 +1344,8 @@ namespace lfs::training::mask_pruning {
 
         LOG_INFO("[prune_by_mask_leakage] Starting: {} splats, {} cameras", N, n_cams);
 
+        warmup_mask_cache(dataset, *sizing, config.invert_masks);
+
         const int num_threads_leak = std::min(n_cams, omp_get_max_threads());
         LOG_INFO("[prune_by_mask_leakage] Using {} OpenMP threads for {} cameras", num_threads_leak, n_cams);
 
@@ -1361,7 +1395,7 @@ namespace lfs::training::mask_pruning {
                     continue;
                 }
 
-                Tensor mask_cpu = mask.cpu().contiguous();
+                Tensor mask_cpu = mask_as_float01(mask).cpu().contiguous();
                 auto mask_acc = mask_cpu.accessor<float, 2>();
 
                 // Exact binary mask
@@ -1753,6 +1787,8 @@ namespace lfs::training::mask_pruning {
         const int num_threads = std::min(n_cams, omp_get_max_threads());
         LOG_INFO("[prune_by_alpha_consensus] Using {} OpenMP threads", num_threads);
 
+        warmup_mask_cache(dataset, *sizing, config.invert_masks);
+
         #pragma omp parallel num_threads(num_threads)
         {
             std::vector<double> local_sum(static_cast<size_t>(N), 0.0);
@@ -1800,7 +1836,7 @@ namespace lfs::training::mask_pruning {
                 Tensor radii_cpu = proj->radii.cpu().contiguous();     // [N, 2] int32
                 Tensor means2d_cpu = proj->means2d.cpu().contiguous(); // [N, 2] float
                 Tensor conics_cpu = proj->conics.cpu().contiguous();   // [N, 3] float
-                Tensor mask_cpu = mask.cpu().contiguous();             // [H, W] float
+                Tensor mask_cpu = mask_as_float01(mask).cpu().contiguous(); // [H, W] float [0,1]
 
                 auto r_acc = radii_cpu.accessor<int32_t, 2>();
                 auto m_acc = means2d_cpu.accessor<float, 2>();
@@ -2014,6 +2050,8 @@ namespace lfs::training::mask_pruning {
             {S, -S},
             {-S, -S}};
 
+        warmup_mask_cache(dataset, *sizing, config.invert_masks);
+
         const int num_threads = std::min(n_cams, omp_get_max_threads());
         LOG_INFO("[prune_by_ellipse_boundary] Using {} OpenMP threads", num_threads);
 
@@ -2062,7 +2100,7 @@ namespace lfs::training::mask_pruning {
                 // Expansion radius = mask_expansion_fraction * max(W, H)
                 // Use integral image for O(1) box queries.
                 // ---------------------------------------------------------
-                Tensor mask_cpu = mask.cpu().contiguous();
+                Tensor mask_cpu = mask_as_float01(mask).cpu().contiguous();
                 auto mask_acc = mask_cpu.accessor<float, 2>();
 
                 const int expand_px = static_cast<int>(
