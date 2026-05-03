@@ -5,6 +5,7 @@
 #include "training/trainer.hpp"
 
 #include "core/logger.hpp"
+#include "lfs/kernels/ssim.cuh"
 #include "optimizer/adam_optimizer.hpp"
 #include "smn/mask_pruning.hpp"
 
@@ -195,10 +196,10 @@ namespace lfs::training {
     // photometric_loss_ is a Trainer member because it holds a persistent
     // workspace that is reused across iterations.
     //
-    // raw_rendered is currently unused - FocusedSegment does not split into
-    // appearance-corrected vs raw gradients. The parameter exists to match the
-    // master signature of compute_photometric_loss_with_mask and to allow a
-    // future decoupled FocusedSegment variant without another churn.
+    // When raw_rendered is provided (PPISP / appearance correction active),
+    // FocusedSegment uses the same decoupled L1+SSIM path as unmasked training:
+    // L1/color gradients flow through corrected, while SSIM/structure gradients
+    // flow directly to raw_rendered.
     std::expected<Trainer::MaskLossResult, std::string> Trainer::focused_segment_compute_loss(
         const lfs::core::Tensor& corrected,
         const lfs::core::Tensor& raw_rendered,
@@ -209,8 +210,6 @@ namespace lfs::training {
 
         using namespace lfs::core;
 
-        (void)raw_rendered;
-
         const float kBgWeight = opt_params.focused_bg_weight; // BG gradient weight relative to FG (1.0)
         constexpr float kAlphaFgWeight = 1.5f; // grad_alpha pressure to push FG alpha -> 1
         constexpr float kAlphaBgWeight = 1.0f; // grad_alpha pressure to push BG alpha -> 0
@@ -218,17 +217,40 @@ namespace lfs::training {
         const Tensor mask_f = focused_segment_mask_float(mask_2d);
         const Tensor bg_mask = Tensor::full(mask_f.shape(), 1.0f, mask_f.device()) - mask_f;
 
-        // Step 1: full-image L1+SSIM forward - identical to None mode.
-        // Produces correct grad_image and populates fused_workspace ssim_map for
-        // pixel-error-based densification. No gradient approximation here.
-        losses::PhotometricLoss::Params params{.lambda_dssim = opt_params.lambda_dssim};
-        auto full_result = photometric_loss_.forward(corrected, gt_image, params);
-        if (!full_result) {
-            return std::unexpected(full_result.error());
+        // Step 1: full-image L1+SSIM forward - identical to None mode, with
+        // decoupled appearance gradients when raw_rendered is available.
+        const bool use_decoupled = raw_rendered.is_valid() &&
+                                   raw_rendered.numel() > 0 &&
+                                   opt_params.lambda_dssim > 0.0f;
+
+        Tensor grad;
+        Tensor grad_raw;
+        Tensor loss;
+        if (use_decoupled) {
+            auto [loss_tensor, ctx] = lfs::training::kernels::decoupled_fused_l1_ssim_forward(
+                corrected, raw_rendered, gt_image, opt_params.lambda_dssim, decoupled_fused_workspace_,
+                /*apply_valid_padding=*/true);
+            auto grads = lfs::training::kernels::decoupled_fused_l1_ssim_backward(ctx, decoupled_fused_workspace_);
+
+            grad = grads.grad_corrected;
+            grad_raw = grads.grad_raw;
+            if (grad.ndim() == 4 && corrected.ndim() == 3) {
+                grad = grad.squeeze(0);
+            }
+            if (grad_raw.ndim() == 4 && corrected.ndim() == 3) {
+                grad_raw = grad_raw.squeeze(0);
+            }
+            loss = loss_tensor;
+        } else {
+            losses::PhotometricLoss::Params params{.lambda_dssim = opt_params.lambda_dssim};
+            auto full_result = photometric_loss_.forward(corrected, gt_image, params);
+            if (!full_result) {
+                return std::unexpected(full_result.error());
+            }
+            auto [full_loss, ctx] = *full_result;
+            grad = ctx.grad_image;
+            loss = full_loss;
         }
-        auto [full_loss, ctx] = *full_result;
-        Tensor grad = ctx.grad_image;
-        Tensor loss = full_loss;
 
         // Step 2: spatial weight map - FG=1.0, BG=kBgWeight.
         // Darkness bonus applied to FG only (Rec.601 perceptual luminance from GT, not rendered).
@@ -262,6 +284,9 @@ namespace lfs::training {
                                      ? weight_map.unsqueeze(0)
                                      : weight_map.unsqueeze(2);
         grad = grad * weight_3d;
+        if (grad_raw.is_valid() && grad_raw.numel() > 0) {
+            grad_raw = grad_raw * weight_3d;
+        }
 
         // Scale scalar loss to reflect FG-focused weighting.
         // This ensures the logged loss is representative of FG reconstruction quality,
@@ -299,7 +324,7 @@ namespace lfs::training {
         return Trainer::MaskLossResult{
             .loss = loss,
             .grad_corrected = grad,
-            .grad_raw = {},
+            .grad_raw = grad_raw,
             .grad_alpha = grad_alpha};
     }
 
@@ -405,14 +430,18 @@ namespace lfs::training {
         const float Wf = static_cast<float>(W);
         const float Hf = static_cast<float>(H);
 
-        // Clamp to image bounds for safe indexing
-        auto x_px = x_proj.round().clamp(0.0f, Wf - 1.0f); // [N]
-        auto y_px = y_proj.round().clamp(0.0f, Hf - 1.0f); // [N]
+        // Build a validity mask before indexing. Invalid/NaN projections are
+        // replaced with zero so the gather index is always inside [0, H*W).
+        auto in_x = x_proj.ge(0.0f).logical_and(x_proj.lt(Wf));
+        auto in_y = y_proj.ge(0.0f).logical_and(y_proj.lt(Hf));
+        auto valid = visible_mask.logical_and(in_x.logical_and(in_y)); // [N] bool
 
-        // Also mask out splats that project outside the image
-        auto in_bounds = x_proj.ge(0.0f) * x_proj.lt(Wf)
-                       * y_proj.ge(0.0f) * y_proj.lt(Hf);
-        auto valid = visible_mask * in_bounds; // [N] bool: visible AND in-bounds
+        auto zero_n = Tensor::zeros({N}, Device::CUDA);
+        auto x_safe = Tensor::where(valid, x_proj, zero_n);
+        auto y_safe = Tensor::where(valid, y_proj, zero_n);
+
+        auto x_px = x_safe.round().clamp(0.0f, Wf - 1.0f); // [N]
+        auto y_px = y_safe.round().clamp(0.0f, Hf - 1.0f); // [N]
 
         // ---- 3. Sample mask at projected centers ----
         auto lin_idx = (y_px * Wf + x_px).to(DataType::Int64); // [N] int64
@@ -479,6 +508,20 @@ namespace lfs::training {
         if (step_params.mask_mode != lfs::core::param::MaskMode::FocusedSegment ||
             step_params.mask_opacity_penalty_weight_bg <= 0.0f) {
             return;
+        }
+
+        // MCMC can carry millions of splats around the 50% FocusedSegment phase.
+        // The center penalty projects every splat, so running it every iteration
+        // can dominate training. Apply it sparsely and scale the gradient to keep
+        // the average pressure comparable.
+        constexpr int kMcmcCenterPenaltyInterval = 8;
+        const bool is_mcmc = lfs::core::param::canonical_strategy_name(params_.optimization.strategy) ==
+                             lfs::core::param::kStrategyMCMC;
+        if (is_mcmc) {
+            if ((iter % kMcmcCenterPenaltyInterval) != 0) {
+                return;
+            }
+            step_params.mask_opacity_penalty_weight_bg *= static_cast<float>(kMcmcCenterPenaltyInterval);
         }
 
         lfs::core::Tensor full_mask;

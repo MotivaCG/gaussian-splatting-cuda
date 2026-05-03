@@ -20,15 +20,15 @@ Do not update the vcpkg baseline automatically in every build. That changes depe
 
 The examples assume this layout:
 
-```bash
+```text
 /home/victor/Documentos/SMN/software/
-├── gaussian-splatting-cuda/
-│   ├── SMNBuildLinux.sh
-│   ├── SMNUpdateVcpkgBaselineLinux.sh
-│   ├── SMNLinux.md
-│   ├── CMakeLists.txt
-│   └── vcpkg.json
-└── vcpkg/
+|-- gaussian-splatting-cuda/
+|   |-- SMNBuildLinux.sh
+|   |-- SMNUpdateVcpkgBaselineLinux.sh
+|   |-- SMNLinux.md
+|   |-- CMakeLists.txt
+|   `-- vcpkg.json
+`-- vcpkg/
 ```
 
 Default paths used by the scripts:
@@ -123,9 +123,31 @@ This will:
 4. Check required tools: `git`, `cmake`, `ninja`, `python3`, `nvcc`, `cc`, `c++`.
 5. Validate the vcpkg `builtin-baseline` if `vcpkg.json` exists.
 6. Configure CMake with the vcpkg toolchain.
-7. Build.
-8. Install into `./dist`.
-9. Run `./dist/bin/LichtFeld-Studio`.
+7. Optionally refresh Python stubs.
+8. Build.
+9. Install into `./dist`.
+10. Run `./dist/LichtFeld-Studio.sh`.
+
+The portable launcher sets these runtime paths before starting the binary:
+
+```bash
+LD_LIBRARY_PATH=./dist/lib:./dist/lib/extensions:./dist/bin:$LD_LIBRARY_PATH
+PXR_PLUGINPATH_NAME=./dist/lib/usd:$PXR_PLUGINPATH_NAME
+```
+
+The launcher then executes `./dist/bin/LichtFeld-Studio`.
+
+---
+
+## Python stub refresh
+
+`SMNBuildLinux.sh` defaults to `REFRESH_PYTHON_STUBS=1`. The `refresh_python_stubs` target can modify committed files under `src/python/stubs` when the native Python API changes.
+
+For faster local builds, or when you do not want stub files touched:
+
+```bash
+REFRESH_PYTHON_STUBS=0 ./SMNBuildLinux.sh --no-run
+```
 
 ---
 
@@ -184,15 +206,17 @@ Use this only when you want to move the project to newer vcpkg dependency versio
 
 This will:
 
-1. Update the local vcpkg repository.
-2. Bootstrap the vcpkg executable.
-3. Run:
+1. Validate `VCPKG_ROOT`.
+2. Refuse a dirty project tree unless `--allow-dirty` is passed.
+3. Update the local vcpkg repository.
+4. Bootstrap the vcpkg executable.
+5. Run:
 
 ```bash
-vcpkg x-update-baseline
+vcpkg x-update-baseline --x-manifest-root=<project-root>
 ```
 
-4. Show the resulting diff for `vcpkg.json` / `vcpkg-configuration.json`.
+6. Show the resulting diff for `vcpkg.json` / `vcpkg-configuration.json`.
 
 Review the diff before committing.
 
