@@ -487,6 +487,13 @@ namespace lfs::rendering {
         }
         LOG_DEBUG("Viewport gizmo initialized");
 
+        if (auto result = screen_overlay_renderer_.initialize(); !result) {
+            LOG_ERROR("Failed to initialize screen overlay renderer: {}", result.error());
+            shutdown();
+            return std::unexpected(result.error());
+        }
+        LOG_DEBUG("Screen overlay renderer initialized");
+
         if (auto result = camera_frustum_renderer_.init(); !result) {
             LOG_ERROR("Failed to initialize camera frustum renderer: {}", result.error());
         } else {
@@ -539,6 +546,7 @@ namespace lfs::rendering {
         screen_renderer_.reset();
         split_view_renderer_.reset();
         viewport_gizmo_.shutdown();
+        screen_overlay_renderer_.shutdown();
     }
 
     bool RenderingEngineImpl::isInitialized() const {
@@ -1393,6 +1401,10 @@ namespace lfs::rendering {
         } else {
             viewport_gizmo_.setHoveredAxis(std::nullopt);
         }
+    }
+
+    ScreenOverlayRenderer* RenderingEngineImpl::getScreenOverlayRenderer() {
+        return &screen_overlay_renderer_;
     }
 
     Result<void> RenderingEngineImpl::renderCameraFrustums(

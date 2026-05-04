@@ -13,7 +13,9 @@
 #include "internal/viewport.hpp"
 #include "python/python_runtime.hpp"
 #include "rendering/coordinate_conventions.hpp"
+#include "rendering/rendering.hpp"
 #include "rendering/rendering_manager.hpp"
+#include "rendering/screen_overlay_renderer.hpp"
 #include "theme/theme.hpp"
 #include "visualizer/gui/video_widget_interface.hpp"
 #include "visualizer_impl.hpp"
@@ -193,8 +195,16 @@ namespace lfs::vis::gui::native_panels {
         const glm::vec3 forward = lfs::rendering::cameraForward(vp.camera.R);
         const float cam_fwd[] = {forward.x, forward.y, forward.z};
 
+        lfs::rendering::ScreenOverlayRenderer* overlay = nullptr;
+        if (rm) {
+            if (auto* const engine = rm->getRenderingEngineIfInitialized()) {
+                overlay = engine->getScreenOverlayRenderer();
+            }
+        }
+
         python::invoke_viewport_overlay(glm::value_ptr(view), glm::value_ptr(proj),
                                         vp_pos, vp_size, cam_pos, cam_fwd,
+                                        overlay,
                                         ImGui::GetBackgroundDrawList());
     }
 

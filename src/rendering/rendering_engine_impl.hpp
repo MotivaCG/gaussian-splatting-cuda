@@ -16,6 +16,7 @@
 #include "render_target_pool.hpp"
 #include "rendering/rendering.hpp"
 #include "rendering_pipeline.hpp"
+#include "screen_overlay_renderer.hpp"
 #include "screen_renderer.hpp"
 #include "shader_manager.hpp"
 #include "split_view_renderer.hpp"
@@ -156,6 +157,8 @@ namespace lfs::rendering {
         void setFrustumImageLoader(std::shared_ptr<lfs::io::PipelinedImageLoader> loader,
                                    bool allow_fallback) override;
 
+        ScreenOverlayRenderer* getScreenOverlayRenderer() override;
+
     private:
         Result<RenderingPipeline::ImageRenderResult> renderGaussiansRasterResult(
             const lfs::core::SplatData& splat_data,
@@ -187,6 +190,7 @@ namespace lfs::rendering {
         EllipsoidRenderer ellipsoid_renderer_;
         RenderCoordinateAxes axes_renderer_;
         ViewportGizmo viewport_gizmo_;
+        ScreenOverlayRenderer screen_overlay_renderer_;
         CameraFrustumRenderer camera_frustum_renderer_;
         RenderPivotPoint pivot_renderer_;
 

@@ -8,6 +8,7 @@
 #include <nanobind/stl/vector.h>
 
 #include <deque>
+#include <optional>
 
 #include "notification_bridge.hpp"
 #include "py_animation.hpp"
@@ -783,19 +784,22 @@ NB_MODULE(lichtfeld, m) {
         "load_file",
         [](const std::string& path, const bool is_dataset,
            const std::string& output_path, const std::string& init_path,
-           const std::string& centralize_dataset) {
+           const std::string& centralize_dataset,
+           std::optional<int> max_width) {
             nb::gil_scoped_release release;
             lfs::core::events::cmd::LoadFile{
                 .path = python_utf8_path(path),
                 .is_dataset = is_dataset,
                 .output_path = python_utf8_path(output_path),
                 .init_path = python_utf8_path(init_path),
-                .centralize_dataset = centralize_dataset}
+                .centralize_dataset = centralize_dataset,
+                .max_width = max_width}
                 .emit();
         },
         nb::arg("path"), nb::arg("is_dataset") = false,
         nb::arg("output_path") = "", nb::arg("init_path") = "",
         nb::arg("centralize_dataset") = "off",
+        nb::arg("max_width") = nb::none(),
         "Load a file (PLY, checkpoint) or dataset into the scene.");
 
     m.def(
@@ -1185,6 +1189,46 @@ NB_MODULE(lichtfeld, m) {
             return std::vector<float>(&mat[0][0], &mat[0][0] + 16);
         },
         nb::arg("name"), "Get node transform matrix (16 floats, column-major)");
+
+    m.def(
+        "get_node_source_path", [](const std::string& name) -> std::optional<std::string> {
+            const auto* sm = lfs::python::get_scene_manager();
+            if (!sm)
+                return std::nullopt;
+
+            if (auto path = sm->getPlyPath(name); path) {
+                return lfs::core::path_to_utf8(*path);
+            }
+
+            const auto& scene = sm->getScene();
+            const auto* node = scene.getNode(name);
+            if (!node)
+                return std::nullopt;
+
+            if (node->type == lfs::core::NodeType::DATASET) {
+                const auto dataset_path = sm->getDatasetPath();
+                if (!dataset_path.empty()) {
+                    return lfs::core::path_to_utf8(dataset_path);
+                }
+            }
+
+            if (node->parent_id != lfs::core::NULL_NODE) {
+                if (const auto* parent = scene.getNodeById(node->parent_id); parent) {
+                    if (parent->type == lfs::core::NodeType::DATASET) {
+                        const auto dataset_path = sm->getDatasetPath();
+                        if (!dataset_path.empty()) {
+                            return lfs::core::path_to_utf8(dataset_path);
+                        }
+                    }
+                    if (auto path = sm->getPlyPath(parent->name); path) {
+                        return lfs::core::path_to_utf8(*path);
+                    }
+                }
+            }
+
+            return std::nullopt;
+        },
+        nb::arg("name"), "Get original source path for a node if available");
 
     m.def(
         "get_node_visualizer_world_transform", [](const std::string& name) -> std::optional<std::vector<float>> {

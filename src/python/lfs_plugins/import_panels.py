@@ -7,6 +7,7 @@ from pathlib import Path
 import lichtfeld as lf
 
 from . import rml_widgets as w
+from .asset_manager_integration import register_catalog_asset_path
 from .types import Panel
 from .rml_keys import KI_ESCAPE, KI_RETURN
 
@@ -114,6 +115,8 @@ class DatasetImportPanel(_ImportDialogPanel):
     size = (560, 0)
     form_id = "dataset-import-form"
 
+    DEFAULT_MAX_WIDTH = 3840
+
     def __init__(self):
         global _dataset_import_panel
         _dataset_import_panel = self
@@ -126,6 +129,8 @@ class DatasetImportPanel(_ImportDialogPanel):
         self._init_path = ""
         self._ppisp_sidecar_path = ""
         self._centralize_dataset = "off"
+        self._max_width = self.DEFAULT_MAX_WIDTH
+        self._max_width_str = str(self.DEFAULT_MAX_WIDTH)
         self._last_lang = ""
 
     def on_bind_model(self, ctx):
@@ -148,6 +153,8 @@ class DatasetImportPanel(_ImportDialogPanel):
         model.bind("init_path", lambda: self._init_path, self._set_init_path)
         model.bind("ppisp_sidecar_path", lambda: self._ppisp_sidecar_path, self._set_ppisp_sidecar_path)
         model.bind("centralize_dataset", lambda: self._centralize_dataset, self._set_centralize_dataset)
+        model.bind("max_width_str", lambda: self._max_width_str, self._set_max_width_str)
+        model.bind("max_width_disabled", lambda: self._max_width == 0, self._set_max_width_disabled)
 
         model.bind_event("browse_dataset", self._on_browse_dataset)
         model.bind_event("browse_output", self._on_browse_output)
@@ -173,6 +180,8 @@ class DatasetImportPanel(_ImportDialogPanel):
 
         self._init_path = ""
         self._centralize_dataset = "off"
+        self._max_width = self.DEFAULT_MAX_WIDTH
+        self._max_width_str = str(self.DEFAULT_MAX_WIDTH)
         params = lf.optimization_params()
         self._ppisp_sidecar_path = (
             str(params.ppisp_sidecar_path) if params and params.has_params() else ""
@@ -287,6 +296,33 @@ class DatasetImportPanel(_ImportDialogPanel):
         self._centralize_dataset = next_value
         self._dirty_model("centralize_dataset")
 
+    def _set_max_width_str(self, value):
+        text = str(value).strip().replace(",", "")
+        try:
+            parsed = int(text) if text else 0
+        except ValueError:
+            self._dirty_model("max_width_str")
+            return
+        if parsed < 0:
+            parsed = 0
+        self._max_width = parsed
+        self._max_width_str = str(parsed)
+        self._dirty_model("max_width_str", "max_width_disabled")
+
+    def _set_max_width_disabled(self, value):
+        disabled = bool(value)
+        if disabled:
+            if self._max_width == 0:
+                return
+            self._max_width = 0
+            self._max_width_str = "0"
+        else:
+            if self._max_width != 0:
+                return
+            self._max_width = self.DEFAULT_MAX_WIDTH
+            self._max_width_str = str(self.DEFAULT_MAX_WIDTH)
+        self._dirty_model("max_width_str", "max_width_disabled")
+
     def _on_browse_dataset(self, _handle=None, _ev=None, _args=None):
         path = lf.ui.open_dataset_folder_dialog()
         if path:
@@ -329,12 +365,14 @@ class DatasetImportPanel(_ImportDialogPanel):
                 params.ppisp = True
 
         lf.ui.set_panel_enabled(self.id, False)
+        register_catalog_asset_path(dataset_path, is_dataset=True, select=True)
         lf.load_file(
             dataset_path,
             is_dataset=True,
             output_path=self._output_path.strip(),
             init_path=init_path,
             centralize_dataset=centralize_dataset,
+            max_width=self._max_width,
         )
 
     def _on_do_cancel(self, _handle=None, _ev=None, _args=None):
@@ -491,6 +529,13 @@ class ResumeCheckpointPanel(_ImportDialogPanel):
             return
 
         lf.ui.set_panel_enabled(self.id, False)
+        register_catalog_asset_path(self._dataset_path, is_dataset=True)
+        register_catalog_asset_path(
+            self._checkpoint_path,
+            asset_type="checkpoint",
+            role="training_checkpoint",
+            select=True,
+        )
         lf.load_checkpoint_for_training(
             self._checkpoint_path,
             self._dataset_path,

@@ -18,6 +18,7 @@ set(RENDERING_SOURCES
         text_renderer.cpp
         environment_renderer.cpp
         viewport_gizmo.cpp
+        screen_overlay_renderer.cpp
         framebuffer_factory.cpp
         shader_manager.cpp
         screen_renderer.cpp

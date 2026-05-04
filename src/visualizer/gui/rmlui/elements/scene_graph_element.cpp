@@ -32,6 +32,7 @@
 #include <cmath>
 #include <format>
 #include <functional>
+#include <glm/mat4x4.hpp>
 #include <optional>
 #include <ranges>
 #include <sstream>
@@ -230,6 +231,31 @@ namespace lfs::vis::gui {
                    !parent_is_dataset;
         }
 
+        [[nodiscard]] bool isTransformHelperGroupName(const std::string& name) {
+            constexpr std::string_view suffix = "_transform";
+            return name.size() > suffix.size() && name.ends_with(suffix);
+        }
+
+        [[nodiscard]] bool isTransformHelperNode(const core::SceneNode& node) {
+            return node.type == core::NodeType::GROUP && isTransformHelperGroupName(node.name);
+        }
+
+        [[nodiscard]] bool canSaveAsAsset(const core::SceneNode& node) {
+            if (isTransformHelperNode(node))
+                return false;
+
+            switch (node.type) {
+            case core::NodeType::SPLAT:
+            case core::NodeType::POINTCLOUD:
+            case core::NodeType::MESH:
+            case core::NodeType::GROUP:
+            case core::NodeType::DATASET:
+                return true;
+            default:
+                return false;
+            }
+        }
+
         [[nodiscard]] bool canDrag(const core::NodeType type, const bool parent_is_dataset) {
             if (parent_is_dataset)
                 return false;
@@ -316,6 +342,36 @@ namespace lfs::vis::gui {
                           lfs::core::path_to_utf8(path),
                           result.error().message);
             }
+        }
+
+        ContextMenuItem makeAction(std::string label,
+                                   std::string action,
+                                   const bool separator_before = false,
+                                   const bool submenu = false,
+                                   const bool active = false) {
+            return ContextMenuItem{
+                .label = std::move(label),
+                .action = std::move(action),
+                .separator_before = separator_before,
+                .is_label = false,
+                .is_submenu_item = submenu,
+                .is_active = active,
+            };
+        }
+
+        ContextMenuItem makeLabel(std::string label, const bool separator_before = false) {
+            return ContextMenuItem{
+                .label = std::move(label),
+                .action = {},
+                .separator_before = separator_before,
+                .is_label = true,
+                .is_submenu_item = false,
+                .is_active = false,
+            };
+        }
+
+        std::string prefixedAction(std::string_view payload) {
+            return std::string(kContextActionPrefix) + std::string(payload);
         }
 
     } // namespace
@@ -574,6 +630,11 @@ namespace lfs::vis::gui {
         snapshots.reserve(nodes.size());
         root_ids.reserve(nodes.size());
 
+        const auto childIsTreeVisible = [&scene](const core::NodeId child_id) {
+            const auto* child = scene.getNodeById(child_id);
+            return child && !isTransformHelperNode(*child);
+        };
+
         for (const core::SceneNode* node : nodes) {
             NodeSnapshot snapshot;
             snapshot.id = node->id;
@@ -582,7 +643,8 @@ namespace lfs::vis::gui {
             snapshot.type = node->type;
             snapshot.name = node->name;
             snapshot.visible = static_cast<bool>(node->visible);
-            snapshot.has_children = !node->children.empty();
+            snapshot.has_children = std::any_of(node->children.begin(), node->children.end(),
+                                                childIsTreeVisible);
             snapshot.training_enabled = node->training_enabled;
             snapshot.has_mask = node->type == core::NodeType::CAMERA && !node->mask_path.empty();
 
@@ -653,6 +715,9 @@ namespace lfs::vis::gui {
             return;
 
         const NodeSnapshot& snapshot = it->second;
+        if (snapshot.type == core::NodeType::GROUP && isTransformHelperGroupName(snapshot.name))
+            return;
+
         std::vector<FlatRow> child_rows;
         for (const core::NodeId child_id : snapshot.children)
             appendSnapshotRows(child_id, depth + 1, child_rows, filter_text_lower);
@@ -672,6 +737,7 @@ namespace lfs::vis::gui {
             .collapsed = collapsed_ids_.contains(snapshot.id),
             .draggable = snapshot.draggable,
             .training_enabled = snapshot.training_enabled,
+            .name = snapshot.name,
             .label = snapshot.label,
             .node_id_text = std::to_string(snapshot.id),
             .encoded_label = encode(snapshot.label),
@@ -691,6 +757,9 @@ namespace lfs::vis::gui {
             return;
 
         const NodeSnapshot& snapshot = it->second;
+        if (snapshot.type == core::NodeType::GROUP && isTransformHelperGroupName(snapshot.name))
+            return;
+
         rows.push_back(FlatRow{
             .id = snapshot.id,
             .type = snapshot.type,
@@ -700,6 +769,7 @@ namespace lfs::vis::gui {
             .collapsed = collapsed_ids_.contains(snapshot.id),
             .draggable = snapshot.draggable,
             .training_enabled = snapshot.training_enabled,
+            .name = snapshot.name,
             .label = snapshot.label,
             .node_id_text = std::to_string(snapshot.id),
             .encoded_label = encode(snapshot.label),
@@ -975,10 +1045,15 @@ namespace lfs::vis::gui {
         setCachedAttribute(slot.delete_icon, "data-node-id", row.node_id_text);
         setCachedProperty(slot.delete_icon, "display", row.deletable ? "inline" : "none");
 
-        const std::string_view icon_sprite = typeIconSprite(row.type);
+        // Check if this is a transform node (GROUP node with name ending in "_transform")
+        const bool is_transform_node = (row.type == core::NodeType::GROUP) &&
+                                       isTransformHelperGroupName(row.name);
+
+        const std::string_view icon_sprite = is_transform_node ? "icon-cropbox" : typeIconSprite(row.type);
+        const std::string_view type_class = is_transform_node ? "transform" : typeClass(row.type);
         const std::string_view unicode = unicodeIcon(row.type);
-        setCachedTypeClass(slot.type_icon, typeClass(row.type));
-        setCachedTypeClass(slot.unicode_icon, typeClass(row.type));
+        setCachedTypeClass(slot.type_icon, type_class);
+        setCachedTypeClass(slot.unicode_icon, type_class);
 
         if (!icon_sprite.empty()) {
             setCachedAttribute(slot.type_icon, "sprite", std::string(icon_sprite));
@@ -1187,8 +1262,11 @@ namespace lfs::vis::gui {
             return;
 
         const std::string next_name = rename_buffer_.empty() ? it->second.name : rename_buffer_;
-        if (next_name != it->second.name)
-            scene->renameNode(it->second.name, next_name);
+        if (next_name != it->second.name) {
+            // Emit RenamePLY event to ensure proper handling including source path tracking
+            using namespace lfs::core::events;
+            cmd::RenamePLY{.old_name = it->second.name, .new_name = next_name}.emit();
+        }
 
         rename_node_id_ = core::NULL_NODE;
         rename_buffer_.clear();
@@ -1392,6 +1470,14 @@ namespace lfs::vis::gui {
         return target && target->GetTagName() == "input";
     }
 
+    bool SceneGraphElement::isModelsHeaderTarget(Rml::Element* target) const {
+        if (!target)
+            return false;
+        if (target == header_el_ || target == header_arrow_el_ || target == header_label_el_)
+            return true;
+        return target->GetAttribute<Rml::String>("data-role", "") == "models-header";
+    }
+
     SceneGraphElement::RowSlot* SceneGraphElement::rowSlotFromTarget(Rml::Element* target) {
         while (target && target != this) {
             const auto value = target->GetAttribute<Rml::String>("data-node-id", "");
@@ -1508,34 +1594,6 @@ namespace lfs::vis::gui {
         if (!gui || !scene)
             return;
 
-        const auto make_action = [](std::string label, std::string action,
-                                    const bool separator_before = false,
-                                    const bool submenu = false,
-                                    const bool active = false) {
-            return ContextMenuItem{
-                .label = std::move(label),
-                .action = std::move(action),
-                .separator_before = separator_before,
-                .is_label = false,
-                .is_submenu_item = submenu,
-                .is_active = active,
-            };
-        };
-        const auto make_label = [](std::string label, const bool separator_before = false) {
-            return ContextMenuItem{
-                .label = std::move(label),
-                .action = {},
-                .separator_before = separator_before,
-                .is_label = true,
-                .is_submenu_item = false,
-                .is_active = false,
-            };
-        };
-
-        auto prefixed = [](const std::string& payload) {
-            return std::string(kContextActionPrefix) + payload;
-        };
-
         std::vector<ContextMenuItem> items;
         const auto* node = scene->getNodeById(node_id);
         if (!node)
@@ -1554,54 +1612,54 @@ namespace lfs::vis::gui {
                 }
             }
             if (all_camera_like) {
-                items.push_back(make_action(tr(string_keys::Scene::ENABLE_ALL_TRAINING),
-                                            prefixed("enable_all_selected_train")));
-                items.push_back(make_action(tr(string_keys::Scene::DISABLE_ALL_TRAINING),
-                                            prefixed("disable_all_selected_train")));
+                items.push_back(makeAction(tr(string_keys::Scene::ENABLE_ALL_TRAINING),
+                                           prefixedAction("enable_all_selected_train")));
+                items.push_back(makeAction(tr(string_keys::Scene::DISABLE_ALL_TRAINING),
+                                           prefixedAction("disable_all_selected_train")));
             }
 
             const auto deletable = deletableSelectedNodeNames();
             if (!deletable.empty()) {
-                items.push_back(make_action(
+                items.push_back(makeAction(
                     std::format("{} ({})", tr(string_keys::Scene::DELETE_ITEM), deletable.size()),
-                    prefixed("delete_selected"),
+                    prefixedAction("delete_selected"),
                     !items.empty()));
             }
         } else {
             switch (node->type) {
             case core::NodeType::CAMERA:
-                items.push_back(make_action(
+                items.push_back(makeAction(
                     tr(string_keys::Scene::GO_TO_CAMERA_VIEW),
-                    prefixed(std::format("go_to_camera:{}", node->camera_uid))));
-                items.push_back(make_action(
+                    prefixedAction(std::format("go_to_camera:{}", node->camera_uid))));
+                items.push_back(makeAction(
                     tr(string_keys::Scene::GO_TO_IMAGE),
-                    prefixed(std::format("go_to_image:{}", node->camera_uid))));
-                items.push_back(make_action(
+                    prefixedAction(std::format("go_to_image:{}", node->camera_uid))));
+                items.push_back(makeAction(
                     tr(string_keys::Scene::OPEN_IN_GT_COMPARE),
-                    prefixed(std::format("open_in_gt_compare:{}", node->camera_uid))));
+                    prefixedAction(std::format("open_in_gt_compare:{}", node->camera_uid))));
                 if (!node->image_path.empty()) {
-                    items.push_back(make_action(
+                    items.push_back(makeAction(
                         tr(string_keys::Scene::SHOW_IN_FILE_MANAGER),
-                        prefixed(std::format("show_in_file_manager:{}", node_id))));
+                        prefixedAction(std::format("show_in_file_manager:{}", node_id))));
                 }
-                items.push_back(make_action(
+                items.push_back(makeAction(
                     node->training_enabled ? tr(string_keys::Scene::DISABLE_FOR_TRAINING)
                                            : tr(string_keys::Scene::ENABLE_FOR_TRAINING),
-                    prefixed(std::format("{}:{}", node->training_enabled ? "disable_train" : "enable_train", node_id)),
+                    prefixedAction(std::format("{}:{}", node->training_enabled ? "disable_train" : "enable_train", node_id)),
                     true));
                 break;
             case core::NodeType::KEYFRAME:
                 if (node->keyframe) {
-                    items.push_back(make_action(
+                    items.push_back(makeAction(
                         tr(string_keys::Scene::GO_TO_KEYFRAME),
-                        prefixed(std::format("go_to_kf:{}", node->keyframe->keyframe_index))));
-                    items.push_back(make_action(
+                        prefixedAction(std::format("go_to_kf:{}", node->keyframe->keyframe_index))));
+                    items.push_back(makeAction(
                         tr(string_keys::Scene::UPDATE_KEYFRAME),
-                        prefixed(std::format("update_kf:{}", node->keyframe->keyframe_index))));
-                    items.push_back(make_action(
+                        prefixedAction(std::format("update_kf:{}", node->keyframe->keyframe_index))));
+                    items.push_back(makeAction(
                         tr("scene.select_in_timeline"),
-                        prefixed(std::format("select_kf:{}", node->keyframe->keyframe_index))));
-                    items.push_back(make_label(tr(string_keys::Scene::KEYFRAME_EASING), true));
+                        prefixedAction(std::format("select_kf:{}", node->keyframe->keyframe_index))));
+                    items.push_back(makeLabel(tr(string_keys::Scene::KEYFRAME_EASING), true));
                     static constexpr std::array easing_labels{
                         "scene.keyframe_easing.linear",
                         "scene.keyframe_easing.ease_in",
@@ -1609,65 +1667,65 @@ namespace lfs::vis::gui {
                         "scene.keyframe_easing.ease_in_out",
                     };
                     for (size_t i = 0; i < easing_labels.size(); ++i) {
-                        items.push_back(make_action(
+                        items.push_back(makeAction(
                             tr(easing_labels[i]),
-                            prefixed(std::format("set_easing:{}:{}", node->keyframe->keyframe_index, i)),
+                            prefixedAction(std::format("set_easing:{}:{}", node->keyframe->keyframe_index, i)),
                             false, true, node->keyframe->easing == i));
                     }
                     if (node->keyframe->keyframe_index > 0) {
-                        items.push_back(make_action(
+                        items.push_back(makeAction(
                             tr(string_keys::Scene::DELETE_ITEM),
-                            prefixed(std::format("delete_kf:{}", node->keyframe->keyframe_index)),
+                            prefixedAction(std::format("delete_kf:{}", node->keyframe->keyframe_index)),
                             true));
                     }
                 }
                 break;
             case core::NodeType::KEYFRAME_GROUP:
-                items.push_back(make_action(
+                items.push_back(makeAction(
                     tr(string_keys::Scene::ADD_KEYFRAME_SCENE),
-                    prefixed("add_kf")));
+                    prefixedAction("add_kf")));
                 break;
             case core::NodeType::CAMERA_GROUP:
-                items.push_back(make_action(
+                items.push_back(makeAction(
                     tr(string_keys::Scene::ENABLE_ALL_TRAINING),
-                    prefixed(std::format("enable_all_train:{}", node_id))));
-                items.push_back(make_action(
+                    prefixedAction(std::format("enable_all_train:{}", node_id))));
+                items.push_back(makeAction(
                     tr(string_keys::Scene::DISABLE_ALL_TRAINING),
-                    prefixed(std::format("disable_all_train:{}", node_id))));
+                    prefixedAction(std::format("disable_all_train:{}", node_id))));
                 break;
             case core::NodeType::DATASET:
-                items.push_back(make_action(
+                items.push_back(makeAction(
                     tr(string_keys::Scene::DELETE_ITEM),
-                    prefixed(std::format("delete:{}", node_id))));
+                    prefixedAction(std::format("delete:{}", node_id))));
                 break;
             case core::NodeType::CROPBOX:
-                items.push_back(make_action(tr("common.apply"), prefixed("apply_cropbox")));
-                items.push_back(make_action(
+                items.push_back(makeAction(tr("common.apply"), prefixedAction("apply_cropbox")));
+                items.push_back(makeAction(
                     tr("scene.fit_to_scene"),
-                    prefixed("fit_cropbox:0"),
+                    prefixedAction("fit_cropbox:0"),
                     true));
-                items.push_back(make_action(
+                items.push_back(makeAction(
                     tr("scene.fit_to_scene_trimmed"),
-                    prefixed("fit_cropbox:1")));
-                items.push_back(make_action(tr("scene.reset_crop"), prefixed("reset_cropbox")));
-                items.push_back(make_action(
+                    prefixedAction("fit_cropbox:1")));
+                items.push_back(makeAction(tr("scene.reset_crop"), prefixedAction("reset_cropbox")));
+                items.push_back(makeAction(
                     tr(string_keys::Scene::DELETE_ITEM),
-                    prefixed(std::format("delete:{}", node_id)),
+                    prefixedAction(std::format("delete:{}", node_id)),
                     true));
                 break;
             case core::NodeType::ELLIPSOID:
-                items.push_back(make_action(tr("common.apply"), prefixed("apply_ellipsoid")));
-                items.push_back(make_action(
+                items.push_back(makeAction(tr("common.apply"), prefixedAction("apply_ellipsoid")));
+                items.push_back(makeAction(
                     tr("scene.fit_to_scene"),
-                    prefixed("fit_ellipsoid:0"),
+                    prefixedAction("fit_ellipsoid:0"),
                     true));
-                items.push_back(make_action(
+                items.push_back(makeAction(
                     tr("scene.fit_to_scene_trimmed"),
-                    prefixed("fit_ellipsoid:1")));
-                items.push_back(make_action(tr("scene.reset_crop"), prefixed("reset_ellipsoid")));
-                items.push_back(make_action(
+                    prefixedAction("fit_ellipsoid:1")));
+                items.push_back(makeAction(tr("scene.reset_crop"), prefixedAction("reset_ellipsoid")));
+                items.push_back(makeAction(
                     tr(string_keys::Scene::DELETE_ITEM),
-                    prefixed(std::format("delete:{}", node_id)),
+                    prefixedAction(std::format("delete:{}", node_id)),
                     true));
                 break;
             default:
@@ -1675,39 +1733,52 @@ namespace lfs::vis::gui {
             }
 
             if (node->type == core::NodeType::GROUP) {
-                items.push_back(make_action(
+                items.push_back(makeAction(
                     tr("scene.add_group_ellipsis"),
-                    prefixed(std::format("add_group:{}", node_id)),
+                    prefixedAction(std::format("add_group:{}", node_id)),
                     !items.empty()));
-                items.push_back(make_action(
+                items.push_back(makeAction(
                     tr("scene.merge_to_single_ply"),
-                    prefixed(std::format("merge_group:{}", node_id))));
+                    prefixedAction(std::format("merge_group:{}", node_id))));
+                if (isTransformHelperNode(*node)) {
+                    items.push_back(makeAction(
+                        tr(string_keys::Transform::RESET_TRANSFORM),
+                        prefixedAction(std::format("reset_transform:{}", node_id))));
+                }
             }
 
             if (node->type == core::NodeType::SPLAT || node->type == core::NodeType::POINTCLOUD) {
-                items.push_back(make_action(
+                items.push_back(makeAction(
                     tr("scene.add_crop_box"),
-                    prefixed(std::format("add_cropbox:{}", node_id)),
+                    prefixedAction(std::format("add_cropbox:{}", node_id)),
                     !items.empty()));
-                items.push_back(make_action(
+                items.push_back(makeAction(
                     tr("scene.add_crop_ellipsoid"),
-                    prefixed(std::format("add_ellipsoid:{}", node_id))));
-                items.push_back(make_action(
+                    prefixedAction(std::format("add_ellipsoid:{}", node_id))));
+                items.push_back(makeAction(
                     tr("scene.save_to_disk"),
-                    prefixed(std::format("save_node:{}", node_id))));
+                    prefixedAction(std::format("save_node:{}", node_id))));
+            }
+
+            // Add Save Asset for asset-compatible node types
+            if (canSaveAsAsset(*node)) {
+                items.push_back(makeAction(
+                    tr(string_keys::Scene::SAVE_ASSET),
+                    prefixedAction(std::format("save_asset:{}", node_id)),
+                    !items.empty()));
             }
 
             if (node_snapshots_.at(node_id).deletable) {
-                items.push_back(make_action(
+                items.push_back(makeAction(
                     tr(string_keys::Scene::RENAME),
-                    prefixed(std::format("rename:{}", node_id)),
+                    prefixedAction(std::format("rename:{}", node_id)),
                     !items.empty()));
             }
 
             if (node->type != core::NodeType::CAMERA) {
-                items.push_back(make_action(
+                items.push_back(makeAction(
                     tr("scene.duplicate"),
-                    prefixed(std::format("duplicate:{}", node_id))));
+                    prefixedAction(std::format("duplicate:{}", node_id))));
             }
 
             if (node_snapshots_.at(node_id).draggable) {
@@ -1717,27 +1788,27 @@ namespace lfs::vis::gui {
                         groups.emplace_back(candidate_id, snapshot.name);
                 }
                 if (!groups.empty()) {
-                    items.push_back(make_label(tr("scene.move_to"), true));
-                    items.push_back(make_action(
+                    items.push_back(makeLabel(tr("scene.move_to"), true));
+                    items.push_back(makeAction(
                         tr("scene.move_to_root"),
-                        prefixed(std::format("reparent:{}:{}", node_id, core::NULL_NODE)),
+                        prefixedAction(std::format("reparent:{}:{}", node_id, core::NULL_NODE)),
                         false, true));
                     std::ranges::sort(groups, [](const auto& a, const auto& b) {
                         return a.second < b.second;
                     });
                     for (const auto& [group_id, group_name] : groups) {
-                        items.push_back(make_action(
+                        items.push_back(makeAction(
                             group_name,
-                            prefixed(std::format("reparent:{}:{}", node_id, group_id)),
+                            prefixedAction(std::format("reparent:{}:{}", node_id, group_id)),
                             false, true));
                     }
                 }
             }
 
             if (node_snapshots_.at(node_id).deletable) {
-                items.push_back(make_action(
+                items.push_back(makeAction(
                     tr(string_keys::Scene::DELETE_ITEM),
-                    prefixed(std::format("delete:{}", node_id)),
+                    prefixedAction(std::format("delete:{}", node_id)),
                     true));
             }
         }
@@ -1746,6 +1817,20 @@ namespace lfs::vis::gui {
             return;
 
         context_menu_node_id_ = node_id;
+        gui->globalContextMenu().request(std::move(items),
+                                         panel_screen_x_ + mouse_x,
+                                         panel_screen_y_ + mouse_y);
+    }
+
+    void SceneGraphElement::showModelsHeaderContextMenu(const float mouse_x, const float mouse_y) {
+        auto* gui = services().guiOrNull();
+        if (!gui)
+            return;
+
+        std::vector<ContextMenuItem> items;
+        items.push_back(makeAction(tr(string_keys::Scene::ADD_PLY), prefixedAction("add_ply_root")));
+        items.push_back(makeAction(tr(string_keys::Scene::ADD_GROUP_ELLIPSIS), prefixedAction("add_group_root")));
+
         gui->globalContextMenu().request(std::move(items),
                                          panel_screen_x_ + mouse_x,
                                          panel_screen_y_ + mouse_y);
@@ -1836,6 +1921,22 @@ namespace lfs::vis::gui {
                 if (const auto* node = scene->getNodeById(node_id))
                     cmd::MergeGroup{.name = node->name}.emit();
             }
+        } else if (kind == "add_ply_root") {
+            const auto path = OpenPointCloudFileDialog();
+            if (!path.empty()) {
+                cmd::LoadFile{.path = path, .is_dataset = false}.emit();
+            }
+        } else if (kind == "add_group_root") {
+            cmd::AddGroup{.name = tr("scene.new_group_name"), .parent_name = ""}.emit();
+        } else if (kind == "reset_transform" && parts.size() >= 2) {
+            core::NodeId node_id = core::NULL_NODE;
+            if (!parseNodeId(parts[1], node_id))
+                return;
+            if (const auto* node = scene->getNodeById(node_id)) {
+                if (isTransformHelperNode(*node)) {
+                    scene_manager->setNodeTransform(node->name, glm::mat4(1.0f));
+                }
+            }
         } else if ((kind == "add_cropbox" || kind == "add_ellipsoid" || kind == "save_node") && parts.size() >= 2) {
             core::NodeId node_id = core::NULL_NODE;
             if (!parseNodeId(parts[1], node_id))
@@ -1881,6 +1982,12 @@ namespace lfs::vis::gui {
             const auto* parent = parent_id == core::NULL_NODE ? nullptr : scene->getNodeById(parent_id);
             if (node)
                 cmd::ReparentNode{.node_name = node->name, .new_parent_name = parent ? parent->name : std::string{}}.emit();
+        } else if (kind == "save_asset" && parts.size() >= 2) {
+            core::NodeId node_id = core::NULL_NODE;
+            if (parseNodeId(parts[1], node_id)) {
+                if (const auto* node = scene->getNodeById(node_id))
+                    cmd::SaveAsset{.node_name = node->name}.emit();
+            }
         }
     }
 
@@ -1904,8 +2011,7 @@ namespace lfs::vis::gui {
         if (type == "click") {
             focusTree();
 
-            if (target == header_el_ || target == header_arrow_el_ ||
-                target->GetAttribute<Rml::String>("data-role", "") == "models-header") {
+            if (isModelsHeaderTarget(target)) {
                 toggleModelsSection();
                 event.StopPropagation();
                 return;
@@ -1952,6 +2058,10 @@ namespace lfs::vis::gui {
                     handleSecondaryClick(node_id,
                                          event.GetParameter("mouse_x", 0.0f),
                                          event.GetParameter("mouse_y", 0.0f));
+                    event.StopPropagation();
+                } else if (isModelsHeaderTarget(target)) {
+                    showModelsHeaderContextMenu(event.GetParameter("mouse_x", 0.0f),
+                                                event.GetParameter("mouse_y", 0.0f));
                     event.StopPropagation();
                 }
             }

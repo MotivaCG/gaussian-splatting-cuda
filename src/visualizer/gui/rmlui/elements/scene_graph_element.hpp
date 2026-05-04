@@ -79,6 +79,7 @@ namespace lfs::vis::gui {
             bool collapsed = false;
             bool draggable = false;
             bool training_enabled = true;
+            std::string name;
             std::string label;
             std::string node_id_text;
             std::string encoded_label;
@@ -145,6 +146,8 @@ namespace lfs::vis::gui {
         void toggleModelsSection();
         bool setDropTarget(core::NodeId node_id);
         void showContextMenu(core::NodeId node_id, float mouse_x, float mouse_y);
+        void showModelsHeaderContextMenu(float mouse_x, float mouse_y);
+        bool isModelsHeaderTarget(Rml::Element* target) const;
         std::vector<std::string> deletableSelectedNodeNames() const;
         void deleteSelectedNodes();
         void toggleChildrenTraining(core::NodeId group_id, bool enabled);

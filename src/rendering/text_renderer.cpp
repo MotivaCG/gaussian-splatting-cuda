@@ -79,6 +79,7 @@ namespace lfs::rendering {
 
         FT_Set_Pixel_Sizes(face, 0, fontSize);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        base_pixel_size_ = fontSize;
 
         // This renderer is currently used only for viewport gizmo axis labels, so we keep
         // the glyph atlas intentionally narrow instead of building a general text cache.
@@ -133,6 +134,85 @@ namespace lfs::rendering {
         return {};
     }
 
+    Result<void> TextRenderer::LoadAsciiFont(const std::filesystem::path& fontPath, unsigned int fontSize) {
+        LOG_TIMER("TextRenderer::LoadAsciiFont");
+        LOG_INFO("Loading ASCII font: {} at size {}", fontPath.string(), fontSize);
+
+        for (auto& pair : characters) {
+            glDeleteTextures(1, &pair.second.textureID);
+        }
+        characters.clear();
+
+        FT_Library ft;
+        if (FT_Init_FreeType(&ft)) {
+            return std::unexpected("Could not init FreeType Library");
+        }
+        struct FTLibraryGuard {
+            FT_Library lib;
+            ~FTLibraryGuard() {
+                if (lib)
+                    FT_Done_FreeType(lib);
+            }
+        } ft_guard{ft};
+
+        const std::string fontPath_utf8 = lfs::core::path_to_utf8(fontPath);
+        FT_Face face;
+        if (FT_New_Face(ft, fontPath_utf8.c_str(), 0, &face)) {
+            return std::unexpected(std::format("Failed to load font from: {}", fontPath.string()));
+        }
+        struct FTFaceGuard {
+            FT_Face face;
+            ~FTFaceGuard() {
+                if (face)
+                    FT_Done_Face(face);
+            }
+        } face_guard{face};
+
+        FT_Set_Pixel_Sizes(face, 0, fontSize);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        base_pixel_size_ = fontSize;
+        ascender_px_ = static_cast<float>(face->size->metrics.ascender) / 64.0f;
+        line_height_px_ = static_cast<float>(face->size->metrics.height) / 64.0f;
+
+        int loaded_count = 0;
+        for (unsigned char c = 32; c < 127; ++c) {
+            if (FT_Load_Char(face, c, FT_LOAD_RENDER)) {
+                LOG_TRACE("Failed to load glyph for character: {}", static_cast<char>(c));
+                continue;
+            }
+
+            GLuint texture = 0;
+            const unsigned int bw = face->glyph->bitmap.width;
+            const unsigned int bh = face->glyph->bitmap.rows;
+            if (bw > 0 && bh > 0) {
+                glGenTextures(1, &texture);
+                glBindTexture(GL_TEXTURE_2D, texture);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, bw, bh, 0, GL_RED, GL_UNSIGNED_BYTE,
+                             face->glyph->bitmap.buffer);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            }
+
+            Character character = {
+                texture,
+                glm::ivec2(bw, bh),
+                glm::ivec2(face->glyph->bitmap_left, face->glyph->bitmap_top),
+                static_cast<GLuint>(face->glyph->advance.x)};
+            characters.insert(std::pair<char, Character>(static_cast<char>(c), character));
+            ++loaded_count;
+        }
+
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        if (characters.empty()) {
+            return std::unexpected("Failed to load any ASCII glyphs from font");
+        }
+        LOG_INFO("Loaded {} ASCII glyphs from font at {} px", loaded_count, fontSize);
+        return {};
+    }
+
     Result<void> TextRenderer::initRenderData() {
         LOG_TIMER_TRACE("TextRenderer::initRenderData");
 
@@ -184,7 +264,7 @@ namespace lfs::rendering {
     }
 
     Result<void> TextRenderer::RenderText(const std::string& text, float x, float y, float scale,
-                                          const glm::vec3& color) {
+                                          const glm::vec3& color, float alpha) {
         if (!shader_.valid()) {
             LOG_ERROR("Text renderer shader not initialized");
             return std::unexpected("Text renderer shader not initialized");
@@ -221,6 +301,8 @@ namespace lfs::rendering {
         if (auto result = s->set("projection", projection); !result)
             return result;
         if (auto result = s->set("textColor", color); !result)
+            return result;
+        if (auto result = s->set("textAlpha", alpha); !result)
             return result;
 
         // Ensure we're using texture unit 0
@@ -289,6 +371,16 @@ namespace lfs::rendering {
         if (const auto it = characters.find(c); it != characters.end())
             return glm::vec2(it->second.bearing) * scale;
         return glm::vec2(0.0f);
+    }
+
+    glm::vec2 TextRenderer::measureString(std::string_view text, const float scale) const {
+        float advance_total = 0.0f;
+        for (char c : text) {
+            if (const auto it = characters.find(c); it != characters.end()) {
+                advance_total += static_cast<float>(it->second.advance >> 6) * scale;
+            }
+        }
+        return {advance_total, line_height_px_ * scale};
     }
 
 } // namespace lfs::rendering

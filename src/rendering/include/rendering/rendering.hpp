@@ -543,6 +543,11 @@ namespace lfs::rendering {
         virtual void clearFrustumCache() = 0;
         virtual void setFrustumImageLoader(std::shared_ptr<lfs::io::PipelinedImageLoader> loader,
                                            bool allow_fallback) = 0;
+
+        // Screen-space overlay renderer (lines, polylines, circles, filled shapes, text).
+        // Used by selection tool, gui_manager selection previews, and the python plugin
+        // viewport overlay flush. Returns nullptr only if the engine is not yet initialized.
+        virtual class ScreenOverlayRenderer* getScreenOverlayRenderer() = 0;
     };
 
 } // namespace lfs::rendering

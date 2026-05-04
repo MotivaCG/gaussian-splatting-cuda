@@ -87,6 +87,9 @@ namespace lfs::python {
         GetTransformSpaceCallback g_get_transform_space_cb = nullptr;
         SetTransformSpaceCallback g_set_transform_space_cb = nullptr;
 
+        // Asset Manager save callback
+        SaveAssetCallback g_save_asset_cb = nullptr;
+
         // Thumbnail callbacks
         RequestThumbnailCallback g_request_thumbnail_cb = nullptr;
         ProcessThumbnailsCallback g_process_thumbnails_cb = nullptr;
@@ -517,6 +520,15 @@ namespace lfs::python {
     void set_transform_space(int space) {
         if (g_set_transform_space_cb)
             g_set_transform_space_cb(space);
+    }
+
+    void set_save_asset_callback(SaveAssetCallback save_cb) {
+        g_save_asset_cb = save_cb;
+    }
+
+    void invoke_save_asset(const std::string& node_name) {
+        if (g_save_asset_cb)
+            g_save_asset_cb(node_name.c_str());
     }
 
     void set_scene_manager(vis::SceneManager* sm) { g_scene_manager.store(sm); }
@@ -1192,10 +1204,11 @@ namespace lfs::python {
     void invoke_viewport_overlay(const float* view_matrix, const float* proj_matrix,
                                  const float* vp_pos, const float* vp_size,
                                  const float* cam_pos, const float* cam_fwd,
+                                 void* overlay_renderer,
                                  void* draw_list) {
         if (g_invoke_viewport_overlay_cb) {
             g_invoke_viewport_overlay_cb(view_matrix, proj_matrix, vp_pos, vp_size,
-                                         cam_pos, cam_fwd, draw_list);
+                                         cam_pos, cam_fwd, overlay_renderer, draw_list);
         }
     }
 
