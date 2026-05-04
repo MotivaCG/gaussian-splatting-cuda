@@ -47,10 +47,20 @@ namespace lfs::training {
                 return {};
             }
 
+            if (mask.dtype() == DataType::Bool) {
+                return mask.to(DataType::Float32).contiguous();
+            }
+
             const Tensor mask_f = mask.to(DataType::Float32);
-            const Tensor normalized_binary = mask_f.ge(0.5f).to(DataType::Float32);
-            const Tensor image_binary = mask_f.ge(127.5f).to(DataType::Float32);
-            return Tensor::where(mask_f.le(1.0f), normalized_binary, image_binary).contiguous();
+            if (mask.dtype() == DataType::UInt8) {
+                // Loaders differ by platform/path: some return UInt8 masks as 0/1,
+                // others as 0/255. Preserve 0/1 masks and scale image-range values.
+                return Tensor::where(mask_f.le(1.0f), mask_f, mask_f * (1.0f / 255.0f))
+                    .clamp(0.0f, 1.0f)
+                    .contiguous();
+            }
+
+            return mask_f.clamp(0.0f, 1.0f).contiguous();
         }
 
         lfs::core::Tensor focused_segment_image_float01(const lfs::core::Tensor& image) {
