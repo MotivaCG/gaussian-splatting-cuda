@@ -3855,6 +3855,32 @@ namespace lfs::python {
             "Open a file dialog to select a CSV file. Returns empty string if cancelled.");
 
         m.def(
+            "open_las_file_dialog",
+            []() -> std::string {
+                auto result = lfs::vis::gui::OpenLasFileDialog();
+                return result.empty() ? "" : lfs::core::path_to_utf8(result);
+            },
+            "Open a file dialog to select a LAS or LAZ point cloud file. Returns empty string if cancelled.");
+
+        m.def(
+            "save_las_file_dialog",
+            [](const std::string& default_name) -> std::string {
+                auto result = lfs::vis::gui::SaveLasFileDialog(default_name);
+                return result.empty() ? "" : lfs::core::path_to_utf8(result);
+            },
+            nb::arg("default_name") = "export",
+            "Open a save file dialog for LAS files. Returns empty string if cancelled.");
+
+        m.def(
+            "save_laz_file_dialog",
+            [](const std::string& default_name) -> std::string {
+                auto result = lfs::vis::gui::SaveLazFileDialog(default_name);
+                return result.empty() ? "" : lfs::core::path_to_utf8(result);
+            },
+            nb::arg("default_name") = "export",
+            "Open a save file dialog for LAZ compressed files. Returns empty string if cancelled.");
+
+        m.def(
             "save_json_file_dialog",
             [](const std::string& default_name) -> std::string {
                 auto result = lfs::vis::gui::SaveJsonFileDialog(default_name);
@@ -4278,7 +4304,8 @@ namespace lfs::python {
                     {"rectangle", 1},
                     {"polygon", 2},
                     {"lasso", 3},
-                    {"rings", 4}};
+                    {"rings", 4},
+                    {"color", 5}};
                 if (const auto it = MODE_MAP.find(mode); it != MODE_MAP.end()) {
                     lfs::core::events::tools::SetSelectionSubMode{.selection_mode = it->second}.emit();
                 }
