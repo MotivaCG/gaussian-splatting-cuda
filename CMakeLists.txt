@@ -489,6 +489,22 @@ configure_file(
 # Project-wide definitions
 add_definitions(-DPROJECT_ROOT_PATH="${PROJ_ROOT_DIR}")
 
+# Keep CPU code on a fixed AVX2 baseline so release builds do not depend on the
+# build machine's CPU. In particular, avoid -march=native producing AVX512 on
+# newer Intel/AMD hosts.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64|x64)$")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        set(LFS_AVX2_BASELINE_FLAGS "-march=x86-64-v3 -mtune=generic -mno-avx512f -mno-avx512vl -mno-avx512dq -mno-avx512bw -mno-avx512cd")
+        string(APPEND CMAKE_C_FLAGS_RELEASE " ${LFS_AVX2_BASELINE_FLAGS}")
+        string(APPEND CMAKE_CXX_FLAGS_RELEASE " ${LFS_AVX2_BASELINE_FLAGS}")
+        message(STATUS "CPU baseline: x86-64-v3 (AVX2), AVX512 disabled")
+    elseif(MSVC)
+        string(APPEND CMAKE_C_FLAGS_RELEASE " /arch:AVX2")
+        string(APPEND CMAKE_CXX_FLAGS_RELEASE " /arch:AVX2")
+        message(STATUS "CPU baseline: AVX2 (/arch:AVX2)")
+    endif()
+endif()
+
 # CUDA device debugging (-G flag) generates huge object files. Disable in CI.
 option(CUDA_DEVICE_DEBUG "Enable CUDA device debugging (-G flag)" ON)
 

@@ -48,6 +48,7 @@ Environment variables:
   BUILD_TYPE            Default: Release
   BUILD_PORTABLE        Default: ON
   BUILD_CUDA_FATBIN     Default: ON
+  BUILD_CUDA_FATBIN_MIN_SM Default: 75
   UPDATE_VCPKG          Default: 0
   RUN_AFTER_BUILD       Default: 1
   CMAKE_GENERATOR       Default: Ninja
@@ -211,6 +212,7 @@ fi
 : "${BUILD_TYPE:=Release}"
 : "${BUILD_PORTABLE:=ON}"
 : "${BUILD_CUDA_FATBIN:=ON}"
+: "${BUILD_CUDA_FATBIN_MIN_SM:=75}"
 : "${UPDATE_VCPKG:=0}"
 : "${RUN_AFTER_BUILD:=1}"
 : "${CMAKE_GENERATOR:=Ninja}"
@@ -359,7 +361,8 @@ cmake \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
     -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
     -DBUILD_PORTABLE="$BUILD_PORTABLE" \
-    -DBUILD_CUDA_FATBIN="$BUILD_CUDA_FATBIN"
+    -DBUILD_CUDA_FATBIN="$BUILD_CUDA_FATBIN" \
+    -DBUILD_CUDA_FATBIN_MIN_SM="$BUILD_CUDA_FATBIN_MIN_SM"
 
 # vcpkg_installed exists after configure.
 VCPKG_INSTALLED_DIR_LINUX="$BUILD_DIR/vcpkg_installed/x64-linux"
