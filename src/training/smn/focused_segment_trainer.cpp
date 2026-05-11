@@ -15,6 +15,41 @@ namespace lfs::training {
 
     namespace {
 
+        // =====================================================================
+        // FocusedSegment compile-time feature switches.
+        //
+        // All flags default to true (current production behavior). Setting one
+        // to false compiles out that piece via `if constexpr` or via a zero
+        // multiplier on a weight constant. Grouped so that alpha pressure
+        // inside the mask (transparency penalty) and opacity pressure outside
+        // the mask (opacity penalty) can be toggled independently at BOTH the
+        // pixel level (grad_alpha) and the splat level (center penalty),
+        // giving 4 fully independent knobs.
+        // =====================================================================
+
+        // Time-varying weight schedule. When false the 7-phase ramp is skipped
+        // entirely: FocusedSegment is active from iter 0 and weights stay at
+        // their CLI-provided values for the whole training.
+        constexpr bool FOCUSED_ENABLE_SCHEDULE = true;
+
+        // Pixel-level loss shaping (focused_segment_compute_loss).
+        constexpr bool FOCUSED_ENABLE_SPATIAL_WEIGHT_MAP = true; // FG=1, BG=focused_bg_weight on grad_image
+        constexpr bool FOCUSED_ENABLE_DARKNESS_BOOST     = true; // GT-luminance darkness boost on FG region
+        constexpr bool FOCUSED_ENABLE_GRAD_ALPHA_FG      = true; // push FG alpha->1 (force opacity inside; fills holes)
+        constexpr bool FOCUSED_ENABLE_GRAD_ALPHA_BG      = true; // push BG alpha->0 (force transparency outside; removes halos)
+
+        // Densification (focused_segment_apply_densification_mask).
+        // FOCUSED_DENSIFY_DILATE_RADIUS below still controls the dilation size.
+        constexpr bool FOCUSED_ENABLE_DENSIFY_DILATION = true;
+
+        // Splat-level center penalty (focused_segment_apply_center_penalty).
+        constexpr bool FOCUSED_ENABLE_CENTER_PENALTY         = true; // master switch (skips hook entirely)
+        constexpr bool FOCUSED_ENABLE_CENTER_PENALTY_FG_FILL = true; // push opacity UP inside mask
+        constexpr bool FOCUSED_ENABLE_CENTER_PENALTY_BG      = true; // push opacity DOWN outside mask
+
+        // Post-training mask-based pruning pipeline.
+        constexpr bool FOCUSED_ENABLE_POST_TRAINING_PRUNE = true;
+
         // FocusedSegment densification mask dilation radius (in pixels).
         //
         // Controls how much the FG mask is dilated before multiplying it against the
@@ -118,6 +153,10 @@ namespace lfs::training {
 
         if (step_params.mask_mode != lfs::core::param::MaskMode::FocusedSegment) {
             return;
+        }
+
+        if constexpr (!FOCUSED_ENABLE_SCHEDULE) {
+            return; // skip the time-varying ramp; params stay at CLI-provided values
         }
 
         constexpr float kNoneEnd = 0.15f; // End of warm-up with masking disabled.
@@ -262,49 +301,55 @@ namespace lfs::training {
             loss = full_loss;
         }
 
-        // Step 2: spatial weight map - FG=1.0, BG=kBgWeight.
-        // Darkness bonus applied to FG only (Rec.601 perceptual luminance from GT, not rendered).
-        // Using GT keeps the weight map stable across iterations - rendered changes every step.
-        // BG stays flat at kBgWeight regardless of darkness, avoiding spurious BG gradient boosts.
-        Tensor weight_map;
-        if (opt_params.darkness_boost > 0.0f) {
-            const Tensor gt_norm = focused_segment_image_float01(gt_image);
-            const bool chw = (gt_norm.ndim() == 3 && gt_norm.shape()[0] == 3);
-            const Tensor r = chw ? gt_norm.slice(0, 0, 1).squeeze(0) : gt_norm.slice(2, 0, 1).squeeze(2);
-            const Tensor g = chw ? gt_norm.slice(0, 1, 2).squeeze(0) : gt_norm.slice(2, 1, 2).squeeze(2);
-            const Tensor b = chw ? gt_norm.slice(0, 2, 3).squeeze(0) : gt_norm.slice(2, 2, 3).squeeze(2);
-            const Tensor brightness = r * 0.299f + g * 0.587f + b * 0.114f;
-            const Tensor darkness = Tensor::full(brightness.shape(), 1.0f, brightness.device()) - brightness;
-            weight_map =
-                mask_f * (Tensor::full(darkness.shape(), 1.0f, darkness.device()) + darkness * opt_params.darkness_boost) +
-                bg_mask * kBgWeight;
-        } else {
-            weight_map = mask_f + bg_mask * kBgWeight;
-        }
-
-        // Normalize weight_map by its mean so the global gradient magnitude stays
-        // comparable to None mode - prevents scale drift when mask size varies across scenes.
-        const float weight_mean = weight_map.mean().item<float>();
-        weight_map = weight_map * (1.0f / std::max(weight_mean, 1e-4f));
-
-        // Step 3: apply spatial weights to gradient.
-        // Multiplying grad post-hoc is exact for L1 (pixel-wise) and a good approximation
-        // for SSIM (window-based). In practice this outperforms discarding SSIM gradient entirely.
-        const Tensor weight_3d = (corrected.ndim() == 3 && corrected.shape()[0] == 3)
-                                     ? weight_map.unsqueeze(0)
-                                     : weight_map.unsqueeze(2);
-        grad = grad * weight_3d;
-        if (grad_raw.is_valid() && grad_raw.numel() > 0) {
-            grad_raw = grad_raw * weight_3d;
-        }
-
-        // Scale scalar loss to reflect FG-focused weighting.
-        // This ensures the logged loss is representative of FG reconstruction quality,
-        // not diluted by the large BG area. fg_pixels is cached to avoid a second GPU sync.
+        // Pixel counts feed both the spatial-weight loss rescale and the
+        // grad_alpha normalization, so compute them once up front.
         const float total_pixels = static_cast<float>(mask_f.numel());
         const float fg_pixels = std::max(mask_f.sum().item<float>(), 1.0f);
         const float bg_pixels = std::max(total_pixels - fg_pixels, 1.0f);
-        loss = loss * (fg_pixels / std::max(total_pixels * weight_mean, 1e-6f));
+
+        // Step 2+3: spatial weight map - FG=1.0, BG=kBgWeight applied to grad.
+        // Darkness bonus applied to FG only (Rec.601 perceptual luminance from
+        // GT, not rendered). Using GT keeps the weight map stable across
+        // iterations - rendered changes every step. BG stays flat at kBgWeight
+        // regardless of darkness, avoiding spurious BG gradient boosts.
+        // Multiplying grad post-hoc is exact for L1 (pixel-wise) and a good
+        // approximation for SSIM (window-based); in practice this outperforms
+        // discarding SSIM gradient entirely.
+        if constexpr (FOCUSED_ENABLE_SPATIAL_WEIGHT_MAP) {
+            Tensor weight_map;
+            if (FOCUSED_ENABLE_DARKNESS_BOOST && opt_params.darkness_boost > 0.0f) {
+                const Tensor gt_norm = focused_segment_image_float01(gt_image);
+                const bool chw = (gt_norm.ndim() == 3 && gt_norm.shape()[0] == 3);
+                const Tensor r = chw ? gt_norm.slice(0, 0, 1).squeeze(0) : gt_norm.slice(2, 0, 1).squeeze(2);
+                const Tensor g = chw ? gt_norm.slice(0, 1, 2).squeeze(0) : gt_norm.slice(2, 1, 2).squeeze(2);
+                const Tensor b = chw ? gt_norm.slice(0, 2, 3).squeeze(0) : gt_norm.slice(2, 2, 3).squeeze(2);
+                const Tensor brightness = r * 0.299f + g * 0.587f + b * 0.114f;
+                const Tensor darkness = Tensor::full(brightness.shape(), 1.0f, brightness.device()) - brightness;
+                weight_map =
+                    mask_f * (Tensor::full(darkness.shape(), 1.0f, darkness.device()) + darkness * opt_params.darkness_boost) +
+                    bg_mask * kBgWeight;
+            } else {
+                weight_map = mask_f + bg_mask * kBgWeight;
+            }
+
+            // Normalize weight_map by its mean so the global gradient magnitude
+            // stays comparable to None mode - prevents scale drift when mask
+            // size varies across scenes.
+            const float weight_mean = weight_map.mean().item<float>();
+            weight_map = weight_map * (1.0f / std::max(weight_mean, 1e-4f));
+
+            const Tensor weight_3d = (corrected.ndim() == 3 && corrected.shape()[0] == 3)
+                                         ? weight_map.unsqueeze(0)
+                                         : weight_map.unsqueeze(2);
+            grad = grad * weight_3d;
+            if (grad_raw.is_valid() && grad_raw.numel() > 0) {
+                grad_raw = grad_raw * weight_3d;
+            }
+
+            // Rescale scalar loss so logged values track FG reconstruction
+            // quality, not diluted by the large BG area.
+            loss = loss * (fg_pixels / std::max(total_pixels * weight_mean, 1e-6f));
+        }
 
         // Step 4: pixel-based adaptive alpha pressure via grad_alpha.
         // NOTE: modifying the scalar `loss` does NOT affect Gaussian parameters - only
@@ -323,12 +368,21 @@ namespace lfs::training {
         Tensor grad_alpha;
         const float w_fg = opt_params.mask_opacity_penalty_weight;
         const float w_bg = opt_params.mask_opacity_penalty_weight_bg;
-        if (alpha.is_valid() && (w_fg > 0.0f || w_bg > 0.0f)) {
+        const bool apply_fg = FOCUSED_ENABLE_GRAD_ALPHA_FG && w_fg > 0.0f;
+        const bool apply_bg = FOCUSED_ENABLE_GRAD_ALPHA_BG && w_bg > 0.0f;
+        if (alpha.is_valid() && (apply_fg || apply_bg)) {
             const Tensor alpha_2d = alpha.ndim() == 3 ? alpha.squeeze(0) : alpha;
             const Tensor ones = Tensor::full(alpha_2d.shape(), 1.0f, alpha_2d.device());
 
-            grad_alpha = bg_mask * alpha_2d * (w_bg * kAlphaBgWeight / bg_pixels)          // BG: pressure proportional to current alpha
-                         - mask_f * (ones - alpha_2d) * (w_fg * kAlphaFgWeight / fg_pixels); // FG: pressure proportional to (1 - alpha)
+            if (apply_bg && apply_fg) {
+                grad_alpha = bg_mask * alpha_2d * (w_bg * kAlphaBgWeight / bg_pixels)          // BG: pressure proportional to current alpha
+                             - mask_f * (ones - alpha_2d) * (w_fg * kAlphaFgWeight / fg_pixels); // FG: pressure proportional to (1 - alpha)
+            } else if (apply_bg) {
+                grad_alpha = bg_mask * alpha_2d * (w_bg * kAlphaBgWeight / bg_pixels);
+            } else {
+                // FG only: bake the negative sign into the scalar to push alpha_raw up.
+                grad_alpha = mask_f * (ones - alpha_2d) * (-w_fg * kAlphaFgWeight / fg_pixels);
+            }
         }
 
         return Trainer::MaskLossResult{
@@ -349,7 +403,7 @@ namespace lfs::training {
         lfs::core::Tensor& error_map,
         const lfs::core::Tensor& mask_tile) {
 
-        if constexpr (FOCUSED_DENSIFY_DILATE_RADIUS > 0) {
+        if constexpr (FOCUSED_ENABLE_DENSIFY_DILATION && FOCUSED_DENSIFY_DILATE_RADIUS > 0) {
             constexpr int kDensifyDilateRadius = FOCUSED_DENSIFY_DILATE_RADIUS;
             constexpr int kDensifyDilateKernel = 2 * kDensifyDilateRadius + 1;
             auto mask_4d = focused_segment_mask_float(mask_tile).unsqueeze(0).unsqueeze(0); // [1,1,H,W]
@@ -389,6 +443,11 @@ namespace lfs::training {
 
         const float w_bg = step_params.mask_opacity_penalty_weight_bg;
         if (w_bg <= 0.0f)
+            return;
+
+        // If both per-direction switches are off, the resulting gradient
+        // would be all zeros; bail before doing any projection work.
+        if constexpr (!FOCUSED_ENABLE_CENTER_PENALTY_BG && !FOCUSED_ENABLE_CENTER_PENALTY_FG_FILL)
             return;
 
         if (!mask.is_valid() || mask.numel() == 0)
@@ -461,8 +520,8 @@ namespace lfs::training {
         // ---- 4. Compute opacity gradient ----
         // For splats outside the mask: positive gradient pushes raw opacity down (sigmoid decreases).
         // For splats inside the mask: small negative gradient fills transparency holes.
-        constexpr float kOutWeight = 1.5f;  // BG center penalty strength
-        constexpr float kInWeight = 0.05f;  // gentle FG fill (most work done by grad_alpha)
+        constexpr float kOutWeight = FOCUSED_ENABLE_CENTER_PENALTY_BG      ? 1.5f  : 0.0f; // BG center penalty strength
+        constexpr float kInWeight  = FOCUSED_ENABLE_CENTER_PENALTY_FG_FILL ? 0.05f : 0.0f; // gentle FG fill (most work done by grad_alpha)
 
         auto is_outside = (Tensor::full({N}, 1.0f, Device::CUDA) - is_inside);
         auto valid_f = valid.to(DataType::Float32); // [N] float {0, 1}
@@ -501,6 +560,9 @@ namespace lfs::training {
         int num_tiles) {
 
         if (params_.optimization.mask_mode != lfs::core::param::MaskMode::FocusedSegment)
+            return;
+
+        if constexpr (!FOCUSED_ENABLE_CENTER_PENALTY)
             return;
 
         // Center penalty only makes sense with full image (single tile)
@@ -566,6 +628,10 @@ namespace lfs::training {
         const bool invert_masks,
         lfs::training::IStrategy& strategy,
         lfs::training::CameraDataset& train_dataset) {
+
+        if constexpr (!FOCUSED_ENABLE_POST_TRAINING_PRUNE) {
+            return;
+        }
 
         if (mask_mode != lfs::core::param::MaskMode::FocusedSegment) {
             return;
