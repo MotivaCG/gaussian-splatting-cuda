@@ -4014,6 +4014,10 @@ namespace lfs::training {
                  *strategy_,
                  *train_dataset_);
 
+            // SMN: dump the cumulative FocusedSegment / prune subtask timings.
+            // Silent if no FocusedSegment region was timed in this run.
+            focused_segment_print_timings();
+
             // Final save if not already saved by stop request
             if (!stop_requested_.load() && !stop_token.stop_requested()) {
                 auto final_path = params_.dataset.output_path;

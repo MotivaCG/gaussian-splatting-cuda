@@ -48,6 +48,10 @@ namespace lfs::training::smn {
         lfs::core::Tensor darkness_fp16; // [H, W] FP16   - 1 - perceptual luminance
         float fg_pixels = 0.0f;          // max(sum(mask_bool), 1)
         float bg_pixels = 0.0f;          // max(numel - fg_pixels, 1)
+        float mean_darkness_fg = 0.0f;   // mean(darkness) restricted to FG region.
+                                         // Used to compute weight_mean analytically
+                                         // in focused_segment_compute_loss, killing
+                                         // the last per-iter GPU sync.
 
         bool has_mask() const { return mask_bool.is_valid(); }
         bool has_darkness() const { return darkness_fp16.is_valid(); }

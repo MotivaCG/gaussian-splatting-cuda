@@ -13,6 +13,7 @@
 #include "core/parameters.hpp"
 #include "core/tensor.hpp"
 #include "smn/focused_segment_cache.hpp"
+#include "smn/focused_segment_profiling.hpp"
 #include "smn/noise_guided_splatting.hpp"
 #include "dataset.hpp"
 #include "lfs/kernels/ssim.cuh"
@@ -513,7 +514,8 @@ namespace lfs::training {
         // FocusedSegment-specific helpers live in training/smn/focused_segment_trainer.cpp
         // so that the main Trainer dispatcher stays close to upstream.
         // **********************************************************************************/
-        static void focused_segment_apply_schedule(
+        // Non-static so the SMN scoped timer can access fs_timings_.
+        void focused_segment_apply_schedule(
             lfs::core::param::OptimizationParameters& step_params,
             float progress);
 
@@ -526,11 +528,13 @@ namespace lfs::training {
             const lfs::core::Tensor& alpha,
             const lfs::core::param::OptimizationParameters& opt_params);
 
-        static void focused_segment_apply_densification_mask(
+        // Non-static so the SMN scoped timer can access fs_timings_.
+        void focused_segment_apply_densification_mask(
             lfs::core::Tensor& error_map,
             const lfs::core::Tensor& mask_tile);
 
-        static void focused_segment_run_post_training_prune(
+        // Non-static so the SMN scoped timer can access fs_timings_.
+        void focused_segment_run_post_training_prune(
             lfs::core::param::MaskMode mask_mode,
             bool invert_masks,
             lfs::training::IStrategy& strategy,
@@ -568,6 +572,18 @@ namespace lfs::training {
             bool want_lightness);
 
         lfs::training::smn::FocusedSegmentCameraCacheMap fs_camera_cache_;
+
+        // ----- SMN-only per-subtask timings (FocusedSegment + post-prune) --------
+        // Cumulative wall-clock per subtask. Populated by ScopedFsTimer regions
+        // sprinkled across the SMN helpers and the post-training prune. Printed
+        // by focused_segment_print_timings() at the end of Trainer::train().
+        // See smn/focused_segment_profiling.hpp.
+        lfs::training::smn::FsTimings fs_timings_;
+
+        /// SMN-only. Logs the accumulated FocusedSegment / prune timings table.
+        /// Called once at the end of Trainer::train(). Silent if nothing was
+        /// timed in this run (None mask mode, training aborted, etc.).
+        void focused_segment_print_timings() const;
 
         // **********************************************************************************/
         // End FocusedSegment-specific helpers.

@@ -7,9 +7,12 @@
 #include "core/logger.hpp"
 #include "lfs/kernels/ssim.cuh"
 #include "optimizer/adam_optimizer.hpp"
+#include "smn/focused_segment_profiling.hpp"
 #include "smn/mask_pruning.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <string>
 
 namespace lfs::training {
 
@@ -49,6 +52,17 @@ namespace lfs::training {
 
         // Post-training mask-based pruning pipeline.
         constexpr bool FOCUSED_ENABLE_POST_TRAINING_PRUNE = true;
+
+        // Per-pass switches for the post-training prune. Each can be disabled
+        // independently to A/B test the impact of that specific pass. Only
+        // consulted when FOCUSED_ENABLE_POST_TRAINING_PRUNE is true.
+        // Disable an individual pass to skip it without commenting code out.
+        constexpr bool FOCUSED_ENABLE_PRUNE_GEOMETRIC_DOME   = true;
+        constexpr bool FOCUSED_ENABLE_PRUNE_CENTER_VOTE      = true;
+        constexpr bool FOCUSED_ENABLE_PRUNE_MASK_LEAKAGE     = true;
+        constexpr bool FOCUSED_ENABLE_PRUNE_ISOLATION        = true;
+        constexpr bool FOCUSED_ENABLE_PRUNE_ELLIPSE_BOUNDARY = true;
+        constexpr bool FOCUSED_ENABLE_PRUNE_CLUSTER_EXTREME  = false; // Off by default (slow + experimental)
 
         // FocusedSegment densification mask dilation radius (in pixels).
         //
@@ -139,6 +153,8 @@ namespace lfs::training {
         auto& entry = fs_camera_cache_[cam.uid()];
 
         if (!entry.has_mask()) {
+            const lfs::training::smn::ScopedFsTimer _t(
+                fs_timings_, lfs::training::smn::FsTimerSlot::CacheBuildMask);
             const Tensor mask_f = focused_segment_mask_float(src_mask);
             entry.mask_bool = mask_f.gt(0.5f).contiguous();
             const float fg = std::max(mask_f.sum().item<float>(), 1.0f); // one-time sync
@@ -147,6 +163,8 @@ namespace lfs::training {
         }
 
         if (want_lightness && !entry.has_darkness() && gt_image.is_valid() && gt_image.numel() > 0) {
+            const lfs::training::smn::ScopedFsTimer _t(
+                fs_timings_, lfs::training::smn::FsTimerSlot::CacheBuildDarkness);
             const Tensor gt_norm = focused_segment_image_float01(gt_image);
             const bool chw = (gt_norm.ndim() == 3 && gt_norm.shape()[0] == 3);
             const Tensor r = chw ? gt_norm.slice(0, 0, 1).squeeze(0) : gt_norm.slice(2, 0, 1).squeeze(2);
@@ -154,6 +172,14 @@ namespace lfs::training {
             const Tensor b = chw ? gt_norm.slice(0, 2, 3).squeeze(0) : gt_norm.slice(2, 2, 3).squeeze(2);
             const Tensor brightness = r * 0.299f + g * 0.587f + b * 0.114f;
             const Tensor darkness = Tensor::full(brightness.shape(), 1.0f, brightness.device()) - brightness;
+
+            // Mean of darkness restricted to FG region. Lets the per-iter
+            // spatial-weight block compute weight_mean analytically without
+            // any GPU sync. One-time cost (single .item<float>()) per camera.
+            const Tensor mask_f_for_mean = entry.mask_bool.to(DataType::Float32);
+            const float sum_dark_fg = (mask_f_for_mean * darkness).sum().item<float>();
+            entry.mean_darkness_fg = sum_dark_fg / entry.fg_pixels;
+
             entry.darkness_fp16 = darkness.to(DataType::Float16).contiguous();
         }
 
@@ -200,6 +226,13 @@ namespace lfs::training {
         if (step_params.mask_mode != lfs::core::param::MaskMode::FocusedSegment) {
             return;
         }
+
+        // NOTE: no ScopedFsTimer here. This function is CPU-only (a few `if`s
+        // and scalar arithmetic), and the 2 cudaDeviceSynchronize calls a timer
+        // would inject not only inflate the reported time but also force the
+        // GPU pipeline to drain twice per iter for nothing. The slot
+        // FsTimerSlot::ApplySchedule stays in the enum but is never populated;
+        // the printer skips empty slots so the report ignores it.
 
         if constexpr (!FOCUSED_ENABLE_SCHEDULE) {
             return; // skip the time-varying ramp; params stay at CLI-provided values
@@ -304,6 +337,9 @@ namespace lfs::training {
         const lfs::core::Tensor& alpha,
         const lfs::core::param::OptimizationParameters& opt_params) {
 
+        const lfs::training::smn::ScopedFsTimer _t_total(
+            fs_timings_, lfs::training::smn::FsTimerSlot::ComputeLossTotal);
+
         using namespace lfs::core;
 
         const float kBgWeight = opt_params.focused_bg_weight; // BG gradient weight relative to FG (1.0)
@@ -330,30 +366,34 @@ namespace lfs::training {
         Tensor grad;
         Tensor grad_raw;
         Tensor loss;
-        if (use_decoupled) {
-            auto [loss_tensor, ctx] = lfs::training::kernels::decoupled_fused_l1_ssim_forward(
-                corrected, raw_rendered, gt_image, opt_params.lambda_dssim, decoupled_fused_workspace_,
-                /*apply_valid_padding=*/true);
-            auto grads = lfs::training::kernels::decoupled_fused_l1_ssim_backward(ctx, decoupled_fused_workspace_);
+        {
+            const lfs::training::smn::ScopedFsTimer _t_photo(
+                fs_timings_, lfs::training::smn::FsTimerSlot::ComputeLossPhoto);
+            if (use_decoupled) {
+                auto [loss_tensor, ctx] = lfs::training::kernels::decoupled_fused_l1_ssim_forward(
+                    corrected, raw_rendered, gt_image, opt_params.lambda_dssim, decoupled_fused_workspace_,
+                    /*apply_valid_padding=*/true);
+                auto grads = lfs::training::kernels::decoupled_fused_l1_ssim_backward(ctx, decoupled_fused_workspace_);
 
-            grad = grads.grad_corrected;
-            grad_raw = grads.grad_raw;
-            if (grad.ndim() == 4 && corrected.ndim() == 3) {
-                grad = grad.squeeze(0);
+                grad = grads.grad_corrected;
+                grad_raw = grads.grad_raw;
+                if (grad.ndim() == 4 && corrected.ndim() == 3) {
+                    grad = grad.squeeze(0);
+                }
+                if (grad_raw.ndim() == 4 && corrected.ndim() == 3) {
+                    grad_raw = grad_raw.squeeze(0);
+                }
+                loss = loss_tensor;
+            } else {
+                losses::PhotometricLoss::Params params{.lambda_dssim = opt_params.lambda_dssim};
+                auto full_result = photometric_loss_.forward(corrected, gt_image, params);
+                if (!full_result) {
+                    return std::unexpected(full_result.error());
+                }
+                auto [full_loss, ctx] = *full_result;
+                grad = ctx.grad_image;
+                loss = full_loss;
             }
-            if (grad_raw.ndim() == 4 && corrected.ndim() == 3) {
-                grad_raw = grad_raw.squeeze(0);
-            }
-            loss = loss_tensor;
-        } else {
-            losses::PhotometricLoss::Params params{.lambda_dssim = opt_params.lambda_dssim};
-            auto full_result = photometric_loss_.forward(corrected, gt_image, params);
-            if (!full_result) {
-                return std::unexpected(full_result.error());
-            }
-            auto [full_loss, ctx] = *full_result;
-            grad = ctx.grad_image;
-            loss = full_loss;
         }
 
         // Pixel counts come from the SMN cache (no GPU sync). Total is just the
@@ -371,6 +411,8 @@ namespace lfs::training {
         // approximation for SSIM (window-based); in practice this outperforms
         // discarding SSIM gradient entirely.
         if constexpr (FOCUSED_ENABLE_SPATIAL_WEIGHT_MAP) {
+            const lfs::training::smn::ScopedFsTimer _t_sw(
+                fs_timings_, lfs::training::smn::FsTimerSlot::ComputeLossSpatialWeight);
             Tensor weight_map;
             if (want_lightness && fs_cache.has_darkness()) {
                 // Darkness comes from the SMN cache as FP16 (~6 MB/cam at 1296x2304);
@@ -386,7 +428,17 @@ namespace lfs::training {
             // Normalize weight_map by its mean so the global gradient magnitude
             // stays comparable to None mode - prevents scale drift when mask
             // size varies across scenes.
-            const float weight_mean = weight_map.mean().item<float>();
+            //
+            // weight_mean computed analytically from cached scalars (no GPU sync).
+            // With darkness boost:
+            //   sum(weight_map) = fg * (1 + boost*<darkness>_FG) + bg * kBgWeight
+            // Without darkness boost:
+            //   sum(weight_map) = fg + bg * kBgWeight
+            // weight_mean = sum(weight_map) / total_pixels
+            const float weight_mean = (want_lightness && fs_cache.has_darkness())
+                ? (fs_cache.fg_pixels * (1.0f + opt_params.darkness_boost * fs_cache.mean_darkness_fg)
+                   + fs_cache.bg_pixels * kBgWeight) / total_pixels
+                : (fs_cache.fg_pixels + fs_cache.bg_pixels * kBgWeight) / total_pixels;
             weight_map = weight_map * (1.0f / std::max(weight_mean, 1e-4f));
 
             const Tensor weight_3d = (corrected.ndim() == 3 && corrected.shape()[0] == 3)
@@ -438,6 +490,8 @@ namespace lfs::training {
         const bool apply_fg = FOCUSED_ENABLE_GRAD_ALPHA_FG && w_fg > 0.0f;
         const bool apply_bg = FOCUSED_ENABLE_GRAD_ALPHA_BG && w_bg > 0.0f;
         if (alpha.is_valid() && (apply_fg || apply_bg)) {
+            const lfs::training::smn::ScopedFsTimer _t_ga(
+                fs_timings_, lfs::training::smn::FsTimerSlot::ComputeLossGradAlpha);
             Tensor fg_term;
             if (apply_fg) {
                 fg_term = mask_f * (w_fg * kAlphaFgWeight / fg_pixels);
@@ -474,6 +528,9 @@ namespace lfs::training {
     void Trainer::focused_segment_apply_densification_mask(
         lfs::core::Tensor& error_map,
         const lfs::core::Tensor& mask_tile) {
+
+        const lfs::training::smn::ScopedFsTimer _t(
+            fs_timings_, lfs::training::smn::FsTimerSlot::ApplyDensifyMask);
 
         if constexpr (FOCUSED_ENABLE_DENSIFY_DILATION && FOCUSED_DENSIFY_DILATE_RADIUS > 0) {
             constexpr int kDensifyDilateRadius = FOCUSED_DENSIFY_DILATE_RADIUS;
@@ -512,6 +569,9 @@ namespace lfs::training {
 
         if (step_params.mask_mode != param::MaskMode::FocusedSegment)
             return;
+
+        const lfs::training::smn::ScopedFsTimer _t(
+            fs_timings_, lfs::training::smn::FsTimerSlot::ApplyCenterPenalty);
 
         const float w_bg = step_params.mask_opacity_penalty_weight_bg;
         if (w_bg <= 0.0f)
@@ -637,6 +697,9 @@ namespace lfs::training {
 
         if (params_.optimization.mask_mode != lfs::core::param::MaskMode::FocusedSegment)
             return;
+
+        const lfs::training::smn::ScopedFsTimer _t(
+            fs_timings_, lfs::training::smn::FsTimerSlot::PostBackward);
 
         if constexpr (!FOCUSED_ENABLE_CENTER_PENALTY)
             return;
@@ -775,42 +838,109 @@ namespace lfs::training {
 
         LOG_INFO("Running post-training mask-based pruning...");
 
-        auto pruning_result = mask_pruning::prune_after_training(
-            strategy,
-            train_dataset,
-            geomdome_cfg,
-            center_cfg,
-            leak_cfg,
-            iso_cfg);
+        // SMN: pasadas individuales en vez de prune_after_training() para poder
+        // medir el tiempo de cada una por separado en fs_timings_. Si una
+        // pasada falla se loguea pero no se aborta el resto, igual que hacia
+        // el bundle de upstream.
 
-        if (!pruning_result) {
-            LOG_WARN("Post-training pruning failed: {}", pruning_result.error());
-        } else if (pruning_result->splats_removed > 0) {
-            LOG_INFO("Pruning complete: removed {} splats ({:.1f}%)",
-                     pruning_result->splats_removed,
-                     pruning_result->removal_ratio() * 100.0f);
+        auto report = [](const char* name, const std::expected<mask_pruning::PruningResult, std::string>& r) {
+            if (!r) {
+                LOG_WARN("{} pruning failed: {}", name, r.error());
+            } else if (r->splats_removed > 0) {
+                LOG_INFO("{}: removed {} splats ({:.1f}%)",
+                         name, r->splats_removed, r->removal_ratio() * 100.0f);
+            }
+        };
+
+        if constexpr (FOCUSED_ENABLE_PRUNE_GEOMETRIC_DOME) {
+            const lfs::training::smn::ScopedFsTimer _t(
+                fs_timings_, lfs::training::smn::FsTimerSlot::PruneGeometricDome);
+            auto r = mask_pruning::prune_by_geometric_dome(strategy, train_dataset, geomdome_cfg);
+            report("Geometric dome", r);
+        }
+        if constexpr (FOCUSED_ENABLE_PRUNE_CENTER_VOTE) {
+            const lfs::training::smn::ScopedFsTimer _t(
+                fs_timings_, lfs::training::smn::FsTimerSlot::PruneCenterVote);
+            auto r = mask_pruning::prune_by_center_vote(strategy, train_dataset, center_cfg);
+            report("Center vote", r);
+        }
+        if constexpr (FOCUSED_ENABLE_PRUNE_MASK_LEAKAGE) {
+            const lfs::training::smn::ScopedFsTimer _t(
+                fs_timings_, lfs::training::smn::FsTimerSlot::PruneMaskLeakage);
+            auto r = mask_pruning::prune_by_mask_leakage(strategy, train_dataset, leak_cfg);
+            report("Mask leakage", r);
+        }
+        if constexpr (FOCUSED_ENABLE_PRUNE_ISOLATION) {
+            const lfs::training::smn::ScopedFsTimer _t(
+                fs_timings_, lfs::training::smn::FsTimerSlot::PruneIsolation);
+            auto r = mask_pruning::prune_by_isolation_distance(strategy, iso_cfg);
+            report("Isolation", r);
+        }
+        if constexpr (FOCUSED_ENABLE_PRUNE_ELLIPSE_BOUNDARY) {
+            const lfs::training::smn::ScopedFsTimer _t(
+                fs_timings_, lfs::training::smn::FsTimerSlot::PruneEllipseBoundary);
+            auto r = mask_pruning::prune_by_ellipse_boundary(strategy, train_dataset, ellipse_cfg);
+            report("Ellipse boundary", r);
+        }
+        if constexpr (FOCUSED_ENABLE_PRUNE_CLUSTER_EXTREME) {
+            const lfs::training::smn::ScopedFsTimer _t(
+                fs_timings_, lfs::training::smn::FsTimerSlot::PruneClusterExtreme);
+            auto r = mask_pruning::prune_by_cluster_and_extremes(strategy, cluster_cfg);
+            report("Cluster/extremes", r);
+        }
+    }
+
+    // =========================================================================
+    // SMN: dump cumulative FocusedSegment / prune timings to the log.
+    //
+    // Called once at the end of Trainer::train(). Builds a single multi-line
+    // string and emits it via LOG_INFO so it lands at the same level as the
+    // training stats; nothing is printed for slots that were never timed
+    // (so non-FocusedSegment training stays clean).
+    // =========================================================================
+    void Trainer::focused_segment_print_timings() const {
+        using lfs::training::smn::FsTimerSlot;
+        using lfs::training::smn::fs_timer_slot_name;
+        using lfs::training::smn::kFsTimerSlotCount;
+
+        if (!fs_timings_.enabled) {
+            return;
         }
 
-        // Ellipse boundary pass - catches spikes missed by center-vote and leakage.
-        auto ellipse_result = mask_pruning::prune_by_ellipse_boundary(strategy, train_dataset, ellipse_cfg);
-        if (!ellipse_result) {
-            LOG_WARN("Ellipse boundary pruning failed: {}", ellipse_result.error());
-        } else if (ellipse_result->splats_removed > 0) {
-            LOG_INFO("Ellipse pruning: removed {} splats ({:.1f}%)",
-                     ellipse_result->splats_removed,
-                     ellipse_result->removal_ratio() * 100.0f);
+        bool any = false;
+        for (auto c : fs_timings_.calls) {
+            if (c > 0) { any = true; break; }
+        }
+        if (!any) {
+            return;
         }
 
-        // Cluster + extremes pass - removes 3D spikes whose oriented extremes
-        // are far from the main point cloud.
-        /* auto cluster_result = mask_pruning::prune_by_cluster_and_extremes(strategy, cluster_cfg);
-        if (!cluster_result) {
-            LOG_WARN("Cluster/extremes pruning failed: {}", cluster_result.error());
-        } else if (cluster_result->splats_removed > 0) {
-            LOG_INFO("Cluster/extremes pruning: removed {} splats ({:.1f}%)",
-                     cluster_result->splats_removed,
-                     cluster_result->removal_ratio() * 100.0f);
-        }*/
+        std::string out;
+        out.reserve(2048);
+        out += "\n";
+        out += "[SMN] FocusedSegment cumulative timings (GPU-synced)\n";
+        out += "  Subtask                                       Calls          Total (s)      Avg/call (s)\n";
+        out += "  --------------------------------------------- -------------- -------------- ---------------\n";
+
+        char line[256];
+        for (int i = 0; i < kFsTimerSlotCount; ++i) {
+            const std::uint64_t calls = fs_timings_.calls[i];
+            if (calls == 0) {
+                continue;
+            }
+            const double total_s = fs_timings_.total_ms[i] / 1000.0;
+            const double avg_s = total_s / static_cast<double>(calls);
+            const std::string name(fs_timer_slot_name(static_cast<FsTimerSlot>(i)));
+            std::snprintf(line, sizeof(line),
+                          "  %-45s %14llu %14.4f %15.6f\n",
+                          name.c_str(),
+                          static_cast<unsigned long long>(calls),
+                          total_s,
+                          avg_s);
+            out += line;
+        }
+
+        LOG_INFO("{}", out);
     }
 
 } // namespace lfs::training
