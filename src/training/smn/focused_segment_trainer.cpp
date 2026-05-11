@@ -351,16 +351,32 @@ namespace lfs::training {
             loss = loss * (fg_pixels / std::max(total_pixels * weight_mean, 1e-6f));
         }
 
-        // Step 4: pixel-based adaptive alpha pressure via grad_alpha.
-        // NOTE: modifying the scalar `loss` does NOT affect Gaussian parameters - only
-        // grad_image and grad_alpha propagate through rasterize_backward to the optimizer.
-        // Alpha pressure is therefore applied purely through grad_alpha.
+        // Step 4: pixel-based alpha pressure via grad_alpha. Constant per-pixel
+        // magnitude (no scaling by (1-alpha) or alpha) so the natural gradient
+        // accumulation across views performs an implicit majority vote: each
+        // FG pixel contributes -w_fg*k/fg_pixels to alpha, each BG pixel
+        // contributes +w_bg*k/bg_pixels. If a region is labelled FG in more
+        // views than BG, the net accumulated gradient drives the covering
+        // splats toward opacity, and vice versa, with no per-iteration trick.
         //
-        // Pressure is proportional to the current rendered alpha error, so it
-        // self-regulates: a BG pixel already at alpha=0 gets no pressure, a BG pixel
-        // at alpha=0.8 gets strong pressure. This avoids over-correction on boundary
-        // Gaussians that are already behaving correctly and reduces halo artifacts
-        // compared to a constant gradient map.
+        // Earlier formulations scaled by (1-alpha)/alpha for "self-regulation"
+        // (zero pressure when already correct, max when wrong). That broke
+        // majority vote: at alpha=0.9 a BG vote contributed 0.9 while an FG
+        // vote only 0.1, so a few wrong masks could outweigh many correct ones
+        // even when alpha was already high. Trusting the gradient accumulation
+        // gives the expected behavior: more votes win, period.
+        //
+        // Per-area normalization (/fg_pixels, /bg_pixels) keeps the total
+        // scalar pressure bounded by the user-set weights so neither side
+        // overwhelms the photometric loss. The asymmetry it introduces
+        // (each FG pixel matters more than each BG pixel because fg_pixels
+        // << bg_pixels in dome captures) is intentional: the subject is small,
+        // each FG pixel carries more information.
+        //
+        // NOTE: modifying the scalar `loss` does NOT affect Gaussian parameters
+        // - only grad_image and grad_alpha propagate through rasterize_backward
+        // to the optimizer. Alpha pressure is therefore applied purely through
+        // grad_alpha.
         //
         // Sign convention (gradient descent: param -= lr * grad):
         //   FG: negative grad_alpha  -> alpha_raw increases -> rendered alpha approaches 1
@@ -371,17 +387,22 @@ namespace lfs::training {
         const bool apply_fg = FOCUSED_ENABLE_GRAD_ALPHA_FG && w_fg > 0.0f;
         const bool apply_bg = FOCUSED_ENABLE_GRAD_ALPHA_BG && w_bg > 0.0f;
         if (alpha.is_valid() && (apply_fg || apply_bg)) {
-            const Tensor alpha_2d = alpha.ndim() == 3 ? alpha.squeeze(0) : alpha;
-            const Tensor ones = Tensor::full(alpha_2d.shape(), 1.0f, alpha_2d.device());
+            Tensor fg_term;
+            if (apply_fg) {
+                fg_term = mask_f * (w_fg * kAlphaFgWeight / fg_pixels);
+            }
 
-            if (apply_bg && apply_fg) {
-                grad_alpha = bg_mask * alpha_2d * (w_bg * kAlphaBgWeight / bg_pixels)          // BG: pressure proportional to current alpha
-                             - mask_f * (ones - alpha_2d) * (w_fg * kAlphaFgWeight / fg_pixels); // FG: pressure proportional to (1 - alpha)
-            } else if (apply_bg) {
-                grad_alpha = bg_mask * alpha_2d * (w_bg * kAlphaBgWeight / bg_pixels);
+            Tensor bg_term;
+            if (apply_bg) {
+                bg_term = bg_mask * (w_bg * kAlphaBgWeight / bg_pixels);
+            }
+
+            if (bg_term.is_valid() && fg_term.is_valid()) {
+                grad_alpha = bg_term - fg_term;
+            } else if (bg_term.is_valid()) {
+                grad_alpha = bg_term;
             } else {
-                // FG only: bake the negative sign into the scalar to push alpha_raw up.
-                grad_alpha = mask_f * (ones - alpha_2d) * (-w_fg * kAlphaFgWeight / fg_pixels);
+                grad_alpha = fg_term * (-1.0f);
             }
         }
 
