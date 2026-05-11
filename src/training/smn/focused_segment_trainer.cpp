@@ -115,6 +115,52 @@ namespace lfs::training {
     } // namespace
 
     // =========================================================================
+    // SMN: FocusedSegment per-camera cache getter.
+    //
+    // BELONGS TO SMN. Lazily populates the entry for `cam` on first hit:
+    //   - mask_bool      : src_mask -> thresholded bool [H, W]
+    //   - fg/bg_pixels   : scalars (one-time GPU sync only on first hit)
+    //   - darkness_fp16  : 1 - Rec.601 luminance(gt_image), stored FP16
+    //                      (only if want_lightness is true and not already cached)
+    //
+    // On subsequent hits returns the existing entry with no GPU work. This
+    // eliminates the per-iter focused_segment_mask_float() call and the
+    // .sum().item<float>() sync that otherwise stall the pipeline every step.
+    //
+    // See smn/focused_segment_cache.hpp for the data layout and rationale.
+    // =========================================================================
+    const lfs::training::smn::FocusedSegmentCameraCache& Trainer::focused_segment_get_cache(
+        const lfs::core::Camera& cam,
+        const lfs::core::Tensor& src_mask,
+        const lfs::core::Tensor& gt_image,
+        bool want_lightness) {
+
+        using namespace lfs::core;
+        auto& entry = fs_camera_cache_[cam.uid()];
+
+        if (!entry.has_mask()) {
+            const Tensor mask_f = focused_segment_mask_float(src_mask);
+            entry.mask_bool = mask_f.gt(0.5f).contiguous();
+            const float fg = std::max(mask_f.sum().item<float>(), 1.0f); // one-time sync
+            entry.fg_pixels = fg;
+            entry.bg_pixels = std::max(static_cast<float>(mask_f.numel()) - fg, 1.0f);
+        }
+
+        if (want_lightness && !entry.has_darkness() && gt_image.is_valid() && gt_image.numel() > 0) {
+            const Tensor gt_norm = focused_segment_image_float01(gt_image);
+            const bool chw = (gt_norm.ndim() == 3 && gt_norm.shape()[0] == 3);
+            const Tensor r = chw ? gt_norm.slice(0, 0, 1).squeeze(0) : gt_norm.slice(2, 0, 1).squeeze(2);
+            const Tensor g = chw ? gt_norm.slice(0, 1, 2).squeeze(0) : gt_norm.slice(2, 1, 2).squeeze(2);
+            const Tensor b = chw ? gt_norm.slice(0, 2, 3).squeeze(0) : gt_norm.slice(2, 2, 3).squeeze(2);
+            const Tensor brightness = r * 0.299f + g * 0.587f + b * 0.114f;
+            const Tensor darkness = Tensor::full(brightness.shape(), 1.0f, brightness.device()) - brightness;
+            entry.darkness_fp16 = darkness.to(DataType::Float16).contiguous();
+        }
+
+        return entry;
+    }
+
+    // =========================================================================
     // FocusedSegment helpers
     //
     // All FocusedSegment-specific logic is grouped here in Trainer private
@@ -250,6 +296,7 @@ namespace lfs::training {
     // L1/color gradients flow through corrected, while SSIM/structure gradients
     // flow directly to raw_rendered.
     std::expected<Trainer::MaskLossResult, std::string> Trainer::focused_segment_compute_loss(
+        const lfs::core::Camera& cam,
         const lfs::core::Tensor& corrected,
         const lfs::core::Tensor& raw_rendered,
         const lfs::core::Tensor& gt_image,
@@ -263,7 +310,15 @@ namespace lfs::training {
         constexpr float kAlphaFgWeight = 1.5f; // grad_alpha pressure to push FG alpha -> 1
         constexpr float kAlphaBgWeight = 1.0f; // grad_alpha pressure to push BG alpha -> 0
 
-        const Tensor mask_f = focused_segment_mask_float(mask_2d);
+        // SMN per-camera memoization: builds mask_bool, fg/bg pixel counts and,
+        // when darkness_boost is in use, the FP16 darkness map on first hit per
+        // camera. Replaces both the per-iter focused_segment_mask_float() work
+        // and the .sum().item<float>() GPU sync that would otherwise stall the
+        // pipeline every iteration. See smn/focused_segment_cache.hpp.
+        const bool want_lightness = FOCUSED_ENABLE_DARKNESS_BOOST && opt_params.darkness_boost > 0.0f;
+        const auto& fs_cache = focused_segment_get_cache(cam, mask_2d, gt_image, want_lightness);
+
+        const Tensor mask_f = fs_cache.mask_bool.to(DataType::Float32);
         const Tensor bg_mask = Tensor::full(mask_f.shape(), 1.0f, mask_f.device()) - mask_f;
 
         // Step 1: full-image L1+SSIM forward - identical to None mode, with
@@ -301,11 +356,11 @@ namespace lfs::training {
             loss = full_loss;
         }
 
-        // Pixel counts feed both the spatial-weight loss rescale and the
-        // grad_alpha normalization, so compute them once up front.
+        // Pixel counts come from the SMN cache (no GPU sync). Total is just the
+        // tensor numel (metadata access, no kernel).
         const float total_pixels = static_cast<float>(mask_f.numel());
-        const float fg_pixels = std::max(mask_f.sum().item<float>(), 1.0f);
-        const float bg_pixels = std::max(total_pixels - fg_pixels, 1.0f);
+        const float fg_pixels = fs_cache.fg_pixels;
+        const float bg_pixels = fs_cache.bg_pixels;
 
         // Step 2+3: spatial weight map - FG=1.0, BG=kBgWeight applied to grad.
         // Darkness bonus applied to FG only (Rec.601 perceptual luminance from
@@ -317,14 +372,10 @@ namespace lfs::training {
         // discarding SSIM gradient entirely.
         if constexpr (FOCUSED_ENABLE_SPATIAL_WEIGHT_MAP) {
             Tensor weight_map;
-            if (FOCUSED_ENABLE_DARKNESS_BOOST && opt_params.darkness_boost > 0.0f) {
-                const Tensor gt_norm = focused_segment_image_float01(gt_image);
-                const bool chw = (gt_norm.ndim() == 3 && gt_norm.shape()[0] == 3);
-                const Tensor r = chw ? gt_norm.slice(0, 0, 1).squeeze(0) : gt_norm.slice(2, 0, 1).squeeze(2);
-                const Tensor g = chw ? gt_norm.slice(0, 1, 2).squeeze(0) : gt_norm.slice(2, 1, 2).squeeze(2);
-                const Tensor b = chw ? gt_norm.slice(0, 2, 3).squeeze(0) : gt_norm.slice(2, 2, 3).squeeze(2);
-                const Tensor brightness = r * 0.299f + g * 0.587f + b * 0.114f;
-                const Tensor darkness = Tensor::full(brightness.shape(), 1.0f, brightness.device()) - brightness;
+            if (want_lightness && fs_cache.has_darkness()) {
+                // Darkness comes from the SMN cache as FP16 (~6 MB/cam at 1296x2304);
+                // promote to FP32 once for the per-iter math.
+                const Tensor darkness = fs_cache.darkness_fp16.to(DataType::Float32);
                 weight_map =
                     mask_f * (Tensor::full(darkness.shape(), 1.0f, darkness.device()) + darkness * opt_params.darkness_boost) +
                     bg_mask * kBgWeight;
@@ -534,8 +585,12 @@ namespace lfs::training {
         auto y_px = y_safe.round().clamp(0.0f, Hf - 1.0f); // [N]
 
         // ---- 3. Sample mask at projected centers ----
+        // Pull from the SMN per-camera cache: avoids re-running
+        // focused_segment_mask_float() per iter and shares the bool buffer
+        // already populated by focused_segment_compute_loss.
+        const auto& fs_cache = focused_segment_get_cache(cam, mask, lfs::core::Tensor(), /*want_lightness=*/false);
         auto lin_idx = (y_px * Wf + x_px).to(DataType::Int64); // [N] int64
-        auto mask_flat = focused_segment_mask_float(mask).reshape({static_cast<int>(H * W)}); // [H*W]
+        auto mask_flat = fs_cache.mask_bool.to(DataType::Float32).reshape({static_cast<int>(H * W)}); // [H*W]
         auto is_inside = mask_flat.gather(0, lin_idx); // [N] float {0..1}
 
         // ---- 4. Compute opacity gradient ----
