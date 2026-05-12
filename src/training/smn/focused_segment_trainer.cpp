@@ -51,7 +51,7 @@ namespace lfs::training {
         constexpr bool FOCUSED_ENABLE_CENTER_PENALTY_BG      = true; // push opacity DOWN outside mask
 
         // Post-training mask-based pruning pipeline.
-        constexpr bool FOCUSED_ENABLE_POST_TRAINING_PRUNE = true;
+        constexpr bool FOCUSED_ENABLE_POST_TRAINING_PRUNE    = true;
 
         // Per-pass switches for the post-training prune. Each can be disabled
         // independently to A/B test the impact of that specific pass. Only
@@ -61,7 +61,7 @@ namespace lfs::training {
         constexpr bool FOCUSED_ENABLE_PRUNE_CENTER_VOTE      = true;
         constexpr bool FOCUSED_ENABLE_PRUNE_MASK_LEAKAGE     = true;
         constexpr bool FOCUSED_ENABLE_PRUNE_ISOLATION        = true;
-        constexpr bool FOCUSED_ENABLE_PRUNE_ELLIPSE_BOUNDARY = true;
+        constexpr bool FOCUSED_ENABLE_PRUNE_ELLIPSE_BOUNDARY = false; // could introduce holes
         constexpr bool FOCUSED_ENABLE_PRUNE_CLUSTER_EXTREME  = false; // Off by default (slow + experimental)
 
         // FocusedSegment densification mask dilation radius (in pixels).
@@ -256,8 +256,8 @@ namespace lfs::training {
         constexpr float kAlphaDecayStart = 0.75f; // Start relaxing alpha pressure toward residual floors.
         constexpr float kAlphaDecayEnd = 0.85f; // End of decay; residual floors remain until training ends.
 
-        constexpr float kFgAlphaFloorValue = 0.0f;  // FG residual alpha penalty after decay.
-        constexpr float kBgAlphaFloorValue = 0.20f; // BG residual alpha penalty after decay.
+        constexpr float kFgAlphaFloorValue = 0.01f;  // FG residual alpha penalty after decay.
+        constexpr float kBgAlphaFloorValue = 0.03f; // BG residual alpha penalty after decay.
                                                      // Prevents BG opacity from creeping back
                                                      // in concave regions (between legs, armpits)
                                                      // during the free refinement phase.
