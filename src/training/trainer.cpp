@@ -2379,12 +2379,13 @@ namespace lfs::training {
 
         if (save_requested_.exchange(false)) {
             LOG_INFO("Saving checkpoint and PLY at iteration {}...", iter);
-            save_ply(params_.dataset.output_path, "", iter, /*join=*/false, /*save_checkpoint=*/false);
+            const auto ply_result = save_ply(params_.dataset.output_path, "", iter, /*join=*/false, /*save_checkpoint=*/false);
             auto result = save_checkpoint(iter);
             if (result) {
                 const auto checkpoint_path = lfs::training::checkpoint_output_path(params_.dataset.output_path);
-                LOG_INFO("Checkpoint and PLY saved to {} (checkpoint: {})",
+                LOG_INFO("Checkpoint and PLY saved to {} (PLY: {}, checkpoint: {})",
                          lfs::core::path_to_utf8(params_.dataset.output_path),
+                         ply_result ? lfs::core::path_to_utf8(*ply_result) : std::string("<failed>"),
                          lfs::core::path_to_utf8(checkpoint_path));
             } else {
                 LOG_ERROR("Failed to save checkpoint: {}", result.error());
@@ -2395,8 +2396,11 @@ namespace lfs::training {
         if (stop_requested_.load()) {
             LOG_INFO("Stopping training permanently at iteration {}...", iter);
             LOG_DEBUG("Saving final model...");
-            save_ply(params_.dataset.output_path, params_.dataset.output_name, iter, /*join=*/true,
-                     /*save_checkpoint=*/true);
+            if (auto save_result = save_ply(params_.dataset.output_path, params_.dataset.output_name, iter,
+                                            /*join=*/true, /*save_checkpoint=*/true);
+                !save_result) {
+                LOG_ERROR("Failed to save final model on stop: {}", save_result.error());
+            }
             is_running_ = false;
         }
     }
@@ -3671,7 +3675,11 @@ namespace lfs::training {
                                                        iter == get_sparsity_boundary_iteration();
                 if (save_regular_phase_output) {
                     LOG_INFO("Saving regular-phase checkpoint and PLY at iteration {} before sparsification", iter);
-                    save_ply(params_.dataset.output_path, "", iter, /*join=*/false, /*save_checkpoint=*/false);
+                    if (auto save_result = save_ply(params_.dataset.output_path, "", iter,
+                                                    /*join=*/false, /*save_checkpoint=*/false);
+                        !save_result) {
+                        LOG_WARN("Failed to save regular-phase PLY at iteration {}: {}", iter, save_result.error());
+                    }
                     if (auto result = save_checkpoint(iter); !result) {
                         LOG_WARN("Failed to save regular-phase checkpoint at iteration {}: {}", iter, result.error());
                     }
@@ -4017,8 +4025,11 @@ namespace lfs::training {
             if (!stop_requested_.load() && !stop_token.stop_requested()) {
                 auto final_path = params_.dataset.output_path;
                 const bool rotate_checkpoint = get_active_sparsify_steps() == 0;
-                save_ply(final_path, params_.dataset.output_name, get_total_iterations(), /*join=*/true,
-                         /*save_checkpoint=*/rotate_checkpoint);
+                if (auto save_result = save_ply(final_path, params_.dataset.output_name, get_total_iterations(),
+                                                /*join=*/true, /*save_checkpoint=*/rotate_checkpoint);
+                    !save_result) {
+                    return std::unexpected(std::format("Final PLY save failed: {}", save_result.error()));
+                }
             }
 
             maybe_publish_camera_loss_heatmap(current_iteration_.load(), true);
@@ -4066,19 +4077,36 @@ namespace lfs::training {
         }
     }
 
-    void Trainer::save_ply(const std::filesystem::path& save_path,
-                           const std::string& filename,
-                           const int iter_num,
-                           const bool join_threads,
-                           const bool save_checkpoint_file) {
+    namespace {
+        std::filesystem::path training_ply_output_path(const std::filesystem::path& save_path,
+                                                       const std::string& filename,
+                                                       const int iter_num) {
+            if (filename.empty()) {
+                return save_path / std::format("splat_{}.ply", iter_num);
+            }
 
-        std::filesystem::path ply_output_path = filename.empty() ? save_path / ("splat_" + std::to_string(iter_num) + ".ply") : save_path / (filename + ".ply");
+            std::filesystem::path output = lfs::core::utf8_to_path(filename);
+            if (output.extension() != ".ply") {
+                output += ".ply";
+            }
+            return output.is_absolute() ? output : save_path / output;
+        }
+    } // namespace
+
+    std::expected<std::filesystem::path, std::string> Trainer::save_ply(const std::filesystem::path& save_path,
+                                                                        const std::string& filename,
+                                                                        const int iter_num,
+                                                                        const bool join_threads,
+                                                                        const bool save_checkpoint_file) {
+
+        std::filesystem::path ply_output_path = training_ply_output_path(save_path, filename, iter_num);
 
         const lfs::io::PlySaveOptions ply_options{
             .output_path = ply_output_path,
             .binary = true,
             .async = !join_threads};
 
+        LOG_INFO("Saving PLY to {} (sync={})", lfs::core::path_to_utf8(ply_options.output_path), join_threads);
         const auto ply_result = lfs::io::save_ply(strategy_->get_model(), ply_options);
         if (!ply_result) {
             if (ply_result.error().code == lfs::io::ErrorCode::INSUFFICIENT_DISK_SPACE) {
@@ -4092,8 +4120,10 @@ namespace lfs::training {
                     .is_checkpoint = false}
                     .emit();
             }
-            LOG_WARN("Failed to save PLY: {}", ply_result.error().message);
-            return; // Don't save checkpoint if PLY failed
+            LOG_ERROR("Failed to save PLY to {}: {}",
+                      lfs::core::path_to_utf8(ply_options.output_path),
+                      ply_result.error().format());
+            return std::unexpected(ply_result.error().format()); // Don't save checkpoint if PLY failed
         }
 
         PPISPControllerPool* controller_to_save = controller_pool_for_save(iter_num);
@@ -4122,7 +4152,10 @@ namespace lfs::training {
             }
         }
 
-        LOG_DEBUG("PLY save initiated: {} (sync={})", lfs::core::path_to_utf8(save_path), join_threads);
+        LOG_INFO("PLY save {}: {}",
+                 join_threads ? "completed" : "queued",
+                 lfs::core::path_to_utf8(ply_options.output_path));
+        return ply_options.output_path;
     }
 
     std::expected<void, std::string> Trainer::save_checkpoint(int iteration) {
@@ -4204,8 +4237,11 @@ namespace lfs::training {
     }
 
     void Trainer::save_final_ply_and_checkpoint(const int iteration) {
-        save_ply(params_.dataset.output_path, params_.dataset.output_name, iteration, /*join=*/true,
-                 /*save_checkpoint=*/false);
+        if (auto save_result = save_ply(params_.dataset.output_path, params_.dataset.output_name, iteration,
+                                        /*join=*/true, /*save_checkpoint=*/false);
+            !save_result) {
+            LOG_ERROR("Failed to save final PLY: {}", save_result.error());
+        }
         if (auto result = save_checkpoint(iteration); !result) {
             LOG_WARN("Failed to save checkpoint: {}", result.error());
         }
