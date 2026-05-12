@@ -1920,6 +1920,11 @@ def open_csv_file_dialog() -> str:
     Open a file dialog to select a CSV file. Returns empty string if cancelled.
     """
 
+def open_xml_file_dialog() -> str:
+    """
+    Open a file dialog to select a Metashape XML file. Returns empty string if cancelled.
+    """
+
 def open_las_file_dialog() -> str:
     """
     Open a file dialog to select a LAS or LAZ point cloud file. Returns empty string if cancelled.

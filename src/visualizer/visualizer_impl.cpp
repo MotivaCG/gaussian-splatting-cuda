@@ -804,19 +804,43 @@ namespace lfs::vis {
             }
         });
 
+        const auto sync_viewer_mip_filter_with_training = [this] {
+            if (!rendering_manager_ || !trainer_manager_)
+                return;
+            const auto* trainer = trainer_manager_->getTrainer();
+            if (!trainer)
+                return;
+
+            auto settings = rendering_manager_->getSettings();
+            const bool training_mip_filter = trainer->getParams().optimization.mip_filter;
+            if (settings.mip_filter == training_mip_filter)
+                return;
+
+            settings.mip_filter = training_mip_filter;
+            rendering_manager_->updateSettings(settings);
+            LOG_INFO("Synced viewer mip filter with training: {}", training_mip_filter ? "enabled" : "disabled");
+        };
+
         // Trainer ready signal
-        internal::TrainerReady::when([this](const auto&) {
+        internal::TrainerReady::when([this, sync_viewer_mip_filter_with_training](const auto&) {
+            sync_viewer_mip_filter_with_training();
             internal::TrainingReadyToStart{}.emit();
         });
 
         // Training started - switch to splat rendering without hijacking scene selection
-        state::TrainingStarted::when([this](const auto&) {
+        state::TrainingStarted::when([this, sync_viewer_mip_filter_with_training](const auto&) {
+            sync_viewer_mip_filter_with_training();
+
             ui::PointCloudModeChanged{
                 .enabled = false,
                 .voxel_size = 0.01f}
                 .emit();
 
             LOG_INFO("Switched to splat rendering mode (training started)");
+        });
+
+        state::TrainingResumed::when([sync_viewer_mip_filter_with_training](const auto&) {
+            sync_viewer_mip_filter_with_training();
         });
 
         // Training completed - update content type
@@ -1025,12 +1049,14 @@ namespace lfs::vis {
             LOG_INFO("Loading {} splat file(s)", paths.size());
             if (const auto result = data_loader_->loadPLY(paths[0]); !result) {
                 LOG_ERROR("Failed to load {}: {}", lfs::core::path_to_utf8(paths[0]), result.error());
+                state::SplatFileLoadFailed{.path = paths[0], .error = result.error()}.emit();
             } else {
                 for (size_t i = 1; i < paths.size(); ++i) {
                     try {
                         data_loader_->addSplatFileToScene(paths[i]);
                     } catch (const std::exception& e) {
                         LOG_ERROR("Failed to add {}: {}", lfs::core::path_to_utf8(paths[i]), e.what());
+                        state::SplatFileLoadFailed{.path = paths[i], .error = e.what()}.emit();
                     }
                 }
                 if (paths.size() > 1) {
