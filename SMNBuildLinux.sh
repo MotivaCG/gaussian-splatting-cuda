@@ -189,6 +189,49 @@ EOF
     chmod +x "$dist_dir/LichtFeld-Studio.sh"
 }
 
+copy_system_runtime_library() {
+    local lib_name="$1"
+    local dst_dir="$2"
+    local lib_path=""
+
+    mkdir -p "$dst_dir"
+
+    if command -v gcc >/dev/null 2>&1; then
+        lib_path="$(gcc -print-file-name="$lib_name" 2>/dev/null || true)"
+    fi
+
+    if [[ -z "$lib_path" || "$lib_path" == "$lib_name" || ! -e "$lib_path" ]]; then
+        if command -v g++ >/dev/null 2>&1; then
+            lib_path="$(g++ -print-file-name="$lib_name" 2>/dev/null || true)"
+        fi
+    fi
+
+    if [[ -z "$lib_path" || "$lib_path" == "$lib_name" || ! -e "$lib_path" ]]; then
+        if command -v ldconfig >/dev/null 2>&1; then
+            lib_path="$(ldconfig -p 2>/dev/null | awk -v name="$lib_name" '$1 == name { print $NF; exit }' || true)"
+        fi
+    fi
+
+    if [[ -z "$lib_path" || ! -e "$lib_path" ]]; then
+        warn "Could not find system runtime library: $lib_name"
+        return 0
+    fi
+
+    echo "-- Copying runtime library $lib_name from $lib_path"
+    cp -L "$lib_path" "$dst_dir/$lib_name"
+}
+
+bundle_lfsnt_runtime_libraries() {
+    local dist_dir="$1"
+    local lib_dir="$dist_dir/lib"
+
+    echo "-- Bundling LFSNT runtime libraries"
+
+    copy_system_runtime_library "libgomp.so.1" "$lib_dir"
+    copy_system_runtime_library "libstdc++.so.6" "$lib_dir"
+    copy_system_runtime_library "libgcc_s.so.1" "$lib_dir"
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${BUILD_DIR:-$SCRIPT_DIR/LinuxBuild}"
 DIST_DIR="${DIST_DIR:-$SCRIPT_DIR/dist}"
@@ -415,6 +458,7 @@ if [[ "$BUILD_PORTABLE" == "ON" ]]; then
 
     cmake --install "$BUILD_DIR" --prefix "$DIST_DIR"
 
+    bundle_lfsnt_runtime_libraries "$DIST_DIR"
     write_portable_launcher "$DIST_DIR"
 else
     warn "BUILD_PORTABLE is OFF; skipping portable install into dist."
