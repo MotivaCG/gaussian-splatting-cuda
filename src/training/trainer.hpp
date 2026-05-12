@@ -12,6 +12,8 @@
 #include "core/camera.hpp"
 #include "core/parameters.hpp"
 #include "core/tensor.hpp"
+#include "smn/focused_segment_cache.hpp"
+#include "smn/focused_segment_profiling.hpp"
 #include "smn/noise_guided_splatting.hpp"
 #include "dataset.hpp"
 #include "lfs/kernels/ssim.cuh"
@@ -284,14 +286,18 @@ namespace lfs::training {
             lfs::core::Tensor grad_alpha;
         };
 
-        // Masked photometric loss with optional alpha gradient
+        // Masked photometric loss with optional alpha gradient.
+        // The `cam` parameter is only consumed by the SMN FocusedSegment branch
+        // (used as the key for the per-camera cache in fs_camera_cache_); it is
+        // ignored by all other mask modes. See training/smn/focused_segment_cache.hpp.
         std::expected<MaskLossResult, std::string> compute_photometric_loss_with_mask(
             const lfs::core::Tensor& corrected,
             const lfs::core::Tensor& gt_image,
             const lfs::core::Tensor& mask,
             const lfs::core::Tensor& alpha,
             const lfs::core::param::OptimizationParameters& opt_params,
-            const lfs::core::Tensor& raw_rendered);
+            const lfs::core::Tensor& raw_rendered,
+            const lfs::core::Camera& cam);
 
         // Validate masks exist for all cameras when mask mode is enabled
         std::expected<void, std::string> validate_masks();
@@ -508,11 +514,13 @@ namespace lfs::training {
         // FocusedSegment-specific helpers live in training/smn/focused_segment_trainer.cpp
         // so that the main Trainer dispatcher stays close to upstream.
         // **********************************************************************************/
-        static void focused_segment_apply_schedule(
+        // Non-static so the SMN scoped timer can access fs_timings_.
+        void focused_segment_apply_schedule(
             lfs::core::param::OptimizationParameters& step_params,
             float progress);
 
         std::expected<MaskLossResult, std::string> focused_segment_compute_loss(
+            const lfs::core::Camera& cam,
             const lfs::core::Tensor& corrected,
             const lfs::core::Tensor& raw_rendered,
             const lfs::core::Tensor& gt_image,
@@ -520,11 +528,13 @@ namespace lfs::training {
             const lfs::core::Tensor& alpha,
             const lfs::core::param::OptimizationParameters& opt_params);
 
-        static void focused_segment_apply_densification_mask(
+        // Non-static so the SMN scoped timer can access fs_timings_.
+        void focused_segment_apply_densification_mask(
             lfs::core::Tensor& error_map,
             const lfs::core::Tensor& mask_tile);
 
-        static void focused_segment_run_post_training_prune(
+        // Non-static so the SMN scoped timer can access fs_timings_.
+        void focused_segment_run_post_training_prune(
             lfs::core::param::MaskMode mask_mode,
             bool invert_masks,
             lfs::training::IStrategy& strategy,
@@ -548,6 +558,32 @@ namespace lfs::training {
             const lfs::core::Tensor& mask,
             const lfs::core::Camera& cam,
             const lfs::core::param::OptimizationParameters& step_params);
+
+        // ----- SMN-only per-camera cache (FocusedSegment) ------------------------
+        // Lazily memoizes mask_bool, darkness FP16 and pixel counts on first hit
+        // per camera; eliminates the two GPU syncs and the redundant tensor work
+        // that would otherwise run every iteration. Definition and rationale in
+        // training/smn/focused_segment_cache.hpp. Not used outside the
+        // FocusedSegment helpers.
+        const lfs::training::smn::FocusedSegmentCameraCache& focused_segment_get_cache(
+            const lfs::core::Camera& cam,
+            const lfs::core::Tensor& src_mask,
+            const lfs::core::Tensor& gt_image,
+            bool want_lightness);
+
+        lfs::training::smn::FocusedSegmentCameraCacheMap fs_camera_cache_;
+
+        // ----- SMN-only per-subtask timings (FocusedSegment + post-prune) --------
+        // Cumulative wall-clock per subtask. Populated by ScopedFsTimer regions
+        // sprinkled across the SMN helpers and the post-training prune. Printed
+        // by focused_segment_print_timings() at the end of Trainer::train().
+        // See smn/focused_segment_profiling.hpp.
+        lfs::training::smn::FsTimings fs_timings_;
+
+        /// SMN-only. Logs the accumulated FocusedSegment / prune timings table.
+        /// Called once at the end of Trainer::train(). Silent if nothing was
+        /// timed in this run (None mask mode, training aborted, etc.).
+        void focused_segment_print_timings() const;
 
         // **********************************************************************************/
         // End FocusedSegment-specific helpers.

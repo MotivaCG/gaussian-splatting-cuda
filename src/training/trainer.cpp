@@ -1213,7 +1213,8 @@ namespace lfs::training {
         const lfs::core::Tensor& mask,
         const lfs::core::Tensor& alpha,
         const lfs::core::param::OptimizationParameters& opt_params,
-        const lfs::core::Tensor& raw_rendered) {
+        const lfs::core::Tensor& raw_rendered,
+        const lfs::core::Camera& cam) {
 
         // Guard: if mask is invalid or empty, fall back to standard photometric loss.
         // This can happen when a camera has no mask file or alpha extraction failed.
@@ -1317,7 +1318,7 @@ namespace lfs::training {
             // FocusedSegment-specific logic lives in training/smn/focused_segment_trainer.cpp
             // so that this dispatcher stays close to upstream.
             auto fs_result = focused_segment_compute_loss(
-                corrected, raw_rendered, gt_image, mask_2d, alpha, opt_params);
+                cam, corrected, raw_rendered, gt_image, mask_2d, alpha, opt_params);
             if (!fs_result)
                 return std::unexpected(fs_result.error());
             loss = fs_result->loss;
@@ -3068,7 +3069,7 @@ namespace lfs::training {
                         focused_segment_apply_schedule(step_params, progress);
 
                         auto result = compute_photometric_loss_with_mask(
-                            corrected_image, gt_tile, mask_tile, output.alpha, step_params, raw_loss_input);
+                            corrected_image, gt_tile, mask_tile, output.alpha, step_params, raw_loss_input, *cam);
                         if (!result) {
                             nvtxRangePop();
                             nvtxRangePop();
@@ -3176,7 +3177,7 @@ namespace lfs::training {
                         }
 
                         auto result = compute_photometric_loss_with_mask(
-                            corrected_image, gt_tile, mask_tile, output.alpha, step_params, raw_loss_input);
+                            corrected_image, gt_tile, mask_tile, output.alpha, step_params, raw_loss_input, *cam);
                         if (!result) {
                             nvtxRangePop();
                             nvtxRangePop();
@@ -4020,6 +4021,10 @@ namespace lfs::training {
                  params_.optimization.invert_masks,
                  *strategy_,
                  *train_dataset_);
+
+            // SMN: dump the cumulative FocusedSegment / prune subtask timings.
+            // Silent if no FocusedSegment region was timed in this run.
+            focused_segment_print_timings();
 
             // Final save if not already saved by stop request
             if (!stop_requested_.load() && !stop_token.stop_requested()) {
