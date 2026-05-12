@@ -4096,6 +4096,37 @@ namespace lfs::training {
             }
             return output.is_absolute() ? output : save_path / output;
         }
+
+        std::expected<std::uintmax_t, std::string> verify_saved_ply_file(
+            const std::filesystem::path& path,
+            const std::string_view stage) {
+            std::error_code ec;
+            if (!std::filesystem::exists(path, ec)) {
+                const std::string reason = ec ? ec.message() : "file does not exist";
+                return std::unexpected(std::format(
+                    "PLY missing after {}: {} ({})",
+                    stage,
+                    lfs::core::path_to_utf8(path),
+                    reason));
+            }
+
+            const auto size = std::filesystem::file_size(path, ec);
+            if (ec) {
+                return std::unexpected(std::format(
+                    "Cannot stat PLY after {}: {} ({})",
+                    stage,
+                    lfs::core::path_to_utf8(path),
+                    ec.message()));
+            }
+            if (size == 0) {
+                return std::unexpected(std::format(
+                    "PLY is empty after {}: {}",
+                    stage,
+                    lfs::core::path_to_utf8(path)));
+            }
+
+            return size;
+        }
     } // namespace
 
     std::expected<std::filesystem::path, std::string> Trainer::save_ply(const std::filesystem::path& save_path,
@@ -4131,6 +4162,19 @@ namespace lfs::training {
             return std::unexpected(ply_result.error().format()); // Don't save checkpoint if PLY failed
         }
 
+        std::optional<std::uintmax_t> verified_size;
+        if (join_threads) {
+            auto verify_result = verify_saved_ply_file(ply_options.output_path, "native PLY writer");
+            if (!verify_result) {
+                LOG_ERROR("{}", verify_result.error());
+                return std::unexpected(verify_result.error());
+            }
+            verified_size = *verify_result;
+            LOG_INFO("PLY file verified after native writer: {} ({} bytes)",
+                     lfs::core::path_to_utf8(ply_options.output_path),
+                     *verified_size);
+        }
+
         PPISPControllerPool* controller_to_save = controller_pool_for_save(iter_num);
 
         if (save_checkpoint_file && !params_.optimization.skip_intermediate) {
@@ -4157,9 +4201,22 @@ namespace lfs::training {
             }
         }
 
-        LOG_INFO("PLY save {}: {}",
-                 join_threads ? "completed" : "queued",
-                 lfs::core::path_to_utf8(ply_options.output_path));
+        if (join_threads) {
+            auto verify_result = verify_saved_ply_file(ply_options.output_path, "PPISP sidecar save");
+            if (!verify_result) {
+                LOG_ERROR("{}", verify_result.error());
+                return std::unexpected(verify_result.error());
+            }
+            verified_size = *verify_result;
+        }
+
+        if (verified_size) {
+            LOG_INFO("PLY save completed: {} ({} bytes)",
+                     lfs::core::path_to_utf8(ply_options.output_path),
+                     *verified_size);
+        } else {
+            LOG_INFO("PLY save queued: {}", lfs::core::path_to_utf8(ply_options.output_path));
+        }
         return ply_options.output_path;
     }
 
