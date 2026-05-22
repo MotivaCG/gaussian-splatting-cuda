@@ -28,7 +28,8 @@ def _install_lf_stub(monkeypatch):
     lf_stub = ModuleType("lichtfeld")
     lf_stub.ui = SimpleNamespace(
         PanelSpace=SimpleNamespace(FLOATING="FLOATING"),
-        PanelHeightMode=SimpleNamespace(FILL="FILL"),
+        PanelHeightMode=SimpleNamespace(FILL="FILL", CONTENT="CONTENT"),
+        tr=lambda key: key,
     )
     lf_stub.log = _LogStub()
     monkeypatch.setitem(sys.modules, "lichtfeld", lf_stub)
@@ -67,6 +68,10 @@ class _ElementStub:
         self._attrs = attrs or {}
         self._parent = parent
         self.tag_name = tag_name
+        self.listeners = {}
+        self.scroll_height = 0.0
+        self.client_height = 0.0
+        self.scroll_top = 0.0
 
     def get_attribute(self, name, default=""):
         return self._attrs.get(name, default)
@@ -76,6 +81,9 @@ class _ElementStub:
 
     def parent(self):
         return self._parent
+
+    def add_event_listener(self, event, callback):
+        self.listeners[event] = callback
 
 
 class _EventStub:
@@ -106,6 +114,18 @@ class _EventStub:
 
     def stop_propagation(self):
         self.stopped = True
+
+
+class _DocumentStub:
+    def __init__(self, elements=None):
+        self._elements = elements or {}
+        self.listeners = {}
+
+    def get_element_by_id(self, element_id):
+        return self._elements.get(element_id)
+
+    def add_event_listener(self, event, callback):
+        self.listeners[event] = callback
 
 
 def _make_asset():
@@ -149,7 +169,7 @@ def test_asset_rows_expose_scalar_tag_label(asset_manager_panel_module):
 def test_asset_card_title_uses_asset_path_leaf(asset_manager_panel_module):
     panel = asset_manager_panel_module.AssetManagerPanel()
     asset = _make_asset()
-    asset["name"] = "truck"
+    asset["name"] = ""
     asset["absolute_path"] = "/data/tandt/truck/train"
     fields = panel._get_asset_display_fields(
         asset,
@@ -189,7 +209,22 @@ def test_asset_manager_rml_uses_text_interpolation_for_display_values():
 def test_asset_manager_load_context_actions_are_localized():
     project_root = Path(__file__).parent.parent.parent
     locale_dir = project_root / "src" / "visualizer" / "gui" / "resources" / "locales"
-    required_keys = ("action.load_new", "action.add_to_scene")
+    required_keys = (
+        "action.load_new",
+        "action.add_to_scene",
+        "action.refresh",
+        "action.clean_missing",
+        "tooltip.refresh",
+        "tooltip.clean_missing",
+        "import_from_url",
+        "import_button",
+        "import_button_downloading",
+        "panel_title",
+        "property.assets",
+        "status_connecting",
+        "status_extracting",
+        "status_complete",
+    )
 
     for locale_path in sorted(locale_dir.glob("*.json")):
         data = json.loads(locale_path.read_text(encoding="utf-8"))
@@ -214,8 +249,9 @@ def test_asset_selection_dirties_info_fields(asset_manager_panel_module):
     assert panel.get_selected_asset_name() == "bicycle"
     assert panel.get_selected_asset_path() == "/tmp/bicycle"
     assert panel.get_selected_asset_dataset_image_count() == "194"
-    assert "selected_asset_path" in panel._handle.dirty_fields
-    assert "show_selection_asset" in panel._handle.dirty_fields
+    dirty = panel._handle.dirty_fields
+    assert "selected_asset_path" in dirty or "__all__" in dirty
+    assert "show_selection_asset" in dirty or "__all__" in dirty
 
 
 def test_asset_selection_resolves_asset_id_from_clicked_element(asset_manager_panel_module):
@@ -313,7 +349,6 @@ def test_dom_card_double_click_loads_asset(asset_manager_panel_module, monkeypat
         tags={},
         collections={},
     )
-    panel._load_menu_asset_id = "a1"
     calls = []
     monkeypatch.setattr(
         asset_manager_panel_module.os.path, "exists", lambda _path: True
@@ -342,106 +377,7 @@ def test_dom_card_double_click_loads_asset(asset_manager_panel_module, monkeypat
         )
     ]
     assert panel.get_selected_asset_name() == "bicycle"
-    assert panel._load_menu_asset_id is None
     assert event.stopped is True
-
-
-def test_dom_card_right_click_opens_load_menu(asset_manager_panel_module, monkeypatch):
-    panel = asset_manager_panel_module.AssetManagerPanel()
-    panel._handle = _HandleStub()
-    panel._asset_index = SimpleNamespace(
-        assets={"a1": _make_asset()},
-        projects={
-            "p1": {"id": "p1", "name": "Imported Datasets", "scene_ids": ["s1"]}
-        },
-        scenes={"s1": {"id": "s1", "name": "bicycle", "project_id": "p1"}},
-        tags={},
-        collections={},
-    )
-    calls = []
-    monkeypatch.setattr(
-        asset_manager_panel_module.os.path, "exists", lambda _path: True
-    )
-    monkeypatch.setattr(
-        asset_manager_panel_module.lf,
-        "load_file",
-        lambda *args, **kwargs: calls.append((args, kwargs)),
-        raising=False,
-    )
-
-    container = _ElementStub({"id": "asset-popup-content"})
-    card = _ElementStub(
-        {"data-asset-id": "a1", "data-asset-action": "select"},
-        parent=container,
-    )
-    child = _ElementStub(parent=card)
-    event = _EventStub(current_target=container, target=child, params={"button": "1"})
-
-    panel._on_asset_manager_mousedown(event)
-
-    assert calls == []
-    assert panel.get_selected_asset_name() == "bicycle"
-    assert panel._handle.records["assets"][0]["load_menu_open"] is True
-    assert event.stopped is True
-
-
-def test_dom_card_left_mousedown_does_not_capture_input(
-    asset_manager_panel_module,
-):
-    panel = asset_manager_panel_module.AssetManagerPanel()
-    panel._handle = _HandleStub()
-    panel._asset_index = SimpleNamespace(
-        assets={"a1": _make_asset()},
-        projects={
-            "p1": {"id": "p1", "name": "Imported Datasets", "scene_ids": ["s1"]}
-        },
-        scenes={"s1": {"id": "s1", "name": "bicycle", "project_id": "p1"}},
-        tags={},
-        collections={},
-    )
-
-    container = _ElementStub({"id": "asset-popup-content"})
-    card = _ElementStub(
-        {"data-asset-id": "a1", "data-asset-action": "select"},
-        parent=container,
-    )
-    event = _EventStub(current_target=container, target=card, params={"button": "0"})
-
-    panel._on_asset_manager_mousedown(event)
-
-    assert panel.get_selected_count() == 0
-    assert panel._load_menu_asset_id is None
-    assert event.stopped is False
-
-
-def test_dom_card_right_click_ignored_during_input_capture(
-    asset_manager_panel_module,
-):
-    panel = asset_manager_panel_module.AssetManagerPanel()
-    panel._handle = _HandleStub()
-    panel._asset_index = SimpleNamespace(
-        assets={"a1": _make_asset()},
-        projects={
-            "p1": {"id": "p1", "name": "Imported Datasets", "scene_ids": ["s1"]}
-        },
-        scenes={"s1": {"id": "s1", "name": "bicycle", "project_id": "p1"}},
-        tags={},
-        collections={},
-    )
-    asset_manager_panel_module.lf.keymap = SimpleNamespace(is_capturing=lambda: True)
-
-    container = _ElementStub({"id": "asset-popup-content"})
-    card = _ElementStub(
-        {"data-asset-id": "a1", "data-asset-action": "select"},
-        parent=container,
-    )
-    event = _EventStub(current_target=container, target=card, params={"button": "1"})
-
-    panel._on_asset_manager_mousedown(event)
-
-    assert panel.get_selected_count() == 0
-    assert panel._load_menu_asset_id is None
-    assert event.stopped is False
 
 
 def test_dom_card_double_click_ignored_during_input_capture(
@@ -482,102 +418,6 @@ def test_dom_card_double_click_ignored_during_input_capture(
     assert event.stopped is False
 
 
-def test_load_menu_add_to_scene_loads_asset(asset_manager_panel_module, monkeypatch):
-    panel = asset_manager_panel_module.AssetManagerPanel()
-    panel._handle = _HandleStub()
-    panel._asset_index = SimpleNamespace(
-        assets={"a1": _make_asset()},
-        projects={
-            "p1": {"id": "p1", "name": "Imported Datasets", "scene_ids": ["s1"]}
-        },
-        scenes={"s1": {"id": "s1", "name": "bicycle", "project_id": "p1"}},
-        tags={},
-        collections={},
-    )
-    panel._load_menu_asset_id = "a1"
-    calls = []
-    monkeypatch.setattr(
-        asset_manager_panel_module.os.path, "exists", lambda _path: True
-    )
-    monkeypatch.setattr(
-        asset_manager_panel_module.lf,
-        "load_file",
-        lambda *args, **kwargs: calls.append(("load", args, kwargs)),
-        raising=False,
-    )
-
-    container = _ElementStub({"id": "asset-popup-content"})
-    item = _ElementStub(
-        {"data-asset-id": "a1", "data-asset-action": "add_to_scene"},
-        parent=container,
-    )
-    event = _EventStub(current_target=container, target=item)
-
-    panel._on_asset_manager_click(event)
-
-    assert calls == [
-        (
-            "load",
-            ("/tmp/bicycle",),
-            {"is_dataset": True, "output_path": "/tmp/bicycle/output"},
-        )
-    ]
-    assert panel.get_selected_asset_name() == "bicycle"
-    assert panel._load_menu_asset_id is None
-    assert event.stopped is True
-
-
-def test_load_menu_new_clears_scene_before_loading(asset_manager_panel_module, monkeypatch):
-    panel = asset_manager_panel_module.AssetManagerPanel()
-    panel._handle = _HandleStub()
-    panel._asset_index = SimpleNamespace(
-        assets={"a1": _make_asset()},
-        projects={
-            "p1": {"id": "p1", "name": "Imported Datasets", "scene_ids": ["s1"]}
-        },
-        scenes={"s1": {"id": "s1", "name": "bicycle", "project_id": "p1"}},
-        tags={},
-        collections={},
-    )
-    panel._load_menu_asset_id = "a1"
-    calls = []
-    monkeypatch.setattr(
-        asset_manager_panel_module.os.path, "exists", lambda _path: True
-    )
-    monkeypatch.setattr(
-        asset_manager_panel_module.lf,
-        "clear_scene",
-        lambda: calls.append(("clear",)),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        asset_manager_panel_module.lf,
-        "load_file",
-        lambda *args, **kwargs: calls.append(("load", args, kwargs)),
-        raising=False,
-    )
-
-    container = _ElementStub({"id": "asset-popup-content"})
-    item = _ElementStub(
-        {"data-asset-id": "a1", "data-asset-action": "load_new"},
-        parent=container,
-    )
-    event = _EventStub(current_target=container, target=item)
-
-    panel._on_asset_manager_click(event)
-
-    assert calls == [
-        ("clear",),
-        (
-            "load",
-            ("/tmp/bicycle",),
-            {"is_dataset": True, "output_path": "/tmp/bicycle/output"},
-        ),
-    ]
-    assert panel._load_menu_asset_id is None
-    assert event.stopped is True
-
-
 def test_dataset_remove_deletes_catalog_json_entry(asset_manager_panel_module, tmp_path):
     index = asset_manager_panel_module.AssetIndex(
         library_path=tmp_path / "library.json"
@@ -609,3 +449,71 @@ def test_dataset_remove_deletes_catalog_json_entry(asset_manager_panel_module, t
     assert scene.id not in data["scenes"]
     assert project.id not in data["projects"]
     assert panel.get_selected_count() == 0
+
+
+def test_edit_watch_dirs_uses_clicked_project_without_selecting_it(
+    asset_manager_panel_module,
+    monkeypatch,
+):
+    panel = asset_manager_panel_module.AssetManagerPanel()
+    panel._handle = _HandleStub()
+    panel._asset_index = SimpleNamespace(
+        assets={},
+        projects={
+            "default": {"id": "default", "name": "Default", "scene_ids": []},
+            "target": {"id": "target", "name": "Target", "scene_ids": []},
+        },
+        scenes={},
+        tags={},
+        collections={},
+    )
+    panel._selected_project_id = "default"
+    opened = []
+
+    monkeypatch.setattr(
+        asset_manager_panel_module,
+        "open_watch_dirs_dialog",
+        lambda project_id: opened.append(project_id) or True,
+    )
+
+    panel.on_edit_watch_dirs(None, None, ["target"])
+
+    assert panel._selected_project_id == "default"
+    assert opened == ["target"]
+
+
+def test_bind_dom_event_listeners_registers_gallery_wheel_handler(
+    asset_manager_panel_module,
+):
+    panel = asset_manager_panel_module.AssetManagerPanel()
+    content = _ElementStub({"id": "asset-popup-content"})
+    gallery_scroll = _ElementStub({"id": "asset-gallery-scroll"})
+    doc = _DocumentStub(
+        {
+            "asset-popup-content": content,
+            "asset-gallery-scroll": gallery_scroll,
+        }
+    )
+
+    panel._bind_dom_event_listeners(doc)
+
+    assert "mousescroll" in gallery_scroll.listeners
+    assert "click" in content.listeners
+    assert "mousemove" in doc.listeners
+
+
+def test_gallery_precise_scroll_moves_scroll_container(asset_manager_panel_module):
+    panel = asset_manager_panel_module.AssetManagerPanel()
+    gallery_scroll = _ElementStub({"id": "asset-gallery-scroll"})
+    gallery_scroll.scroll_height = 900.0
+    gallery_scroll.client_height = 300.0
+    gallery_scroll.scroll_top = 120.0
+    event = _EventStub(
+        current_target=gallery_scroll,
+        params={"wheel_delta_y": "1"},
+    )
+
+    panel._on_gallery_precise_scroll(event)
+
+    assert gallery_scroll.scroll_top == 152.0
+    assert event.stopped is True

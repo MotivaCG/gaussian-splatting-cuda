@@ -35,11 +35,11 @@ namespace fast_lfs::rasterization::kernels::backward {
         const float3* __restrict__ means,
         const float3* __restrict__ raw_scales,
         const float4* __restrict__ raw_rotations,
-        const float3* __restrict__ sh_coefficients_rest,
+        const float4* __restrict__ sh_coefficients_rest, // compact float4-packed swizzled layout
         const float4* __restrict__ w2c,
         const float3* __restrict__ cam_position,
         const float* __restrict__ raw_opacities,
-        const uint* __restrict__ primitive_n_touched_tiles,
+        const std::uint64_t* __restrict__ primitive_n_touched_tiles,
         const float2* __restrict__ grad_mean2d,
         const float* __restrict__ grad_conic,
         float* __restrict__ grad_opacity_helper,
@@ -47,17 +47,64 @@ namespace fast_lfs::rasterization::kernels::backward {
         float4* __restrict__ grad_w2c,
         float* __restrict__ densification_info,
         const uint n_primitives,
-        const uint total_bases_sh_rest,
         const float w,
         const float h,
         const float fx,
         const float fy,
         const float cx,
         const float cy,
+        const uint sh_layout_slots,
         FusedAdamSettings fused_adam) {
         auto primitive_idx = cg::this_grid().thread_rank();
-        if (primitive_idx >= n_primitives || primitive_n_touched_tiles[primitive_idx] == 0)
+        if (primitive_idx >= n_primitives)
             return;
+
+        // vksplat-style invisible fold: when n_touched_tiles == 0, skip the projection /
+        // SH-backward work and only apply Adam momentum decay (with regulariser grads for
+        // scaling / opacity). Eliminates the separate adam_step_invisible kernel launches.
+        if (primitive_n_touched_tiles[primitive_idx] == 0) {
+            // means: grad = 0
+            adam_step_helper(0.0f, fused_adam.means, primitive_idx, 0, fused_adam.beta1, fused_adam.beta2, fused_adam.eps);
+            adam_step_helper(0.0f, fused_adam.means, primitive_idx, 1, fused_adam.beta1, fused_adam.beta2, fused_adam.eps);
+            adam_step_helper(0.0f, fused_adam.means, primitive_idx, 2, fused_adam.beta1, fused_adam.beta2, fused_adam.eps);
+
+            // scaling: grad = scale_regularization_grad per channel
+            for (uint c = 0; c < 3u; ++c) {
+                const uint elt = static_cast<uint>(primitive_idx) * 3u + c;
+                const float g = scale_regularization_grad(fused_adam, fused_adam.scaling, elt);
+                adam_step_helper(g, fused_adam.scaling, primitive_idx, c, fused_adam.beta1, fused_adam.beta2, fused_adam.eps);
+            }
+
+            // rotation: grad = 0
+            adam_step_helper(0.0f, fused_adam.rotation, primitive_idx, 0, fused_adam.beta1, fused_adam.beta2, fused_adam.eps);
+            adam_step_helper(0.0f, fused_adam.rotation, primitive_idx, 1, fused_adam.beta1, fused_adam.beta2, fused_adam.eps);
+            adam_step_helper(0.0f, fused_adam.rotation, primitive_idx, 2, fused_adam.beta1, fused_adam.beta2, fused_adam.eps);
+            adam_step_helper(0.0f, fused_adam.rotation, primitive_idx, 3, fused_adam.beta1, fused_adam.beta2, fused_adam.eps);
+
+            // opacity: grad = opacity_extra_grad
+            {
+                const float g = opacity_extra_grad(fused_adam, fused_adam.opacity, static_cast<uint>(primitive_idx));
+                adam_step_helper(g, fused_adam.opacity, primitive_idx, 0, fused_adam.beta1, fused_adam.beta2, fused_adam.eps);
+            }
+
+            // sh0: grad = 0
+            adam_step_helper(0.0f, fused_adam.sh0, primitive_idx, 0, fused_adam.beta1, fused_adam.beta2, fused_adam.eps);
+            adam_step_helper(0.0f, fused_adam.sh0, primitive_idx, 1, fused_adam.beta1, fused_adam.beta2, fused_adam.eps);
+            adam_step_helper(0.0f, fused_adam.sh0, primitive_idx, 2, fused_adam.beta1, fused_adam.beta2, fused_adam.eps);
+
+            // shN: grad = 0, all active float4 slots via swizzle-aware indexing (matches the
+            // packed-grad path used in the visible branch).
+            if constexpr (ACTIVE_SH_BASES > 1) {
+                const float4 zero = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                constexpr uint N_SLOTS = (ACTIVE_SH_BASES > 9) ? 12u : (ACTIVE_SH_BASES > 4) ? 6u
+                                                                                             : 3u;
+                for (uint k = 0; k < N_SLOTS; ++k) {
+                    adam_step_f4(zero, fused_adam.shN, shAt(primitive_idx, k, sh_layout_slots),
+                                 fused_adam.beta1, fused_adam.beta2, fused_adam.eps);
+                }
+            }
+            return;
+        }
 
         // load 3d mean
         const float3 mean3d = means[primitive_idx];
@@ -67,7 +114,8 @@ namespace fast_lfs::rasterization::kernels::backward {
             sh_coefficients_rest, grad_color_helper,
             fused_adam,
             mean3d, cam_position[0],
-            primitive_idx, total_bases_sh_rest);
+            primitive_idx,
+            sh_layout_slots);
 
         const float4 w2c_r3 = w2c[2];
         const float depth = w2c_r3.x * mean3d.x + w2c_r3.y * mean3d.y + w2c_r3.z * mean3d.z + w2c_r3.w;
@@ -305,7 +353,7 @@ namespace fast_lfs::rasterization::kernels::backward {
     }
 
     __global__ void adam_step_invisible(
-        const uint* __restrict__ primitive_n_touched_tiles,
+        const std::uint64_t* __restrict__ primitive_n_touched_tiles,
         FusedAdamParam param,
         FusedAdamSettings fused_adam,
         const int extra_grad_kind,
@@ -335,6 +383,31 @@ namespace fast_lfs::rasterization::kernels::backward {
         param.exp_avg_sq[idx] = moment2;
     }
 
+    // Swizzle-aware Adam decay for shN's invisible primitives. One thread per primitive;
+    // if invisible, iterate over the active compact float4 slots via shAt indexing.
+    __global__ void adam_step_invisible_shN(
+        const std::uint64_t* __restrict__ primitive_n_touched_tiles,
+        FusedAdamParam param,
+        const uint n_primitives,
+        const uint n_slots,
+        const float beta1,
+        const float beta2,
+        const float eps) {
+        const uint primitive_idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (primitive_idx >= n_primitives || !param.enabled)
+            return;
+        if (primitive_n_touched_tiles[primitive_idx] != 0)
+            return;
+
+        const float4 zero = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+#pragma unroll
+        for (uint k = 0; k < 12u; ++k) {
+            if (k >= n_slots)
+                break;
+            adam_step_f4(zero, param, shAt(primitive_idx, k, n_slots), beta1, beta2, eps);
+        }
+    }
+
     struct BlendBackwardAccum {
         float mean_x;
         float mean_y;
@@ -354,7 +427,8 @@ namespace fast_lfs::rasterization::kernels::backward {
     }
 
     template <DensificationType DENSIFICATION_TYPE>
-    __global__ void __launch_bounds__(config::block_size_blend_backward) blend_backward_cu(
+    // The (128, 8) occupancy hint was tuned on sm_89 (-4.3%, all variants spill-free).
+    __global__ void __launch_bounds__(config::block_size_blend_backward, 8) blend_backward_cu(
         const uint2* __restrict__ tile_instance_ranges,
         const uint* __restrict__ instance_primitive_indices,
         const float2* __restrict__ primitive_mean2d,
@@ -372,6 +446,8 @@ namespace fast_lfs::rasterization::kernels::backward {
         float3* __restrict__ grad_color,
         float* __restrict__ densification_info,
         const float* __restrict__ densification_error_map,
+        FastGSForwardStatus* __restrict__ status,
+        const uint n_instances,
         const uint n_primitives,
         const uint width,
         const uint height,
@@ -382,6 +458,20 @@ namespace fast_lfs::rasterization::kernels::backward {
         const uint tile_idx = block.group_index().x;
         const uint thread_rank = block.thread_rank();
         const uint2 tile_instance_range = tile_instance_ranges[tile_idx];
+        if (tile_instance_range.x > tile_instance_range.y || tile_instance_range.y > n_instances) {
+            if (thread_rank == 0) {
+                report_fastgs_status(
+                    status,
+                    kFastGSForwardStatusTileInstanceRangeOutOfRange,
+                    tile_idx,
+                    tile_idx,
+                    (static_cast<std::uint64_t>(tile_instance_range.x) << 32) | tile_instance_range.y,
+                    make_uint4(tile_instance_range.x, tile_instance_range.y, n_instances, 0),
+                    n_instances,
+                    tile_instance_range.y);
+            }
+            return;
+        }
         const int tile_n_primitives = tile_instance_range.y - tile_instance_range.x;
         if (tile_n_primitives <= 0)
             return;
@@ -428,7 +518,7 @@ namespace fast_lfs::rasterization::kernels::backward {
                                               ? (tile_n_primitives - batch_base)
                                               : splat_batch_size;
             const int lane = static_cast<int>(thread_rank);
-            const bool valid_splat = lane < n_splats_in_batch;
+            bool valid_splat = lane < n_splats_in_batch;
             const int tile_primitive_idx = tile_n_primitives - batch_base - lane - 1;
 
             uint primitive_idx = 0;
@@ -439,17 +529,36 @@ namespace fast_lfs::rasterization::kernels::backward {
             float3 color_grad_factor = make_float3(0.0f);
 
             if (valid_splat) {
-                primitive_idx = instance_primitive_indices[tile_instance_range.x + tile_primitive_idx];
-                mean2d = primitive_mean2d[primitive_idx];
-                const float4 conic_opacity = primitive_conic_opacity[primitive_idx];
-                conic = make_float3(conic_opacity);
-                compensated_opacity = conic_opacity.w;
-                const float3 color_unclamped = primitive_color[primitive_idx];
-                color = fminf(fmaxf(color_unclamped, 0.0f), config::max_blend_color);
-                color_grad_factor = make_float3(
-                    (color_unclamped.x >= 0.0f && color_unclamped.x <= config::max_blend_color) ? 1.0f : 0.0f,
-                    (color_unclamped.y >= 0.0f && color_unclamped.y <= config::max_blend_color) ? 1.0f : 0.0f,
-                    (color_unclamped.z >= 0.0f && color_unclamped.z <= config::max_blend_color) ? 1.0f : 0.0f);
+                const uint instance_idx = tile_instance_range.x + static_cast<uint>(tile_primitive_idx);
+                primitive_idx = instance_primitive_indices[instance_idx];
+                if (primitive_idx >= n_primitives) {
+                    report_fastgs_status(
+                        status,
+                        kFastGSForwardStatusPrimitiveIndexOutOfRange,
+                        instance_idx,
+                        tile_idx,
+                        primitive_idx,
+                        make_uint4(
+                            tile_instance_range.x,
+                            tile_instance_range.y,
+                            static_cast<uint>(tile_primitive_idx),
+                            n_instances),
+                        n_primitives,
+                        primitive_idx);
+                    valid_splat = false;
+                }
+                if (valid_splat) {
+                    mean2d = primitive_mean2d[primitive_idx];
+                    const float4 conic_opacity = primitive_conic_opacity[primitive_idx];
+                    conic = make_float3(conic_opacity);
+                    compensated_opacity = conic_opacity.w;
+                    const float3 color_unclamped = primitive_color[primitive_idx];
+                    color = fminf(fmaxf(color_unclamped, 0.0f), config::max_blend_color);
+                    color_grad_factor = make_float3(
+                        (color_unclamped.x >= 0.0f && color_unclamped.x <= config::max_blend_color) ? 1.0f : 0.0f,
+                        (color_unclamped.y >= 0.0f && color_unclamped.y <= config::max_blend_color) ? 1.0f : 0.0f,
+                        (color_unclamped.z >= 0.0f && color_unclamped.z <= config::max_blend_color) ? 1.0f : 0.0f);
+                }
             }
 
             BlendBackwardAccum accum = make_zero_blend_backward_accum();

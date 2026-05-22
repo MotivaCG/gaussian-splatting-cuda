@@ -5,6 +5,7 @@
 #include "core/scene.hpp"
 #include "core/camera.hpp"
 #include "core/cuda/memory_arena.hpp"
+#include "core/cuda/sh_layout.cuh"
 #include "core/events.hpp"
 #include "core/logger.hpp"
 #include "core/path_utils.hpp"
@@ -679,6 +680,7 @@ namespace lfs::core {
         struct ModelStats {
             size_t total_gaussians = 0;
             int max_sh_degree = 0;
+            int max_active_sh_degree = 0;
             float total_scene_scale = 0.0f;
             bool has_shN = false;
         };
@@ -694,27 +696,30 @@ namespace lfs::core {
             stats.total_gaussians += node_size;
 
             const auto& shN_tensor = model->shN_raw();
-            if (shN_tensor.is_valid() && shN_tensor.ndim() >= 2 && shN_tensor.size(1) > 0) {
-                const int shN_coeffs = static_cast<int>(shN_tensor.size(1));
-                const int sh_degree = std::clamp(
-                    static_cast<int>(std::round(std::sqrt(shN_coeffs + 1))) - 1, 0, 3);
-                stats.max_sh_degree = std::max(stats.max_sh_degree, sh_degree);
+            const auto model_layout_rest = model->max_sh_coeffs_rest();
+            if (shN_tensor.is_valid() && shN_tensor.numel() > 0 && model_layout_rest > 0) {
+                stats.max_sh_degree = std::max(stats.max_sh_degree, model->get_max_sh_degree());
             }
+            stats.max_active_sh_degree = std::max(stats.max_active_sh_degree, model->get_active_sh_degree());
 
             stats.total_scene_scale += model->get_scene_scale();
-            stats.has_shN = stats.has_shN || (shN_tensor.numel() > 0 && shN_tensor.size(1) > 0);
+            stats.has_shN = stats.has_shN || (shN_tensor.numel() > 0 && model_layout_rest > 0);
         }
 
         const lfs::core::Device device = visible_nodes[0]->model->means_raw().device();
         constexpr int SH0_COEFFS = 1;
-        const int shN_coeffs = (stats.max_sh_degree > 0)
-                                   ? ((stats.max_sh_degree + 1) * (stats.max_sh_degree + 1) - 1)
-                                   : 0;
+        const auto dst_layout_rest = sh_rest_coefficients_for_degree(stats.max_sh_degree);
+        const size_t shN_swizzled_floats = lfs::core::sh_swizzled_float_count(stats.total_gaussians, dst_layout_rest);
 
         using lfs::core::Tensor;
         Tensor means = Tensor::empty({static_cast<size_t>(stats.total_gaussians), 3}, device);
         Tensor sh0 = Tensor::empty({static_cast<size_t>(stats.total_gaussians), static_cast<size_t>(SH0_COEFFS), 3}, device);
-        Tensor shN = (shN_coeffs > 0) ? Tensor::zeros({static_cast<size_t>(stats.total_gaussians), static_cast<size_t>(shN_coeffs), 3}, device) : Tensor::empty({static_cast<size_t>(stats.total_gaussians), 0, 3}, device);
+        Tensor shN = shN_swizzled_floats > 0
+                         ? Tensor::zeros_direct(
+                               TensorShape({shN_swizzled_floats}),
+                               shN_swizzled_floats,
+                               lfs::core::Device::CUDA)
+                         : Tensor::zeros({0}, lfs::core::Device::CUDA);
         Tensor opacity = Tensor::empty({static_cast<size_t>(stats.total_gaussians), 1}, device);
         Tensor scaling = Tensor::empty({static_cast<size_t>(stats.total_gaussians), 3}, device);
         Tensor rotation = Tensor::empty({static_cast<size_t>(stats.total_gaussians), 4}, device);
@@ -743,15 +748,17 @@ namespace lfs::core {
             sh0.slice(0, offset, offset + size) = model->sh0_raw();
             opacity.slice(0, offset, offset + size) = model->opacity_raw();
 
-            if (shN_coeffs > 0) {
-                const auto& model_shN = model->shN_raw();
-                const int model_shN_coeffs = (model_shN.is_valid() && model_shN.ndim() >= 2)
-                                                 ? static_cast<int>(model_shN.size(1))
-                                                 : 0;
-                if (model_shN_coeffs > 0) {
-                    const int coeffs_to_copy = std::min(model_shN_coeffs, shN_coeffs);
-                    shN.slice(0, offset, offset + size).slice(1, 0, coeffs_to_copy) =
-                        model_shN.slice(1, 0, coeffs_to_copy);
+            if (stats.max_sh_degree > 0 && model->shN_raw().is_valid() && model->shN_raw().numel() > 0) {
+                const auto model_layout_rest = static_cast<std::uint32_t>(model->max_sh_coeffs_rest());
+                if (model_layout_rest > 0) {
+                    lfs::core::shN_swizzled_copy_contiguous(
+                        model->shN_raw().ptr<float>(),
+                        shN.ptr<float>(),
+                        size,
+                        offset,
+                        model_layout_rest,
+                        dst_layout_rest,
+                        shN.stream());
                 }
             }
 
@@ -789,7 +796,9 @@ namespace lfs::core {
             std::move(scaling),
             std::move(rotation),
             std::move(opacity),
-            stats.total_scene_scale / visible_nodes.size());
+            stats.total_scene_scale / visible_nodes.size(),
+            lfs::core::SplatData::ShNLayout::Swizzled);
+        cached_combined_->set_active_sh_degree(stats.max_active_sh_degree);
 
         if (has_any_deleted) {
             cached_combined_->deleted() = std::move(deleted);
@@ -1813,9 +1822,11 @@ namespace lfs::core {
                     const auto& model = *src_for_model->model;
                     auto cloned = std::make_unique<lfs::core::SplatData>(
                         model.get_max_sh_degree(),
-                        model.means_raw().clone(), model.sh0_raw().clone(), model.shN_raw().clone(),
+                        model.means_raw().clone(), model.sh0_raw().clone(),
+                        model.shN_raw().is_valid() ? model.shN_raw().clone() : lfs::core::Tensor{},
                         model.scaling_raw().clone(), model.rotation_raw().clone(), model.opacity_raw().clone(),
-                        model.get_scene_scale());
+                        model.get_scene_scale(),
+                        lfs::core::SplatData::ShNLayout::Swizzled);
                     cloned->set_active_sh_degree(model.get_active_sh_degree());
                     new_id = addSplat(new_name, std::move(cloned), parent_id);
                 }
@@ -1897,55 +1908,220 @@ namespace lfs::core {
         }
 
         int max_sh = 0;
+        int max_active_sh = 0;
         for (const auto& [model, _] : splats) {
             max_sh = std::max(max_sh, model->get_max_sh_degree());
+            max_active_sh = std::max(max_active_sh, model->get_active_sh_degree());
         }
 
         static const glm::mat4 IDENTITY{1.0f};
-        if (splats.size() == 1 && splats[0].second == IDENTITY) {
-            const auto* const src = splats[0].first;
+        const bool all_identity = std::all_of(
+            splats.begin(), splats.end(),
+            [](const auto& entry) { return entry.second == IDENTITY; });
 
-            if (src->has_deleted_mask()) {
-                const auto keep_mask = src->deleted().logical_not();
+        const auto clone_filtered_swizzled = [](const lfs::core::SplatData& src)
+            -> std::unique_ptr<lfs::core::SplatData> {
+            if (!src.has_deleted_mask()) {
+                const int active_sh = src.get_active_sh_degree();
                 auto result = std::make_unique<lfs::core::SplatData>(
-                    src->get_max_sh_degree(),
-                    src->means_raw().index_select(0, keep_mask),
-                    src->sh0_raw().index_select(0, keep_mask),
-                    src->shN_raw().is_valid() ? src->shN_raw().index_select(0, keep_mask) : lfs::core::Tensor(),
-                    src->scaling_raw().index_select(0, keep_mask),
-                    src->rotation_raw().index_select(0, keep_mask),
-                    src->opacity_raw().index_select(0, keep_mask),
-                    src->get_scene_scale());
-                result->set_active_sh_degree(src->get_active_sh_degree());
-                return result;
-            } else if (storage_mode == MergeStorageMode::BorrowSingleIdentity) {
-                auto result = std::make_unique<lfs::core::SplatData>(
-                    src->get_max_sh_degree(),
-                    src->means_raw(),
-                    src->sh0_raw(),
-                    src->shN_raw().is_valid() ? src->shN_raw() : lfs::core::Tensor(),
-                    src->scaling_raw(),
-                    src->rotation_raw(),
-                    src->opacity_raw(),
-                    src->get_scene_scale());
-                result->set_active_sh_degree(src->get_active_sh_degree());
-                return result;
-            } else {
-                auto result = std::make_unique<lfs::core::SplatData>(
-                    src->get_max_sh_degree(),
-                    src->means_raw().clone(),
-                    src->sh0_raw().clone(),
-                    src->shN_raw().is_valid() ? src->shN_raw().clone() : lfs::core::Tensor(),
-                    src->scaling_raw().clone(),
-                    src->rotation_raw().clone(),
-                    src->opacity_raw().clone(),
-                    src->get_scene_scale());
-                result->set_active_sh_degree(src->get_active_sh_degree());
+                    src.get_max_sh_degree(),
+                    src.means_raw().clone(),
+                    src.sh0_raw().clone(),
+                    src.shN_raw().is_valid() ? src.shN_raw().clone() : lfs::core::Tensor{},
+                    src.scaling_raw().clone(),
+                    src.rotation_raw().clone(),
+                    src.opacity_raw().clone(),
+                    src.get_scene_scale(),
+                    lfs::core::SplatData::ShNLayout::Swizzled);
+                result->set_active_sh_degree(active_sh);
                 return result;
             }
+
+            const auto keep_mask = src.deleted().logical_not();
+            const size_t visible = static_cast<size_t>(keep_mask.sum_scalar());
+            if (visible == 0) {
+                return nullptr;
+            }
+
+            lfs::core::Tensor shN;
+            const int active_sh = src.get_active_sh_degree();
+            const auto layout_rest = static_cast<std::uint32_t>(src.max_sh_coeffs_rest());
+            if (layout_rest > 0 && src.shN_raw().is_valid() && src.shN_raw().numel() > 0) {
+                auto kept_indices = keep_mask.nonzero();
+                if (kept_indices.ndim() == 2) {
+                    kept_indices = kept_indices.squeeze(1);
+                }
+                kept_indices = kept_indices.to(lfs::core::DataType::Int32);
+                shN = lfs::core::Tensor::zeros_direct(
+                    lfs::core::TensorShape({lfs::core::sh_swizzled_float_count(visible, layout_rest)}),
+                    lfs::core::sh_swizzled_float_count(visible, layout_rest),
+                    lfs::core::Device::CUDA);
+                lfs::core::shN_swizzled_gather_self(
+                    src.shN_raw().ptr<float>(),
+                    shN.ptr<float>(),
+                    kept_indices.ptr<int>(),
+                    visible,
+                    0,
+                    layout_rest,
+                    shN.stream());
+            }
+
+            auto result = std::make_unique<lfs::core::SplatData>(
+                src.get_max_sh_degree(),
+                src.means_raw().index_select(0, keep_mask).contiguous(),
+                src.sh0_raw().index_select(0, keep_mask).contiguous(),
+                std::move(shN),
+                src.scaling_raw().index_select(0, keep_mask).contiguous(),
+                src.rotation_raw().index_select(0, keep_mask).contiguous(),
+                src.opacity_raw().index_select(0, keep_mask).contiguous(),
+                src.get_scene_scale(),
+                lfs::core::SplatData::ShNLayout::Swizzled);
+            result->set_active_sh_degree(active_sh);
+            return result;
+        };
+
+        if (all_identity) {
+            if (splats.size() == 1) {
+                const auto* const src = splats[0].first;
+
+                if (storage_mode == MergeStorageMode::BorrowSingleIdentity && !src->has_deleted_mask()) {
+                    const int active_sh = src->get_active_sh_degree();
+                    auto result = std::make_unique<lfs::core::SplatData>(
+                        src->get_max_sh_degree(),
+                        src->means_raw(),
+                        src->sh0_raw(),
+                        src->shN_raw().is_valid() ? src->shN_raw() : lfs::core::Tensor{},
+                        src->scaling_raw(),
+                        src->rotation_raw(),
+                        src->opacity_raw(),
+                        src->get_scene_scale(),
+                        lfs::core::SplatData::ShNLayout::Swizzled);
+                    result->set_active_sh_degree(active_sh);
+                    return result;
+                }
+
+                return clone_filtered_swizzled(*src);
+            }
+
+            size_t total_visible = 0;
+            int max_active_sh_identity = 0;
+            int max_storage_sh = 0;
+            bool has_shN = false;
+            float total_scale = 0.0f;
+            const auto device = splats.front().first->means_raw().device();
+
+            for (const auto& [model, _] : splats) {
+                const size_t visible = model->has_deleted_mask()
+                                           ? static_cast<size_t>(model->visible_count())
+                                           : static_cast<size_t>(model->size());
+                total_visible += visible;
+                total_scale += model->get_scene_scale();
+                max_active_sh_identity = std::max(max_active_sh_identity, model->get_active_sh_degree());
+                max_storage_sh = std::max(max_storage_sh, model->get_max_sh_degree());
+                has_shN = has_shN || (model->max_sh_coeffs_rest() > 0 &&
+                                      model->shN_raw().is_valid() && model->shN_raw().numel() > 0);
+            }
+
+            if (total_visible == 0) {
+                return nullptr;
+            }
+
+            const auto dst_layout_rest = sh_rest_coefficients_for_degree(max_storage_sh);
+            lfs::core::Tensor means = lfs::core::Tensor::empty({total_visible, 3}, device);
+            lfs::core::Tensor sh0 = lfs::core::Tensor::empty({total_visible, 1, 3}, device);
+            lfs::core::Tensor scaling = lfs::core::Tensor::empty({total_visible, 3}, device);
+            lfs::core::Tensor rotation = lfs::core::Tensor::empty({total_visible, 4}, device);
+            lfs::core::Tensor opacity = lfs::core::Tensor::empty({total_visible, 1}, device);
+            lfs::core::Tensor shN = has_shN
+                                        ? lfs::core::Tensor::zeros_direct(
+                                              lfs::core::TensorShape({lfs::core::sh_swizzled_float_count(total_visible, dst_layout_rest)}),
+                                              lfs::core::sh_swizzled_float_count(total_visible, dst_layout_rest),
+                                              lfs::core::Device::CUDA)
+                                        : lfs::core::Tensor{};
+
+            size_t offset = 0;
+            for (const auto& [model, _] : splats) {
+                const bool has_deleted = model->has_deleted_mask();
+                const lfs::core::Tensor keep_mask = has_deleted ? model->deleted().logical_not() : lfs::core::Tensor{};
+                const size_t visible = has_deleted
+                                           ? static_cast<size_t>(keep_mask.sum_scalar())
+                                           : static_cast<size_t>(model->size());
+                if (visible == 0) {
+                    continue;
+                }
+
+                if (has_deleted) {
+                    means.slice(0, offset, offset + visible) = model->means_raw().index_select(0, keep_mask);
+                    sh0.slice(0, offset, offset + visible) = model->sh0_raw().index_select(0, keep_mask);
+                    scaling.slice(0, offset, offset + visible) = model->scaling_raw().index_select(0, keep_mask);
+                    rotation.slice(0, offset, offset + visible) = model->rotation_raw().index_select(0, keep_mask);
+                    opacity.slice(0, offset, offset + visible) = model->opacity_raw().index_select(0, keep_mask);
+                } else {
+                    means.slice(0, offset, offset + visible) = model->means_raw();
+                    sh0.slice(0, offset, offset + visible) = model->sh0_raw();
+                    scaling.slice(0, offset, offset + visible) = model->scaling_raw();
+                    rotation.slice(0, offset, offset + visible) = model->rotation_raw();
+                    opacity.slice(0, offset, offset + visible) = model->opacity_raw();
+                }
+
+                const auto src_layout_rest = static_cast<std::uint32_t>(model->max_sh_coeffs_rest());
+                if (shN.is_valid() && src_layout_rest > 0 && model->shN_raw().is_valid() && model->shN_raw().numel() > 0) {
+                    if (has_deleted) {
+                        auto kept_indices = keep_mask.nonzero();
+                        if (kept_indices.ndim() == 2) {
+                            kept_indices = kept_indices.squeeze(1);
+                        }
+                        kept_indices = kept_indices.to(lfs::core::DataType::Int32);
+                        auto compact_shN = lfs::core::Tensor::zeros_direct(
+                            lfs::core::TensorShape({lfs::core::sh_swizzled_float_count(visible, src_layout_rest)}),
+                            lfs::core::sh_swizzled_float_count(visible, src_layout_rest),
+                            lfs::core::Device::CUDA);
+                        lfs::core::shN_swizzled_gather_self(
+                            model->shN_raw().ptr<float>(),
+                            compact_shN.ptr<float>(),
+                            kept_indices.ptr<int>(),
+                            visible,
+                            0,
+                            src_layout_rest,
+                            compact_shN.stream());
+                        lfs::core::shN_swizzled_copy_contiguous(
+                            compact_shN.ptr<float>(),
+                            shN.ptr<float>(),
+                            visible,
+                            offset,
+                            src_layout_rest,
+                            dst_layout_rest,
+                            shN.stream());
+                    } else {
+                        lfs::core::shN_swizzled_copy_contiguous(
+                            model->shN_raw().ptr<float>(),
+                            shN.ptr<float>(),
+                            visible,
+                            offset,
+                            src_layout_rest,
+                            dst_layout_rest,
+                            shN.stream());
+                    }
+                }
+
+                offset += visible;
+            }
+
+            auto result = std::make_unique<lfs::core::SplatData>(
+                max_storage_sh,
+                std::move(means),
+                std::move(sh0),
+                std::move(shN),
+                std::move(scaling),
+                std::move(rotation),
+                std::move(opacity),
+                total_scale / static_cast<float>(splats.size()),
+                lfs::core::SplatData::ShNLayout::Swizzled);
+            result->set_active_sh_degree(max_active_sh_identity);
+            return result;
         }
 
-        const int shN_coeffs = (max_sh > 0) ? ((max_sh + 1) * (max_sh + 1) - 1) : 0;
+        const int shN_coeffs = static_cast<int>(sh_rest_coefficients_for_degree(max_sh));
         std::vector<lfs::core::Tensor> means_list, sh0_list, shN_list, scaling_list, rotation_list, opacity_list;
         means_list.reserve(splats.size());
         sh0_list.reserve(splats.size());
@@ -1954,86 +2130,88 @@ namespace lfs::core {
         opacity_list.reserve(splats.size());
         if (shN_coeffs > 0)
             shN_list.reserve(splats.size());
+        std::vector<size_t> shN_sizes;
+        if (shN_coeffs > 0)
+            shN_sizes.reserve(splats.size());
+        std::vector<std::uint32_t> shN_layout_rests;
+        if (shN_coeffs > 0)
+            shN_layout_rests.reserve(splats.size());
 
         float total_scale = 0.0f;
+        size_t total_count = 0;
 
         for (const auto& [model, world_transform] : splats) {
-            lfs::core::Tensor means, sh0, shN, scaling, rotation, opacity;
-            if (model->has_deleted_mask()) {
-                const auto keep_mask = model->deleted().logical_not();
-                means = model->means_raw().index_select(0, keep_mask);
-                sh0 = model->sh0_raw().index_select(0, keep_mask);
-                shN = model->shN_raw().is_valid() ? model->shN_raw().index_select(0, keep_mask) : lfs::core::Tensor();
-                scaling = model->scaling_raw().index_select(0, keep_mask);
-                rotation = model->rotation_raw().index_select(0, keep_mask);
-                opacity = model->opacity_raw().index_select(0, keep_mask);
-            } else {
-                means = model->means_raw().clone();
-                sh0 = model->sh0_raw().clone();
-                shN = model->shN_raw().is_valid() ? model->shN_raw().clone() : lfs::core::Tensor();
-                scaling = model->scaling_raw().clone();
-                rotation = model->rotation_raw().clone();
-                opacity = model->opacity_raw().clone();
+            auto transformed = clone_filtered_swizzled(*model);
+            if (!transformed || transformed->size() == 0) {
+                total_scale += model->get_scene_scale();
+                continue;
             }
 
-            lfs::core::SplatData transformed(
-                model->get_max_sh_degree(),
-                std::move(means),
-                std::move(sh0),
-                std::move(shN),
-                std::move(scaling),
-                std::move(rotation),
-                std::move(opacity),
-                model->get_scene_scale());
-
             try {
-                lfs::core::transform(transformed, world_transform);
+                lfs::core::transform(*transformed, world_transform);
             } catch (const std::exception& e) {
                 LOG_ERROR("Failed to transform splat data while merging scene nodes: {}", e.what());
                 return nullptr;
             }
 
-            means_list.push_back(transformed.means_raw().clone());
-            sh0_list.push_back(transformed.sh0_raw().clone());
-            scaling_list.push_back(transformed.scaling_raw().clone());
-            rotation_list.push_back(transformed.rotation_raw().clone());
-            opacity_list.push_back(transformed.opacity_raw().clone());
+            means_list.push_back(transformed->means_raw().clone());
+            sh0_list.push_back(transformed->sh0_raw().clone());
+            scaling_list.push_back(transformed->scaling_raw().clone());
+            rotation_list.push_back(transformed->rotation_raw().clone());
+            opacity_list.push_back(transformed->opacity_raw().clone());
 
             if (shN_coeffs > 0) {
-                const auto& src_shN = transformed.shN_raw();
-                const int src_coeffs = (src_shN.is_valid() && src_shN.ndim() >= 2)
-                                           ? static_cast<int>(src_shN.size(1))
-                                           : 0;
-
-                if (src_coeffs == shN_coeffs) {
-                    shN_list.push_back(src_shN.clone());
-                } else if (src_coeffs > 0) {
-                    const int copy_coeffs = std::min(src_coeffs, shN_coeffs);
-                    auto padded = lfs::core::Tensor::zeros(
-                        {transformed.size(), static_cast<size_t>(shN_coeffs), 3},
-                        lfs::core::Device::CUDA);
-                    padded.slice(1, 0, copy_coeffs).copy_from(src_shN.slice(1, 0, copy_coeffs));
-                    shN_list.push_back(std::move(padded));
-                } else {
-                    shN_list.push_back(lfs::core::Tensor::zeros(
-                        {transformed.size(), static_cast<size_t>(shN_coeffs), 3},
-                        lfs::core::Device::CUDA));
-                }
+                shN_sizes.push_back(static_cast<size_t>(transformed->size()));
+                shN_layout_rests.push_back(static_cast<std::uint32_t>(transformed->max_sh_coeffs_rest()));
+                shN_list.push_back(transformed->shN_raw().is_valid()
+                                       ? transformed->shN_raw().clone()
+                                       : lfs::core::Tensor{});
             }
 
+            total_count += static_cast<size_t>(transformed->size());
             total_scale += model->get_scene_scale();
+        }
+
+        if (means_list.empty() || total_count == 0) {
+            return nullptr;
+        }
+
+        lfs::core::Tensor merged_shN;
+        if (shN_coeffs > 0) {
+            merged_shN = lfs::core::Tensor::zeros_direct(
+                lfs::core::TensorShape({lfs::core::sh_swizzled_float_count(total_count, shN_coeffs)}),
+                lfs::core::sh_swizzled_float_count(total_count, shN_coeffs),
+                lfs::core::Device::CUDA);
+
+            size_t offset = 0;
+            for (size_t i = 0; i < shN_list.size(); ++i) {
+                const size_t count = shN_sizes[i];
+                const auto src_layout_rest = shN_layout_rests[i];
+                if (src_layout_rest > 0 && shN_list[i].is_valid() && shN_list[i].numel() > 0) {
+                    lfs::core::shN_swizzled_copy_contiguous(
+                        shN_list[i].ptr<float>(),
+                        merged_shN.ptr<float>(),
+                        count,
+                        offset,
+                        src_layout_rest,
+                        static_cast<std::uint32_t>(shN_coeffs),
+                        merged_shN.stream());
+                }
+                offset += count;
+            }
         }
 
         auto result = std::make_unique<lfs::core::SplatData>(
             max_sh,
             lfs::core::Tensor::cat(means_list, 0),
             lfs::core::Tensor::cat(sh0_list, 0),
-            (shN_coeffs > 0) ? lfs::core::Tensor::cat(shN_list, 0) : lfs::core::Tensor(),
+            std::move(merged_shN),
             lfs::core::Tensor::cat(scaling_list, 0),
             lfs::core::Tensor::cat(rotation_list, 0),
             lfs::core::Tensor::cat(opacity_list, 0),
-            total_scale / static_cast<float>(splats.size()));
-        result->set_active_sh_degree(max_sh);
+            total_scale / static_cast<float>(splats.size()),
+            lfs::core::SplatData::ShNLayout::Swizzled);
+        result->set_active_sh_degree(max_active_sh);
 
         return result;
     }

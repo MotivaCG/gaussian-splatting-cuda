@@ -16,6 +16,7 @@
 #include <functional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace fast_lfs::rasterization {
@@ -34,6 +35,143 @@ namespace fast_lfs::rasterization {
             cudaFree(ptr);
 #endif
         }
+
+        std::string cuda_error_detail(cudaError_t err) {
+            return std::string(cudaGetErrorName(err)) + ": " + cudaGetErrorString(err);
+        }
+
+        const char* cuda_memory_type_name(cudaMemoryType type) {
+            switch (type) {
+            case cudaMemoryTypeHost: return "host";
+            case cudaMemoryTypeDevice: return "device";
+            case cudaMemoryTypeManaged: return "managed";
+            default: return "unknown";
+            }
+        }
+
+        int checked_current_cuda_device(const char* phase) {
+            int device_count = 0;
+            const cudaError_t count_err = cudaGetDeviceCount(&device_count);
+            if (count_err != cudaSuccess) {
+                throw std::runtime_error(std::string(phase) +
+                                         ": cudaGetDeviceCount failed - " +
+                                         cuda_error_detail(count_err));
+            }
+            if (device_count <= 0) {
+                throw std::runtime_error(std::string(phase) +
+                                         ": no CUDA devices are visible");
+            }
+
+            int current_device = -1;
+            const cudaError_t device_err = cudaGetDevice(&current_device);
+            if (device_err != cudaSuccess) {
+                throw std::runtime_error(std::string(phase) +
+                                         ": cudaGetDevice failed - " +
+                                         cuda_error_detail(device_err) +
+                                         " (device_count=" + std::to_string(device_count) + ")");
+            }
+            if (current_device < 0 || current_device >= device_count) {
+                throw std::runtime_error(std::string(phase) +
+                                         ": current CUDA device ordinal is out of range"
+                                         " (current_device=" +
+                                         std::to_string(current_device) +
+                                         ", device_count=" + std::to_string(device_count) + ")");
+            }
+            return current_device;
+        }
+
+        void checked_no_pending_cuda_error(const char* phase) {
+            const cudaError_t pending_err = cudaPeekAtLastError();
+            if (pending_err != cudaSuccess) {
+                throw std::runtime_error(std::string(phase) +
+                                         ": pending CUDA error before FastGS buffer sizing - " +
+                                         cuda_error_detail(pending_err));
+            }
+        }
+
+        void checked_device_pointer_on_current_device(
+            const void* ptr,
+            const char* name,
+            int current_device) {
+            if (!ptr) {
+                throw std::runtime_error(std::string("FastGS forward preflight: ") +
+                                         name + " is null");
+            }
+
+            cudaPointerAttributes attrs{};
+            const cudaError_t attr_err = cudaPointerGetAttributes(&attrs, ptr);
+            if (attr_err != cudaSuccess) {
+                throw std::runtime_error(std::string("FastGS forward preflight: cudaPointerGetAttributes failed for ") +
+                                         name + " - " + cuda_error_detail(attr_err));
+            }
+            if (attrs.type != cudaMemoryTypeDevice) {
+                throw std::runtime_error(std::string("FastGS forward preflight: ") +
+                                         name + " is not device memory (type=" +
+                                         cuda_memory_type_name(attrs.type) + ")");
+            }
+            if (attrs.device != current_device) {
+                throw std::runtime_error(std::string("FastGS forward preflight: ") +
+                                         name + " is allocated on CUDA device " +
+                                         std::to_string(attrs.device) +
+                                         " but the current CUDA device is " +
+                                         std::to_string(current_device));
+            }
+        }
+
+        void validate_fastgs_forward_cuda_preflight(
+            const float* means_ptr,
+            const float* scales_raw_ptr,
+            const float* rotations_raw_ptr,
+            const float* opacities_raw_ptr,
+            const float* sh_coefficients_0_ptr,
+            const float* sh_coefficients_rest_ptr,
+            const float* w2c_ptr,
+            const float* cam_position_ptr,
+            const float* image_ptr,
+            const float* alpha_ptr,
+            int n_primitives,
+            int active_sh_bases,
+            int sh_layout_bases,
+            int width,
+            int height,
+            int n_tiles) {
+            const int current_device = checked_current_cuda_device("FastGS forward preflight");
+            checked_no_pending_cuda_error("FastGS forward preflight");
+
+            if (n_primitives <= 0 || active_sh_bases <= 0 || active_sh_bases > 16 ||
+                sh_layout_bases <= 0 || sh_layout_bases > 16 ||
+                width <= 0 || height <= 0 || n_tiles <= 0) {
+                throw std::runtime_error(
+                    "FastGS forward preflight: invalid dimensions"
+                    " (n_primitives=" +
+                    std::to_string(n_primitives) +
+                    ", active_sh_bases=" + std::to_string(active_sh_bases) +
+                    ", sh_layout_bases=" + std::to_string(sh_layout_bases) +
+                    ", width=" + std::to_string(width) +
+                    ", height=" + std::to_string(height) +
+                    ", n_tiles=" + std::to_string(n_tiles) + ")");
+            }
+            if (sh_layout_bases < active_sh_bases) {
+                throw std::runtime_error(
+                    "FastGS forward preflight: SH layout is smaller than active SH degree"
+                    " (active_sh_bases=" +
+                    std::to_string(active_sh_bases) +
+                    ", sh_layout_bases=" + std::to_string(sh_layout_bases) + ")");
+            }
+
+            checked_device_pointer_on_current_device(means_ptr, "means_ptr", current_device);
+            checked_device_pointer_on_current_device(scales_raw_ptr, "scales_raw_ptr", current_device);
+            checked_device_pointer_on_current_device(rotations_raw_ptr, "rotations_raw_ptr", current_device);
+            checked_device_pointer_on_current_device(opacities_raw_ptr, "opacities_raw_ptr", current_device);
+            checked_device_pointer_on_current_device(sh_coefficients_0_ptr, "sh_coefficients_0_ptr", current_device);
+            if (active_sh_bases > 1) {
+                checked_device_pointer_on_current_device(sh_coefficients_rest_ptr, "sh_coefficients_rest_ptr", current_device);
+            }
+            checked_device_pointer_on_current_device(w2c_ptr, "w2c_ptr", current_device);
+            checked_device_pointer_on_current_device(cam_position_ptr, "cam_position_ptr", current_device);
+            checked_device_pointer_on_current_device(image_ptr, "image_ptr", current_device);
+            checked_device_pointer_on_current_device(alpha_ptr, "alpha_ptr", current_device);
+        }
     } // namespace
 
     ForwardContext forward_raw(
@@ -49,7 +187,7 @@ namespace fast_lfs::rasterization {
         float* alpha_ptr,
         int n_primitives,
         int active_sh_bases,
-        int total_bases_sh_rest,
+        int sh_layout_bases,
         int width,
         int height,
         float focal_x,
@@ -60,81 +198,98 @@ namespace fast_lfs::rasterization {
         float far_plane,
         bool mip_filter) {
 
-        // Validate inputs using pure CUDA validation
-        CHECK_CUDA_PTR(means_ptr, "means_ptr");
-        CHECK_CUDA_PTR(scales_raw_ptr, "scales_raw_ptr");
-        CHECK_CUDA_PTR(rotations_raw_ptr, "rotations_raw_ptr");
-        CHECK_CUDA_PTR(opacities_raw_ptr, "opacities_raw_ptr");
-        CHECK_CUDA_PTR(sh_coefficients_0_ptr, "sh_coefficients_0_ptr");
-        if (total_bases_sh_rest > 0) {
-            CHECK_CUDA_PTR(sh_coefficients_rest_ptr, "sh_coefficients_rest_ptr");
-        }
-        CHECK_CUDA_PTR(w2c_ptr, "w2c_ptr");
-        CHECK_CUDA_PTR(cam_position_ptr, "cam_position_ptr");
-        CHECK_CUDA_PTR(image_ptr, "image_ptr");
-        CHECK_CUDA_PTR(alpha_ptr, "alpha_ptr");
-
-        if (n_primitives <= 0 || width <= 0 || height <= 0) {
-            throw std::runtime_error("Invalid dimensions in forward_raw");
-        }
-
-        // Calculate grid dimensions
-        const dim3 grid(div_round_up(width, config::tile_width),
-                        div_round_up(height, config::tile_height), 1);
-        const uint64_t n_tiles_u64 = static_cast<uint64_t>(grid.x) * static_cast<uint64_t>(grid.y);
-        const int n_tiles = checked_to_int(n_tiles_u64, "n_tiles exceeds int range");
-
-        // Get global arena and begin frame
-        auto& arena = lfs::core::GlobalArenaManager::instance().get_arena();
-        uint64_t frame_id = arena.begin_frame();
-
-        // Get arena allocator for this frame
-        auto arena_allocator = arena.get_allocator(frame_id);
-
-        // Allocate buffers through arena
-        size_t per_primitive_size = required<PerPrimitiveBuffers>(n_primitives);
-        size_t per_tile_size = required<PerTileBuffers>(n_tiles);
-
-        char* per_primitive_buffers_blob = arena_allocator(per_primitive_size);
-        char* per_tile_buffers_blob = arena_allocator(per_tile_size);
-
-        if (!per_primitive_buffers_blob || !per_tile_buffers_blob) {
-            arena.end_frame(frame_id);
-            ForwardContext error_ctx = {};
-            error_ctx.success = false;
-            error_ctx.error_message = "OUT_OF_MEMORY: Failed to allocate initial buffers from arena";
-            error_ctx.frame_id = frame_id; // Set frame_id so caller knows it's ended
-            return error_ctx;
-        }
-
-        // Allocate helper buffers for backward pass upfront to avoid allocation failures later
-        const size_t grad_mean2d_size = static_cast<size_t>(n_primitives) * 2 * sizeof(float);
-        const size_t grad_conic_size = static_cast<size_t>(n_primitives) * 3 * sizeof(float);
-        char* grad_mean2d_helper = arena_allocator(grad_mean2d_size);
-        char* grad_conic_helper = arena_allocator(grad_conic_size);
-
-        if (!grad_mean2d_helper || !grad_conic_helper) {
-            arena.end_frame(frame_id);
-            ForwardContext error_ctx = {};
-            error_ctx.success = false;
-            error_ctx.error_message = "OUT_OF_MEMORY: Failed to allocate backward helper buffers from arena";
-            error_ctx.frame_id = frame_id;
-            return error_ctx;
-        }
-
-        // Create allocation wrappers
-        std::function<char*(size_t)> per_primitive_buffers_func =
-            [&per_primitive_buffers_blob](size_t size) -> char* {
-            // Already allocated, just return the pointer
-            return per_primitive_buffers_blob;
-        };
-
-        std::function<char*(size_t)> per_tile_buffers_func =
-            [&per_tile_buffers_blob](size_t size) -> char* {
-            return per_tile_buffers_blob;
-        };
-
+        lfs::core::RasterizerMemoryArena* arena = nullptr;
+        uint64_t frame_id = 0;
+        bool frame_started = false;
         try {
+            auto fail = [&](std::string message) {
+                if (frame_started && arena) {
+                    arena->end_frame(frame_id);
+                    frame_started = false;
+                }
+                last_forward_error = std::move(message);
+                ForwardContext error_ctx = {};
+                error_ctx.success = false;
+                error_ctx.error_message = last_forward_error.c_str();
+                error_ctx.frame_id = frame_id;
+                return error_ctx;
+            };
+
+            if (n_primitives <= 0 || width <= 0 || height <= 0) {
+                return fail("FastGS forward preflight: invalid dimensions"
+                            " (n_primitives=" +
+                            std::to_string(n_primitives) +
+                            ", width=" + std::to_string(width) +
+                            ", height=" + std::to_string(height) + ")");
+            }
+
+            // Calculate grid dimensions
+            const dim3 grid(div_round_up(width, config::tile_width),
+                            div_round_up(height, config::tile_height), 1);
+            const uint64_t n_tiles_u64 = static_cast<uint64_t>(grid.x) * static_cast<uint64_t>(grid.y);
+            const int n_tiles = checked_to_int(n_tiles_u64, "n_tiles exceeds int range");
+
+            // Get global arena and begin frame before buffer sizing. begin_frame
+            // synchronizes prior arena users, so asynchronous CUDA failures are
+            // attributed before the CUB workspace query below.
+            arena = &lfs::core::GlobalArenaManager::instance().get_arena();
+            frame_id = arena->begin_frame();
+            frame_started = true;
+
+            validate_fastgs_forward_cuda_preflight(
+                means_ptr,
+                scales_raw_ptr,
+                rotations_raw_ptr,
+                opacities_raw_ptr,
+                sh_coefficients_0_ptr,
+                sh_coefficients_rest_ptr,
+                w2c_ptr,
+                cam_position_ptr,
+                image_ptr,
+                alpha_ptr,
+                n_primitives,
+                active_sh_bases,
+                sh_layout_bases,
+                width,
+                height,
+                n_tiles);
+
+            // Get arena allocator for this frame
+            auto arena_allocator = arena->get_allocator(frame_id);
+
+            // Allocate buffers through arena
+            const size_t per_primitive_size = required<PerPrimitiveBuffers>(n_primitives);
+            const size_t per_tile_size = required<PerTileBuffers>(n_tiles);
+
+            char* per_primitive_buffers_blob = arena_allocator(per_primitive_size);
+            char* per_tile_buffers_blob = arena_allocator(per_tile_size);
+
+            if (!per_primitive_buffers_blob || !per_tile_buffers_blob) {
+                return fail("OUT_OF_MEMORY: Failed to allocate initial buffers from arena");
+            }
+
+            // Allocate helper buffers for backward pass upfront to avoid allocation failures later
+            const size_t grad_mean2d_size = static_cast<size_t>(n_primitives) * 2 * sizeof(float);
+            const size_t grad_conic_size = static_cast<size_t>(n_primitives) * 3 * sizeof(float);
+            char* grad_mean2d_helper = arena_allocator(grad_mean2d_size);
+            char* grad_conic_helper = arena_allocator(grad_conic_size);
+
+            if (!grad_mean2d_helper || !grad_conic_helper) {
+                return fail("OUT_OF_MEMORY: Failed to allocate backward helper buffers from arena");
+            }
+
+            // Create allocation wrappers
+            std::function<char*(size_t)> per_primitive_buffers_func =
+                [&per_primitive_buffers_blob](size_t size) -> char* {
+                // Already allocated, just return the pointer
+                return per_primitive_buffers_blob;
+            };
+
+            std::function<char*(size_t)> per_tile_buffers_func =
+                [&per_tile_buffers_blob](size_t size) -> char* {
+                return per_tile_buffers_blob;
+            };
+
             // Call the actual forward implementation
             ForwardResult forward_result = forward(per_primitive_buffers_func,
                                                    per_tile_buffers_func,
@@ -143,14 +298,14 @@ namespace fast_lfs::rasterization {
                                                    reinterpret_cast<const float4*>(rotations_raw_ptr),
                                                    opacities_raw_ptr,
                                                    reinterpret_cast<const float3*>(sh_coefficients_0_ptr),
-                                                   reinterpret_cast<const float3*>(sh_coefficients_rest_ptr),
+                                                   reinterpret_cast<const float4*>(sh_coefficients_rest_ptr),
                                                    reinterpret_cast<const float4*>(w2c_ptr),
                                                    reinterpret_cast<const float3*>(cam_position_ptr),
                                                    image_ptr,
                                                    alpha_ptr,
                                                    n_primitives,
                                                    active_sh_bases,
-                                                   total_bases_sh_rest,
+                                                   sh_layout_bases,
                                                    width,
                                                    height,
                                                    focal_x,
@@ -163,12 +318,7 @@ namespace fast_lfs::rasterization {
 
             // Verify allocations happened
             if (forward_result.n_instances > 0 && !forward_result.sorted_primitive_indices) {
-                arena.end_frame(frame_id);
-                ForwardContext error_ctx = {};
-                error_ctx.success = false;
-                error_ctx.error_message = "OUT_OF_MEMORY: Sorted primitive indices were not allocated despite n_instances > 0";
-                error_ctx.frame_id = frame_id;
-                return error_ctx;
+                return fail("OUT_OF_MEMORY: Sorted primitive indices were not allocated despite n_instances > 0");
             }
             // Create and return context
             ForwardContext ctx;
@@ -181,6 +331,7 @@ namespace fast_lfs::rasterization {
             ctx.per_instance_sort_scratch_size = forward_result.per_instance_sort_scratch_size;
             ctx.per_instance_sort_total_size = forward_result.per_instance_sort_total_size;
             ctx.n_instances = forward_result.n_instances;
+            ctx.sh_layout_bases = sh_layout_bases;
             ctx.frame_id = frame_id;
             ctx.grad_mean2d_helper = grad_mean2d_helper;
             ctx.grad_conic_helper = grad_conic_helper;
@@ -193,7 +344,10 @@ namespace fast_lfs::rasterization {
 
         } catch (const std::exception& e) {
             // Clean up frame on error and return error context instead of throwing
-            arena.end_frame(frame_id);
+            if (frame_started && arena) {
+                arena->end_frame(frame_id);
+                frame_started = false;
+            }
             last_forward_error = e.what();
             ForwardContext error_ctx = {};
             error_ctx.success = false;
@@ -230,7 +384,7 @@ namespace fast_lfs::rasterization {
         float* grad_w2c_ptr,
         int n_primitives,
         int active_sh_bases,
-        int total_bases_sh_rest,
+        int sh_layout_bases,
         int width,
         int height,
         float focal_x,
@@ -249,26 +403,49 @@ namespace fast_lfs::rasterization {
             outputs.error_message = "FastGS backward requires fused Adam settings";
             return outputs;
         }
-
-        // Validate required inputs using pure CUDA validation
-        CHECK_CUDA_PTR(grad_image_ptr, "grad_image_ptr");
-        CHECK_CUDA_PTR(grad_alpha_ptr, "grad_alpha_ptr");
-        CHECK_CUDA_PTR(image_ptr, "image_ptr");
-        CHECK_CUDA_PTR(alpha_ptr, "alpha_ptr");
-        CHECK_CUDA_PTR(means_ptr, "means_ptr");
-        CHECK_CUDA_PTR(scales_raw_ptr, "scales_raw_ptr");
-        CHECK_CUDA_PTR(rotations_raw_ptr, "rotations_raw_ptr");
-        CHECK_CUDA_PTR(raw_opacities_ptr, "raw_opacities_ptr");
-        if (total_bases_sh_rest > 0) {
-            CHECK_CUDA_PTR(sh_coefficients_rest_ptr, "sh_coefficients_rest_ptr");
+        if (n_primitives <= 0 || width <= 0 || height <= 0 || forward_ctx.n_instances < 0) {
+            release_forward_context(forward_ctx);
+            outputs.error_message = "Invalid dimensions in backward_raw";
+            return outputs;
         }
-        CHECK_CUDA_PTR(w2c_ptr, "w2c_ptr");
-        CHECK_CUDA_PTR(cam_position_ptr, "cam_position_ptr");
+        if (active_sh_bases <= 0 || active_sh_bases > 16 ||
+            sh_layout_bases <= 0 || sh_layout_bases > 16 ||
+            sh_layout_bases < active_sh_bases) {
+            release_forward_context(forward_ctx);
+            last_backward_error =
+                "Invalid SH layout in backward_raw (active_sh_bases=" +
+                std::to_string(active_sh_bases) +
+                ", sh_layout_bases=" + std::to_string(sh_layout_bases) + ")";
+            outputs.error_message = last_backward_error.c_str();
+            return outputs;
+        }
 
-        // Optional pointer
-        CHECK_CUDA_PTR_OPTIONAL(densification_info_ptr, "densification_info_ptr");
-        CHECK_CUDA_PTR_OPTIONAL(densification_error_map_ptr, "densification_error_map_ptr");
-        CHECK_CUDA_PTR_OPTIONAL(grad_w2c_ptr, "grad_w2c_ptr");
+        try {
+            // Validate required inputs using pure CUDA validation
+            CHECK_CUDA_PTR(grad_image_ptr, "grad_image_ptr");
+            CHECK_CUDA_PTR(grad_alpha_ptr, "grad_alpha_ptr");
+            CHECK_CUDA_PTR(image_ptr, "image_ptr");
+            CHECK_CUDA_PTR(alpha_ptr, "alpha_ptr");
+            CHECK_CUDA_PTR(means_ptr, "means_ptr");
+            CHECK_CUDA_PTR(scales_raw_ptr, "scales_raw_ptr");
+            CHECK_CUDA_PTR(rotations_raw_ptr, "rotations_raw_ptr");
+            CHECK_CUDA_PTR(raw_opacities_ptr, "raw_opacities_ptr");
+            if (active_sh_bases > 1) {
+                CHECK_CUDA_PTR(sh_coefficients_rest_ptr, "sh_coefficients_rest_ptr");
+            }
+            CHECK_CUDA_PTR(w2c_ptr, "w2c_ptr");
+            CHECK_CUDA_PTR(cam_position_ptr, "cam_position_ptr");
+
+            // Optional pointer
+            CHECK_CUDA_PTR_OPTIONAL(densification_info_ptr, "densification_info_ptr");
+            CHECK_CUDA_PTR_OPTIONAL(densification_error_map_ptr, "densification_error_map_ptr");
+            CHECK_CUDA_PTR_OPTIONAL(grad_w2c_ptr, "grad_w2c_ptr");
+        } catch (const std::exception& e) {
+            release_forward_context(forward_ctx);
+            last_backward_error = e.what();
+            outputs.error_message = last_backward_error.c_str();
+            return outputs;
+        }
 
         // Validate forward context
         if (!forward_ctx.per_primitive_buffers || !forward_ctx.per_tile_buffers) {
@@ -310,13 +487,18 @@ namespace fast_lfs::rasterization {
             // Zero out helper buffers
             const size_t grad_mean2d_size = static_cast<size_t>(n_primitives) * 2 * sizeof(float);
             const size_t grad_conic_size = static_cast<size_t>(n_primitives) * 3 * sizeof(float);
-            cudaMemset(grad_mean2d_helper, 0, grad_mean2d_size);
-            cudaMemset(grad_conic_helper, 0, grad_conic_size);
-            cudaMemset(grad_opacity_helper, 0, static_cast<size_t>(n_primitives) * sizeof(float));
-            cudaMemset(grad_color_helper, 0, static_cast<size_t>(n_primitives) * 3 * sizeof(float));
+            CUDA_CHECK(cudaMemset(grad_mean2d_helper, 0, grad_mean2d_size),
+                       "cudaMemset(grad_mean2d_helper)");
+            CUDA_CHECK(cudaMemset(grad_conic_helper, 0, grad_conic_size),
+                       "cudaMemset(grad_conic_helper)");
+            CUDA_CHECK(cudaMemset(grad_opacity_helper, 0, static_cast<size_t>(n_primitives) * sizeof(float)),
+                       "cudaMemset(grad_opacity_helper)");
+            CUDA_CHECK(cudaMemset(grad_color_helper, 0, static_cast<size_t>(n_primitives) * 3 * sizeof(float)),
+                       "cudaMemset(grad_color_helper)");
 
             if (grad_w2c_ptr) {
-                cudaMemset(grad_w2c_ptr, 0, 4 * 4 * sizeof(float));
+                CUDA_CHECK(cudaMemset(grad_w2c_ptr, 0, 4 * 4 * sizeof(float)),
+                           "cudaMemset(grad_w2c)");
             }
 
             // Call the actual backward implementation
@@ -330,7 +512,7 @@ namespace fast_lfs::rasterization {
                 reinterpret_cast<const float3*>(scales_raw_ptr),
                 reinterpret_cast<const float4*>(rotations_raw_ptr),
                 raw_opacities_ptr,
-                reinterpret_cast<const float3*>(sh_coefficients_rest_ptr),
+                reinterpret_cast<const float4*>(sh_coefficients_rest_ptr),
                 reinterpret_cast<const float4*>(w2c_ptr),
                 reinterpret_cast<const float3*>(cam_position_ptr),
                 static_cast<char*>(forward_ctx.per_primitive_buffers),
@@ -345,7 +527,7 @@ namespace fast_lfs::rasterization {
                 n_primitives,
                 forward_ctx.n_instances,
                 active_sh_bases,
-                total_bases_sh_rest,
+                sh_layout_bases,
                 width,
                 height,
                 focal_x,
@@ -420,7 +602,7 @@ namespace fast_lfs::rasterization {
         const auto ctx = forward_raw(
             means, scales, rotations, opacities, sh0, nullptr,
             w2c, cam_pos, image, alpha,
-            NUM_GAUSSIANS, 1, 0,
+            NUM_GAUSSIANS, 1, 1,
             IMG_WIDTH, IMG_HEIGHT,
             FOCAL, FOCAL, CENTER_X, CENTER_Y,
             0.01f, 100.0f);
@@ -467,7 +649,7 @@ namespace fast_lfs::rasterization {
                 nullptr, nullptr, grad_image, grad_alpha, image, alpha,
                 means, scales, rotations, opacities, nullptr, w2c, cam_pos, ctx,
                 nullptr,
-                NUM_GAUSSIANS, 1, 0,
+                NUM_GAUSSIANS, 1, 1,
                 IMG_WIDTH, IMG_HEIGHT, FOCAL, FOCAL, CENTER_X, CENTER_Y, true,
                 DensificationType::None, &warmup_adam);
 

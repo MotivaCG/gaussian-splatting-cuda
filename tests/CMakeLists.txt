@@ -243,6 +243,7 @@ set(TEST_FILES
     test_torch_conversion.cpp
     test_fastgs_kernels.cpp
     test_fastgs_fuzz.cpp
+    test_sh_swizzle_layout.cpp
     test_python_io.cpp
     test_extended_unary_ops_vs_torch.cpp
     # test_property_system.cpp  # Disabled: needs API update after merge
@@ -392,7 +393,7 @@ target_link_libraries(lichtfeld_tests PRIVATE
 )
 
 if(ENABLE_VULKAN_VIEWER)
-    target_link_libraries(lichtfeld_tests PRIVATE lfs_vksplat_fwd Vulkan::Vulkan)
+    target_link_libraries(lichtfeld_tests PRIVATE lfs_vulkan_rasterizer Vulkan::Vulkan)
 endif()
 
 # Compiler options for CUDA debugging
