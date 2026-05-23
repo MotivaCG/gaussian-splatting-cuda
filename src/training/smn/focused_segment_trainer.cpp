@@ -150,16 +150,93 @@ namespace lfs::training {
         bool want_lightness) {
 
         using namespace lfs::core;
-        auto& entry = fs_camera_cache_[cam.uid()];
+        auto& entry = fs_camera_cache_.map[cam.uid()];
 
         if (!entry.has_mask()) {
             const lfs::training::smn::ScopedFsTimer _t(
                 fs_timings_, lfs::training::smn::FsTimerSlot::CacheBuildMask);
             const Tensor mask_f = focused_segment_mask_float(src_mask);
             entry.mask_bool = mask_f.gt(0.5f).contiguous();
-            const float fg = std::max(mask_f.sum().item<float>(), 1.0f); // one-time sync
+
+            // ------------------------------------------------------------------
+            // Three independent morphology passes, one per consumer. See
+            // focused_segment_cache.hpp for what each constant means.
+            //
+            //   FOCUSED_ALPHA_UP_INSET_PX    -> mask_eroded_bool        (alpha-up zone)
+            //   FOCUSED_PHOTO_OUTSET_PX      -> mask_photo_dilated_bool (photometric FG)
+            //   FOCUSED_ALPHA_DOWN_OUTSET_PX -> mask_bg_dilated_bool    (BG_strict outer edge)
+            //
+            // Any radius = 0 collapses its mask to the original (shared
+            // storage, no extra tensor, no GPU work). If two non-zero
+            // dilation radii happen to be equal we still compute them
+            // separately for code simplicity; the cost is one extra bool
+            // tensor (~3 MB/cam at 2K) - negligible vs darkness_fp16 already
+            // cached (~6 MB/cam).
+            //
+            // Dilation: max_pool2d on a {0,1} mask. Erosion: 1 - dilation(1-mask).
+            // Both use kernel = 2*R+1, stride=1, padding=R - same idiom already
+            // used by focused_segment_apply_densification_mask.
+            // ------------------------------------------------------------------
+            constexpr int kErodeR    = lfs::training::smn::FOCUSED_ALPHA_UP_INSET_PX;
+            constexpr int kPhotoDilR = lfs::training::smn::FOCUSED_PHOTO_OUTSET_PX;
+            constexpr int kBgDilR    = lfs::training::smn::FOCUSED_ALPHA_DOWN_OUTSET_PX;
+
+            const Tensor mask_4d = mask_f.unsqueeze(0).unsqueeze(0); // [1,1,H,W]
+
+            // Erosion -> FG_strict (alpha-up safe zone).
+            if constexpr (kErodeR > 0) {
+                constexpr int kErodeK = 2 * kErodeR + 1;
+                const Tensor inv_4d = Tensor::full(mask_4d.shape(), 1.0f, mask_4d.device()) - mask_4d;
+                const Tensor inv_dilated_4d = inv_4d.max_pool2d(kErodeK, 1, kErodeR);
+                const Tensor eroded_4d = Tensor::full(inv_dilated_4d.shape(), 1.0f, inv_dilated_4d.device()) - inv_dilated_4d;
+                entry.mask_eroded_bool = eroded_4d.squeeze(0).squeeze(0).gt(0.5f).contiguous();
+            } else {
+                entry.mask_eroded_bool = entry.mask_bool; // identity (no allocation)
+            }
+
+            // Photometric dilation -> photometric FG region (spatial weight map and darkness boost).
+            if constexpr (kPhotoDilR > 0) {
+                constexpr int kK = 2 * kPhotoDilR + 1;
+                const Tensor dilated_4d = mask_4d.max_pool2d(kK, 1, kPhotoDilR);
+                entry.mask_photo_dilated_bool = dilated_4d.squeeze(0).squeeze(0).gt(0.5f).contiguous();
+            } else {
+                entry.mask_photo_dilated_bool = entry.mask_bool;
+            }
+
+            // BG dilation -> BG_strict outer edge (alpha-down zone is its complement).
+            if constexpr (kBgDilR > 0) {
+                constexpr int kK = 2 * kBgDilR + 1;
+                const Tensor dilated_4d = mask_4d.max_pool2d(kK, 1, kBgDilR);
+                entry.mask_bg_dilated_bool = dilated_4d.squeeze(0).squeeze(0).gt(0.5f).contiguous();
+            } else {
+                // R=0: alpha-down starts exactly at the annotated silhouette.
+                entry.mask_bg_dilated_bool = entry.mask_bool;
+            }
+
+            // Pixel counts derived from the STORED bool tensors so the
+            // dataset-wide stats below and the per-iter normalization in
+            // focused_segment_compute_loss are guaranteed to match exactly the
+            // masks consumed downstream (single source of truth). One sync per
+            // count per camera at first hit; consumed as cached scalars later.
+            const float numel_f = static_cast<float>(mask_f.numel());
+            const float fg         = std::max(entry.mask_bool.to(DataType::Float32).sum().item<float>(), 1.0f);
+            const float fg_eroded  = std::max(entry.mask_eroded_bool.to(DataType::Float32).sum().item<float>(), 1.0f);
+            const float fg_photo   = std::max(entry.mask_photo_dilated_bool.to(DataType::Float32).sum().item<float>(), 1.0f);
+            const float fg_bg_dil  = std::max(entry.mask_bg_dilated_bool.to(DataType::Float32).sum().item<float>(), 1.0f);
             entry.fg_pixels = fg;
-            entry.bg_pixels = std::max(static_cast<float>(mask_f.numel()) - fg, 1.0f);
+            entry.bg_pixels = std::max(numel_f - fg, 1.0f);
+            entry.fg_eroded_pixels = fg_eroded;
+            entry.fg_photo_pixels  = fg_photo;
+            entry.bg_photo_pixels  = std::max(numel_f - fg_photo, 1.0f);
+            entry.bg_strict_pixels = std::max(numel_f - fg_bg_dil, 1.0f);
+
+            // Accumulate dataset-wide running stats. With focused_segment_prewarm_cache
+            // (called once at trainer start) these are complete before iter 1.
+            // The lazy path also keeps working: if prewarm is skipped, the
+            // running mean stabilizes within the first epoch.
+            fs_camera_cache_.stats.total_fg_eroded_pixels += static_cast<double>(entry.fg_eroded_pixels);
+            fs_camera_cache_.stats.total_bg_strict_pixels += static_cast<double>(entry.bg_strict_pixels);
+            fs_camera_cache_.stats.n_cams_with_mask += 1;
         }
 
         if (want_lightness && !entry.has_darkness() && gt_image.is_valid() && gt_image.numel() > 0) {
@@ -173,17 +250,78 @@ namespace lfs::training {
             const Tensor brightness = r * 0.299f + g * 0.587f + b * 0.114f;
             const Tensor darkness = Tensor::full(brightness.shape(), 1.0f, brightness.device()) - brightness;
 
-            // Mean of darkness restricted to FG region. Lets the per-iter
-            // spatial-weight block compute weight_mean analytically without
-            // any GPU sync. One-time cost (single .item<float>()) per camera.
-            const Tensor mask_f_for_mean = entry.mask_bool.to(DataType::Float32);
-            const float sum_dark_fg = (mask_f_for_mean * darkness).sum().item<float>();
-            entry.mean_darkness_fg = sum_dark_fg / entry.fg_pixels;
+            // Mean of darkness restricted to the photometric FG region
+            // (= mask_photo_dilated). Matches the weight_map FG region used
+            // downstream so weight_mean stays exact.
+            const Tensor photo_f = entry.mask_photo_dilated_bool.to(DataType::Float32);
+            const float sum_dark_photo = (photo_f * darkness).sum().item<float>();
+            entry.mean_darkness_photo = sum_dark_photo / entry.fg_photo_pixels;
 
             entry.darkness_fp16 = darkness.to(DataType::Float16).contiguous();
         }
 
         return entry;
+    }
+
+    // =========================================================================
+    // SMN: pre-warm the FocusedSegment per-camera cache for every camera in
+    // the training dataset.
+    //
+    // Without prewarm, the cache is built lazily on first hit per camera. That
+    // means the dataset-wide stats (fs_camera_cache_.stats) start empty and
+    // mature over the first epoch, so the early grad_alpha pressure is
+    // normalized by a partial mean - typically dominated by whichever cameras
+    // happen to be visited first. Pre-warming guarantees the mean is exact
+    // from iteration 1.
+    //
+    // Cost: one disk read + one morphology pass per camera. For ~105 cameras
+    // at 2K this is ~1-3 seconds at trainer start. Darkness is intentionally
+    // left lazy here (would need to load gt images at startup as well,
+    // doubling the cost for marginal benefit).
+    //
+    // No-op when mask_mode != FocusedSegment or when the dataset has no
+    // masked cameras.
+    // =========================================================================
+    void Trainer::focused_segment_prewarm_cache(lfs::training::CameraDataset& dataset) {
+        if (params_.optimization.mask_mode != lfs::core::param::MaskMode::FocusedSegment) {
+            return;
+        }
+
+        const auto& cams = dataset.get_cameras();
+        if (cams.empty()) {
+            return;
+        }
+
+        LOG_INFO("[SMN] FocusedSegment: pre-warming mask cache for {} cameras...", cams.size());
+
+        int n_built = 0;
+        for (const auto& cam_ptr : cams) {
+            if (!cam_ptr || !cam_ptr->has_mask()) {
+                continue;
+            }
+
+            auto mask = cam_ptr->load_and_get_mask(
+                params_.dataset.resize_factor,
+                params_.dataset.max_width,
+                params_.optimization.invert_masks,
+                params_.optimization.mask_threshold);
+
+            if (!mask.is_valid() || mask.numel() == 0) {
+                continue;
+            }
+
+            // Build mask_bool + bands + per-camera counts and accumulate global
+            // stats. Darkness is left for the per-iter loss path so we do not
+            // need to load gt images here.
+            (void)focused_segment_get_cache(
+                *cam_ptr, mask, lfs::core::Tensor(), /*want_lightness=*/false);
+            ++n_built;
+        }
+
+        const auto& s = fs_camera_cache_.stats;
+        LOG_INFO("[SMN] FocusedSegment: pre-warm complete - {} cameras built, "
+                 "mean_fg_eroded={:.0f}px, mean_bg_strict={:.0f}px",
+                 n_built, s.mean_fg_eroded(), s.mean_bg_strict());
     }
 
     // =========================================================================
@@ -346,16 +484,28 @@ namespace lfs::training {
         constexpr float kAlphaFgWeight = 1.5f; // grad_alpha pressure to push FG alpha -> 1
         constexpr float kAlphaBgWeight = 1.0f; // grad_alpha pressure to push BG alpha -> 0
 
-        // SMN per-camera memoization: builds mask_bool, fg/bg pixel counts and,
-        // when darkness_boost is in use, the FP16 darkness map on first hit per
-        // camera. Replaces both the per-iter focused_segment_mask_float() work
-        // and the .sum().item<float>() GPU sync that would otherwise stall the
-        // pipeline every iteration. See smn/focused_segment_cache.hpp.
+        // SMN per-camera memoization: on first hit builds mask_bool, the eroded
+        // and dilated band masks, fg/bg pixel counts (per-band) and, when
+        // darkness_boost is in use, the FP16 darkness map. Also accumulates
+        // dataset-wide pixel-count stats used by the global grad_alpha
+        // normalization below. See smn/focused_segment_cache.hpp.
         const bool want_lightness = FOCUSED_ENABLE_DARKNESS_BOOST && opt_params.darkness_boost > 0.0f;
         const auto& fs_cache = focused_segment_get_cache(cam, mask_2d, gt_image, want_lightness);
 
-        const Tensor mask_f = fs_cache.mask_bool.to(DataType::Float32);
-        const Tensor bg_mask = Tensor::full(mask_f.shape(), 1.0f, mask_f.device()) - mask_f;
+        // Three masks pulled from the cache, each with its own radius:
+        //   - fg_photo   (mask dilated by N for photometric focus, captures
+        //                 fine border features like hair)
+        //   - fg_strict  (mask eroded by X for alpha-UP, safe FG zone)
+        //   - bg_strict  (complement of mask dilated by Y for alpha-DOWN,
+        //                 safe BG zone)
+        // The free band between fg_strict and the complement of bg_strict
+        // receives no alpha pressure - the rasterizer is free to set alpha
+        // however the photometric loss dictates there.
+        const Tensor fg_photo   = fs_cache.mask_photo_dilated_bool.to(DataType::Float32); // photometric FG
+        const Tensor fg_strict  = fs_cache.mask_eroded_bool.to(DataType::Float32);        // alpha-up zone
+        const Tensor fg_bg_dil  = fs_cache.mask_bg_dilated_bool.to(DataType::Float32);    // for BG_strict complement
+        const Tensor bg_photo   = Tensor::full(fg_photo.shape(), 1.0f, fg_photo.device()) - fg_photo;   // photometric BG
+        const Tensor bg_strict  = Tensor::full(fg_bg_dil.shape(), 1.0f, fg_bg_dil.device()) - fg_bg_dil; // alpha-down zone
 
         // Step 1: full-image L1+SSIM forward - identical to None mode, with
         // decoupled appearance gradients when raw_rendered is available.
@@ -396,17 +546,23 @@ namespace lfs::training {
             }
         }
 
-        // Pixel counts come from the SMN cache (no GPU sync). Total is just the
-        // tensor numel (metadata access, no kernel).
-        const float total_pixels = static_cast<float>(mask_f.numel());
-        const float fg_pixels = fs_cache.fg_pixels;
-        const float bg_pixels = fs_cache.bg_pixels;
+        // Pixel counts come from the SMN cache (no GPU sync). Total is just
+        // the tensor numel (metadata access, no kernel). All counts are built
+        // once per camera in focused_segment_get_cache.
+        const float total_pixels   = static_cast<float>(fg_photo.numel());
+        const float fg_photo_count = fs_cache.fg_photo_pixels; // photometric FG area
+        const float bg_photo_count = fs_cache.bg_photo_pixels; // photometric BG area (= total - fg_photo)
 
-        // Step 2+3: spatial weight map - FG=1.0, BG=kBgWeight applied to grad.
-        // Darkness bonus applied to FG only (Rec.601 perceptual luminance from
-        // GT, not rendered). Using GT keeps the weight map stable across
-        // iterations - rendered changes every step. BG stays flat at kBgWeight
-        // regardless of darkness, avoiding spurious BG gradient boosts.
+        // Step 2+3: spatial weight map - FG=1.0 on the photo-dilated mask,
+        // BG=kBgWeight on its complement, applied to grad. The photo-dilated
+        // FG is larger than the original mask so the photometric loss covers
+        // fine border features (hair, fingers) that the annotation typically
+        // cuts too tight.
+        // Darkness bonus applied to photo FG only (Rec.601 perceptual
+        // luminance from GT, not rendered). Using GT keeps the weight map
+        // stable across iterations - rendered changes every step. BG stays
+        // flat at kBgWeight regardless of darkness, avoiding spurious BG
+        // gradient boosts.
         // Multiplying grad post-hoc is exact for L1 (pixel-wise) and a good
         // approximation for SSIM (window-based); in practice this outperforms
         // discarding SSIM gradient entirely.
@@ -419,10 +575,10 @@ namespace lfs::training {
                 // promote to FP32 once for the per-iter math.
                 const Tensor darkness = fs_cache.darkness_fp16.to(DataType::Float32);
                 weight_map =
-                    mask_f * (Tensor::full(darkness.shape(), 1.0f, darkness.device()) + darkness * opt_params.darkness_boost) +
-                    bg_mask * kBgWeight;
+                    fg_photo * (Tensor::full(darkness.shape(), 1.0f, darkness.device()) + darkness * opt_params.darkness_boost) +
+                    bg_photo * kBgWeight;
             } else {
-                weight_map = mask_f + bg_mask * kBgWeight;
+                weight_map = fg_photo + bg_photo * kBgWeight;
             }
 
             // Normalize weight_map by its mean so the global gradient magnitude
@@ -431,14 +587,14 @@ namespace lfs::training {
             //
             // weight_mean computed analytically from cached scalars (no GPU sync).
             // With darkness boost:
-            //   sum(weight_map) = fg * (1 + boost*<darkness>_FG) + bg * kBgWeight
+            //   sum(weight_map) = fg_photo * (1 + boost*<darkness>_photo) + bg_photo * kBgWeight
             // Without darkness boost:
-            //   sum(weight_map) = fg + bg * kBgWeight
-            // weight_mean = sum(weight_map) / total_pixels
+            //   sum(weight_map) = fg_photo + bg_photo * kBgWeight
+            // (fg_photo + bg_photo == total_pixels by construction)
             const float weight_mean = (want_lightness && fs_cache.has_darkness())
-                ? (fs_cache.fg_pixels * (1.0f + opt_params.darkness_boost * fs_cache.mean_darkness_fg)
-                   + fs_cache.bg_pixels * kBgWeight) / total_pixels
-                : (fs_cache.fg_pixels + fs_cache.bg_pixels * kBgWeight) / total_pixels;
+                ? (fg_photo_count * (1.0f + opt_params.darkness_boost * fs_cache.mean_darkness_photo)
+                   + bg_photo_count * kBgWeight) / total_pixels
+                : (fg_photo_count + bg_photo_count * kBgWeight) / total_pixels;
             weight_map = weight_map * (1.0f / std::max(weight_mean, 1e-4f));
 
             const Tensor weight_3d = (corrected.ndim() == 3 && corrected.shape()[0] == 3)
@@ -449,41 +605,42 @@ namespace lfs::training {
                 grad_raw = grad_raw * weight_3d;
             }
 
-            // Rescale scalar loss so logged values track FG reconstruction
-            // quality, not diluted by the large BG area.
-            loss = loss * (fg_pixels / std::max(total_pixels * weight_mean, 1e-6f));
+            // Rescale scalar loss so logged values track the photometric FG
+            // reconstruction quality, not diluted by the large BG area.
+            loss = loss * (fg_photo_count / std::max(total_pixels * weight_mean, 1e-6f));
         }
 
-        // Step 4: pixel-based alpha pressure via grad_alpha. Constant per-pixel
-        // magnitude (no scaling by (1-alpha) or alpha) so the natural gradient
-        // accumulation across views performs an implicit majority vote: each
-        // FG pixel contributes -w_fg*k/fg_pixels to alpha, each BG pixel
-        // contributes +w_bg*k/bg_pixels. If a region is labelled FG in more
-        // views than BG, the net accumulated gradient drives the covering
-        // splats toward opacity, and vice versa, with no per-iteration trick.
+        // Step 4: pixel-based alpha pressure via grad_alpha, applied only on
+        // the SAFE bands of the 3-band scheme.
+        //   - FG_strict (eroded by FOCUSED_ALPHA_UP_INSET_PX): push alpha UP
+        //   - BG_strict (complement of dilated):            push alpha DOWN
+        //   - free band (between them):                     no pressure
         //
-        // Earlier formulations scaled by (1-alpha)/alpha for "self-regulation"
-        // (zero pressure when already correct, max when wrong). That broke
-        // majority vote: at alpha=0.9 a BG vote contributed 0.9 while an FG
-        // vote only 0.1, so a few wrong masks could outweigh many correct ones
-        // even when alpha was already high. Trusting the gradient accumulation
-        // gives the expected behavior: more votes win, period.
+        // The free band absorbs almost all mask-annotation errors (which are
+        // overwhelmingly border errors), so a single bad mask cannot push a
+        // splat in the wrong direction in the strict regions: those regions
+        // are unambiguous even in noisy annotations.
         //
-        // Per-area normalization (/fg_pixels, /bg_pixels) keeps the total
-        // scalar pressure bounded by the user-set weights so neither side
-        // overwhelms the photometric loss. The asymmetry it introduces
-        // (each FG pixel matters more than each BG pixel because fg_pixels
-        // << bg_pixels in dome captures) is intentional: the subject is small,
-        // each FG pixel carries more information.
+        // Normalization (CHANGED from per-camera 1/fg_pixels to dataset-wide
+        // 1/mean_fg_eroded): each pixel contributes a constant amount across
+        // ALL cameras of the dataset. With per-camera normalization, a bad
+        // mask labelling almost everything as FG (tiny per-pixel push, but
+        // huge area) would still dominate the BG term of OTHER cameras
+        // through its mirror behavior in BG; conversely a mask with tiny FG
+        // would have enormous per-pixel push and one such outlier could
+        // overwhelm many correct votes. Normalizing by the dataset mean makes
+        // each camera contribute pressure proportional to its area, so bad
+        // outliers (extreme area on either side) cannot dominate the natural
+        // multi-view majority vote.
         //
-        // NOTE: modifying the scalar `loss` does NOT affect Gaussian parameters
-        // - only grad_image and grad_alpha propagate through rasterize_backward
-        // to the optimizer. Alpha pressure is therefore applied purely through
-        // grad_alpha.
+        // The accumulators live in fs_camera_cache_.stats and update lazily as
+        // cameras are visited. During the very first epoch some cameras may
+        // not have contributed yet, in which case the running mean is
+        // already representative after a few iterations (one camera per iter).
         //
         // Sign convention (gradient descent: param -= lr * grad):
-        //   FG: negative grad_alpha  -> alpha_raw increases -> rendered alpha approaches 1
-        //   BG: positive grad_alpha  -> alpha_raw decreases -> rendered alpha approaches 0
+        //   FG_strict: negative grad_alpha -> alpha_raw increases -> alpha -> 1
+        //   BG_strict: positive grad_alpha -> alpha_raw decreases -> alpha -> 0
         Tensor grad_alpha;
         const float w_fg = opt_params.mask_opacity_penalty_weight;
         const float w_bg = opt_params.mask_opacity_penalty_weight_bg;
@@ -492,14 +649,18 @@ namespace lfs::training {
         if (alpha.is_valid() && (apply_fg || apply_bg)) {
             const lfs::training::smn::ScopedFsTimer _t_ga(
                 fs_timings_, lfs::training::smn::FsTimerSlot::ComputeLossGradAlpha);
+
+            const float mean_fg = std::max(fs_camera_cache_.stats.mean_fg_eroded(), 1.0f);
+            const float mean_bg = std::max(fs_camera_cache_.stats.mean_bg_strict(), 1.0f);
+
             Tensor fg_term;
             if (apply_fg) {
-                fg_term = mask_f * (w_fg * kAlphaFgWeight / fg_pixels);
+                fg_term = fg_strict * (w_fg * kAlphaFgWeight / mean_fg);
             }
 
             Tensor bg_term;
             if (apply_bg) {
-                bg_term = bg_mask * (w_bg * kAlphaBgWeight / bg_pixels);
+                bg_term = bg_strict * (w_bg * kAlphaBgWeight / mean_bg);
             }
 
             if (bg_term.is_valid() && fg_term.is_valid()) {
@@ -646,25 +807,40 @@ namespace lfs::training {
 
         // ---- 3. Sample mask at projected centers ----
         // Pull from the SMN per-camera cache: avoids re-running
-        // focused_segment_mask_float() per iter and shares the bool buffer
+        // focused_segment_mask_float() per iter and shares the band buffers
         // already populated by focused_segment_compute_loss.
+        //
+        // 3-band semantics for the center penalty (mirrors the pixel-level
+        // grad_alpha policy):
+        //   - splat center in FG_strict  (mask_eroded)              -> FG fill
+        //   - splat center in BG_strict  (NOT mask_bg_dilated)      -> BG push
+        //   - splat center in the free band (between the two)        -> no penalty
+        // Only press where we are confident, leave the silhouette to the
+        // photometric loss.
         const auto& fs_cache = focused_segment_get_cache(cam, mask, lfs::core::Tensor(), /*want_lightness=*/false);
         auto lin_idx = (y_px * Wf + x_px).to(DataType::Int64); // [N] int64
-        auto mask_flat = fs_cache.mask_bool.to(DataType::Float32).reshape({static_cast<int>(H * W)}); // [H*W]
-        auto is_inside = mask_flat.gather(0, lin_idx); // [N] float {0..1}
+        auto eroded_flat     = fs_cache.mask_eroded_bool.to(DataType::Float32).reshape({static_cast<int>(H * W)});
+        auto bg_dilated_flat = fs_cache.mask_bg_dilated_bool.to(DataType::Float32).reshape({static_cast<int>(H * W)});
+        auto is_in_fg_strict  = eroded_flat.gather(0, lin_idx);     // [N] {0,1}
+        auto is_in_bg_dilated = bg_dilated_flat.gather(0, lin_idx); // [N] {0,1}
+        auto is_in_bg_strict  = Tensor::full({N}, 1.0f, Device::CUDA) - is_in_bg_dilated; // [N] {0,1}
 
         // ---- 4. Compute opacity gradient ----
-        // For splats outside the mask: positive gradient pushes raw opacity down (sigmoid decreases).
-        // For splats inside the mask: small negative gradient fills transparency holes.
+        // For splats whose center is in BG_strict: positive gradient pushes
+        // raw opacity down. For splats in FG_strict: small negative gradient
+        // fills transparency holes. Splats in the free band fall through with
+        // zero gradient in both terms.
         constexpr float kOutWeight = FOCUSED_ENABLE_CENTER_PENALTY_BG      ? 1.5f  : 0.0f; // BG center penalty strength
         constexpr float kInWeight  = FOCUSED_ENABLE_CENTER_PENALTY_FG_FILL ? 0.05f : 0.0f; // gentle FG fill (most work done by grad_alpha)
 
-        auto is_outside = (Tensor::full({N}, 1.0f, Device::CUDA) - is_inside);
         auto valid_f = valid.to(DataType::Float32); // [N] float {0, 1}
 
-        // Gradient w.r.t. activated opacity (sigmoid output)
+        // Gradient w.r.t. activated opacity (sigmoid output).
+        // is_in_bg_strict and is_in_fg_strict are mutually exclusive by
+        // construction (eroded subset of dilated), so the free band cleanly
+        // contributes 0 to both terms.
         auto grad_activated = valid_f *
-            (is_outside * kOutWeight - is_inside * kInWeight) *
+            (is_in_bg_strict * kOutWeight - is_in_fg_strict * kInWeight) *
             (w_bg / static_cast<float>(N));  // normalize by splat count
 
         // Chain rule: d(loss)/d(raw) = d(loss)/d(sigmoid) * sigmoid'(raw)

@@ -3909,6 +3909,8 @@ namespace lfs::training {
                 memory_breakdown_logged_train_setup_ = true;
             }
 
+            focused_segment_prewarm_cache(*train_dataset_); // SMN: pre-build mask cache & dataset stats
+
             LOG_DEBUG("Starting training iterations");
             while (iter <= get_total_iterations()) {
                 lfs::core::Tensor::set_memory_pool_iteration(iter);

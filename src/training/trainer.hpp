@@ -571,6 +571,13 @@ namespace lfs::training {
             const lfs::core::Tensor& gt_image,
             bool want_lightness);
 
+        // SMN-only. Pre-build the per-camera cache (mask + 3-band masks +
+        // pixel counts) for every camera in the dataset and finalize the
+        // dataset-wide stats before the first training iteration. See
+        // smn/focused_segment_trainer.cpp for rationale. No-op outside
+        // FocusedSegment mode.
+        void focused_segment_prewarm_cache(lfs::training::CameraDataset& dataset);
+
         lfs::training::smn::FocusedSegmentCameraCacheMap fs_camera_cache_;
 
         // ----- SMN-only per-subtask timings (FocusedSegment + post-prune) --------
