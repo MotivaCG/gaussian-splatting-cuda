@@ -204,10 +204,22 @@ namespace lfs::training {
             }
 
             // BG dilation -> BG_strict outer edge (alpha-down zone is its complement).
+            // Signed: positive dilates, zero leaves the mask as is, negative
+            // erodes (alpha-down extends |R| px INSIDE the silhouette to kill
+            // halo splats sitting in the outer ring of an over-generous mask).
             if constexpr (kBgDilR > 0) {
                 constexpr int kK = 2 * kBgDilR + 1;
                 const Tensor dilated_4d = mask_4d.max_pool2d(kK, 1, kBgDilR);
                 entry.mask_bg_dilated_bool = dilated_4d.squeeze(0).squeeze(0).gt(0.5f).contiguous();
+            } else if constexpr (kBgDilR < 0) {
+                constexpr int kAbsR = -kBgDilR;
+                constexpr int kK = 2 * kAbsR + 1;
+                // Erosion via 1 - dilate(1 - mask, |R|). Same idiom as the
+                // alpha-up zone build above.
+                const Tensor inv_4d = Tensor::full(mask_4d.shape(), 1.0f, mask_4d.device()) - mask_4d;
+                const Tensor inv_dilated_4d = inv_4d.max_pool2d(kK, 1, kAbsR);
+                const Tensor eroded_4d = Tensor::full(inv_dilated_4d.shape(), 1.0f, inv_dilated_4d.device()) - inv_dilated_4d;
+                entry.mask_bg_dilated_bool = eroded_4d.squeeze(0).squeeze(0).gt(0.5f).contiguous();
             } else {
                 // R=0: alpha-down starts exactly at the annotated silhouette.
                 entry.mask_bg_dilated_bool = entry.mask_bool;
