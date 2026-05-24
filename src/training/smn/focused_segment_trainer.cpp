@@ -43,7 +43,7 @@ namespace lfs::training {
 
         // Densification (focused_segment_apply_densification_mask).
         // FOCUSED_DENSIFY_DILATE_RADIUS below still controls the dilation size.
-        constexpr bool FOCUSED_ENABLE_DENSIFY_DILATION = true;
+        constexpr bool FOCUSED_ENABLE_DENSIFY_DILATION = true; // dilate the mask before applying it to the densification error map
 
         // Splat-level center penalty (focused_segment_apply_center_penalty).
         constexpr bool FOCUSED_ENABLE_CENTER_PENALTY         = true; // master switch (skips hook entirely)
@@ -63,6 +63,101 @@ namespace lfs::training {
         constexpr bool FOCUSED_ENABLE_PRUNE_ISOLATION        = true;
         constexpr bool FOCUSED_ENABLE_PRUNE_ELLIPSE_BOUNDARY = false; // could introduce holes
         constexpr bool FOCUSED_ENABLE_PRUNE_CLUSTER_EXTREME  = false; // Off by default (slow + experimental)
+
+        // =====================================================================
+        // FocusedSegment band radii (pixels). One independent knob per
+        // consumer.
+        //
+        // Kept here (in the .cpp's anonymous namespace) rather than in
+        // focused_segment_cache.hpp on purpose: changing any of these is a
+        // common tuning operation, and pulling them out of the header turns
+        // it from a ~11 min full-project rebuild into a ~1 min single-file
+        // recompile + relink.
+        //
+        // Naming convention:
+        //   <consumer>_INSET_PX   -> how far the zone steps INTO the mask
+        //   <consumer>_OUTSET_PX  -> how far the zone steps OUT of the mask
+        // =====================================================================
+
+        /// How many pixels INSIDE the annotated mask the alpha-UP zone starts.
+        /// Built as: mask_eroded = erode(mask, N).
+        /// Consumed by:
+        ///   - per-pixel grad_alpha FG term (pushes alpha -> 1)
+        ///   - center penalty FG fill (bonus opacity for splats with center inside)
+        ///
+        /// Raising it = alpha-up trusted only deeper inside the silhouette.
+        /// The outer ring (last N px before the border) gets no alpha-up
+        /// pressure and is left to the photometric loss. Protects the subject
+        /// when some masks are buggy near the silhouette ("this border pixel
+        /// is BG" votes from bad masks do not destroy opacity on the rest of
+        /// the body). Cost of being generous: low.
+        constexpr int FOCUSED_ALPHA_UP_INSET_PX = 7;
+
+        /// How many pixels OUTSIDE the annotated mask the photometric attention
+        /// extends. Built as: mask_photo = dilate(mask, N).
+        /// Consumed by:
+        ///   - spatial weight map FG region (FG weight 1.0, BG weight kBgWeight
+        ///     applied to its complement)
+        ///   - darkness boost area (linked to the FG region of the weight map)
+        ///
+        /// Raising it = photometric loss "sees" more border pixels as FG,
+        /// which gives correct-color signal to splats covering fine features
+        /// the matting trimmed (hair, fingers, eyelashes). Cost of being
+        /// generous: some BG pixels near the border get weighted at FG level
+        /// - mild dilution of background photometric signal AND, more
+        /// importantly, if the matting includes any BG fuzz in that ring the
+        /// photo loss will obligate the model to reconstruct it (= halos).
+        constexpr int FOCUSED_PHOTO_OUTSET_PX = 0;
+
+        /// SIGNED. How far from the annotated mask the alpha-DOWN zone starts.
+        /// Built as:
+        ///     N > 0  -> BG_strict = NOT dilate(mask,  N)
+        ///     N = 0  -> BG_strict = NOT mask
+        ///     N < 0  -> BG_strict = NOT erode (mask, |N|)
+        /// Consumed by:
+        ///   - per-pixel grad_alpha BG term (pushes alpha -> 0)
+        ///   - center penalty BG push (kills opacity for splats with center
+        ///     clearly in BG)
+        ///
+        /// THIS IS THE ANTI-HALO KNOB.
+        ///
+        ///   N > 0  : alpha-down starts N px OUTSIDE the silhouette. Opens a
+        ///            ring just outside the mask where splats are protected -
+        ///            this is where bright "halo" splats nucleate. Use only
+        ///            when you need to recover fine border features at the
+        ///            cost of some halos.
+        ///
+        ///   N = 0  : alpha-down starts exactly at the silhouette (matches
+        ///            the old trainer_oldmode.cpp). Kills any splat with
+        ///            center outside the matting cut.
+        ///
+        ///   N < 0  : alpha-down extends |N| px INSIDE the silhouette. Kills
+        ///            "fuzz" / halo splats whose center sits in the outer
+        ///            ring of the matting (typical when the matting is over-
+        ///            generous and includes a few px of background around
+        ///            fine hair). The rendered silhouette contracts to
+        ///            roughly (mask - |N|).
+        ///
+        /// Note: very negative values also DILUTE per-pixel BG pressure
+        /// (the global mean_bg_strict grows -> grad_alpha_BG / mean_bg
+        /// shrinks). Keep |N| moderate (0 to 3) for the best tradeoff.
+        ///
+        /// Constraint when negative: |N| must be < FOCUSED_ALPHA_UP_INSET_PX,
+        /// otherwise alpha-up and alpha-down overlap in the same ring and
+        /// their gradients fight each other.
+        constexpr int FOCUSED_ALPHA_DOWN_OUTSET_PX = 0;
+
+        // Sanity: when the alpha-down outset is negative it eats INTO the FG
+        // side of the band; if it eats as far as (or past) the alpha-up
+        // inset, the two zones overlap and their gradients pull a single
+        // ring in opposite directions every iteration. Forbid that at
+        // compile time.
+        static_assert(
+            FOCUSED_ALPHA_DOWN_OUTSET_PX >= 0 ||
+                (-FOCUSED_ALPHA_DOWN_OUTSET_PX) < FOCUSED_ALPHA_UP_INSET_PX,
+            "FOCUSED_ALPHA_DOWN_OUTSET_PX is negative AND its magnitude reaches "
+            "the alpha-up zone. Pick |OUTSET| < FOCUSED_ALPHA_UP_INSET_PX so the "
+            "two rings do not overlap.");
 
         // FocusedSegment densification mask dilation radius (in pixels).
         //
@@ -177,9 +272,9 @@ namespace lfs::training {
             // Both use kernel = 2*R+1, stride=1, padding=R - same idiom already
             // used by focused_segment_apply_densification_mask.
             // ------------------------------------------------------------------
-            constexpr int kErodeR    = lfs::training::smn::FOCUSED_ALPHA_UP_INSET_PX;
-            constexpr int kPhotoDilR = lfs::training::smn::FOCUSED_PHOTO_OUTSET_PX;
-            constexpr int kBgDilR    = lfs::training::smn::FOCUSED_ALPHA_DOWN_OUTSET_PX;
+            constexpr int kErodeR    = FOCUSED_ALPHA_UP_INSET_PX;
+            constexpr int kPhotoDilR = FOCUSED_PHOTO_OUTSET_PX;
+            constexpr int kBgDilR    = FOCUSED_ALPHA_DOWN_OUTSET_PX;
 
             const Tensor mask_4d = mask_f.unsqueeze(0).unsqueeze(0); // [1,1,H,W]
 
