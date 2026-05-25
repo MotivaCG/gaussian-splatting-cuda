@@ -61,7 +61,7 @@ namespace lfs::training {
         constexpr bool FOCUSED_ENABLE_PRUNE_CENTER_VOTE      = true;
         constexpr bool FOCUSED_ENABLE_PRUNE_MASK_LEAKAGE     = true;
         constexpr bool FOCUSED_ENABLE_PRUNE_ISOLATION        = true;
-        constexpr bool FOCUSED_ENABLE_PRUNE_ELLIPSE_BOUNDARY = false; // could introduce holes
+        constexpr bool FOCUSED_ENABLE_PRUNE_ELLIPSE_BOUNDARY = true; // catches elongated spike splats
         constexpr bool FOCUSED_ENABLE_PRUNE_CLUSTER_EXTREME  = false; // Off by default (slow + experimental)
 
         // =====================================================================
@@ -93,20 +93,34 @@ namespace lfs::training {
         /// the body). Cost of being generous: low.
         constexpr int FOCUSED_ALPHA_UP_INSET_PX = 7;
 
-        /// How many pixels OUTSIDE the annotated mask the photometric attention
-        /// extends. Built as: mask_photo = dilate(mask, N).
+        /// SIGNED. How far from the annotated mask the photometric FG region
+        /// reaches. Built as:
+        ///     N > 0  -> mask_photo = dilate(mask,  N)
+        ///     N = 0  -> mask_photo = mask
+        ///     N < 0  -> mask_photo = erode (mask, |N|)
         /// Consumed by:
         ///   - spatial weight map FG region (FG weight 1.0, BG weight kBgWeight
         ///     applied to its complement)
         ///   - darkness boost area (linked to the FG region of the weight map)
         ///
-        /// Raising it = photometric loss "sees" more border pixels as FG,
-        /// which gives correct-color signal to splats covering fine features
-        /// the matting trimmed (hair, fingers, eyelashes). Cost of being
-        /// generous: some BG pixels near the border get weighted at FG level
-        /// - mild dilution of background photometric signal AND, more
-        /// importantly, if the matting includes any BG fuzz in that ring the
-        /// photo loss will obligate the model to reconstruct it (= halos).
+        ///   N > 0 : photo loss "sees" more border pixels as FG, giving
+        ///           correct-color signal to splats covering fine features the
+        ///           matting trimmed (hair, fingers, eyelashes). Cost: if the
+        ///           matting includes any BG fuzz in that ring, the photo
+        ///           loss will obligate the model to reconstruct it (=halos).
+        ///
+        ///   N = 0 : photo follows the annotated silhouette exactly.
+        ///
+        ///   N < 0 : photo region SHRINKS by |N| px inside the silhouette.
+        ///           The outer ring (last |N| px of the mask interior) gets
+        ///           BG weight (0.05) instead of FG weight. Use when the
+        ///           matting is over-generous and includes BG fuzz inside its
+        ///           annotated boundary: telling the model "do not try hard
+        ///           to reconstruct that ring" lets it converge to either
+        ///           dark BG or transparent without fighting a high-weight
+        ///           photo gradient that wants to keep the fuzz. Pairs well
+        ///           with negative ALPHA_DOWN_OUTSET for cleanest silhouette
+        ///           on over-generous mattings.
         constexpr int FOCUSED_PHOTO_OUTSET_PX = 0;
 
         /// SIGNED. How far from the annotated mask the alpha-DOWN zone starts.
@@ -290,10 +304,22 @@ namespace lfs::training {
             }
 
             // Photometric dilation -> photometric FG region (spatial weight map and darkness boost).
+            // Signed: positive dilates (photo extends past mask), zero is the
+            // identity, negative erodes (photo region shrinks inside the mask
+            // to dampen the photo loss on over-generous matting borders).
             if constexpr (kPhotoDilR > 0) {
                 constexpr int kK = 2 * kPhotoDilR + 1;
                 const Tensor dilated_4d = mask_4d.max_pool2d(kK, 1, kPhotoDilR);
                 entry.mask_photo_dilated_bool = dilated_4d.squeeze(0).squeeze(0).gt(0.5f).contiguous();
+            } else if constexpr (kPhotoDilR < 0) {
+                constexpr int kAbsR = -kPhotoDilR;
+                constexpr int kK = 2 * kAbsR + 1;
+                // Erosion via 1 - dilate(1 - mask, |R|). Same idiom used for
+                // the alpha-up zone and (when negative) the alpha-down zone.
+                const Tensor inv_4d = Tensor::full(mask_4d.shape(), 1.0f, mask_4d.device()) - mask_4d;
+                const Tensor inv_dilated_4d = inv_4d.max_pool2d(kK, 1, kAbsR);
+                const Tensor eroded_4d = Tensor::full(inv_dilated_4d.shape(), 1.0f, inv_dilated_4d.device()) - inv_dilated_4d;
+                entry.mask_photo_dilated_bool = eroded_4d.squeeze(0).squeeze(0).gt(0.5f).contiguous();
             } else {
                 entry.mask_photo_dilated_bool = entry.mask_bool;
             }
@@ -486,7 +512,7 @@ namespace lfs::training {
         constexpr float kNoneEnd = 0.15f; // End of warm-up with masking disabled.
         constexpr float kBgSpatialRampEnd = 0.25f; // End of BG spatial weighting ramp.
         constexpr float kBgTarget = 0.05f; // Active-phase BG gradient weight (FG focused)
-        constexpr float kBgTargetFree = 0.08f; // Free-refinement BG weight - slightly higher
+        constexpr float kBgTargetFree = 0.1f; // Free-refinement BG weight - slightly higher
                                                // than kBgTarget to allow gentle BG refinement
                                                // without reintroducing detail. Kept low to help
                                                // fine silhouettes (hair) stay sharp.
@@ -510,7 +536,7 @@ namespace lfs::training {
         static_assert(kBgSpatialRampEnd < kFgAlphaRampStart, "BG spatial ramp must finish before FG alpha penalty starts");
         static_assert(kFgAlphaRampEnd <= kBgAlphaRampStart, "FG alpha penalty must reach full before BG joins");
         static_assert(kBgAlphaRampEnd <= kAlphaDecayStart, "Both at full before decay starts");
-
+        
         if (progress < kNoneEnd) {
             step_params.mask_mode = lfs::core::param::MaskMode::None;
             step_params.focused_bg_weight = 1.0f;
@@ -762,7 +788,30 @@ namespace lfs::training {
 
             Tensor fg_term;
             if (apply_fg) {
-                fg_term = fg_strict * (w_fg * kAlphaFgWeight / mean_fg);
+                // Modulate alpha-up by GT darkness when available: full pressure
+                // on dark FG pixels (where photo alone cannot disambiguate FG
+                // from BG - dark hair, shadowed concave zones), low pressure on
+                // bright FG pixels (where photo already provides decisive
+                // signal, and forcing opacity would lock SH to wrong colors
+                // from per-view contamination - e.g. backlight bleed visible
+                // through fine hair).
+                //
+                // The darkness map is the same one already cached and used by
+                // the spatial weight map's darkness boost - zero extra GPU
+                // work, zero extra memory.
+                //
+                // NOTE: total alpha-up magnitude drops by ~mean(darkness)
+                // (typically 0.4-0.6). If pelo oscuro pierde proteccion, sube
+                // mask_opacity_penalty_weight 2x desde CLI para compensar.
+                //
+                // Falls back to flat (un-modulated) alpha-up if darkness is not
+                // cached (e.g. darkness_boost disabled in the current phase).
+                if (fs_cache.has_darkness()) {
+                    const Tensor darkness = fs_cache.darkness_fp16.to(DataType::Float32);
+                    fg_term = fg_strict * darkness * (w_fg * kAlphaFgWeight / mean_fg);
+                } else {
+                    fg_term = fg_strict * (w_fg * kAlphaFgWeight / mean_fg);
+                }
             }
 
             Tensor bg_term;
@@ -1108,7 +1157,7 @@ namespace lfs::training {
         // because their center is inside the mask.
         mask_pruning::EllipseBoundaryPruningConfig ellipse_cfg;
         ellipse_cfg.enabled = true;
-        ellipse_cfg.mask_expansion_fraction = 0.02f; // ~4px at 2K - tighter than default to catch thin spikes
+        ellipse_cfg.mask_expansion_fraction = 0.005f; // ~10px at 2K - aggressive to catch thin dark edge fringes (was 0.02 = ~40px, too generous)
         ellipse_cfg.negative_vote_threshold = 0.10f; // remove if >=10% of evaluating cameras flagged leakage
         ellipse_cfg.min_evaluating_cameras = 3;
         ellipse_cfg.invert_masks = invert_masks;
