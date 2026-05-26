@@ -91,7 +91,7 @@ namespace lfs::training {
         /// when some masks are buggy near the silhouette ("this border pixel
         /// is BG" votes from bad masks do not destroy opacity on the rest of
         /// the body). Cost of being generous: low.
-        constexpr int FOCUSED_ALPHA_UP_INSET_PX = 7;
+        constexpr int FOCUSED_ALPHA_UP_INSET_PX = 3;
 
         /// SIGNED. How far from the annotated mask the photometric FG region
         /// reaches. Built as:
@@ -527,11 +527,12 @@ namespace lfs::training {
         constexpr float kAlphaDecayStart = 0.75f; // Start relaxing alpha pressure toward residual floors.
         constexpr float kAlphaDecayEnd = 0.85f; // End of decay; residual floors remain until training ends.
 
-        constexpr float kFgAlphaFloorValue = 0.01f;  // FG residual alpha penalty after decay.
-        constexpr float kBgAlphaFloorValue = 0.03f; // BG residual alpha penalty after decay.
-                                                     // Prevents BG opacity from creeping back
-                                                     // in concave regions (between legs, armpits)
-                                                     // during the free refinement phase.
+        constexpr float kAlphaPenaltyMult = 0.0066;
+        constexpr float kFgAlphaFloorValue = 1.0f * kAlphaPenaltyMult; // FG residual alpha penalty after decay.
+        constexpr float kBgAlphaFloorValue = 3.0f * kAlphaPenaltyMult; // BG residual alpha penalty after decay.
+                                                                       // Prevents BG opacity from creeping back
+                                                                       // in concave regions (between legs, armpits)
+                                                                       // during the free refinement phase.
 
         static_assert(kBgSpatialRampEnd < kFgAlphaRampStart, "BG spatial ramp must finish before FG alpha penalty starts");
         static_assert(kFgAlphaRampEnd <= kBgAlphaRampStart, "FG alpha penalty must reach full before BG joins");
