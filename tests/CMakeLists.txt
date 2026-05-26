@@ -90,7 +90,6 @@ set(BENCHMARK_FILES
     benchmark_scheduler.cpp
     benchmark_losses.cpp
     benchmark_ppisp_controller.cpp
-    benchmark_selection_modes.cpp
     # profile_adam_optimizer.cpp  # Disabled - missing header
     test_tensor_benchmark.cpp
     test_memory_pool_benchmark.cpp
@@ -289,9 +288,7 @@ set(TEST_FILES
     test_tensor_stream.cpp
     test_tensor_memory_planner.cpp
 )
-if(ENABLE_VULKAN_VIEWER)
-    list(APPEND TEST_FILES test_vksplat_input_packer.cpp)
-endif()
+list(APPEND TEST_FILES test_vksplat_input_packer.cpp)
 
 # Build test sources list
 set(TEST_SOURCES test_main.cpp)
@@ -392,9 +389,7 @@ target_link_libraries(lichtfeld_tests PRIVATE
     spdlog::spdlog
 )
 
-if(ENABLE_VULKAN_VIEWER)
-    target_link_libraries(lichtfeld_tests PRIVATE lfs_vulkan_rasterizer Vulkan::Vulkan)
-endif()
+target_link_libraries(lichtfeld_tests PRIVATE lfs_vulkan_rasterizer Vulkan::Vulkan)
 
 # Compiler options for CUDA debugging
 target_compile_options(lichtfeld_tests PRIVATE

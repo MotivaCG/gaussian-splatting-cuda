@@ -33,6 +33,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -123,6 +124,7 @@ namespace lfs::vis {
 
             bool isCapturingInput() const;
             bool isModalWindowOpen() const;
+            [[nodiscard]] bool passiveMouseMoveNeedsRender(float mouse_x, float mouse_y) const;
             [[nodiscard]] bool isStartupVisible() const { return startup_overlay_.isVisible(); }
             void dismissStartupOverlay();
             void captureKey(int physical_key, int logical_key, int mods);
@@ -197,9 +199,22 @@ namespace lfs::vis {
             void initCustomCursors();
             void destroyCustomCursors();
             void applyRmlCursorRequest(RmlCursorRequest req);
+            struct DevResourceScanResult {
+                std::unordered_map<std::string, std::filesystem::file_time_type> file_times;
+                bool rml_changed = false;
+                bool locale_changed = false;
+                bool scan_failed = false;
+            };
             void initDevResourceHotReload();
             void pollDevResourceHotReload();
-            std::pair<bool, bool> scanDevResourceFiles(bool detect_changes);
+            DevResourceScanResult scanDevResourceFiles(bool detect_changes);
+            static DevResourceScanResult scanDevResourceFilesSnapshot(
+                std::filesystem::path rml_dir,
+                std::filesystem::path locale_dir,
+                std::unordered_map<std::string, std::filesystem::file_time_type> previous_times,
+                bool detect_changes);
+            void launchDevResourceScan();
+            bool consumeDevResourceScanResult();
             bool shouldDeferDevResourceHotReload() const;
             bool reloadLocalizationResources();
             void reloadRmlResources();
@@ -330,6 +345,7 @@ namespace lfs::vis {
                 std::filesystem::path locale_dir;
                 std::unordered_map<std::string, std::filesystem::file_time_type> file_times;
                 std::chrono::steady_clock::time_point next_scan{};
+                std::future<DevResourceScanResult> scan_future;
                 bool pending_rml_reload = false;
                 bool pending_locale_reload = false;
             };

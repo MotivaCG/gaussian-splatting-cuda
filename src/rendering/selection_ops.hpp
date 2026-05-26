@@ -31,30 +31,12 @@ namespace lfs::rendering {
         bool* selection,
         int n_primitives);
 
-    void rect_select_mode(
-        const float2* positions,
-        float x0,
-        float y0,
-        float x1,
-        float y1,
-        bool* selection,
-        int n_primitives,
-        bool add_mode);
-
     void polygon_select(
         const float2* positions,
         const float2* polygon,
         int num_vertices,
         bool* selection,
         int n_primitives);
-
-    void polygon_select_mode(
-        const float2* positions,
-        const float2* polygon,
-        int num_vertices,
-        bool* selection,
-        int n_primitives,
-        bool add_mode);
 
     void set_selection_element(bool* selection, int index, bool value);
 
@@ -73,25 +55,10 @@ namespace lfs::rendering {
         float y1,
         Tensor& selection_out);
 
-    void rect_select_mode_tensor(
-        const Tensor& screen_positions,
-        float x0,
-        float y0,
-        float x1,
-        float y1,
-        Tensor& selection_out,
-        bool add_mode);
-
     void polygon_select_tensor(
         const Tensor& screen_positions,
         const Tensor& polygon_vertices,
         Tensor& selection_out);
-
-    void polygon_select_mode_tensor(
-        const Tensor& screen_positions,
-        const Tensor& polygon_vertices,
-        Tensor& selection_out,
-        bool add_mode);
 
     void apply_selection_group_tensor(
         const Tensor& cumulative_selection,

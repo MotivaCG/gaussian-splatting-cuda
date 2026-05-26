@@ -44,6 +44,21 @@ PACK_STRUCT(struct VulkanGSSelectionMaskUniforms {
     float cy;
     float dist_coeffs[4];
     float world_view_transform[16];
+    uint32_t aabb_x0;
+    uint32_t aabb_y0;
+    uint32_t aabb_w;
+    uint32_t aabb_h;
+});
+
+PACK_STRUCT(struct VulkanGSSelectionPolygonRasterizeUniforms {
+    uint32_t vertex_count;
+    uint32_t aabb_x0;
+    uint32_t aabb_y0;
+    uint32_t aabb_w;
+    uint32_t aabb_h;
+    uint32_t pad0;
+    uint32_t pad1;
+    uint32_t pad2;
 });
 
 class VulkanGSRenderer : public VulkanGSPipeline {
@@ -92,7 +107,12 @@ public:
                               const _VulkanBuffer& node_mask,
                               const _VulkanBuffer& primitives,
                               const _VulkanBuffer& model_transforms,
-                              const _VulkanBuffer& selection_out);
+                              const _VulkanBuffer& selection_out,
+                              const _VulkanBuffer& polygon_mask);
+
+    void executeSelectionPolygonRasterize(const VulkanGSSelectionPolygonRasterizeUniforms& uniforms,
+                                          const _VulkanBuffer& polygon_vertices,
+                                          const _VulkanBuffer& polygon_mask);
 
     void executeCalculateIndexBufferOffset(const VulkanGSRendererUniforms& uniforms,
                                            VulkanGSPipelineBuffers& buffers);
@@ -119,7 +139,8 @@ protected:
 
     _ComputePipeline pipeline_projection_forward = _ComputePipeline(19);
     _ComputePipeline pipeline_projection_forward_3dgut = _ComputePipeline(19);
-    _ComputePipeline pipeline_selection_mask = _ComputePipeline(8);
+    _ComputePipeline pipeline_selection_mask = _ComputePipeline(9);
+    _ComputePipeline pipeline_selection_polygon_rasterize = _ComputePipeline(2);
     _ComputePipeline pipeline_generate_keys = _ComputePipeline(7);
     _ComputePipeline pipeline_seed_primitive_indices = _ComputePipeline(1);
     _ComputePipeline pipeline_apply_depth_ordering = _ComputePipeline(3);

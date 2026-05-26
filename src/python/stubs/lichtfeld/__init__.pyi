@@ -1296,6 +1296,16 @@ def render_at(eye: tuple[float, float, float], target: tuple[float, float, float
     Render scene from eye looking at target. Returns [H,W,3] RGB tensor or None.
     """
 
+def render_asset_preview(path: str, width: int = 512, height: int = 224, focal_length_mm: float = 35.0) -> Tensor | None:
+    """
+    Render an asset from the framed home camera into an offscreen thumbnail without mutating the live scene.
+    """
+
+def render_asset_preview_from_camera(path: str, eye: tuple[float, float, float], target: tuple[float, float, float], width: int = 512, height: int = 224, focal_length_mm: float = 35.0, up: tuple[float, float, float] = (0.0, 1.0, 0.0)) -> Tensor | None:
+    """
+    Render an asset from a custom camera pose into an offscreen thumbnail without mutating the live scene.
+    """
+
 def get_render_scene() -> scene.Scene | None:
     """Get the current render scene (None if not available)"""
 

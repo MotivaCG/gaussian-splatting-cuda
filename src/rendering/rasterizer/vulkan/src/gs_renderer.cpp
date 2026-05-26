@@ -117,6 +117,7 @@ void VulkanGSRenderer::initializeExternal(const std::map<std::string, std::strin
     createComputePipeline(pipeline_projection_forward, spirv_paths.at("projection_forward"));
     createComputePipeline(pipeline_projection_forward_3dgut, spirv_paths.at("projection_forward_3dgut"));
     createComputePipeline(pipeline_selection_mask, spirv_paths.at("selection_mask"));
+    createComputePipeline(pipeline_selection_polygon_rasterize, spirv_paths.at("selection_polygon_rasterize"));
     createComputePipeline(pipeline_generate_keys, spirv_paths.at("generate_keys"));
     for (int i = 0; i < 2; ++i) {
         createComputePipeline(pipeline_compute_tile_ranges[i], spirv_paths.at("compute_tile_ranges"));
@@ -384,7 +385,8 @@ void VulkanGSRenderer::executeSelectionMask(
     const _VulkanBuffer& node_mask,
     const _VulkanBuffer& primitives,
     const _VulkanBuffer& model_transforms,
-    const _VulkanBuffer& selection_out) {
+    const _VulkanBuffer& selection_out,
+    const _VulkanBuffer& polygon_mask) {
     DEVICE_GUARD;
 
     bufferMemoryBarrier({
@@ -396,6 +398,7 @@ void VulkanGSRenderer::executeSelectionMask(
                             {primitives, TRANSFER_COMPUTE_SHADER_WRITE},
                             {model_transforms, TRANSFER_COMPUTE_SHADER_WRITE},
                             {selection_out, TRANSFER_COMPUTE_SHADER_WRITE},
+                            {polygon_mask, COMPUTE_SHADER_READ_WRITE},
                         },
                         COMPUTE_SHADER_READ_WRITE);
 
@@ -413,9 +416,36 @@ void VulkanGSRenderer::executeSelectionMask(
             buffers.rotations.deviceBuffer,
             buffers.scaling_raw.deviceBuffer,
             selection_out,
+            polygon_mask,
         });
 
     bufferMemoryBarrier({{selection_out, COMPUTE_SHADER_WRITE}}, TRANSFER_READ);
+}
+
+void VulkanGSRenderer::executeSelectionPolygonRasterize(
+    const VulkanGSSelectionPolygonRasterizeUniforms& uniforms,
+    const _VulkanBuffer& polygon_vertices,
+    const _VulkanBuffer& polygon_mask) {
+    DEVICE_GUARD;
+
+    bufferMemoryBarrier({
+                            {polygon_vertices, TRANSFER_COMPUTE_SHADER_WRITE},
+                            {polygon_mask, TRANSFER_COMPUTE_SHADER_WRITE},
+                        },
+                        COMPUTE_SHADER_READ_WRITE);
+
+    constexpr size_t kBlockXY = 8;
+    executeCompute(
+        {{static_cast<size_t>(uniforms.aabb_w), kBlockXY},
+         {static_cast<size_t>(uniforms.aabb_h), kBlockXY}},
+        &uniforms, sizeof(uniforms),
+        pipeline_selection_polygon_rasterize,
+        {
+            polygon_vertices,
+            polygon_mask,
+        });
+
+    bufferMemoryBarrier({{polygon_mask, COMPUTE_SHADER_WRITE}}, COMPUTE_SHADER_READ);
 }
 
 void VulkanGSRenderer::executeCumsum(

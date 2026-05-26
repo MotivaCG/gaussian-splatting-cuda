@@ -68,6 +68,12 @@ class ToolRegistry:
 
         gizmo = tool.gizmo or ""
         lf.ui.set_active_operator(tool_id, gizmo)
+        try:
+            from .ui.state import AppState
+
+            AppState.active_tool.value = tool_id
+        except Exception:
+            pass
 
         if tool_id == "builtin.select" and not lf.ui.get_active_submode():
             lf.ui.set_selection_mode("centers")
@@ -87,6 +93,12 @@ class ToolRegistry:
         lf.ui.clear_gizmo()
         lf.ui.clear_active_operator()
         cls._active_tool_id = ""
+        try:
+            from .ui.state import AppState
+
+            AppState.active_tool.value = ""
+        except Exception:
+            pass
 
     @classmethod
     def get_active(cls) -> Optional[ToolDef]:

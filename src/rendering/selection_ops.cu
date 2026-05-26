@@ -114,34 +114,11 @@ namespace lfs::rendering {
             }
 
             const float2 pos = positions[idx];
-            if (pos.x < kInvalidScreenPositionThreshold) {
+            if (pos.x < kInvalidScreenPositionThreshold || pos.y < kInvalidScreenPositionThreshold) {
                 return;
             }
             if (pos.x >= x0 && pos.x <= x1 && pos.y >= y0 && pos.y <= y1) {
                 selection[idx] = true;
-            }
-        }
-
-        __global__ void rectSelectModeKernel(
-            const float2* __restrict__ positions,
-            const float x0,
-            const float y0,
-            const float x1,
-            const float y1,
-            bool* __restrict__ selection,
-            const int n,
-            const bool add_mode) {
-            const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-            if (idx >= n) {
-                return;
-            }
-
-            const float2 pos = positions[idx];
-            if (pos.x < kInvalidScreenPositionThreshold) {
-                return;
-            }
-            if (pos.x >= x0 && pos.x <= x1 && pos.y >= y0 && pos.y <= y1) {
-                selection[idx] = add_mode;
             }
         }
 
@@ -157,32 +134,11 @@ namespace lfs::rendering {
             }
 
             const float2 pos = positions[idx];
-            if (pos.x < kInvalidScreenPositionThreshold) {
+            if (pos.x < kInvalidScreenPositionThreshold || pos.y < kInvalidScreenPositionThreshold) {
                 return;
             }
             if (pointInPolygon(pos.x, pos.y, polygon, num_verts)) {
                 selection[idx] = true;
-            }
-        }
-
-        __global__ void polygonSelectModeKernel(
-            const float2* __restrict__ positions,
-            const float2* __restrict__ polygon,
-            const int num_verts,
-            bool* __restrict__ selection,
-            const int n,
-            const bool add_mode) {
-            const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-            if (idx >= n) {
-                return;
-            }
-
-            const float2 pos = positions[idx];
-            if (pos.x < kInvalidScreenPositionThreshold) {
-                return;
-            }
-            if (pointInPolygon(pos.x, pos.y, polygon, num_verts)) {
-                selection[idx] = add_mode;
             }
         }
 
@@ -400,22 +356,6 @@ namespace lfs::rendering {
         rectSelectKernel<<<grid_size, kBlockSize>>>(positions, x0, y0, x1, y1, selection, n_primitives);
     }
 
-    void rect_select_mode(
-        const float2* const positions,
-        const float x0,
-        const float y0,
-        const float x1,
-        const float y1,
-        bool* const selection,
-        const int n_primitives,
-        const bool add_mode) {
-        if (n_primitives <= 0) {
-            return;
-        }
-        const int grid_size = (n_primitives + kBlockSize - 1) / kBlockSize;
-        rectSelectModeKernel<<<grid_size, kBlockSize>>>(positions, x0, y0, x1, y1, selection, n_primitives, add_mode);
-    }
-
     void polygon_select(
         const float2* const positions,
         const float2* const polygon,
@@ -427,20 +367,6 @@ namespace lfs::rendering {
         }
         const int grid_size = (n_primitives + kBlockSize - 1) / kBlockSize;
         polygonSelectKernel<<<grid_size, kBlockSize>>>(positions, polygon, num_vertices, selection, n_primitives);
-    }
-
-    void polygon_select_mode(
-        const float2* const positions,
-        const float2* const polygon,
-        const int num_vertices,
-        bool* const selection,
-        const int n_primitives,
-        const bool add_mode) {
-        if (n_primitives <= 0 || num_vertices < 3) {
-            return;
-        }
-        const int grid_size = (n_primitives + kBlockSize - 1) / kBlockSize;
-        polygonSelectModeKernel<<<grid_size, kBlockSize>>>(positions, polygon, num_vertices, selection, n_primitives, add_mode);
     }
 
     void set_selection_element(bool* const selection, const int index, const bool value) {
@@ -461,7 +387,7 @@ namespace lfs::rendering {
                      mouse_x,
                      mouse_y,
                      radius,
-                     selection_out.ptr<uint8_t>(),
+                     reinterpret_cast<uint8_t*>(selection_out.ptr<bool>()),
                      n);
     }
 
@@ -485,28 +411,6 @@ namespace lfs::rendering {
                     n);
     }
 
-    void rect_select_mode_tensor(
-        const Tensor& screen_positions,
-        const float x0,
-        const float y0,
-        const float x1,
-        const float y1,
-        Tensor& selection_out,
-        const bool add_mode) {
-        if (!screen_positions.is_valid() || screen_positions.size(0) == 0) {
-            return;
-        }
-        const int n = checkedToInt(screen_positions.size(0), "n_primitives exceeds int range");
-        rect_select_mode(reinterpret_cast<const float2*>(screen_positions.ptr<float>()),
-                         x0,
-                         y0,
-                         x1,
-                         y1,
-                         selection_out.ptr<bool>(),
-                         n,
-                         add_mode);
-    }
-
     void polygon_select_tensor(
         const Tensor& screen_positions,
         const Tensor& polygon_vertices,
@@ -524,27 +428,6 @@ namespace lfs::rendering {
                        num_vertices,
                        selection_out.ptr<bool>(),
                        n);
-    }
-
-    void polygon_select_mode_tensor(
-        const Tensor& screen_positions,
-        const Tensor& polygon_vertices,
-        Tensor& selection_out,
-        const bool add_mode) {
-        if (!screen_positions.is_valid() || screen_positions.size(0) == 0) {
-            return;
-        }
-        if (!polygon_vertices.is_valid() || polygon_vertices.size(0) < 3) {
-            return;
-        }
-        const int num_vertices = checkedToInt(polygon_vertices.size(0), "polygon vertex count exceeds int range");
-        const int n = checkedToInt(screen_positions.size(0), "n_primitives exceeds int range");
-        polygon_select_mode(reinterpret_cast<const float2*>(screen_positions.ptr<float>()),
-                            reinterpret_cast<const float2*>(polygon_vertices.ptr<float>()),
-                            num_vertices,
-                            selection_out.ptr<bool>(),
-                            n,
-                            add_mode);
     }
 
     void apply_selection_group_tensor(

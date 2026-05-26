@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <nanobind/stl/string.h>
 #include <imgui.h>
 
 namespace lfs::vis::gui {
@@ -80,8 +81,12 @@ namespace lfs::vis::gui {
             try {
                 if (nb::hasattr(panel_instance_, "update_interval_ms"))
                     update_interval_ms_ = std::max(0, nb::cast<int>(panel_instance_.attr("update_interval_ms")));
+                if (nb::hasattr(panel_instance_, "update_policy")) {
+                    const auto policy = nb::cast<std::string>(panel_instance_.attr("update_policy"));
+                    dirty_driven_updates_ = policy == "dirty" || policy == "reactive";
+                }
             } catch (const std::exception& e) {
-                LOG_ERROR("Panel update_interval_ms error: {}", e.what());
+                LOG_ERROR("Panel update policy error: {}", e.what());
             }
         }
     }
@@ -348,7 +353,8 @@ namespace lfs::vis::gui {
         const auto now = std::chrono::steady_clock::now();
         cachePythonCapabilities();
         const bool update_due =
-            next_update_at_ == std::chrono::steady_clock::time_point{} || now >= next_update_at_;
+            !dirty_driven_updates_ &&
+            (next_update_at_ == std::chrono::steady_clock::time_point{} || now >= next_update_at_);
         const bool should_run_update = scene_changed || pending_dirty || update_due;
 
         if (should_run_update) {
@@ -373,7 +379,8 @@ namespace lfs::vis::gui {
                 LOG_ERROR("Panel on_update error: {}", e.what());
             }
             pending_dirty |= lfs::python::consume_document_dirty(doc);
-            next_update_at_ = now + updateInterval();
+            if (!dirty_driven_updates_)
+                next_update_at_ = now + updateInterval();
         }
 
         pending_dirty |= lfs::python::consume_document_dirty(doc);
@@ -439,6 +446,16 @@ namespace lfs::vis::gui {
             return;
 
         ops.draw_direct(host_, x, y, w, h);
+    }
+
+    bool RmlPythonPanelAdapter::drawDirectCached(float x, float y, float w, float h,
+                                                 const PanelDrawContext& ctx) {
+        (void)ctx;
+        if (!host_)
+            return false;
+
+        const auto& ops = lfs::python::get_rml_panel_host_ops();
+        return ops.draw_direct_cached ? ops.draw_direct_cached(host_, x, y, w, h) : false;
     }
 
     bool RmlPythonPanelAdapter::poll(const PanelDrawContext& ctx) {

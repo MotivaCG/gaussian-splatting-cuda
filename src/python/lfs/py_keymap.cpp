@@ -113,6 +113,7 @@ namespace lfs::python {
             .value("CAMERA_MOVE_UP", Action::CAMERA_MOVE_UP)
             .value("CAMERA_MOVE_DOWN", Action::CAMERA_MOVE_DOWN)
             .value("CAMERA_RESET_HOME", Action::CAMERA_RESET_HOME)
+            .value("CAMERA_SET_HOME", Action::CAMERA_SET_HOME)
             .value("CAMERA_FOCUS_SELECTION", Action::CAMERA_FOCUS_SELECTION)
             .value("CAMERA_SET_PIVOT", Action::CAMERA_SET_PIVOT)
             .value("CAMERA_NEXT_VIEW", Action::CAMERA_NEXT_VIEW)
@@ -238,10 +239,20 @@ namespace lfs::python {
             [](Action action, ToolMode mode) {
                 if (!get_keymap_bindings())
                     return std::string();
-                return get_keymap_bindings()->getTriggerDescription(action, mode);
+                return get_keymap_bindings()->getLocalizedTriggerDescription(action, mode);
             },
             nb::arg("action"), nb::arg("mode") = ToolMode::GLOBAL,
             "Get human-readable description of action's trigger");
+
+        keymap.def(
+            "is_bound",
+            [](Action action, ToolMode mode) {
+                if (!get_keymap_bindings())
+                    return false;
+                return get_keymap_bindings()->getEffectiveTriggerForAction(action, mode).has_value();
+            },
+            nb::arg("action"), nb::arg("mode") = ToolMode::GLOBAL,
+            "Check whether an action has an effective binding");
 
         keymap.def(
             "get_trigger",
@@ -313,7 +324,7 @@ namespace lfs::python {
 
         keymap.def(
             "get_action_name",
-            [](Action action) { return getActionName(action); },
+            [](Action action) { return getLocalizedActionName(action); },
             nb::arg("action"),
             "Get display name for an action");
 
@@ -476,7 +487,7 @@ namespace lfs::python {
                 for (const auto& [action, desc] : bindings) {
                     nb::dict d;
                     d["action"] = action;
-                    d["action_name"] = getActionName(action);
+                    d["action_name"] = getLocalizedActionName(action);
                     d["description"] = desc;
                     result.append(d);
                 }
@@ -502,19 +513,7 @@ namespace lfs::python {
 
         keymap.def(
             "get_tool_mode_name",
-            [](ToolMode mode) {
-                switch (mode) {
-                case ToolMode::GLOBAL: return "Global";
-                case ToolMode::SELECTION: return "Selection";
-                case ToolMode::BRUSH: return "Brush";
-                case ToolMode::TRANSLATE: return "Translate";
-                case ToolMode::ROTATE: return "Rotate";
-                case ToolMode::SCALE: return "Scale";
-                case ToolMode::ALIGN: return "Align";
-                case ToolMode::CROP_BOX: return "Crop Box";
-                default: return "Unknown";
-                }
-            },
+            [](ToolMode mode) { return getLocalizedToolModeName(mode); },
             nb::arg("mode"),
             "Get human-readable name for tool mode");
     }

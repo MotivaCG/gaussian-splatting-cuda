@@ -11,7 +11,6 @@
 #include "vulkan_scene_image_uploader.hpp"
 #include "window/vulkan_context.hpp"
 
-#ifdef LFS_VULKAN_VIEWER_ENABLED
 #include "viewport/grid.frag.spv.h"
 #include "viewport/grid.vert.spv.h"
 #include "viewport/overlay.frag.spv.h"
@@ -25,7 +24,6 @@
 #include "viewport/textured_overlay.frag.spv.h"
 #include "viewport/textured_overlay.vert.spv.h"
 #include "viewport/vignette.frag.spv.h"
-#endif
 
 #include <algorithm>
 #include <array>
@@ -38,7 +36,6 @@
 
 namespace lfs::vis {
 
-#ifdef LFS_VULKAN_VIEWER_ENABLED
     namespace {
         struct Vertex {
             glm::vec2 position;
@@ -146,10 +143,8 @@ namespace lfs::vis {
             };
         }
     } // namespace
-#endif
 
     struct VulkanViewportPass::Impl {
-#ifdef LFS_VULKAN_VIEWER_ENABLED
         VkDevice device = VK_NULL_HANDLE;
         VulkanContext* context = nullptr;
         VmaAllocator allocator = VK_NULL_HANDLE;
@@ -1627,12 +1622,6 @@ namespace lfs::vis {
             }
             *this = {};
         }
-#else
-        [[nodiscard]] bool init(VulkanContext&) { return false; }
-        void prepare(const VulkanViewportPassParams&) {}
-        void record(VkCommandBuffer, VkExtent2D, const VulkanViewportPassParams&) {}
-        void reset() {}
-#endif
     };
 
     VulkanViewportPass::VulkanViewportPass() = default;

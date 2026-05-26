@@ -78,12 +78,14 @@ namespace lfs::vis {
                                                   int camera_index = 0);
         [[nodiscard]] SelectionResult selectRect(float x0, float y0, float x1, float y1, SelectionMode mode,
                                                  int camera_index = 0);
-        [[nodiscard]] SelectionResult selectPolygon(const core::Tensor& vertices, SelectionMode mode,
+        [[nodiscard]] SelectionResult selectPolygon(const std::vector<glm::vec2>& vertices, SelectionMode mode,
                                                     int camera_index = 0);
-        [[nodiscard]] SelectionResult selectLasso(const core::Tensor& vertices, SelectionMode mode,
+        [[nodiscard]] SelectionResult selectLasso(const std::vector<glm::vec2>& vertices, SelectionMode mode,
                                                   int camera_index = 0);
         [[nodiscard]] SelectionResult selectRing(float x, float y, SelectionMode mode, int camera_index = 0);
-        [[nodiscard]] std::optional<int> pickGaussianAt(float x, float y);
+        [[nodiscard]] SelectionResult selectByColorAt(float x, float y, SelectionMode mode,
+                                                      SelectionFilterState filters = {},
+                                                      int camera_index = -1);
         [[nodiscard]] SelectionResult selectAllFiltered();
         [[nodiscard]] SelectionResult invertFiltered();
 
@@ -166,6 +168,7 @@ namespace lfs::vis {
         [[nodiscard]] std::shared_ptr<core::Tensor> getScreenPositionsForContext(
             const ViewerViewportContext& context) const;
         [[nodiscard]] std::shared_ptr<core::Tensor> resolveCommandScreenPositions(int camera_index) const;
+        [[nodiscard]] std::optional<rendering::FrameView> resolveCommandFrameView(int camera_index) const;
         [[nodiscard]] std::shared_ptr<core::Tensor> renderScreenPositionsForCamera(int camera_index) const;
         [[nodiscard]] std::shared_ptr<core::Tensor> renderScreenPositionsForViewerContext(
             const ViewerViewportContext& context) const;

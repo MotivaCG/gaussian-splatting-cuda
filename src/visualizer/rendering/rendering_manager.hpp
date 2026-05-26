@@ -40,8 +40,9 @@
 #include <vulkan/vulkan.h>
 
 namespace lfs::core {
+    class SplatData;
     class Tensor;
-}
+} // namespace lfs::core
 
 namespace lfs::core::events::ui {
     struct GridSettingsChanged;
@@ -59,6 +60,7 @@ namespace lfs::vis {
     class PointCloudVulkanRenderer;
 
     class SceneManager;
+    struct SceneRenderState;
     class TrainerManager;
 
     class LFS_VIS_API RenderingManager {
@@ -107,16 +109,24 @@ namespace lfs::vis {
         enum class VksplatSelectionMaskShape : std::uint32_t {
             Brush = 0,
             Rectangle = 1,
+            Polygon = 2,
         };
         [[nodiscard]] std::expected<lfs::core::Tensor, std::string> buildVksplatSelectionMask(
             SceneManager& scene_manager,
             const lfs::rendering::FrameView& frame_view,
             bool equirectangular,
             VksplatSelectionMaskShape shape,
-            const std::vector<glm::vec4>& primitives);
+            const std::vector<glm::vec4>& primitives,
+            const std::vector<glm::vec2>& polygon_vertices = {});
 
         // Render preview image without touching the shared viewport presentation textures.
         std::shared_ptr<lfs::core::Tensor> renderPreviewImage(SceneManager* scene_manager,
+                                                              const glm::mat3& camera_rotation,
+                                                              const glm::vec3& camera_position,
+                                                              float focal_length_mm,
+                                                              int width, int height);
+        std::shared_ptr<lfs::core::Tensor> renderPreviewImage(const lfs::core::SplatData& model,
+                                                              SceneRenderState scene_state,
                                                               const glm::mat3& camera_rotation,
                                                               const glm::vec3& camera_position,
                                                               float focal_length_mm,
@@ -476,6 +486,7 @@ namespace lfs::vis {
         lfs::core::Tensor point_cloud_colors_cache_;
         const void* point_cloud_colors_cache_key_ = nullptr;
         std::size_t point_cloud_colors_cache_size_ = 0;
+        std::uint64_t point_cloud_preview_selection_revision_ = 0;
         VulkanContext* last_vulkan_context_ = nullptr;
         VkImage vulkan_external_viewport_image_ = VK_NULL_HANDLE;
         VkImageView vulkan_external_viewport_image_view_ = VK_NULL_HANDLE;

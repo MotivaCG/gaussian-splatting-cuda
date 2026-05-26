@@ -63,6 +63,7 @@ namespace lfs::vis::gui {
             rml_manager_->destroyContext("viewport_overlay");
         rml_context_ = nullptr;
         document_ = nullptr;
+        body_el_ = nullptr;
         body_template_rml_.clear();
     }
 
@@ -80,10 +81,13 @@ namespace lfs::vis::gui {
         }
 
         document_ = nullptr;
+        body_el_ = nullptr;
         base_rcss_.clear();
         has_theme_signature_ = false;
         wants_input_ = false;
         render_needed_ = true;
+        data_model_binding_dirty_ = true;
+        toolbar_roots_dirty_ = true;
         animation_active_ = true;
         mouse_pos_valid_ = false;
         last_render_w_ = 0;
@@ -111,11 +115,14 @@ namespace lfs::vis::gui {
 
     void RmlViewportOverlay::cacheBodyTemplate() {
         body_template_rml_.clear();
+        body_el_ = nullptr;
         if (!document_)
             return;
 
-        if (auto* const body = document_->GetElementById("overlay-body"))
+        if (auto* const body = document_->GetElementById("overlay-body")) {
+            body_el_ = body;
             body_template_rml_ = body->GetInnerRML();
+        }
     }
 
     bool RmlViewportOverlay::updateTheme() {
@@ -176,6 +183,7 @@ namespace lfs::vis::gui {
         secondary_toolbar_x_ = secondary_x;
         secondary_toolbar_width_ = secondary_width;
         render_needed_ = true;
+        toolbar_roots_dirty_ = true;
         updateToolbarRoots();
     }
 
@@ -196,10 +204,20 @@ namespace lfs::vis::gui {
         render_needed_ = true;
     }
 
-    void RmlViewportOverlay::updateToolbarRoots() {
+    bool RmlViewportOverlay::updateToolbarRoots() {
         if (!document_) {
-            return;
+            return false;
         }
+
+        const bool changed =
+            toolbar_roots_dirty_ ||
+            std::abs(applied_primary_toolbar_x_ - primary_toolbar_x_) > 0.5f ||
+            std::abs(applied_primary_toolbar_width_ - primary_toolbar_width_) > 0.5f ||
+            applied_show_secondary_toolbar_ != show_secondary_toolbar_ ||
+            std::abs(applied_secondary_toolbar_x_ - secondary_toolbar_x_) > 0.5f ||
+            std::abs(applied_secondary_toolbar_width_ - secondary_toolbar_width_) > 0.5f;
+        if (!changed)
+            return false;
 
         const auto apply_root = [&](const char* element_id,
                                     const float x,
@@ -217,12 +235,20 @@ namespace lfs::vis::gui {
                    secondary_toolbar_x_,
                    secondary_toolbar_width_,
                    show_secondary_toolbar_ && secondary_toolbar_width_ > 0.0f);
+        applied_primary_toolbar_x_ = primary_toolbar_x_;
+        applied_primary_toolbar_width_ = primary_toolbar_width_;
+        applied_show_secondary_toolbar_ = show_secondary_toolbar_;
+        applied_secondary_toolbar_x_ = secondary_toolbar_x_;
+        applied_secondary_toolbar_width_ = secondary_toolbar_width_;
+        toolbar_roots_dirty_ = false;
+        return true;
     }
 
     void RmlViewportOverlay::applyGTMetricsOverlay() {
         if (!document_) {
             return;
         }
+        data_model_binding_dirty_ = true;
 
         if (auto* const overlay = document_->GetElementById("gt-metrics-overlay")) {
             overlay->SetClass("hidden", !gt_metrics_overlay_.visible);
@@ -246,7 +272,6 @@ namespace lfs::vis::gui {
             return;
         if (vp_size_.x <= 0 || vp_size_.y <= 0)
             return;
-        updateToolbarRoots();
         if (rml_manager_) {
             rml_manager_->trackContextFrame(rml_context_,
                                             static_cast<int>(vp_pos_.x - screen_origin_.x),
@@ -344,10 +369,12 @@ namespace lfs::vis::gui {
             // the live subtree, which may already contain expanded data-for views.
             if (!body_template_rml_.empty()) {
                 body->SetInnerRML(Rml::String(body_template_rml_));
+                toolbar_roots_dirty_ = true;
             } else {
                 LOG_WARN("RmlViewportOverlay: missing body template for stale data-model rebind");
                 body->RemoveChild(existing);
             }
+            render_needed_ = true;
         }
 
         // RmlUI does not rebind data-model when the attribute is set after
@@ -360,6 +387,7 @@ namespace lfs::vis::gui {
         wrapper_ptr->SetProperty("width", "100%");
         wrapper_ptr->SetProperty("height", "100%");
         auto* wrapper = body->AppendChild(std::move(wrapper_ptr));
+        render_needed_ = true;
 
         std::vector<Rml::Element*> children_to_move;
         children_to_move.reserve(body->GetNumChildren());
@@ -377,10 +405,64 @@ namespace lfs::vis::gui {
     bool RmlViewportOverlay::applyFrameTooltip() {
         if (!document_)
             return false;
-        return tooltip_.apply(document_->GetElementById("overlay-body"),
+        if (!body_el_)
+            body_el_ = document_->GetElementById("overlay-body");
+        return tooltip_.apply(body_el_,
                               last_mouse_x_, last_mouse_y_,
                               static_cast<int>(vp_size_.x),
                               static_cast<int>(vp_size_.y));
+    }
+
+    void RmlViewportOverlay::queueVulkanContext() {
+        if (!rml_manager_ || !rml_manager_->getVulkanRenderInterface())
+            return;
+        rml_manager_->queueVulkanContext(rml_context_,
+                                         vp_pos_.x - screen_origin_.x,
+                                         vp_pos_.y - screen_origin_.y,
+                                         true,
+                                         true,
+                                         vp_pos_.x - screen_origin_.x,
+                                         vp_pos_.y - screen_origin_.y,
+                                         vp_pos_.x - screen_origin_.x + vp_size_.x,
+                                         vp_pos_.y - screen_origin_.y + vp_size_.y);
+    }
+
+    void RmlViewportOverlay::renderCached() {
+        if (!rml_context_ || !document_)
+            return;
+        if (vp_size_.x <= 0 || vp_size_.y <= 0)
+            return;
+
+        const int w = static_cast<int>(vp_size_.x);
+        const int h = static_cast<int>(vp_size_.y);
+        const bool theme_current =
+            has_theme_signature_ && rml_theme::currentThemeSignature() == last_theme_signature_;
+        const bool tooltip_changed = tooltip_.hasActiveState() && applyFrameTooltip();
+        if (rml_manager_)
+            rml_manager_->setContextNeedsPassiveMouseMoveFrames(rml_context_, tooltip_.needsFrame());
+        const bool can_update_tooltip_only =
+            rml_manager_ && tooltip_changed && theme_current && !render_needed_ && !animation_active_ &&
+            !data_model_binding_dirty_ && !toolbar_roots_dirty_ &&
+            w == last_render_w_ && h == last_render_h_;
+        if (can_update_tooltip_only) {
+            rml_manager_->trackContextFrame(rml_context_,
+                                            static_cast<int>(vp_pos_.x - screen_origin_.x),
+                                            static_cast<int>(vp_pos_.y - screen_origin_.y));
+            rml_context_->SetDimensions(Rml::Vector2i(w, h));
+            rml_context_->Update();
+            queueVulkanContext();
+            animation_active_ = (rml_context_->GetNextUpdateDelay() == 0);
+            return;
+        }
+        const bool can_reuse = theme_current && !render_needed_ && !animation_active_ &&
+                               !data_model_binding_dirty_ && !toolbar_roots_dirty_ &&
+                               !tooltip_changed && w == last_render_w_ && h == last_render_h_;
+        if (!can_reuse) {
+            render();
+            return;
+        }
+
+        queueVulkanContext();
     }
 
     void RmlViewportOverlay::render() {
@@ -401,31 +483,30 @@ namespace lfs::vis::gui {
         const int w = static_cast<int>(vp_size_.x);
         const int h = static_cast<int>(vp_size_.y);
         const bool size_changed = (w != last_render_w_ || h != last_render_h_);
+        const bool toolbar_changed = updateToolbarRoots();
         const bool run_document_hooks = shouldRunDocumentHooks(
-            theme_changed || size_changed || render_needed_ || animation_active_);
+            theme_changed || size_changed || toolbar_changed || render_needed_ || animation_active_);
         if (run_document_hooks) {
             lfs::python::invoke_python_document_hooks("viewport_overlay", "document", document_, true);
             lfs::python::invoke_python_document_hooks("viewport_overlay", "document", document_, false);
             last_document_hook_run_ = std::chrono::steady_clock::now();
+            data_model_binding_dirty_ = true;
         }
 
-        auto* body = document_->GetElementById("overlay-body");
-        ensureBodyDataModelBound(body);
-        updateToolbarRoots();
-        const bool tooltip_changed = applyFrameTooltip();
+        if (!body_el_)
+            body_el_ = document_->GetElementById("overlay-body");
+        if (data_model_binding_dirty_) {
+            ensureBodyDataModelBound(body_el_);
+            data_model_binding_dirty_ = false;
+        }
+        const bool tooltip_changed = tooltip_.hasActiveState() && applyFrameTooltip();
+        if (rml_manager_)
+            rml_manager_->setContextNeedsPassiveMouseMoveFrames(rml_context_, tooltip_.needsFrame());
 
         const bool needs_render = render_needed_ || animation_active_ || run_document_hooks ||
-                                  theme_changed || size_changed || tooltip_changed;
+                                  theme_changed || size_changed || toolbar_changed || tooltip_changed;
         if (!needs_render) {
-            rml_manager_->queueVulkanContext(rml_context_,
-                                             vp_pos_.x - screen_origin_.x,
-                                             vp_pos_.y - screen_origin_.y,
-                                             true,
-                                             true,
-                                             vp_pos_.x - screen_origin_.x,
-                                             vp_pos_.y - screen_origin_.y,
-                                             vp_pos_.x - screen_origin_.x + vp_size_.x,
-                                             vp_pos_.y - screen_origin_.y + vp_size_.y);
+            queueVulkanContext();
             return;
         }
 
@@ -435,15 +516,7 @@ namespace lfs::vis::gui {
         rml_context_->SetDimensions(Rml::Vector2i(w, h));
         rml_context_->Update();
 
-        rml_manager_->queueVulkanContext(rml_context_,
-                                         vp_pos_.x - screen_origin_.x,
-                                         vp_pos_.y - screen_origin_.y,
-                                         true,
-                                         true,
-                                         vp_pos_.x - screen_origin_.x,
-                                         vp_pos_.y - screen_origin_.y,
-                                         vp_pos_.x - screen_origin_.x + vp_size_.x,
-                                         vp_pos_.y - screen_origin_.y + vp_size_.y);
+        queueVulkanContext();
         animation_active_ = (rml_context_->GetNextUpdateDelay() == 0);
         render_needed_ = false;
         last_render_w_ = w;

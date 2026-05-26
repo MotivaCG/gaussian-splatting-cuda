@@ -899,7 +899,8 @@ namespace lfs::vis {
         });
 
         internal::TrainerReady::when([this](const auto&) {
-            python::update_trainer_loaded(true, trainer_manager_->getTotalIterations());
+            python::update_trainer_loaded(true, trainer_manager_->getTotalIterations(),
+                                          trainer_manager_->getCurrentIteration());
             python::update_training_state(false, "ready");
         });
 
@@ -989,6 +990,7 @@ namespace lfs::vis {
     }
 
     void VisualizerImpl::update() {
+        update_work_processed_ = false;
         window_manager_->updateWindowSize();
 
         // Process MCP work queue
@@ -998,6 +1000,7 @@ namespace lfs::vis {
                 std::lock_guard lock(work_queue_mutex_);
                 work.swap(work_queue_);
             }
+            update_work_processed_ = !work.empty();
             for (size_t i = 0; i < work.size(); ++i) {
                 try {
                     if (work[i].run)
@@ -1112,6 +1115,77 @@ namespace lfs::vis {
         processing_render_work_ = false;
     }
 
+    bool VisualizerImpl::hasPendingRenderWork() {
+        std::lock_guard lock(work_queue_mutex_);
+        return !render_work_queue_.empty();
+    }
+
+    bool VisualizerImpl::inputFrameRequestsRender() const {
+        if (!window_manager_)
+            return false;
+
+        const auto& input = window_manager_->frameInput();
+        if (!input.had_event)
+            return false;
+        if (input.window_event)
+            return true;
+
+        const bool mouse_button_event = input.mouse_clicked[0] || input.mouse_clicked[1] ||
+                                        input.mouse_clicked[2] || input.mouse_released[0] ||
+                                        input.mouse_released[1] || input.mouse_released[2];
+        const bool keyboard_event = !input.keys_pressed.empty() ||
+                                    !input.keys_repeated.empty() ||
+                                    !input.keys_released.empty() ||
+                                    !input.text_codepoints.empty() ||
+                                    !input.text_inputs.empty() ||
+                                    input.has_text_editing;
+        if (mouse_button_event || keyboard_event || input.mouse_wheel != 0.0f)
+            return true;
+
+        if (!input.mouse_moved)
+            return false;
+
+        if (input.mouse_down[0] || input.mouse_down[1] || input.mouse_down[2])
+            return true;
+
+        const auto targets = window_manager_->inputRouter().pointerTargets(input.mouse_x, input.mouse_y);
+        const bool targets_gui = targets.hover_target == input::InputTarget::Gui ||
+                                 targets.pointer_target == input::InputTarget::Gui;
+        if (!targets_gui)
+            return false;
+
+        return !gui_manager_ ||
+               gui_manager_->passiveMouseMoveNeedsRender(input.mouse_x, input.mouse_y);
+    }
+
+    VisualizerImpl::FrameDemand VisualizerImpl::collectFrameDemand(const bool viewport_export_locked) {
+        FrameDemand demand;
+        demand.viewport_export_locked = viewport_export_locked;
+        demand.scene_dirty = rendering_manager_ && rendering_manager_->pollDirtyState();
+        demand.continuous_input = input_controller_ && input_controller_->isContinuousInputActive();
+        demand.python_animation = python::has_frame_callback();
+        demand.python_overlay = python::has_viewport_draw_handlers();
+        demand.python_redraw = python::consume_redraw_request();
+        demand.gui_animation = gui_manager_ && gui_manager_->needsAnimationFrame();
+        demand.input_event = inputFrameRequestsRender();
+        demand.posted_work = update_work_processed_;
+        demand.render_work = hasPendingRenderWork();
+        return demand;
+    }
+
+    void VisualizerImpl::waitForNextEvent(const bool is_training) {
+        if (!window_manager_)
+            return;
+
+        if (is_training) {
+            constexpr double TRAINING_WAIT_SEC = 0.1; // ~10 Hz
+            window_manager_->waitEvents(TRAINING_WAIT_SEC);
+        } else {
+            constexpr double IDLE_WAIT_SEC = 0.5;
+            window_manager_->waitEvents(IDLE_WAIT_SEC);
+        }
+    }
+
     void VisualizerImpl::render() {
 
         auto now = std::chrono::high_resolution_clock::now();
@@ -1186,6 +1260,24 @@ namespace lfs::vis {
             rendering_manager_->setEllipsoidGizmoActive(gui_manager_->gizmo().isEllipsoidGizmoActive());
         }
 
+        const bool is_training = trainer_manager_ && trainer_manager_->isRunning();
+        const FrameDemand frame_demand = collectFrameDemand(viewport_export_locked);
+        if (gui_frame_rendered_ && !frame_demand.shouldRenderFrame()) {
+            LOG_PERF("loop_idle skip_gui_render=true needs_render={} continuous_input={} py_anim={} py_overlay={} py_redraw={} gui_anim={} input_event={} posted_work={} render_work={}",
+                     frame_demand.scene_dirty,
+                     frame_demand.continuous_input,
+                     frame_demand.python_animation,
+                     frame_demand.python_overlay,
+                     frame_demand.python_redraw,
+                     frame_demand.gui_animation,
+                     frame_demand.input_event,
+                     frame_demand.posted_work,
+                     frame_demand.render_work);
+            python::flush_signals();
+            waitForNextEvent(is_training);
+            return;
+        }
+
         if (!viewport_export_locked) {
             const auto vulkan_frame = rendering_manager_->renderVulkanFrame(context);
             if (gui_manager_) {
@@ -1236,31 +1328,28 @@ namespace lfs::vis {
         processRenderWorkQueue();
         python::flush_signals();
         gui_frame_rendered_ = true;
+        update_work_processed_ = false;
 
         // Render-on-demand: VSync handles frame pacing, waitEvents saves CPU when idle
-        const bool is_training = trainer_manager_ && trainer_manager_->isRunning();
-        const bool needs_render = rendering_manager_ && rendering_manager_->pollDirtyState();
-        const bool continuous_input = input_controller_ && input_controller_->isContinuousInputActive();
-        const bool has_python_animation = python::has_frame_callback();
-        const bool has_python_overlay = python::has_viewport_draw_handlers();
-        const bool has_python_redraw = python::consume_redraw_request();
-        const bool needs_gui_animation = gui_manager_ && gui_manager_->needsAnimationFrame();
+        const FrameDemand next_demand = collectFrameDemand(viewport_export_locked);
 
-        LOG_PERF("loop_end needs_render={} continuous_input={} py_anim={} py_overlay={} py_redraw={} gui_anim={}",
-                 needs_render, continuous_input, has_python_animation, has_python_overlay,
-                 has_python_redraw, needs_gui_animation);
+        LOG_PERF("loop_end needs_render={} continuous_input={} py_anim={} py_overlay={} py_redraw={} gui_anim={} input_event={} posted_work={} render_work={}",
+                 next_demand.scene_dirty,
+                 next_demand.continuous_input,
+                 next_demand.python_animation,
+                 next_demand.python_overlay,
+                 next_demand.python_redraw,
+                 next_demand.gui_animation,
+                 next_demand.input_event,
+                 next_demand.posted_work,
+                 next_demand.render_work);
 
-        if (needs_render || continuous_input || has_python_animation || has_python_overlay ||
-            has_python_redraw || needs_gui_animation) {
+        if (next_demand.needsContinuousLoop()) {
             window_manager_->pollEvents();
-        } else if (is_training) {
-            // Training: longer wait to reduce GPU load and memory fragmentation
-            constexpr double TRAINING_WAIT_SEC = 0.1; // ~10 Hz
-            window_manager_->waitEvents(TRAINING_WAIT_SEC);
         } else {
-            // Idle: long wait to minimize CPU usage (VSync still applies on wake)
-            constexpr double IDLE_WAIT_SEC = 0.5;
-            window_manager_->waitEvents(IDLE_WAIT_SEC);
+            // Idle: wait to minimize CPU/GPU work. Mouse-motion-only viewport wakes
+            // are filtered at the top of the next loop without presenting a GUI frame.
+            waitForNextEvent(is_training);
         }
     }
 
@@ -1348,6 +1437,13 @@ namespace lfs::vis {
         pending_auto_train_ = params.optimization.auto_train;
         pending_view_paths_ = params.view_paths;
         pending_dataset_path_ = params.dataset.data_path;
+
+        if (params.cli_bg_color_set && rendering_manager_) {
+            auto render_settings = rendering_manager_->getSettings();
+            const auto& color = params.optimization.bg_color;
+            render_settings.background_color = glm::vec3(color[0], color[1], color[2]);
+            rendering_manager_->updateSettings(render_settings);
+        }
     }
 
     std::expected<void, std::string> VisualizerImpl::loadPLY(const std::filesystem::path& path) {
