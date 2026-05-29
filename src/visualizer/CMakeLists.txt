@@ -21,6 +21,7 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         # Core
         visualizer.cpp
         visualizer_impl.cpp
+        app_store.cpp
         core/main_loop.cpp
         core/data_loading_service.cpp
         core/editor_context.cpp
@@ -78,6 +79,7 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         gui/rml_right_panel.cpp
         gui/rml_shell_frame.cpp
         gui/rml_viewport_overlay.cpp
+        gui/vram_hud_overlay.cpp
         gui/rml_status_bar.cpp
         gui/gpu_memory_query.cpp
         gui/line_renderer.cpp
@@ -215,6 +217,7 @@ target_include_directories(lfs_visualizer
 target_link_libraries(lfs_visualizer
         PRIVATE
         lfs_core
+        lfs_diagnostics
         lfs_video
         lfs_geometry
         lfs_io

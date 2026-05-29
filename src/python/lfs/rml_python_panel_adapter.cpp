@@ -16,6 +16,30 @@
 #include <imgui.h>
 
 namespace lfs::vis::gui {
+    namespace {
+        bool panelHookDirtyResult(const nb::object& result,
+                                  const bool none_is_dirty,
+                                  bool& warned_non_bool,
+                                  const char* const hook_name) {
+            if (result.is_none()) {
+                return none_is_dirty;
+            }
+            if (nb::isinstance<nb::bool_>(result)) {
+                return nb::cast<bool>(result);
+            }
+            if (!warned_non_bool) {
+                LOG_WARN("Panel {} returned a non-bool value; treating it with Python truthiness. "
+                         "Return None for compatibility or bool for explicit dirty state.",
+                         hook_name);
+                warned_non_bool = true;
+            }
+            const int truthy = PyObject_IsTrue(result.ptr());
+            if (truthy < 0) {
+                throw nb::python_error();
+            }
+            return truthy != 0;
+        }
+    } // namespace
 
     bool RmlPythonPanelAdapter::isModelBound() const {
         return lifecycle_state_ == LifecycleState::ModelBound ||
@@ -349,37 +373,49 @@ namespace lfs::vis::gui {
             return doc;
 
         bool pending_dirty = content_dirty_ || lfs::python::consume_document_dirty(doc);
+        bool update_requested = lfs::python::consume_document_update_request(doc);
         const bool scene_changed = ctx && ctx->scene && ctx->scene_generation != last_scene_gen_;
         const auto now = std::chrono::steady_clock::now();
         cachePythonCapabilities();
         const bool update_due =
             !dirty_driven_updates_ &&
             (next_update_at_ == std::chrono::steady_clock::time_point{} || now >= next_update_at_);
-        const bool should_run_update = scene_changed || pending_dirty || update_due;
+        const bool should_run_update = scene_changed || pending_dirty || update_requested || update_due;
 
         if (should_run_update) {
             assert(isMounted());
             const lfs::python::GilAcquire gil;
             auto py_doc = lfs::python::PyRmlDocument(doc);
+            bool run_update = pending_dirty || update_requested || update_due;
 
             if (scene_changed) {
                 try {
-                    panel_instance_.attr("on_scene_changed")(py_doc);
-                    pending_dirty = true;
+                    nb::object result = panel_instance_.attr("on_scene_changed")(py_doc);
+                    const bool scene_dirty = panelHookDirtyResult(
+                        result, true, warned_non_bool_scene_changed_, "on_scene_changed");
+                    pending_dirty |= scene_dirty;
+                    run_update |= scene_dirty;
                 } catch (const std::exception& e) {
                     LOG_ERROR("Panel on_scene_changed error: {}", e.what());
                 }
+                pending_dirty |= lfs::python::consume_document_dirty(doc);
+                update_requested |= lfs::python::consume_document_update_request(doc);
+                run_update |= pending_dirty;
+                run_update |= update_requested;
                 last_scene_gen_ = ctx->scene_generation;
             }
 
-            try {
-                nb::object result = panel_instance_.attr("on_update")(py_doc);
-                pending_dirty |= !result.is_none() && nb::cast<bool>(result);
-            } catch (const std::exception& e) {
-                LOG_ERROR("Panel on_update error: {}", e.what());
+            if (run_update) {
+                try {
+                    nb::object result = panel_instance_.attr("on_update")(py_doc);
+                    pending_dirty |= panelHookDirtyResult(
+                        result, false, warned_non_bool_update_, "on_update");
+                } catch (const std::exception& e) {
+                    LOG_ERROR("Panel on_update error: {}", e.what());
+                }
             }
             pending_dirty |= lfs::python::consume_document_dirty(doc);
-            if (!dirty_driven_updates_)
+            if (!dirty_driven_updates_ && run_update)
                 next_update_at_ = now + updateInterval();
         }
 
@@ -554,7 +590,8 @@ namespace lfs::vis::gui {
         const auto& ops = lfs::python::get_rml_panel_host_ops();
         if (ops.get_document) {
             auto* doc = static_cast<Rml::ElementDocument*>(ops.get_document(host_));
-            if (lfs::python::is_document_dirty(doc))
+            if (lfs::python::is_document_dirty(doc) ||
+                lfs::python::is_document_update_requested(doc))
                 return true;
         }
 

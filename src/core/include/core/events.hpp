@@ -276,6 +276,7 @@ namespace lfs::core {
             EVENT(FocusTrainingPanel, );
             EVENT(ToggleUI, );
             EVENT(ToggleFullscreen, );
+            EVENT(ToggleVramHud, );
         } // namespace ui
 
         // ============================================================================

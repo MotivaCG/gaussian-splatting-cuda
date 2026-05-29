@@ -20,6 +20,10 @@ import utils;
 #define LFS_3DGUT_RASTERIZE 0
 #endif
 
+#ifndef LFS_RASTER_OVERLAYS
+#define LFS_RASTER_OVERLAYS 1
+#endif
+
 #define SHARED_STRUCT 1
 
 #if SUBTILE_SIZE > 0
@@ -514,18 +518,26 @@ void main(
 
             #if SHARED_STRUCT
                 uint32_t splat_id = collected_gauss_idx[j];
+              #if LFS_RASTER_OVERLAYS
                 uint flags = gaussian_overlay_flags[splat_id];
+              #endif
                 float splat_depth = read_t1_float(splat_id, depths);
                 float4 gauss_rgba;
+              #if LFS_RASTER_OVERLAYS
                 Splat_2D_AlphaBlend overlay_splat;
+              #endif
               #if LFS_3DGUT_RASTERIZE
                     Splat_3D_GUT_AlphaBlend g = collected_gut_splats[j];
                     gauss_rgba = evaluate_gut_splat(g, ray_origin, ray_direction);
+                  #if LFS_RASTER_OVERLAYS
                     overlay_splat = load_splat_alphablend(splat_id, xy_vs, inv_cov_vs_opacity, rgb);
+                  #endif
               #else
                     Splat_2D_AlphaBlend g = collected_splats[j];
                     gauss_rgba = evaluate_splat(g, center_pix_coord);
+                  #if LFS_RASTER_OVERLAYS
                     overlay_splat = g;
+                  #endif
               #endif
                 if (gauss_rgba.a < ALPHA_THRESHOLD)
                     continue;
@@ -546,15 +558,20 @@ void main(
                     continue;
 
                 uint32_t splat_id = collected_gauss_idx[j];
+              #if LFS_RASTER_OVERLAYS
                 uint flags = gaussian_overlay_flags[splat_id];
+              #endif
                 float splat_depth = read_t1_float(splat_id, depths);
                 float3 splat_rgb = read_t3_float3(splat_id, rgb);
                 Splat_2D_AlphaBlend g = { g_inv_cov_opacity, g_xy, splat_rgb };
+              #if LFS_RASTER_OVERLAYS
                 Splat_2D_AlphaBlend overlay_splat = g;
+              #endif
                 float4 gauss_rgba = float4(splat_rgb*alpha, alpha);
 
             #endif
 
+            #if LFS_RASTER_OVERLAYS
                 uint sel_status = selection_status(overlay_splat.xy_vs,
                                                    splat_id,
                                                    flags,
@@ -594,6 +611,7 @@ void main(
 
                 gauss_rgba = apply_selection_overlay(gauss_rgba, sel_status, selection_colors);
                 gauss_rgba = apply_flash_overlay(gauss_rgba, flags, overlay_params);
+            #endif
 
                 float4 new_pixel_state = update_pixel_state(curr_pixel_state, gauss_rgba);
                 if (median_depth >= FAR_DEPTH && curr_pixel_state.a > 0.5f && new_pixel_state.a <= 0.5f) {

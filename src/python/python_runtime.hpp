@@ -166,7 +166,10 @@ namespace lfs::python {
     LFS_PYTHON_RUNTIME_API const ModalEnqueueCallback& get_modal_enqueue_callback();
 
     using DrawPopupsCallback = void (*)();
+    using HasPopupsCallback = bool (*)();
     LFS_PYTHON_RUNTIME_API void set_popup_draw_callback(DrawPopupsCallback cb);
+    LFS_PYTHON_RUNTIME_API void set_popup_has_callback(HasPopupsCallback cb);
+    LFS_PYTHON_RUNTIME_API bool has_python_popups();
     LFS_PYTHON_RUNTIME_API void draw_python_popups(lfs::core::Scene* scene = nullptr);
 
     using ExportCallback = void (*)(int format, const char* path, const char** node_names,
@@ -547,6 +550,8 @@ namespace lfs::python {
     LFS_PYTHON_RUNTIME_API uint32_t consume_scene_mutation_flags();
     LFS_PYTHON_RUNTIME_API void bump_scene_generation();
     LFS_PYTHON_RUNTIME_API void set_scene_mutation_flags(uint32_t flags);
+    using SceneGenerationCallback = void (*)(uint64_t generation);
+    LFS_PYTHON_RUNTIME_API void set_scene_generation_callback(SceneGenerationCallback cb);
 
     LFS_PYTHON_RUNTIME_API void set_gil_state_ready(bool ready);
     LFS_PYTHON_RUNTIME_API bool is_gil_state_ready();
@@ -649,6 +654,7 @@ namespace lfs::python {
     LFS_PYTHON_RUNTIME_API void set_graphics_thread_id(std::thread::id id);
     LFS_PYTHON_RUNTIME_API bool on_graphics_thread();
     LFS_PYTHON_RUNTIME_API void schedule_graphics_callback(std::function<void()> fn);
+    LFS_PYTHON_RUNTIME_API bool has_pending_graphics_callbacks();
     LFS_PYTHON_RUNTIME_API void flush_graphics_callbacks();
 
     // Exit popup state - thread-safe flag for window close callback
@@ -700,6 +706,7 @@ namespace lfs::python {
     // view_matrix/proj_matrix: column-major 4x4, others: float arrays
     // draw_list: opaque pointer to ImDrawList (cast by implementation)
     using HasViewportDrawHandlersCallback = bool (*)();
+    using SyncViewportOverlayDocumentCallback = bool (*)(void* document);
     // overlay_renderer: opaque pointer to lfs::rendering::ScreenOverlayRenderer (used for the
     // queued 2D draw commands). draw_list: ImDrawList* used only for the python transform-gizmo
     // path (still ImGui-rendered).
@@ -711,7 +718,10 @@ namespace lfs::python {
 
     LFS_PYTHON_RUNTIME_API void set_viewport_overlay_callbacks(HasViewportDrawHandlersCallback has_cb,
                                                                InvokeViewportOverlayCallback invoke_cb);
+    LFS_PYTHON_RUNTIME_API void set_viewport_overlay_document_sync_callback(
+        SyncViewportOverlayDocumentCallback sync_cb);
     LFS_PYTHON_RUNTIME_API bool has_viewport_draw_handlers();
+    LFS_PYTHON_RUNTIME_API bool sync_viewport_overlay_document(void* document);
     LFS_PYTHON_RUNTIME_API void invoke_viewport_overlay(const float* view_matrix, const float* proj_matrix,
                                                         const float* vp_pos, const float* vp_size,
                                                         const float* cam_pos, const float* cam_fwd,

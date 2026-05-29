@@ -468,12 +468,18 @@ namespace lfs::core {
           _scaling(std::move(scaling_)),
           _rotation(std::move(rotation_)),
           _opacity(std::move(opacity_)) {
+        _means.set_name("splat.positions");
+        _sh0.set_name("splat.sh0");
+        _scaling.set_name("splat.scaling");
+        _rotation.set_name("splat.rotation");
+        _opacity.set_name("splat.opacity");
         const size_t n = _means.is_valid() ? static_cast<size_t>(_means.shape()[0]) : 0;
         const size_t capacity = _means.is_valid() ? std::max<size_t>(_means.capacity(), n) : n;
         uint32_t layout_coeffs_rest =
             static_cast<uint32_t>(sh_rest_coefficients_for_degree(_max_sh_degree));
         if (shN_layout == ShNLayout::Swizzled) {
             _shN = std::move(shN_);
+            _shN.set_name("splat.shN");
             if (_shN.is_valid() && _shN.ndim() == 1 && n > 0) {
                 const auto stored_rest = infer_swizzled_rest_coefficients(n, static_cast<size_t>(_shN.numel()));
                 const size_t expected_for_requested_degree = sh_swizzled_float_count(n, layout_coeffs_rest);
@@ -506,11 +512,13 @@ namespace lfs::core {
                 static_cast<size_t>(_shN.shape()[0]) != expected_floats) {
                 _shN = allocate_swizzled_shN(n, capacity, layout_coeffs_rest);
             }
+            _shN.set_name("splat.shN");
             return;
         }
 
         // Convert the canonical-layout shN argument into swizzled storage.
         _shN = allocate_swizzled_shN(n, capacity, layout_coeffs_rest);
+        _shN.set_name("splat.shN");
         const auto src_rest = std::min(canonical_rest_coefficients(shN_), layout_coeffs_rest);
         if (shN_.is_valid() && shN_.numel() > 0 && n > 0 && src_rest > 0 && layout_coeffs_rest > 0) {
             reorder_canonical_into_swizzled(shN_, _shN.ptr<float>(), n, src_rest, layout_coeffs_rest);
@@ -532,7 +540,8 @@ namespace lfs::core {
           _rotation(std::move(other._rotation)),
           _opacity(std::move(other._opacity)),
           _densification_info(std::move(other._densification_info)),
-          _deleted(std::move(other._deleted)) {
+          _deleted(std::move(other._deleted)),
+          _tensor_allocator(std::move(other._tensor_allocator)) {
         // Reset the moved-from object
         other._active_sh_degree = 0;
         other._max_sh_degree = 0;
@@ -555,6 +564,7 @@ namespace lfs::core {
             _opacity = std::move(other._opacity);
             _densification_info = std::move(other._densification_info);
             _deleted = std::move(other._deleted);
+            _tensor_allocator = std::move(other._tensor_allocator);
         }
         return *this;
     }
@@ -792,6 +802,7 @@ namespace lfs::core {
 
         if (!_deleted.is_valid()) {
             _deleted = Tensor::zeros({n}, _means.device(), DataType::Bool);
+            _deleted.set_name("splat.deleted_mask");
         }
 
         Tensor old_deleted = _deleted.clone();
@@ -815,7 +826,7 @@ namespace lfs::core {
 
     void SplatData::clear_deleted() {
         if (_deleted.is_valid()) {
-            _deleted.zero_();
+            _deleted = Tensor();
         }
     }
 
@@ -866,12 +877,32 @@ namespace lfs::core {
 
         LOG_DEBUG("apply_deleted: filtering {} -> {} gaussians", old_size, new_size);
 
-        // Filter all tensors by keep mask
-        auto new_means = _means.index_select(0, keep_mask);
-        auto new_sh0 = _sh0.index_select(0, keep_mask);
-        auto new_scaling = _scaling.index_select(0, keep_mask);
-        auto new_rotation = _rotation.index_select(0, keep_mask);
-        auto new_opacity = _opacity.index_select(0, keep_mask);
+        // Int32 indices of kept primitives, computed once and reused for the param
+        // gathers and the shN block-aware gather. nonzero() returns [num_kept, 1].
+        Tensor kept_indices = keep_mask.nonzero();
+        const auto kept_numel = static_cast<int>(kept_indices.numel());
+        if (kept_indices.ndim() > 1)
+            kept_indices = kept_indices.reshape({kept_numel});
+        kept_indices = kept_indices.to(DataType::Int32);
+
+        // Gather kept rows for each parameter directly into a destination allocated
+        // from the model's backing storage (Vulkan-external interop when set, the
+        // default device allocator otherwise). Gathering into the destination avoids
+        // the transient copy of an index_select() + re-home, and keeps the tensors in
+        // the storage the viewport renderer requires.
+        const auto gather_param = [&](const Tensor& src, std::string_view name) {
+            auto dims = src.shape().dims();
+            dims[0] = new_size;
+            Tensor out = allocate_param_tensor(TensorShape(dims), new_size,
+                                               _tensor_allocator, name);
+            src.index_select_into(out, 0, kept_indices, BoundaryMode::Assert);
+            return out;
+        };
+        auto new_means = gather_param(_means, "SplatData.means");
+        auto new_sh0 = gather_param(_sh0, "SplatData.sh0");
+        auto new_scaling = gather_param(_scaling, "SplatData.scaling");
+        auto new_rotation = gather_param(_rotation, "SplatData.rotation");
+        auto new_opacity = gather_param(_opacity, "SplatData.opacity");
 
         // Verify new sizes are correct before committing
         if (new_means.size(0) != new_size || new_sh0.size(0) != new_size ||
@@ -893,15 +924,8 @@ namespace lfs::core {
         // shN is in swizzled layout — block-aware gather of kept primitives.
         const auto layout_rest = static_cast<uint32_t>(max_sh_coeffs_rest());
         if (_shN.is_valid() && _shN.numel() > 0 && layout_rest > 0) {
-            // nonzero() returns [num_kept, 1] int tensor of true indices.
-            auto kept_indices_2d = keep_mask.nonzero();
-            const auto kept_numel = static_cast<int>(kept_indices_2d.numel());
-            Tensor kept_indices = kept_indices_2d.ndim() > 1
-                                      ? kept_indices_2d.reshape({kept_numel})
-                                      : kept_indices_2d;
-            kept_indices = kept_indices.to(DataType::Int32);
-
-            auto new_shN = allocate_swizzled_shN(new_size, new_size, layout_rest);
+            auto new_shN = allocate_swizzled_shN(new_size, new_size, layout_rest,
+                                                 _tensor_allocator, "SplatData.shN");
             shN_swizzled_gather_self(_shN.ptr<float>(), new_shN.ptr<float>(),
                                      kept_indices.ptr<int>(), new_size, 0, layout_rest);
             _shN = std::move(new_shN);
@@ -957,7 +981,8 @@ namespace lfs::core {
         LOG_DEBUG("Serialized SplatData: {} Gaussians, SH {}/{}", size(), _active_sh_degree, _max_sh_degree);
     }
 
-    void SplatData::deserialize(std::istream& is) {
+    void SplatData::deserialize(std::istream& is, SplatTensorAllocator tensor_allocator) {
+        _tensor_allocator = tensor_allocator;
         uint32_t magic = 0, version = 0;
         is.read(reinterpret_cast<char*>(&magic), sizeof(magic));
         is.read(reinterpret_cast<char*>(&version), sizeof(version));
@@ -978,11 +1003,28 @@ namespace lfs::core {
         Tensor means, sh0, scaling, rotation, opacity;
         is >> means >> sh0 >> scaling >> rotation >> opacity;
 
-        _means = std::move(means).cuda();
-        _sh0 = std::move(sh0).cuda();
-        _scaling = std::move(scaling).cuda();
-        _rotation = std::move(rotation).cuda();
-        _opacity = std::move(opacity).cuda();
+        const auto copy_param = [&](Tensor source, std::string_view name) {
+            Tensor source_cuda = std::move(source).cuda();
+            if (!source_cuda.is_contiguous()) {
+                source_cuda = source_cuda.contiguous();
+            }
+            if (!tensor_allocator) {
+                source_cuda.set_name(std::string{name});
+                return source_cuda;
+            }
+            Tensor dst = allocate_param_tensor(source_cuda.shape(),
+                                               source_cuda.capacity(),
+                                               tensor_allocator,
+                                               name);
+            dst.copy_from(source_cuda);
+            return dst;
+        };
+
+        _means = copy_param(std::move(means), "SplatData.means");
+        _sh0 = copy_param(std::move(sh0), "SplatData.sh0");
+        _scaling = copy_param(std::move(scaling), "SplatData.scaling");
+        _rotation = copy_param(std::move(rotation), "SplatData.rotation");
+        _opacity = copy_param(std::move(opacity), "SplatData.opacity");
         _max_sh_degree = std::clamp(max_sh, 0, MAX_SUPPORTED_SH_DEGREE);
         _active_sh_degree = std::clamp(active_sh, 0, _max_sh_degree);
         _scene_scale = scene_scale;
@@ -991,12 +1033,31 @@ namespace lfs::core {
             Tensor shN_canon;
             is >> shN_canon;
             // shN_canon is canonical [N, K, 3]; reorder into swizzled storage.
-            shN_set_from_canonical(shN_canon.cuda(), static_cast<size_t>(_means.capacity()));
+            const size_t n = static_cast<size_t>(size());
+            const size_t cap = std::max<size_t>(_means.capacity(), n);
+            const auto layout_rest = static_cast<uint32_t>(max_sh_coeffs_rest());
+            _shN = allocate_swizzled_shN(n,
+                                         cap,
+                                         layout_rest,
+                                         tensor_allocator,
+                                         "SplatData.shN");
+            const auto src_rest = std::min(canonical_rest_coefficients(shN_canon), layout_rest);
+            if (shN_canon.is_valid() && shN_canon.numel() > 0 && n > 0 && src_rest > 0 && layout_rest > 0) {
+                reorder_canonical_into_swizzled(shN_canon.cuda(),
+                                                _shN.ptr<float>(),
+                                                n,
+                                                src_rest,
+                                                layout_rest);
+            }
         } else {
             // Allocate an empty swizzled tensor so _shN is valid even at SH degree 0.
             const size_t n = static_cast<size_t>(size());
             const size_t cap = std::max<size_t>(_means.capacity(), n);
-            _shN = allocate_swizzled_shN(n, cap, static_cast<uint32_t>(max_sh_coeffs_rest()));
+            _shN = allocate_swizzled_shN(n,
+                                         cap,
+                                         static_cast<uint32_t>(max_sh_coeffs_rest()),
+                                         tensor_allocator,
+                                         "SplatData.shN");
         }
 
         uint8_t has_deleted = 0;
@@ -1004,7 +1065,12 @@ namespace lfs::core {
         if (has_deleted) {
             Tensor deleted;
             is >> deleted;
-            _deleted = std::move(deleted).cuda();
+            Tensor deleted_cuda = std::move(deleted).cuda();
+            if (deleted_cuda.sum_scalar() != 0.0f) {
+                _deleted = std::move(deleted_cuda);
+            } else {
+                _deleted = Tensor{};
+            }
         }
 
         uint8_t has_densification = 0;
@@ -1048,7 +1114,15 @@ namespace lfs::core {
             Tensor positions, colors;
 
             if (params.optimization.random) {
-                const int num_points = params.optimization.init_num_pts;
+                int num_points = params.optimization.init_num_pts;
+                if (capacity > 0 && capacity < num_points) {
+                    LOG_WARN("Max cap ({}) is less than random init count ({}), "
+                             "initializing only {} splats",
+                             capacity,
+                             num_points,
+                             capacity);
+                    num_points = capacity;
+                }
                 const float extent = params.optimization.init_extent;
 
                 LOG_DEBUG("  Using random initialization: num_points={}, extent={}", num_points, extent);
