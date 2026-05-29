@@ -20,6 +20,8 @@ target_link_libraries(lfs_vulkan_rasterizer
         PUBLIC
         Vulkan::Vulkan
         GPUOpen::VulkanMemoryAllocator
+        PRIVATE
+        lfs_diagnostics
 )
 
 target_compile_features(lfs_vulkan_rasterizer PUBLIC cxx_std_23)
@@ -107,12 +109,17 @@ function(_vulkan_add_slang_shader OUT_NAME SRC_FILE)
 endfunction()
 
 function(_vulkan_add_glsl_shader OUT_NAME SRC_FILE)
+        set(_defs "")
+        foreach(D ${ARGN})
+                list(APPEND _defs "-D${D}")
+        endforeach()
         set(_out ${_VULKAN_RADIX_OUT}/${OUT_NAME}.spv)
         add_custom_command(
                 OUTPUT ${_out}
                 COMMAND ${GLSLANG}
                         -V
                         --target-env vulkan1.2
+                        ${_defs}
                         ${_VULKAN_SHADER_SRC}/radix_sort/${SRC_FILE}
                         -o ${_out}
                 DEPENDS ${_VULKAN_SHADER_SRC}/radix_sort/${SRC_FILE} ${_VULKAN_RADIX_DEPS}
@@ -137,6 +144,10 @@ _vulkan_add_slang_shader(compute_tile_ranges       tile_shader.slang EXPORT_MODE
 # Two-stage sort helper shaders
 _vulkan_add_slang_shader(seed_primitive_indices    seed_primitive_indices.slang)
 _vulkan_add_slang_shader(apply_depth_ordering      apply_depth_ordering.slang)
+_vulkan_add_slang_shader(visible_flags             visible_flags.slang)
+_vulkan_add_slang_shader(prepare_visible_sort      prepare_visible_sort.slang)
+_vulkan_add_slang_shader(prepare_tile_sort         prepare_tile_sort.slang)
+_vulkan_add_slang_shader(compact_visible_primitives compact_visible_primitives.slang)
 
 # vertex_shader.slang → projection_forward variants
 _vulkan_add_slang_shader(projection_forward        vertex_shader.slang EXPORT_MODE=0)
@@ -149,14 +160,21 @@ _vulkan_add_slang_shader(selection_mask            selection_mask.slang)
 # coverage mask consumed by selection_mask in POLYGON_MASK mode.
 _vulkan_add_slang_shader(selection_polygon_rasterize selection_polygon_rasterize.slang)
 
-# alphablend_shader.slang → forward variants
-_vulkan_add_slang_shader(rasterize_forward         alphablend_shader.slang EXPORT_MODE=0)
-_vulkan_add_slang_shader(rasterize_forward_3dgut   alphablend_shader.slang EXPORT_MODE=0 LFS_3DGUT_RASTERIZE=1)
+# alphablend_shader.slang → forward variants. The *_plain variants strip the
+# editor overlay/selection path from the per-pixel inner loop; the host selects
+# them whenever no overlay is active (the common viewing case).
+_vulkan_add_slang_shader(rasterize_forward               alphablend_shader.slang EXPORT_MODE=0)
+_vulkan_add_slang_shader(rasterize_forward_3dgut         alphablend_shader.slang EXPORT_MODE=0 LFS_3DGUT_RASTERIZE=1)
+_vulkan_add_slang_shader(rasterize_forward_plain         alphablend_shader.slang EXPORT_MODE=0 LFS_RASTER_OVERLAYS=0)
+_vulkan_add_slang_shader(rasterize_forward_3dgut_plain   alphablend_shader.slang EXPORT_MODE=0 LFS_3DGUT_RASTERIZE=1 LFS_RASTER_OVERLAYS=0)
 
 # Radix sort GLSL .comp
 _vulkan_add_glsl_shader(upsweep    upsweep.comp)
 _vulkan_add_glsl_shader(spine      spine.comp)
 _vulkan_add_glsl_shader(downsweep  downsweep.comp)
+_vulkan_add_glsl_shader(upsweep_indirect    upsweep.comp   RADIX_SORT_COUNT_BUFFER=1)
+_vulkan_add_glsl_shader(spine_indirect      spine.comp     RADIX_SORT_COUNT_BUFFER=1)
+_vulkan_add_glsl_shader(downsweep_indirect  downsweep.comp RADIX_SORT_COUNT_BUFFER=1)
 
 add_custom_target(lfs_vulkan_rasterizer_shaders DEPENDS ${VULKAN_RASTERIZER_SHADER_OUTPUTS})
 add_dependencies(lfs_vulkan_rasterizer lfs_vulkan_rasterizer_shaders)

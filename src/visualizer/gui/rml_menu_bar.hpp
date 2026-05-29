@@ -5,6 +5,8 @@
 #pragma once
 
 #include "gui/panel_layout.hpp"
+#include "gui/rmlui/rmlui_manager.hpp"
+
 #include <RmlUi/Core/DataModelHandle.h>
 #include <chrono>
 #include <cstddef>
@@ -137,9 +139,11 @@ namespace lfs::vis::gui {
         bool mouse_pos_valid_ = false;
         int last_mouse_x_ = 0;
         int last_mouse_y_ = 0;
+        int last_hovered_label_ = -1;
         int last_ctx_w_ = 0;
         int last_ctx_h_ = 0;
         int last_document_h_ = 0;
+        CachedVulkanContextRender direct_cache_;
 
         float bar_height_ = 30.0f;
     };

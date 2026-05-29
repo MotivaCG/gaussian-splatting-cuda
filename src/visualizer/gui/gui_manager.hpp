@@ -28,6 +28,7 @@
 #include "gui/ui_context.hpp"
 #include "gui/utils/drag_drop_native.hpp"
 #include "rendering/passes/vulkan_viewport_pass.hpp"
+#include "visualizer/app_store.hpp"
 #include "visualizer/gui/video_widget_interface.hpp"
 #include <chrono>
 #include <cstddef>
@@ -81,10 +82,7 @@ namespace lfs::vis {
             // Sub-manager access
             [[nodiscard]] AsyncTaskManager& asyncTasks() { return async_tasks_; }
             [[nodiscard]] const AsyncTaskManager& asyncTasks() const { return async_tasks_; }
-            void enqueueModal(lfs::core::ModalRequest request) {
-                if (rml_modal_overlay_)
-                    rml_modal_overlay_->enqueue(std::move(request));
-            }
+            void enqueueModal(lfs::core::ModalRequest request);
             [[nodiscard]] GizmoManager& gizmo() { return gizmo_manager_; }
             [[nodiscard]] const GizmoManager& gizmo() const { return gizmo_manager_; }
             [[nodiscard]] PanelLayoutManager& panelLayout() { return panel_layout_; }
@@ -145,13 +143,17 @@ namespace lfs::vis {
             void setVulkanSceneImage(std::shared_ptr<const lfs::core::Tensor> image,
                                      glm::ivec2 size,
                                      bool flip_y,
-                                     std::uint64_t generation);
+                                     std::uint64_t generation,
+                                     VkSemaphore completion_semaphore = VK_NULL_HANDLE,
+                                     std::uint64_t completion_value = 0);
             void setVulkanExternalSceneImage(VkImage image,
                                              VkImageView image_view,
                                              VkImageLayout layout,
                                              glm::ivec2 size,
                                              bool flip_y,
-                                             std::uint64_t generation);
+                                             std::uint64_t generation,
+                                             VkSemaphore completion_semaphore = VK_NULL_HANDLE,
+                                             std::uint64_t completion_value = 0);
 
             // Split-view's right panel routes through a parallel CUDA/Vulkan interop
             // slot so we don't pay PCIe staging cost for it; the left panel reuses the
@@ -219,6 +221,25 @@ namespace lfs::vis {
             bool reloadLocalizationResources();
             void reloadRmlResources();
 
+            [[nodiscard]] bool isVramHudOverlayVisible() const;
+            [[nodiscard]] bool isVramHudPublishDue(std::chrono::steady_clock::time_point now) const;
+
+            struct EditorContextUpdateStamp {
+                bool valid = false;
+                bool has_scene_manager = false;
+                bool has_trainer_manager = false;
+                bool has_dataset = false;
+                bool has_training_model = false;
+                bool trainer_running = false;
+                bool trainer_paused = false;
+                bool trainer_finished = false;
+                std::uint64_t scene_generation = 0;
+                std::uint64_t selection_generation = 0;
+                std::uint64_t scene_node_count = 0;
+
+                bool operator==(const EditorContextUpdateStamp&) const = default;
+            };
+
             // Core dependencies
             VisualizerImpl* viewer_;
 
@@ -229,6 +250,13 @@ namespace lfs::vis {
             // UI state only
             std::unordered_map<std::string, bool> window_states_;
             bool show_main_panel_ = true;
+            bool show_vram_hud_ = true;
+            bool vram_hud_visible_published_ = false;
+            std::chrono::steady_clock::time_point next_vram_hud_publish_{};
+            std::optional<AppStore::GTMetricsOverlayConfig> published_gt_metrics_overlay_config_;
+            bool menu_labels_synced_ = false;
+            std::uint64_t synced_menu_entries_version_ = 0;
+            std::uint64_t synced_menu_language_generation_ = 0;
 
             // Panel layout and viewport
             PanelLayoutManager panel_layout_;
@@ -296,6 +324,8 @@ namespace lfs::vis {
             glm::ivec2 vulkan_external_scene_image_size_{0, 0};
             bool vulkan_external_scene_image_flip_y_ = false;
             std::uint64_t vulkan_external_scene_image_generation_ = 0;
+            VkSemaphore vulkan_frame_completion_semaphore_ = VK_NULL_HANDLE;
+            std::uint64_t vulkan_frame_completion_value_ = 0;
             bool vulkan_scene_interop_disabled_ = false;
 
             // Parallel slot for split-view's right panel.
@@ -327,6 +357,7 @@ namespace lfs::vis {
             std::vector<std::shared_ptr<IPanel>> native_panel_storage_;
             uint64_t panel_frame_serial_ = 0;
             uint8_t ui_layout_settle_frames_ = 0;
+            EditorContextUpdateStamp last_editor_context_update_stamp_;
             glm::vec2 last_ui_layout_work_pos_{-1.0f, -1.0f};
             glm::vec2 last_ui_layout_work_size_{-1.0f, -1.0f};
             float last_ui_layout_right_panel_w_ = -1.0f;
@@ -337,6 +368,17 @@ namespace lfs::vis {
             bool last_ui_layout_ui_hidden_ = false;
             bool last_ui_layout_python_console_visible_ = false;
             bool last_ui_layout_bottom_dock_visible_ = false;
+            enum class RightPanelPointerRegion : uint8_t {
+                None,
+                Resize,
+                SceneHeader,
+                ActiveTab,
+                Chrome,
+            };
+            bool right_panel_pointer_live_capture_ = false;
+            RightPanelPointerRegion right_panel_pointer_capture_region_ =
+                RightPanelPointerRegion::None;
+            bool bottom_dock_pointer_live_capture_ = false;
             std::string last_ui_layout_active_tab_;
 
             struct DevResourceWatchState {

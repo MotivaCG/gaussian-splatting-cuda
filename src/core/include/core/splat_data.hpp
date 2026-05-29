@@ -26,6 +26,11 @@ namespace lfs::core {
         struct TrainingParameters;
     }
 
+    using SplatTensorAllocator = std::function<Tensor(TensorShape shape,
+                                                      size_t capacity,
+                                                      DataType dtype,
+                                                      std::string_view name)>;
+
     /**
      * @brief Core data structure for Gaussian splat representation
      *
@@ -157,7 +162,15 @@ namespace lfs::core {
 
         // ========== Serialization ==========
         void serialize(std::ostream& os) const;
-        void deserialize(std::istream& is);
+        void deserialize(std::istream& is, SplatTensorAllocator tensor_allocator = {});
+
+        // Allocator used to back the parameter tensors (e.g. Vulkan-external interop
+        // storage). Retained so edits that rebuild tensors (apply_deleted) can keep
+        // them in the same storage the renderer requires, instead of falling back to
+        // the default device allocator.
+        void set_tensor_allocator(SplatTensorAllocator allocator) {
+            _tensor_allocator = std::move(allocator);
+        }
 
         
         // ========== NGS Internal Setters ==========
@@ -191,17 +204,15 @@ namespace lfs::core {
         // Soft deletion mask: bool tensor [N], true = hidden from rendering
         Tensor _deleted;
 
+        // Backing allocator for parameter tensors (see set_tensor_allocator).
+        SplatTensorAllocator _tensor_allocator;
+
         // Allow free functions in splat_data_transform.cpp to access private members
         friend LFS_CORE_API SplatData& transform(SplatData&, const glm::mat4&);
         friend LFS_CORE_API SplatData crop_by_cropbox(const SplatData&, const lfs::geometry::BoundingBox&, bool);
         friend LFS_CORE_API SplatData extract_by_mask(const SplatData&, const Tensor&);
         friend LFS_CORE_API void random_choose(SplatData&, int, int);
     };
-
-    using SplatTensorAllocator = std::function<Tensor(TensorShape shape,
-                                                      size_t capacity,
-                                                      DataType dtype,
-                                                      std::string_view name)>;
 
     // ========== Free function: Factory ==========
 

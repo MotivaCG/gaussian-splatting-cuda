@@ -60,6 +60,11 @@ namespace lfs::vis::gui {
         bool any_item_active = false;
     };
 
+    struct RightPanelRenderDemand {
+        bool scene_header_live = true;
+        bool active_tab_live = true;
+    };
+
     class PanelLayoutManager {
     public:
         PanelLayoutManager();
@@ -72,7 +77,8 @@ namespace lfs::vis::gui {
                               std::unordered_map<std::string, bool>& window_states,
                               std::string& focus_panel_name,
                               const PanelInputState& input,
-                              const ScreenState& screen);
+                              const ScreenState& screen,
+                              RightPanelRenderDemand demand = {});
         void renderRightPanelCached(const UIContext& ctx, const PanelDrawContext& draw_ctx,
                                     bool show_main_panel, bool ui_hidden,
                                     std::unordered_map<std::string, bool>& window_states,
@@ -83,6 +89,9 @@ namespace lfs::vis::gui {
         void renderBottomDock(const PanelDrawContext& draw_ctx, bool show_main_panel,
                               bool ui_hidden, const PanelInputState& input,
                               const ScreenState& screen);
+        void renderBottomDockCached(const PanelDrawContext& draw_ctx, bool show_main_panel,
+                                    bool ui_hidden, const PanelInputState& input,
+                                    const ScreenState& screen);
 
         ViewportLayout computeViewportLayout(bool show_main_panel, bool ui_hidden,
                                              bool python_console_visible,

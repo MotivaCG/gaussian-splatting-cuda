@@ -90,6 +90,7 @@ set(BENCHMARK_FILES
     benchmark_scheduler.cpp
     benchmark_losses.cpp
     benchmark_ppisp_controller.cpp
+    benchmark_reactive_store.cpp
     # profile_adam_optimizer.cpp  # Disabled - missing header
     test_tensor_benchmark.cpp
     test_memory_pool_benchmark.cpp
@@ -118,6 +119,7 @@ set(TEST_FILES
     test_tensor_basic.cpp
     test_tensor_ops.cpp
     test_tensor_memory.cpp
+    test_allocator_policy.cpp
     test_tensor_reduction.cpp
     test_tensor_reduction_alignment.cpp
     test_isolation.cpp
@@ -204,6 +206,7 @@ set(TEST_FILES
     test_mask_loss.cpp
     test_checkpoint_resume.cpp
     test_argument_parser.cpp
+    test_logger.cpp
     test_parameter_manager.cpp
     test_mcp_protocol.cpp
     test_mcp_app_utils.cpp
@@ -212,6 +215,9 @@ set(TEST_FILES
     test_view_info_json.cpp
     test_video_export_utils.cpp
     test_visualizer_post_work.cpp
+    test_panel_registry_animation_demand.cpp
+    test_panel_layout_render_demand.cpp
+    test_reactive_store.cpp
     test_video_color_convert.cpp
     test_python_integration.cpp
     test_python_lsp_client.cpp
@@ -287,6 +293,7 @@ set(TEST_FILES
     test_rotated_sh_correctness.cpp
     test_tensor_stream.cpp
     test_tensor_memory_planner.cpp
+    test_vram_profiler_metrics.cpp
 )
 list(APPEND TEST_FILES test_vksplat_input_packer.cpp)
 
