@@ -2419,7 +2419,7 @@ namespace lfs::training {
     //
     // isNoise=true   (bg_noise): 5-phase curve with grace period, aggressive
     //   hold, and a small floor at the end to prevent late-training halos.
-    //   0-15% grace → 15-25% ramp to 0.85 → 25-45% hold → 45-80% decay → 80-100% floor 0.01
+    //   0-10% grace → 10-30% ramp to 0.85 → 30-45% hold → 45-80% decay → 80-100% floor 0.01
     inline float inv_weight_piecewise(int step, int max_steps, bool isNoise) {
         if (max_steps <= 0)
             return 0.0f;
@@ -2450,19 +2450,27 @@ namespace lfs::training {
             }
         }
 
-        // bg_noise curve — more aggressive, with grace period
-        constexpr float P_DELAY = 0.15f;
-        constexpr float P_WARMUP_LEN = 0.10f;
-        constexpr float P_RAMP_END = P_DELAY + P_WARMUP_LEN;
-        constexpr float P_HOLD_END = P_RAMP_END + P_WARMUP_LEN * 2;
-        constexpr float P_DECAY_END = 0.8f;
-        constexpr float MAX_INTENSITY = 0.85f;
+        // bg_noise curve — more aggressive, with grace period.
+        // Constants are now decoupled (absolute progress fractions) so each
+        // boundary can be moved independently without side effects on the
+        // other phases.
+        constexpr float P_GRACE_END  = 0.10f;  // grace [0, P_GRACE_END)         -> w = 0
+        constexpr float P_RAMP_END   = 0.30f;  // ramp  [P_GRACE_END, P_RAMP_END) -> 0 → MAX
+        constexpr float P_HOLD_END   = 0.45f;  // hold  [P_RAMP_END, P_HOLD_END)  -> MAX
+        constexpr float P_DECAY_END  = 0.80f;  // decay [P_HOLD_END, P_DECAY_END) -> MAX → MIN
+        constexpr float MAX_INTENSITY = 0.98f;
         constexpr float MIN_INTENSITY = 0.01f;
+        static_assert(P_GRACE_END < P_RAMP_END,
+            "P_GRACE_END must be < P_RAMP_END (grace must end before ramp ends)");
+        static_assert(P_RAMP_END <= P_HOLD_END,
+            "P_RAMP_END must be <= P_HOLD_END");
+        static_assert(P_HOLD_END <= P_DECAY_END,
+            "P_HOLD_END must be <= P_DECAY_END");
 
-        if (phase < P_DELAY) {
+        if (phase < P_GRACE_END) {
             return 0.0f;
         } else if (phase < P_RAMP_END) {
-            const float t = (phase - P_DELAY) / P_WARMUP_LEN;
+            const float t = (phase - P_GRACE_END) / (P_RAMP_END - P_GRACE_END);
             return MAX_INTENSITY * t;
         } else if (phase < P_HOLD_END) {
             return MAX_INTENSITY;
@@ -2485,7 +2493,12 @@ namespace lfs::training {
     } // anonymous namespace
 
     lfs::core::Tensor& Trainer::background_for_step(int iter) {
-        if (!params_.optimization.bg_modulation || params_.optimization.bg_noise) {
+        // Modulation applies whenever bg_modulation is on. bg_noise (the
+        // post-rasterizer overlay) is independent and can be combined:
+        // modulation cycles the BG color, bg_noise adds noise on top of the
+        // final render where alpha < 1. The two attack different parts of
+        // the pipeline and stack cleanly.
+        if (!params_.optimization.bg_modulation) {
             return background_;
         }
 
@@ -2659,6 +2672,141 @@ namespace lfs::training {
         return random_bg_buffer_;
     }
 
+    // =========================================================================
+    // TileNoise background: 6-color saturated palette (R,G,B,C,M,Y) sampled
+    // from a low-res pattern, shifted by a fixed step per iteration, fully
+    // regenerated every kRegenInterval iterations. Modulated by the same
+    // schedule weight as Modulation so it decays in the final phase.
+    //
+    // Compared to Random:
+    //   - Spatial structure (tiles of constant color) keeps the BG visually
+    //     smoother within each region -> less disruptive to translucent
+    //     subject features (hair).
+    //   - Saturated palette gives stronger anti-bias signal per pixel
+    //     (any splat memorizing one color is wrong vs >=5 of 6 palette
+    //     colors over time).
+    //   - Per-iter update is just integer shifts + LDG (no RNG hash per
+    //     pixel) -> cheaper than Random.
+    //
+    // Compared to Modulation:
+    //   - Many colors per frame simultaneously (vs one) -> no color in
+    //     particular is "safe" to memorize.
+    //   - Spatially patterned -> different splats see different colors
+    //     even at the same iter, prevents any single learnable BG color.
+    // =========================================================================
+    lfs::core::Tensor Trainer::get_tile_noise_background_for_camera(int width, int height, int iteration) {
+        using namespace lfs::core;
+
+        // ------ Tunable constants ------
+        // Tile size: smaller -> more cells per frame -> more spatial
+        // diversity (each splat sees more colors per iter), but more
+        // visually "fine-grain". 16 px is a sweet spot for 2K+ frames:
+        // ~8K cells in 2K, splats of any size cover multiple cells.
+        constexpr int kTileSize       = 16;
+        // Shift per iter: chosen as kTileSize + 1 so EVERY pixel visits a
+        // new tile every iteration (zero same-color repeats -> Adam cannot
+        // accumulate momentum toward any single BG color), AND the value
+        // is coprime with kTileSize (gcd(17, 16) = 1) so the shift sequence
+        // visits all tiles. +1 gives the minimum skip rate among the
+        // "shift > tile + coprime" candidates.
+        constexpr int kShiftPx        = 17;
+        constexpr int kShiftDx        = kShiftPx;
+        constexpr int kShiftDy        = kShiftPx;  // diagonal shift for 2D coverage
+        constexpr int kPaletteSize    = 6;
+        static_assert(kShiftPx > 0, "Shift must be positive");
+        static_assert(kShiftPx != kTileSize,
+            "kShiftPx == kTileSize would give gcd==kTileSize and produce a "
+            "predictable tile rotation. Pick a coprime value (e.g. kTileSize+1).");
+        // Hard ceiling for regen interval to avoid degenerate huge values on
+        // pathologically small images / shifts; the natural value (computed
+        // below) is bounded by max(wrap_x / dx, wrap_y / dy) which for
+        // typical resolutions is 100-600 iters.
+        constexpr int kRegenMaxIters  = 2048;
+
+        // ------ Output buffer ------
+        const size_t required_size = 3 * static_cast<size_t>(height) * static_cast<size_t>(width);
+        if (!tile_noise_bg_buffer_.is_valid() || tile_noise_bg_buffer_.numel() != required_size) {
+            tile_noise_bg_buffer_ = Tensor::empty(
+                {3, static_cast<size_t>(height), static_cast<size_t>(width)},
+                Device::CUDA,
+                DataType::Float32);
+        }
+
+        // ------ Lowres pattern (cell grid) ------
+        // Pad cells_x/cells_y by 2 so we have headroom for shift wrap-around
+        // without modular bugs at very small frames.
+        const int cells_x = std::max(2, (width  + kTileSize - 1) / kTileSize + 2);
+        const int cells_y = std::max(2, (height + kTileSize - 1) / kTileSize + 2);
+
+        // Regen interval: enough iters for the diagonal shift to wrap BOTH
+        // axes at least once. Past that point the pattern starts repeating
+        // and further iters add no novelty - regenerate instead.
+        //   iters_x = wrap_x / dx, iters_y = wrap_y / dy
+        //   interval = max(iters_x, iters_y)   (clamped to [10, kRegenMaxIters])
+        const int wrap_x = cells_x * kTileSize;
+        const int wrap_y = cells_y * kTileSize;
+        const int iters_x = (kShiftDx > 0) ? (wrap_x / kShiftDx) : kRegenMaxIters;
+        const int iters_y = (kShiftDy > 0) ? (wrap_y / kShiftDy) : kRegenMaxIters;
+        const int natural_interval = std::max(iters_x, iters_y);
+        const int regen_interval   = std::clamp(natural_interval, 10, kRegenMaxIters);
+
+        const bool need_regen =
+            tile_noise_last_regen_iter_ < 0 ||
+            (iteration - tile_noise_last_regen_iter_) >= regen_interval ||
+            cells_x != tile_noise_pattern_cells_x_ ||
+            cells_y != tile_noise_pattern_cells_y_ ||
+            !tile_noise_pattern_.is_valid();
+
+        if (need_regen) {
+            // CPU-side RNG (cheap, cells_x * cells_y ~ a few thousand bytes).
+            // Persistent seed bumps per regen to ensure variety across blocks.
+            const size_t n_cells = static_cast<size_t>(cells_y) * static_cast<size_t>(cells_x);
+            std::vector<uint8_t> host_pattern(n_cells);
+            const uint32_t seed = static_cast<uint32_t>(iteration) * 0x9E3779B1u + 0xCAFEF00Du;
+            uint32_t s = seed ? seed : 1u;  // avoid degenerate state
+            for (size_t i = 0; i < n_cells; ++i) {
+                // xorshift32 (fast, fine for this purpose)
+                s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+                host_pattern[i] = static_cast<uint8_t>(s % kPaletteSize);
+            }
+
+            Tensor host_t = Tensor::from_blob(
+                host_pattern.data(),
+                {static_cast<size_t>(cells_y), static_cast<size_t>(cells_x)},
+                Device::CPU,
+                DataType::UInt8);
+            tile_noise_pattern_ = host_t.to(Device::CUDA).contiguous();
+
+            tile_noise_pattern_cells_x_ = cells_x;
+            tile_noise_pattern_cells_y_ = cells_y;
+            tile_noise_last_regen_iter_ = iteration;
+            tile_noise_shift_x_ = 0;
+            tile_noise_shift_y_ = 0;
+        } else {
+            // Cheap per-iter update: just bump the shift offsets.
+            tile_noise_shift_x_ += kShiftDx;
+            tile_noise_shift_y_ += kShiftDy;
+        }
+
+        // ------ Schedule weight ------
+        // Use the modulation curve (isNoise=false) so the tile noise also
+        // decays in the final phase, like Modulation does.
+        const float w = inv_weight_piecewise(iteration, get_total_iterations(), false);
+
+        // ------ Launch ------
+        kernels::launch_tile_noise_background(
+            tile_noise_bg_buffer_.ptr<float>(),
+            tile_noise_pattern_.ptr<uint8_t>(),
+            height, width,
+            tile_noise_pattern_cells_y_, tile_noise_pattern_cells_x_,
+            kTileSize,
+            tile_noise_shift_x_, tile_noise_shift_y_,
+            w,
+            tile_noise_bg_buffer_.stream());
+
+        return tile_noise_bg_buffer_;
+    }
+
 
     std::expected<Trainer::StepResult, std::string> Trainer::train_step(
         int iter,
@@ -2738,6 +2886,8 @@ namespace lfs::training {
                 bg_image = get_background_image_for_camera(cam->image_width(), cam->image_height());
             } else if (params_.optimization.bg_mode == lfs::core::param::BackgroundMode::Random) {
                 bg_image = get_random_background_for_camera(cam->image_width(), cam->image_height(), iter);
+            } else if (params_.optimization.bg_mode == lfs::core::param::BackgroundMode::TileNoise) {
+                bg_image = get_tile_noise_background_for_camera(cam->image_width(), cam->image_height(), iter);
             }
 
             // Configurable tile-based training to reduce peak memory in 3DGUT.

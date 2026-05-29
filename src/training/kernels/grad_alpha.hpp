@@ -272,4 +272,29 @@ namespace lfs::training::kernels {
         uint64_t seed,
         cudaStream_t stream = nullptr);
 
+    // Generate a tile-noise BG [3, H, W] sampled from a low-res pattern of
+    // CMY+RGB categorical colors. The lowres pattern (cells_y * cells_x bytes,
+    // each in [0,5]) is generated externally (one-time per regen interval) and
+    // uploaded to GPU; this kernel just samples + shifts + applies the
+    // schedule weight w.
+    //
+    // For each output pixel (px, py):
+    //   abs_x  = (px + shift_x) mod (cells_x * tile_size)
+    //   abs_y  = (py + shift_y) mod (cells_y * tile_size)
+    //   tile_x = abs_x / tile_size
+    //   tile_y = abs_y / tile_size
+    //   color  = palette[ pattern_lowres[tile_y, tile_x] ] * weight
+    //
+    // palette[6] = pure saturated:
+    //   0=R(1,0,0) 1=G(0,1,0) 2=B(0,0,1) 3=C(0,1,1) 4=M(1,0,1) 5=Y(1,1,0)
+    void launch_tile_noise_background(
+        float* output,                        // [3, H, W] device
+        const uint8_t* pattern_lowres,        // [cells_y, cells_x] device, values 0..5
+        int H, int W,
+        int cells_y, int cells_x,
+        int tile_size,
+        int shift_x, int shift_y,
+        float weight,
+        cudaStream_t stream = nullptr);
+
 } // namespace lfs::training::kernels

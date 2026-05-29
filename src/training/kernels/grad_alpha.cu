@@ -642,4 +642,68 @@ namespace lfs::training::kernels {
             output, HW, static_cast<uint32_t>(seed));
     }
 
+    // --------------------------------------------------------------------
+    // Tile-noise BG kernel
+    //
+    // 6-color saturated palette (R, G, B, C, M, Y), encoded in two
+    // __constant__ arrays so the kernel only does a small LDC indirection.
+    // --------------------------------------------------------------------
+    __device__ __constant__ float c_tile_palette_r[6] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f};
+    __device__ __constant__ float c_tile_palette_g[6] = {0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f};
+    __device__ __constant__ float c_tile_palette_b[6] = {0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 0.0f};
+
+    __global__ void tile_noise_background_kernel(
+        float* __restrict__ output,
+        const uint8_t* __restrict__ pattern_lowres,
+        const int H, const int W,
+        const int cells_y, const int cells_x,
+        const int tile_size,
+        const int shift_x, const int shift_y,
+        const float weight) {
+        const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        const int HW = H * W;
+        if (idx >= HW) return;
+
+        const int py = idx / W;
+        const int px = idx - py * W;
+
+        const int wrap_x = cells_x * tile_size;
+        const int wrap_y = cells_y * tile_size;
+
+        // (px + shift_x) mod wrap_x but supporting negative shifts safely
+        int abs_x = (px + shift_x) % wrap_x;
+        if (abs_x < 0) abs_x += wrap_x;
+        int abs_y = (py + shift_y) % wrap_y;
+        if (abs_y < 0) abs_y += wrap_y;
+
+        const int tile_x = abs_x / tile_size;
+        const int tile_y = abs_y / tile_size;
+
+        const uint8_t color_idx = pattern_lowres[tile_y * cells_x + tile_x];
+        // Defensive clamp - the source data should already be in [0,5] but
+        // bad memory would crash on the constant array.
+        const uint8_t safe_idx = color_idx < 6 ? color_idx : 0;
+
+        output[idx]          = c_tile_palette_r[safe_idx] * weight;
+        output[HW + idx]     = c_tile_palette_g[safe_idx] * weight;
+        output[2 * HW + idx] = c_tile_palette_b[safe_idx] * weight;
+    }
+
+    void launch_tile_noise_background(
+        float* output,
+        const uint8_t* pattern_lowres,
+        const int H, const int W,
+        const int cells_y, const int cells_x,
+        const int tile_size,
+        const int shift_x, const int shift_y,
+        const float weight,
+        cudaStream_t stream) {
+        const int HW = H * W;
+        const unsigned int blocks = num_blocks_1d(HW);
+        tile_noise_background_kernel<<<blocks, kThreadsPerBlock, 0, stream>>>(
+            output, pattern_lowres,
+            H, W, cells_y, cells_x, tile_size,
+            shift_x, shift_y, weight);
+    }
+
 } // namespace lfs::training::kernels

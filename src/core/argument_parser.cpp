@@ -43,6 +43,8 @@ namespace {
             return BackgroundMode::Image;
         if (mode == "random")
             return BackgroundMode::Random;
+        if (mode == "tilenoise")
+            return BackgroundMode::TileNoise;
         return std::nullopt;
     }
 
@@ -200,7 +202,7 @@ namespace {
             ::args::ValueFlag<float> means_lr_mul_end(parser, "mul_end", "Multiply means_lr by this factor at the end (curved schedule over time)", {"means-lr-mul-end"});
             ::args::Flag use_error_map(training_group, "use_error_map", "Weight MRNF refine signal by per-pixel SSIM error map", {"use-error-map"});
             ::args::Flag use_edge_map(training_group, "use_edge_map", "Weight MRNF refine signal by Sobel edge map on GT images", {"use-edge-map"});
-            ::args::ValueFlag<std::string> bg_mode(training_group, "mode", "Background mode: solidcolor, modulation, image, random (default: solidcolor)", {"bg-mode"});
+            ::args::ValueFlag<std::string> bg_mode(training_group, "mode", "Background mode: solidcolor, modulation, image, random, tilenoise (default: solidcolor)", {"bg-mode"});
             ::args::ValueFlag<std::string> bg_color(training_group, "color", "solidcolor background color as #RRGGBB or (R,G,B) with 0-255 channels (default: #000000)", {"bg-color"});
             ::args::ValueFlag<std::string> bg_image_path(training_group, "path", "Background image path (required when --bg-mode image)", {"bg-image-path"});
 
@@ -642,7 +644,7 @@ namespace {
             if (bg_mode) {
                 parsed_bg_mode = parse_bg_mode(::args::get(bg_mode));
                 if (!parsed_bg_mode) {
-                    return std::unexpected("ERROR: --bg-mode must be one of solidcolor, modulation, image, or random");
+                    return std::unexpected("ERROR: --bg-mode must be one of solidcolor, modulation, image, random, or tilenoise");
                 }
             }
 

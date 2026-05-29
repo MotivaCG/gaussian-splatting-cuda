@@ -519,13 +519,13 @@ namespace lfs::training {
         step_params.focused_bg_weight = kBgTarget;
 
         constexpr float kFgAlphaRampStart = 0.30f; // Start ramping FG alpha pressure up.
-        constexpr float kFgAlphaRampEnd = 0.40f; // FG alpha pressure reaches full strength.
+        constexpr float kFgAlphaRampEnd = 0.40f;   // FG alpha pressure reaches full strength.
 
         constexpr float kBgAlphaRampStart = 0.50f; // Start ramping BG alpha pressure up.
-        constexpr float kBgAlphaRampEnd = 0.60f; // BG alpha pressure reaches full strength; both FG+BG fully active.
+        constexpr float kBgAlphaRampEnd = 0.60f;   // BG alpha pressure reaches full strength; both FG+BG fully active.
 
-        constexpr float kAlphaDecayStart = 0.75f; // Start relaxing alpha pressure toward residual floors.
-        constexpr float kAlphaDecayEnd = 0.85f; // End of decay; residual floors remain until training ends.
+        constexpr float kAlphaDecayStart = 0.75f;  // Start relaxing alpha pressure toward residual floors.
+        constexpr float kAlphaDecayEnd = 0.85f;    // End of decay; residual floors remain until training ends.
 
         constexpr float kAlphaPenaltyMult = 0.0066;
         constexpr float kFgAlphaFloorValue = 1.0f * kAlphaPenaltyMult; // FG residual alpha penalty after decay.

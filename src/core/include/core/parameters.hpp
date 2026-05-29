@@ -34,7 +34,8 @@ namespace lfs::core {
             SolidColor, // Use bg_color RGB values
             Modulation, // Sinusoidal background modulation
             Image,      // Use custom background image
-            Random      // Random per-pixel colors each iteration
+            Random,     // Random per-pixel colors each iteration
+            TileNoise   // Tile-based saturated CMY+RGB pattern, shifted each iter, regenerated every 100 iters
         };
 
         inline constexpr std::string_view kStrategyMCMC = "mcmc";

@@ -244,6 +244,11 @@ namespace lfs::training {
 
         lfs::core::Tensor get_random_background_for_camera(int width, int height, int iteration);
 
+        // TileNoise BG: lowres palette pattern regenerated every kRegen iters,
+        // shifted on-the-fly between regens, modulated by the modulation
+        // schedule weight w. See implementation for tunable constants.
+        lfs::core::Tensor get_tile_noise_background_for_camera(int width, int height, int iteration);
+
         // Protected method for processing a single training step
         std::expected<StepResult, std::string> train_step(
             int iter,
@@ -413,6 +418,17 @@ namespace lfs::training {
         lfs::core::Tensor bg_image_base_{};                              // Original background image [C, H, W]
         std::unordered_map<uint64_t, lfs::core::Tensor> bg_image_cache_; // Cache of resized bg images keyed by (H << 32) | W
         lfs::core::Tensor random_bg_buffer_{};                           // Reusable buffer for random background
+
+        // --- TileNoise BG state ---
+        // Lowres pattern of palette indices (0..5), regenerated periodically
+        // and shifted between regens. See get_tile_noise_background_for_camera.
+        lfs::core::Tensor tile_noise_pattern_{};   // [cells_y, cells_x] UInt8, on CUDA
+        lfs::core::Tensor tile_noise_bg_buffer_{}; // Reusable [3, H, W] output buffer
+        int tile_noise_last_regen_iter_ = -1;      // -1 sentinel: never generated
+        int tile_noise_pattern_cells_x_ = 0;
+        int tile_noise_pattern_cells_y_ = 0;
+        int tile_noise_shift_x_ = 0;
+        int tile_noise_shift_y_ = 0;
         std::unique_ptr<TrainingProgress> progress_;
         size_t train_dataset_size_ = 0;
         size_t total_cameras_count_ = 0;
