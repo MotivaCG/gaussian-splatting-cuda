@@ -1010,7 +1010,7 @@ class TrainingPanel(Panel):
                 "stopped": tr("status.stopped"),
                 "error": tr("status.error"),
             }
-            return f"{tr('status.mode')}: {labels.get(state, tr('status.unknown'))}"
+            return f"{tr('status.mode')} {labels.get(state, tr('status.unknown'))}"
 
         def _status_iteration():
             it = RuntimeState.iteration.value
@@ -1304,6 +1304,15 @@ class TrainingPanel(Panel):
         state = RuntimeState.trainer_state.value
         can_edit = state == "ready" and RuntimeState.iteration.value == 0
         if not can_edit:
+            return False
+
+        return self._refresh_save_steps_model(params)
+
+    def _refresh_save_steps_model(self, params=None):
+        if params is None:
+            params = lf.optimization_params()
+        if not self._handle or not params or not params.has_params():
+            self._last_save_steps = None
             return False
 
         steps = list(params.save_steps)
@@ -1949,7 +1958,7 @@ class TrainingPanel(Panel):
                 params.add_save_step(self._new_save_step)
                 if params.enable_eval:
                     self._sync_eval_steps_with_save_steps(params)
-                self._last_save_steps = None
+                self._refresh_save_steps_model(params)
 
     def _action_start(self):
         params = lf.optimization_params()
@@ -2082,7 +2091,7 @@ class TrainingPanel(Panel):
             params.remove_save_step(step_to_remove)
             if params.enable_eval:
                 self._remove_from_eval_steps(params, step_to_remove)
-            self._last_save_steps = None
+            self._refresh_save_steps_model(params)
 
     def _sync_eval_steps_with_save_steps(self, params):
         if not params or not params.has_params():
@@ -3388,7 +3397,7 @@ class TrainingPanel(Panel):
             "error": tr("status.error"),
         }
         unknown_state = tr("status.unknown")
-        layout.label(f"{tr('status.mode')}: {state_labels.get(state, unknown_state)}")
+        layout.label(f"{tr('status.mode')} {state_labels.get(state, unknown_state)}")
 
         _rate_tracker.add_sample(iteration)
         rate = _rate_tracker.get_rate()

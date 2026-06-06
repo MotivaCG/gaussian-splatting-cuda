@@ -28,8 +28,10 @@ namespace lfs::vis::gui {
     namespace {
         [[nodiscard]] bool isInteractiveViewportOverlayElement(const Rml::Element* const element) {
             return element && element->GetTagName() != "body" &&
+                   element->GetTagName() != "#root" &&
                    element->GetId() != "overlay-body" &&
-                   element->GetId() != "dm-root";
+                   element->GetId() != "dm-root" &&
+                   !element->IsClassSet("viewport-split-divider");
         }
 
         [[nodiscard]] bool isViewportOverlayHoverRoot(const Rml::Element* const element) {
@@ -58,6 +60,7 @@ namespace lfs::vis::gui {
             }
             return isInteractiveViewportOverlayElement(element) ? element : nullptr;
         }
+
     } // namespace
 
     RmlViewportOverlay::RmlViewportOverlay()
@@ -88,6 +91,7 @@ namespace lfs::vis::gui {
         append(RenderReason::DocumentHook, "document_hook");
         append(RenderReason::ViewportResize, "viewport_resize");
         append(RenderReason::ToolbarLayout, "toolbar_layout");
+        append(RenderReason::SplitDivider, "split_divider");
         append(RenderReason::GTMetrics, "gt_metrics");
         append(RenderReason::VramHud, "vram_hud");
         append(RenderReason::DataModelBinding, "data_model_binding");
@@ -200,6 +204,7 @@ namespace lfs::vis::gui {
             cacheBodyTemplate();
             document_->Show();
             applyGTMetricsOverlay();
+            applySplitDividerOverlay();
             if (vram_hud_)
                 vram_hud_->onDocumentLoaded(document_);
             updateToolbarRoots();
@@ -314,6 +319,22 @@ namespace lfs::vis::gui {
         updateToolbarRoots();
     }
 
+    void RmlViewportOverlay::setSplitDividerOverlay(SplitDividerOverlayState state) {
+        const bool changed =
+            split_divider_overlay_.visible != state.visible ||
+            std::abs(split_divider_overlay_.x - state.x) > 0.5f ||
+            std::abs(split_divider_overlay_.y - state.y) > 0.5f ||
+            std::abs(split_divider_overlay_.width - state.width) > 0.5f ||
+            std::abs(split_divider_overlay_.height - state.height) > 0.5f;
+        if (!changed) {
+            return;
+        }
+
+        split_divider_overlay_ = state;
+        applySplitDividerOverlay();
+        markRenderNeeded(RenderReason::SplitDivider);
+    }
+
     void RmlViewportOverlay::setGTMetricsOverlay(GTMetricsOverlayState state) {
         const bool changed =
             gt_metrics_overlay_.visible != state.visible ||
@@ -387,6 +408,8 @@ namespace lfs::vis::gui {
         document_sync_subscriptions_.push_back(store.active_submode.subscribe(mark_document_dirty));
         document_sync_subscriptions_.push_back(store.transform_space.subscribe(mark_document_dirty));
         document_sync_subscriptions_.push_back(store.pivot_mode.subscribe(mark_document_dirty));
+        document_sync_subscriptions_.push_back(store.render_settings_generation.subscribe(mark_document_dirty));
+        document_sync_subscriptions_.push_back(store.viewport_toolbar_generation.subscribe(mark_document_dirty));
         document_sync_subscriptions_.push_back(store.import_overlay_state.subscribe(mark_document_dirty));
         document_sync_subscriptions_.push_back(store.video_export_overlay_state.subscribe(mark_document_dirty));
     }
@@ -450,6 +473,21 @@ namespace lfs::vis::gui {
         return true;
     }
 
+    void RmlViewportOverlay::applySplitDividerOverlay() {
+        if (!document_) {
+            return;
+        }
+
+        if (auto* const overlay = document_->GetElementById("split-divider-overlay")) {
+            overlay->SetClass("hidden", !split_divider_overlay_.visible);
+            overlay->SetProperty("left", std::format("{:.1f}px", split_divider_overlay_.x));
+            overlay->SetProperty("top", std::format("{:.1f}px", split_divider_overlay_.y));
+            overlay->SetProperty("width", std::format("{:.1f}px", std::max(split_divider_overlay_.width, 0.0f)));
+            overlay->SetProperty("height", std::format("{:.1f}px", std::max(split_divider_overlay_.height, 0.0f)));
+            markRenderNeeded(RenderReason::SplitDivider);
+        }
+    }
+
     void RmlViewportOverlay::applyGTMetricsOverlay() {
         if (!document_) {
             return;
@@ -493,9 +531,7 @@ namespace lfs::vis::gui {
                                             static_cast<int>(vp_pos_.x - screen_origin_.x),
                                             static_cast<int>(vp_pos_.y - screen_origin_.y));
         }
-
-        if (guiFocusState().want_capture_mouse)
-            return;
+        const bool external_mouse_capture = guiFocusState().want_capture_mouse;
 
         const float mx = input.mouse_x - vp_pos_.x;
         const float my = input.mouse_y - vp_pos_.y;
@@ -530,8 +566,15 @@ namespace lfs::vis::gui {
         if (mouse_pos_valid_ && !mouse_moved && !pointer_event && !pointer_drag &&
             !keyboard_event && !vram_drag_capture) {
             wants_input_ = hovered_interactive_ || focused_text_target;
-            if (hovered_interactive_)
+            auto* const hover = hovered_interactive_ ? rml_context_->GetHoverElement() : nullptr;
+            const auto* const hover_root = viewportOverlayHoverRoot(hover);
+            if (hovered_interactive_) {
                 guiFocusState().want_capture_mouse = true;
+                if (hover)
+                    tooltip_.setHover(resolveRmlTooltip(hover), hover_root ? hover_root : hover);
+            } else {
+                tooltip_.setHover({}, nullptr);
+            }
             if (focused_text_target)
                 guiFocusState().want_capture_keyboard = true;
             return;
@@ -541,14 +584,19 @@ namespace lfs::vis::gui {
                                               static_cast<float>(rml_mx),
                                               static_cast<float>(rml_my)))
                                         : nullptr;
-        const bool point_interactive = isInteractiveViewportOverlayElement(point_element);
+        const bool point_interactive = viewportOverlayHoverRoot(point_element) != nullptr;
         const bool hover_target_changed = point_element != last_hover_element_;
+        if (external_mouse_capture && !point_interactive && !hovered_interactive_ &&
+            !vram_drag_capture) {
+            tooltip_.setHover({}, nullptr);
+            return;
+        }
         const bool should_process_mouse_move =
             (mouse_moved || pointer_event) &&
             (was_inside || is_inside || vram_drag_capture) &&
             (pointer_event || pointer_drag || hover_target_changed ||
              hovered_interactive_ || was_inside != is_inside || vram_drag_capture) &&
-            (point_interactive || hovered_interactive_ || was_inside != is_inside ||
+            (is_inside || hovered_interactive_ || was_inside != is_inside ||
              vram_drag_capture);
         if (should_process_mouse_move) {
             mouse_pos_valid_ = true;
@@ -580,7 +628,8 @@ namespace lfs::vis::gui {
 
         auto* const hover = should_process_mouse_move ? rml_context_->GetHoverElement()
                                                       : point_element;
-        const bool over_interactive = is_inside && isInteractiveViewportOverlayElement(hover);
+        const auto* const hover_root = viewportOverlayHoverRoot(hover);
+        const bool over_interactive = is_inside && hover_root != nullptr;
         hovered_interactive_ = over_interactive;
 
         if (over_interactive || vram_drag_capture) {
@@ -609,7 +658,9 @@ namespace lfs::vis::gui {
             }
 
             if (hover)
-                tooltip_.setHover(resolveRmlTooltip(hover), hover);
+                tooltip_.setHover(resolveRmlTooltip(hover), hover_root ? hover_root : hover);
+        } else {
+            tooltip_.setHover({}, nullptr);
         }
 
         // Forward keyboard + text input whenever an RmlUi element on this context owns focus
@@ -707,6 +758,7 @@ namespace lfs::vis::gui {
             wrapper->AppendChild(body->RemoveChild(child));
 
         applyGTMetricsOverlay();
+        applySplitDividerOverlay();
         if (vram_hud_)
             vram_hud_->onDocumentLoaded(document_);
     }
@@ -844,6 +896,7 @@ namespace lfs::vis::gui {
             markRenderNeeded(RenderReason::DataModelBinding);
             ensureBodyDataModelBound(body_el_);
             data_model_binding_dirty_ = false;
+            document_dirty |= syncBuiltinDocument(true);
         }
         bool tooltip_changed = false;
         if (tooltip_.hasActiveState()) {

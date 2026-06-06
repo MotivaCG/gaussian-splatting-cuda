@@ -113,6 +113,35 @@ namespace {
         return std::nullopt;
     }
 
+    std::expected<std::vector<bool>, std::string> parse_add_splat_freeze_modifiers(
+        const std::vector<std::string>& args) {
+        std::vector<bool> freeze;
+        for (size_t i = 1; i < args.size(); ++i) {
+            const auto& arg = args[i];
+            if (arg == "--add-splat") {
+                if (i + 1 >= args.size()) {
+                    return std::unexpected("--add-splat requires a path");
+                }
+                const bool frozen = (i + 2 < args.size() && args[i + 2] == "--freeze");
+                freeze.push_back(frozen);
+                i += frozen ? 2 : 1;
+                continue;
+            }
+            if (arg.starts_with("--add-splat=")) {
+                const bool frozen = (i + 1 < args.size() && args[i + 1] == "--freeze");
+                freeze.push_back(frozen);
+                if (frozen) {
+                    ++i;
+                }
+                continue;
+            }
+            if (arg == "--freeze") {
+                return std::unexpected("--freeze must immediately follow --add-splat <path>");
+            }
+        }
+        return freeze;
+    }
+
     // Parse log level from string
     lfs::core::LogLevel parse_log_level(const std::string& level_str) {
         if (level_str == "trace")
@@ -181,6 +210,7 @@ namespace {
             ::args::ValueFlag<std::string> config_file(paths_group, "config_file", "LichtFeldStudio config file (json)", {"config"});
             ::args::ValueFlag<std::string> init_path(paths_group, "path", "Initialize from splat file (.ply, .sog, .spz, .usd, .usda, .usdc, .usdz, .resume)", {"init"});
             ::args::ValueFlagList<std::string> add_splats(paths_group, "path", "Append trained splat file(s) to the training model before optimizer initialization", {"add-splat"});
+            ::args::CounterFlag freeze(paths_group, "freeze", "Freeze the immediately preceding --add-splat rows from optimizer gradients and densification", {"freeze"});
 
             ::args::ValueFlag<std::string> import_cameras(paths_group, "path", "Import COLMAP cameras from sparse folder (no images required)", {"import-cameras"});
 
@@ -487,13 +517,23 @@ namespace {
                 }
             }
 
+            auto add_splat_freeze = parse_add_splat_freeze_modifiers(args);
+            if (!add_splat_freeze) {
+                return std::unexpected(add_splat_freeze.error());
+            }
             if (add_splats) {
-                for (const auto& path_str : ::args::get(add_splats)) {
+                const auto add_splat_values = ::args::get(add_splats);
+                if (add_splat_freeze->size() != add_splat_values.size()) {
+                    return std::unexpected("--add-splat parser metadata is inconsistent");
+                }
+                for (size_t i = 0; i < add_splat_values.size(); ++i) {
+                    const auto& path_str = add_splat_values[i];
                     const auto splat_path = lfs::core::utf8_to_path(path_str);
                     if (!std::filesystem::exists(splat_path)) {
                         return std::unexpected(std::format("Added splat does not exist: {}", path_str));
                     }
                     params.add_splat_paths.push_back(splat_path);
+                    params.add_splat_freeze.push_back((*add_splat_freeze)[i]);
                 }
             }
 

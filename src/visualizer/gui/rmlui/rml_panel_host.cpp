@@ -408,6 +408,8 @@ namespace lfs::vis::gui {
         if (!dirty)
             return;
         direct_cache_dirty_ = true;
+        const bool needs_post_layout_update =
+            content_dirty_ || render_needed_ || theme_dirty || size_dirty;
 
         const bool need_content_measure =
             height_mode_ == PanelHeightMode::Content &&
@@ -472,6 +474,9 @@ namespace lfs::vis::gui {
             updateContextLayout(pw, ph);
             restoreScrollTop(saved_scroll);
         }
+
+        if (needs_post_layout_update)
+            rml_context_->Update();
 
         content_dirty_ = false;
         if (height_mode_ != PanelHeightMode::Content)
@@ -642,6 +647,10 @@ namespace lfs::vis::gui {
         if (w <= 0 || h <= 0)
             return false;
         if (!document_ || !rml_context_ || last_fbo_w_ <= 0 || last_fbo_h_ <= 0)
+            return false;
+        if (render_needed_ || content_dirty_ || animation_active_ || tooltip_.needsFrame())
+            return false;
+        if (!has_theme_signature_ || rml_theme::currentThemeSignature() != last_theme_signature_)
             return false;
 
         const int pw = static_cast<int>(w);
@@ -996,6 +1005,10 @@ namespace lfs::vis::gui {
         if (hovered) {
             if (auto* const hover = rml_context_->GetHoverElement())
                 tooltip_.setHover(resolveRmlTooltip(hover), hover);
+            else
+                tooltip_.setHover({}, nullptr);
+        } else {
+            tooltip_.setHover({}, nullptr);
         }
 
         if (input.viewport_keyboard_focus)

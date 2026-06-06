@@ -7,9 +7,11 @@
 #include "config.h"
 #include "core/logger.hpp"
 #include "diagnostics/vram_profiler.hpp"
+#include "viewport_pass_graph.hpp"
 #include "vulkan_environment_pass.hpp"
 #include "vulkan_mesh_pass.hpp"
 #include "vulkan_scene_image_uploader.hpp"
+#include "window/vulkan_barrier2.hpp"
 #include "window/vulkan_context.hpp"
 
 #include "viewport/grid.frag.spv.h"
@@ -28,6 +30,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -217,6 +220,11 @@ namespace lfs::vis {
         VkPipelineLayout pivot_pipeline_layout = VK_NULL_HANDLE;
         VkPipeline pivot_pipeline = VK_NULL_HANDLE;
 
+        // Declarative pass-graph: record() runs this ordered set of sub-passes, each gated by its
+        // own active() condition, rebinding shared viewport/quad state between them.
+        ViewportPassGraph graph_;
+        std::vector<std::unique_ptr<ViewportSubPass>> graph_passes_;
+
         [[nodiscard]] bool init(VulkanContext& ctx) {
             if (device != VK_NULL_HANDLE) {
                 return true;
@@ -266,7 +274,138 @@ namespace lfs::vis {
                 reset();
                 return false;
             }
+            registerGraphPasses();
+            graph_.finalize();
             return true;
+        }
+
+        // Registers a sub-pass into graph_. active() is the authoritative draw condition: the graph
+        // skips the pass when it returns false, so the matching recordXxx asserts the precondition
+        // rather than re-checking it.
+        void addGraphPass(const char* name, ViewportPhase phase,
+                          LambdaSubPass::ActiveFn active, LambdaSubPass::RecordFn record) {
+            graph_passes_.push_back(
+                std::make_unique<LambdaSubPass>(name, phase, std::move(active), std::move(record)));
+            graph_.add(*graph_passes_.back());
+        }
+
+        void registerGraphPasses() {
+            using P = ViewportPhase;
+            const auto rect_of = [](const ViewportRecordContext& c) {
+                return FramebufferRect{c.rect_x, c.rect_y, c.rect_w, c.rect_h};
+            };
+            addGraphPass(
+                "environment", P::Background,
+                [this](const VulkanViewportPassParams& p) {
+                    return p.environment.enabled && environment_pass.hasTexture();
+                },
+                [this, rect_of](const ViewportRecordContext& c, const VulkanViewportPassParams& p) {
+                    recordEnvironmentPass(c.cmd, rect_of(c), p);
+                });
+            addGraphPass(
+                "scene", P::Scene,
+                [this](const VulkanViewportPassParams& p) {
+                    if (sceneSplitActive(p)) {
+                        return true;
+                    }
+                    const auto& frame = resourcesForFrame(p.frame_slot);
+                    return scene_image_uploader.hasImage() && scene_pipeline != VK_NULL_HANDLE &&
+                           frame.scene_descriptor_set != VK_NULL_HANDLE;
+                },
+                [this, rect_of](const ViewportRecordContext& c, const VulkanViewportPassParams& p) {
+                    recordScenePass(c.cmd, rect_of(c), p);
+                });
+            addGraphPass(
+                "depth_blit", P::DepthBlit,
+                [this](const VulkanViewportPassParams& p) {
+                    return !sceneSplitActive(p) && !p.mesh_items.empty() && depth_blit_pass.hasDepth();
+                },
+                [this, rect_of](const ViewportRecordContext& c, const VulkanViewportPassParams& p) {
+                    recordDepthBlitPass(c.cmd, rect_of(c), p);
+                });
+            addGraphPass(
+                "mesh", P::Geometry,
+                [](const VulkanViewportPassParams& p) { return !p.mesh_items.empty(); },
+                [this, rect_of](const ViewportRecordContext& c, const VulkanViewportPassParams& p) {
+                    recordMeshPass(c.cmd, rect_of(c), p);
+                });
+            addGraphPass(
+                "textured_overlay", P::WorldOverlay,
+                [this](const VulkanViewportPassParams& p) {
+                    const auto& frame = resourcesForFrame(p.frame_slot);
+                    return frame.textured_overlay.count > 0 && textured_overlay_pipeline != VK_NULL_HANDLE &&
+                           frame.textured_overlay.buffer != VK_NULL_HANDLE && !p.textured_overlays.empty();
+                },
+                [this](const ViewportRecordContext& c, const VulkanViewportPassParams& p) {
+                    recordTexturedOverlayPass(c, p);
+                });
+            addGraphPass(
+                "base_overlay", P::WorldOverlay,
+                [this](const VulkanViewportPassParams& p) {
+                    const auto& frame = resourcesForFrame(p.frame_slot);
+                    return overlaySplit(frame, p).base > 0 && overlay_pipeline != VK_NULL_HANDLE &&
+                           frame.overlay.buffer != VK_NULL_HANDLE;
+                },
+                [this](const ViewportRecordContext& c, const VulkanViewportPassParams& p) {
+                    recordBaseOverlayPass(c.cmd, p);
+                });
+            addGraphPass(
+                "world_shape_overlay", P::WorldOverlay,
+                [this](const VulkanViewportPassParams& p) {
+                    const auto& frame = resourcesForFrame(p.frame_slot);
+                    return frame.shape_overlay.count > 0 && shape_overlay_pipeline != VK_NULL_HANDLE &&
+                           frame.shape_overlay.buffer != VK_NULL_HANDLE;
+                },
+                [this](const ViewportRecordContext& c, const VulkanViewportPassParams& p) {
+                    recordWorldShapePass(c, p);
+                });
+            addGraphPass(
+                "pivot", P::WorldOverlay,
+                [this](const VulkanViewportPassParams& p) {
+                    return !p.pivot_overlays.empty() && pivot_pipeline != VK_NULL_HANDLE;
+                },
+                [this](const ViewportRecordContext& c, const VulkanViewportPassParams& p) {
+                    recordPivotPass(c.cmd, p);
+                });
+            addGraphPass(
+                "grid", P::WorldOverlay,
+                [this](const VulkanViewportPassParams& p) {
+                    const auto& frame = resourcesForFrame(p.frame_slot);
+                    return frame.grid_uniform.count > 0 && grid_pipeline != VK_NULL_HANDLE &&
+                           frame.grid_descriptor_set != VK_NULL_HANDLE &&
+                           frame.grid_uniform.buffer != VK_NULL_HANDLE;
+                },
+                [this](const ViewportRecordContext& c, const VulkanViewportPassParams& p) {
+                    recordGridOverlays(c.cmd, c.extent, p);
+                });
+            addGraphPass(
+                "vignette", P::Effect,
+                [this](const VulkanViewportPassParams& p) {
+                    return p.vignette_enabled && vignette_pipeline != VK_NULL_HANDLE;
+                },
+                [this, rect_of](const ViewportRecordContext& c, const VulkanViewportPassParams& p) {
+                    recordVignettePass(c.cmd, rect_of(c), p);
+                });
+            addGraphPass(
+                "ui_shape_overlay", P::UiOverlay,
+                [this](const VulkanViewportPassParams& p) {
+                    const auto& frame = resourcesForFrame(p.frame_slot);
+                    return frame.ui_shape_overlay.count > 0 && shape_overlay_pipeline != VK_NULL_HANDLE &&
+                           frame.ui_shape_overlay.buffer != VK_NULL_HANDLE;
+                },
+                [this](const ViewportRecordContext& c, const VulkanViewportPassParams& p) {
+                    recordUiShapePass(c, p);
+                });
+            addGraphPass(
+                "post_ui_overlay", P::UiOverlay,
+                [this](const VulkanViewportPassParams& p) {
+                    const auto& frame = resourcesForFrame(p.frame_slot);
+                    return overlaySplit(frame, p).post_ui > 0 && overlay_pipeline != VK_NULL_HANDLE &&
+                           frame.overlay.buffer != VK_NULL_HANDLE;
+                },
+                [this](const ViewportRecordContext& c, const VulkanViewportPassParams& p) {
+                    recordPostUiOverlayPass(c.cmd, p);
+                });
         }
 
         [[nodiscard]] bool createBuffer(const VkDeviceSize size,
@@ -548,20 +687,10 @@ namespace lfs::vis {
                 return false;
             }
             const bool transitioned = runOneShotGraphics([this](VkCommandBuffer cb) {
-                VkImageMemoryBarrier barrier{};
-                barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-                barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-                barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                barrier.image = shape_overlay_dummy_depth_image;
-                barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-                barrier.srcAccessMask = 0;
-                barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-                vkCmdPipelineBarrier(cb,
-                                     VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                                     0, 0, nullptr, 0, nullptr, 1, &barrier);
+                cmdImageBarrier2(cb, shape_overlay_dummy_depth_image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                 VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE,
+                                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
             });
             if (!transitioned) {
                 return false;
@@ -1225,15 +1354,10 @@ namespace lfs::vis {
 
         void recordGridOverlays(VkCommandBuffer command_buffer,
                                 const VkExtent2D extent,
-                                const VulkanViewportPassParams& params,
-                                const FramebufferRect& main_rect) const {
+                                const VulkanViewportPassParams& params) const {
             const auto& frame = resourcesForFrame(params.frame_slot);
-            if (frame.grid_uniform.count == 0 ||
-                grid_pipeline == VK_NULL_HANDLE ||
-                frame.grid_descriptor_set == VK_NULL_HANDLE ||
-                frame.grid_uniform.buffer == VK_NULL_HANDLE) {
-                return;
-            }
+            assert(frame.grid_uniform.count > 0 && grid_pipeline != VK_NULL_HANDLE &&
+                   frame.grid_descriptor_set != VK_NULL_HANDLE && frame.grid_uniform.buffer != VK_NULL_HANDLE);
 
             vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, grid_pipeline);
             vkCmdBindDescriptorSets(command_buffer,
@@ -1269,18 +1393,14 @@ namespace lfs::vis {
                                    &push);
                 vkCmdDraw(command_buffer, 6, 1, 0, 0);
             }
-            bindViewport(command_buffer, main_rect);
         }
 
         void recordShapeOverlays(VkCommandBuffer command_buffer,
                                  const DynamicBuffer& resource,
                                  const FrameResources& frame,
                                  const ShapeOverlayPush& push) const {
-            if (resource.count == 0 ||
-                resource.buffer == VK_NULL_HANDLE ||
-                shape_overlay_pipeline == VK_NULL_HANDLE) {
-                return;
-            }
+            assert(resource.count > 0 && resource.buffer != VK_NULL_HANDLE &&
+                   shape_overlay_pipeline != VK_NULL_HANDLE);
             const VkDeviceSize offset = 0;
             vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shape_overlay_pipeline);
             if (frame.shape_overlay_descriptor_set != VK_NULL_HANDLE) {
@@ -1301,7 +1421,264 @@ namespace lfs::vis {
                                &push);
             vkCmdBindVertexBuffers(command_buffer, 0, 1, &resource.buffer, &offset);
             vkCmdDraw(command_buffer, resource.count, 1, 0, 0);
-            bindQuad(command_buffer);
+        }
+
+        // --- Sub-pass record steps -----------------------------------------------------------
+        // One method per graph pass. The graph calls these only when the pass's active() gate holds
+        // and rebinds shared viewport/quad state between passes, so each asserts its precondition and
+        // does not restore shared state on exit.
+
+        [[nodiscard]] bool sceneSplitActive(const VulkanViewportPassParams& params) const {
+            return params.split_view.enabled && split_view_pass.ready();
+        }
+
+        struct OverlayVertexSplit {
+            std::uint32_t base = 0;
+            std::uint32_t post_ui = 0;
+        };
+
+        // Splits the shared overlay buffer into the world-space (pre-UI) head and the post-UI tail.
+        [[nodiscard]] OverlayVertexSplit overlaySplit(const FrameResources& frame,
+                                                      const VulkanViewportPassParams& params) const {
+            const std::uint32_t post_ui = std::min(params.post_ui_overlay_vertex_count, frame.overlay.count);
+            return {frame.overlay.count - post_ui, post_ui};
+        }
+
+        void recordEnvironmentPass(VkCommandBuffer command_buffer, const FramebufferRect& rect,
+                                   const VulkanViewportPassParams& params) {
+            assert(params.environment.enabled && environment_pass.hasTexture());
+            environment_pass.record(command_buffer,
+                                    {static_cast<std::uint32_t>(rect.width),
+                                     static_cast<std::uint32_t>(rect.height)},
+                                    params.environment);
+        }
+
+        void recordScenePass(VkCommandBuffer command_buffer, const FramebufferRect& rect,
+                             const VulkanViewportPassParams& params) {
+            auto& frame = resourcesForFrame(params.frame_slot);
+            const bool has_scene =
+                scene_image_uploader.hasImage() &&
+                frame.scene_descriptor_set != VK_NULL_HANDLE && scene_pipeline != VK_NULL_HANDLE;
+            const bool split_active = sceneSplitActive(params);
+            assert(split_active || has_scene);
+            if (split_active) {
+                // content_rect arrives panel-local; lift it into framebuffer
+                // coords so the shader's letterbox check matches gl_FragCoord.
+                VulkanSplitViewParams adjusted = params.split_view;
+                adjusted.content_rect.x += rect.x;
+                adjusted.content_rect.y += rect.y;
+                const VkRect2D panel_rect{
+                    .offset = {rect.x, rect.y},
+                    .extent = {static_cast<std::uint32_t>(rect.width),
+                               static_cast<std::uint32_t>(rect.height)},
+                };
+                split_view_pass.record(command_buffer, panel_rect, adjusted);
+            } else if (has_scene) {
+                vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, scene_pipeline);
+                vkCmdBindDescriptorSets(command_buffer,
+                                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        scene_pipeline_layout,
+                                        0,
+                                        1,
+                                        &frame.scene_descriptor_set,
+                                        0,
+                                        nullptr);
+                vkCmdDraw(command_buffer, 6, 1, 0, 0);
+            }
+        }
+
+        void recordDepthBlitPass(VkCommandBuffer command_buffer, const FramebufferRect& rect,
+                                 const VulkanViewportPassParams& params) {
+            assert(!sceneSplitActive(params) && !params.mesh_items.empty() && depth_blit_pass.hasDepth());
+            const VkRect2D depth_rect{
+                .offset = {rect.x, rect.y},
+                .extent = {static_cast<std::uint32_t>(rect.width),
+                           static_cast<std::uint32_t>(rect.height)},
+            };
+            depth_blit_pass.record(command_buffer, depth_rect, params.depth_blit);
+        }
+
+        void recordMeshPass(VkCommandBuffer command_buffer, const FramebufferRect& rect,
+                            const VulkanViewportPassParams& params) {
+            assert(!params.mesh_items.empty());
+            const bool split_active = sceneSplitActive(params);
+            const bool split_mesh_panels_active = split_active && !params.mesh_panels.empty();
+            VulkanMeshPassParams mesh_params{.items = params.mesh_items};
+            if (split_mesh_panels_active) {
+                const int rect_min_x = rect.x;
+                const int rect_max_x = rect.x + static_cast<int>(rect.width);
+                for (const auto& panel : params.mesh_panels) {
+                    const int x0 = std::clamp(
+                        rect.x + static_cast<int>(std::lround(panel.start_position * static_cast<float>(rect.width))),
+                        rect_min_x,
+                        rect_max_x);
+                    const int x1 = std::clamp(
+                        rect.x + static_cast<int>(std::lround(panel.end_position * static_cast<float>(rect.width))),
+                        rect_min_x,
+                        rect_max_x);
+                    if (x1 <= x0) {
+                        continue;
+                    }
+                    mesh_params.view_projection = panel.view_projection;
+                    mesh_params.camera_position = panel.camera_position;
+                    const VkRect2D mesh_rect{
+                        .offset = {x0, rect.y},
+                        .extent = {static_cast<std::uint32_t>(x1 - x0),
+                                   static_cast<std::uint32_t>(rect.height)},
+                    };
+                    mesh_pass.record(command_buffer, mesh_rect, mesh_params);
+                }
+            } else if (!split_active) {
+                mesh_params.view_projection = params.mesh_view_projection;
+                mesh_params.camera_position = params.mesh_camera_position;
+                const VkRect2D mesh_rect{
+                    .offset = {rect.x, rect.y},
+                    .extent = {static_cast<std::uint32_t>(rect.width),
+                               static_cast<std::uint32_t>(rect.height)},
+                };
+                mesh_pass.record(command_buffer, mesh_rect, mesh_params);
+            }
+        }
+
+        void recordTexturedOverlayPass(const ViewportRecordContext& ctx,
+                                       const VulkanViewportPassParams& params) {
+            const VkCommandBuffer command_buffer = ctx.cmd;
+            auto& frame = resourcesForFrame(params.frame_slot);
+            assert(frame.textured_overlay.count > 0 && textured_overlay_pipeline != VK_NULL_HANDLE &&
+                   frame.textured_overlay.buffer != VK_NULL_HANDLE && !params.textured_overlays.empty());
+            const VkDeviceSize offset = 0;
+            vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, textured_overlay_pipeline);
+            vkCmdBindVertexBuffers(command_buffer, 0, 1, &frame.textured_overlay.buffer, &offset);
+            if (frame.shape_overlay_descriptor_set != VK_NULL_HANDLE) {
+                vkCmdBindDescriptorSets(command_buffer,
+                                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        textured_overlay_pipeline_layout,
+                                        1,
+                                        1,
+                                        &frame.shape_overlay_descriptor_set,
+                                        0,
+                                        nullptr);
+            }
+            std::uint32_t first_vertex = 0;
+            for (const auto& overlay : params.textured_overlays) {
+                if (overlay.texture_id == 0 || first_vertex + 6u > frame.textured_overlay.count) {
+                    first_vertex += 6u;
+                    continue;
+                }
+                const VkDescriptorSet descriptor_set = descriptorSetFromId(overlay.texture_id);
+                if (descriptor_set == VK_NULL_HANDLE) {
+                    first_vertex += 6u;
+                    continue;
+                }
+                TexturedOverlayPush push{};
+                push.tint_opacity = overlay.tint_opacity;
+                push.effects = overlay.effects;
+                push.viewport_rect = ctx.viewport_rect_push;
+                push.depth_params = ctx.world_depth_params_push;
+                vkCmdBindDescriptorSets(command_buffer,
+                                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        textured_overlay_pipeline_layout,
+                                        0,
+                                        1,
+                                        &descriptor_set,
+                                        0,
+                                        nullptr);
+                vkCmdPushConstants(command_buffer,
+                                   textured_overlay_pipeline_layout,
+                                   VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0,
+                                   sizeof(push),
+                                   &push);
+                vkCmdDraw(command_buffer, 6, 1, first_vertex, 0);
+                first_vertex += 6u;
+            }
+        }
+
+        void recordBaseOverlayPass(VkCommandBuffer command_buffer, const VulkanViewportPassParams& params) {
+            auto& frame = resourcesForFrame(params.frame_slot);
+            const std::uint32_t overlay_vertices = overlaySplit(frame, params).base;
+            assert(overlay_vertices > 0 && overlay_pipeline != VK_NULL_HANDLE &&
+                   frame.overlay.buffer != VK_NULL_HANDLE);
+            const VkDeviceSize offset = 0;
+            vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, overlay_pipeline);
+            vkCmdBindVertexBuffers(command_buffer, 0, 1, &frame.overlay.buffer, &offset);
+            vkCmdDraw(command_buffer, overlay_vertices, 1, 0, 0);
+        }
+
+        void recordWorldShapePass(const ViewportRecordContext& ctx,
+                                  const VulkanViewportPassParams& params) {
+            auto& frame = resourcesForFrame(params.frame_slot);
+            const ShapeOverlayPush world_shape_overlay_push{
+                .viewport_rect = ctx.viewport_rect_push,
+                .params = ctx.world_depth_params_push};
+            recordShapeOverlays(ctx.cmd, frame.shape_overlay, frame, world_shape_overlay_push);
+        }
+
+        void recordPivotPass(VkCommandBuffer command_buffer, const VulkanViewportPassParams& params) {
+            assert(!params.pivot_overlays.empty() && pivot_pipeline != VK_NULL_HANDLE);
+            vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pivot_pipeline);
+            for (const auto& pivot : params.pivot_overlays) {
+                PivotPush push{};
+                push.center_size = {
+                    pivot.center_ndc.x,
+                    pivot.center_ndc.y,
+                    pivot.size_ndc.x,
+                    pivot.size_ndc.y,
+                };
+                push.color_opacity = {
+                    pivot.color.r,
+                    pivot.color.g,
+                    pivot.color.b,
+                    std::clamp(pivot.opacity, 0.0f, 1.0f),
+                };
+                vkCmdPushConstants(command_buffer,
+                                   pivot_pipeline_layout,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0,
+                                   sizeof(push),
+                                   &push);
+                vkCmdDraw(command_buffer, 6, 1, 0, 0);
+            }
+        }
+
+        void recordVignettePass(VkCommandBuffer command_buffer, const FramebufferRect& rect,
+                                const VulkanViewportPassParams& params) {
+            assert(params.vignette_enabled && vignette_pipeline != VK_NULL_HANDLE);
+            VignettePush push{};
+            push.viewport_intensity_radius = {
+                static_cast<float>(rect.width),
+                static_cast<float>(rect.height),
+                params.vignette_intensity,
+                params.vignette_radius,
+            };
+            push.softness_padding = {params.vignette_softness, 0.0f, 0.0f, 0.0f};
+            vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vignette_pipeline);
+            vkCmdPushConstants(command_buffer,
+                               vignette_pipeline_layout,
+                               VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0,
+                               sizeof(push),
+                               &push);
+            vkCmdDraw(command_buffer, 6, 1, 0, 0);
+        }
+
+        void recordUiShapePass(const ViewportRecordContext& ctx,
+                               const VulkanViewportPassParams& params) {
+            auto& frame = resourcesForFrame(params.frame_slot);
+            // depth_available = 0 → UI shapes (gizmos, pivot) always render in front.
+            const ShapeOverlayPush ui_shape_overlay_push{.viewport_rect = ctx.viewport_rect_push};
+            recordShapeOverlays(ctx.cmd, frame.ui_shape_overlay, frame, ui_shape_overlay_push);
+        }
+
+        void recordPostUiOverlayPass(VkCommandBuffer command_buffer, const VulkanViewportPassParams& params) {
+            auto& frame = resourcesForFrame(params.frame_slot);
+            const OverlayVertexSplit split = overlaySplit(frame, params);
+            assert(split.post_ui > 0 && overlay_pipeline != VK_NULL_HANDLE &&
+                   frame.overlay.buffer != VK_NULL_HANDLE);
+            const VkDeviceSize offset = 0;
+            vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, overlay_pipeline);
+            vkCmdBindVertexBuffers(command_buffer, 0, 1, &frame.overlay.buffer, &offset);
+            vkCmdDraw(command_buffer, split.post_ui, 1, split.base, 0);
         }
 
         void record(VkCommandBuffer command_buffer,
@@ -1312,6 +1689,7 @@ namespace lfs::vis {
             if (rect.width == 0 || rect.height == 0 || quad_buffer == VK_NULL_HANDLE) {
                 return;
             }
+            const ScopedNvtxRange viewport_range{"viewport_pass_graph", 0xFFECEFF1};
             const glm::vec4 viewport_rect_push{
                 static_cast<float>(rect.x),
                 static_cast<float>(rect.y),
@@ -1328,236 +1706,21 @@ namespace lfs::vis {
             bindQuad(command_buffer);
             clearViewport(command_buffer, rect, params.background_color);
 
-            // Environment background runs first so the splat scene quad and meshes draw
-            // on top. Skipped when not enabled / no map loaded.
-            if (params.environment.enabled && environment_pass.hasTexture()) {
-                environment_pass.record(command_buffer,
-                                        {static_cast<std::uint32_t>(rect.width),
-                                         static_cast<std::uint32_t>(rect.height)},
-                                        params.environment);
-                bindQuad(command_buffer);
+            ViewportRecordContext rc{};
+            rc.cmd = command_buffer;
+            rc.extent = extent;
+            rc.rect_x = rect.x;
+            rc.rect_y = rect.y;
+            rc.rect_w = rect.width;
+            rc.rect_h = rect.height;
+            rc.depth_available = depth_available;
+            rc.frame_slot = params.frame_slot;
+            rc.viewport_rect_push = viewport_rect_push;
+            rc.world_depth_params_push = world_depth_params_push;
+            graph_.record(rc, params, [this, command_buffer, rect]() {
                 bindViewport(command_buffer, rect);
-            }
-
-            const bool has_scene =
-                scene_image_uploader.hasImage() &&
-                frame.scene_descriptor_set != VK_NULL_HANDLE && scene_pipeline != VK_NULL_HANDLE;
-            const bool split_active = params.split_view.enabled && split_view_pass.ready();
-            if (split_active) {
-                // content_rect arrives panel-local; lift it into framebuffer
-                // coords so the shader's letterbox check matches gl_FragCoord.
-                VulkanSplitViewParams adjusted = params.split_view;
-                adjusted.content_rect.x += rect.x;
-                adjusted.content_rect.y += rect.y;
-                const VkRect2D panel_rect{
-                    .offset = {rect.x, rect.y},
-                    .extent = {static_cast<std::uint32_t>(rect.width),
-                               static_cast<std::uint32_t>(rect.height)},
-                };
-                split_view_pass.record(command_buffer, panel_rect, adjusted);
                 bindQuad(command_buffer);
-                bindViewport(command_buffer, rect);
-            } else if (has_scene) {
-                vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, scene_pipeline);
-                vkCmdBindDescriptorSets(command_buffer,
-                                        VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                        scene_pipeline_layout,
-                                        0,
-                                        1,
-                                        &frame.scene_descriptor_set,
-                                        0,
-                                        nullptr);
-                vkCmdDraw(command_buffer, 6, 1, 0, 0);
-            }
-            // Splat depth → framebuffer depth attachment. Lets the mesh draws that
-            // follow depth-test against the splat surface so meshes occluded by
-            // splats render correctly.
-            const bool split_mesh_panels_active =
-                split_active && !params.mesh_items.empty() && !params.mesh_panels.empty();
-            if (!split_active && !params.mesh_items.empty() && depth_blit_pass.hasDepth()) {
-                const VkRect2D depth_rect{
-                    .offset = {rect.x, rect.y},
-                    .extent = {static_cast<std::uint32_t>(rect.width),
-                               static_cast<std::uint32_t>(rect.height)},
-                };
-                depth_blit_pass.record(command_buffer, depth_rect, params.depth_blit);
-                bindQuad(command_buffer);
-                bindViewport(command_buffer, rect);
-            }
-            // Mesh sub-pass: GPU-rasterize meshes after the cached splat scene blit.
-            if (!params.mesh_items.empty()) {
-                VulkanMeshPassParams mesh_params{.items = params.mesh_items};
-                if (split_mesh_panels_active) {
-                    const int rect_min_x = rect.x;
-                    const int rect_max_x = rect.x + static_cast<int>(rect.width);
-                    for (const auto& panel : params.mesh_panels) {
-                        const int x0 = std::clamp(
-                            rect.x + static_cast<int>(std::lround(panel.start_position * static_cast<float>(rect.width))),
-                            rect_min_x,
-                            rect_max_x);
-                        const int x1 = std::clamp(
-                            rect.x + static_cast<int>(std::lround(panel.end_position * static_cast<float>(rect.width))),
-                            rect_min_x,
-                            rect_max_x);
-                        if (x1 <= x0) {
-                            continue;
-                        }
-                        mesh_params.view_projection = panel.view_projection;
-                        mesh_params.camera_position = panel.camera_position;
-                        const VkRect2D mesh_rect{
-                            .offset = {x0, rect.y},
-                            .extent = {static_cast<std::uint32_t>(x1 - x0),
-                                       static_cast<std::uint32_t>(rect.height)},
-                        };
-                        mesh_pass.record(command_buffer, mesh_rect, mesh_params);
-                        bindQuad(command_buffer);
-                        bindViewport(command_buffer, rect);
-                    }
-                } else if (!split_active) {
-                    mesh_params.view_projection = params.mesh_view_projection;
-                    mesh_params.camera_position = params.mesh_camera_position;
-                    const VkRect2D mesh_rect{
-                        .offset = {rect.x, rect.y},
-                        .extent = {static_cast<std::uint32_t>(rect.width),
-                                   static_cast<std::uint32_t>(rect.height)},
-                    };
-                    mesh_pass.record(command_buffer, mesh_rect, mesh_params);
-                    bindQuad(command_buffer);
-                    bindViewport(command_buffer, rect);
-                }
-            }
-
-            if (frame.textured_overlay.count > 0 && textured_overlay_pipeline != VK_NULL_HANDLE &&
-                frame.textured_overlay.buffer != VK_NULL_HANDLE && !params.textured_overlays.empty()) {
-                const VkDeviceSize offset = 0;
-                vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, textured_overlay_pipeline);
-                vkCmdBindVertexBuffers(command_buffer, 0, 1, &frame.textured_overlay.buffer, &offset);
-                if (frame.shape_overlay_descriptor_set != VK_NULL_HANDLE) {
-                    vkCmdBindDescriptorSets(command_buffer,
-                                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                            textured_overlay_pipeline_layout,
-                                            1,
-                                            1,
-                                            &frame.shape_overlay_descriptor_set,
-                                            0,
-                                            nullptr);
-                }
-                std::uint32_t first_vertex = 0;
-                for (const auto& overlay : params.textured_overlays) {
-                    if (overlay.texture_id == 0 || first_vertex + 6u > frame.textured_overlay.count) {
-                        first_vertex += 6u;
-                        continue;
-                    }
-                    const VkDescriptorSet descriptor_set = descriptorSetFromId(overlay.texture_id);
-                    if (descriptor_set == VK_NULL_HANDLE) {
-                        first_vertex += 6u;
-                        continue;
-                    }
-                    TexturedOverlayPush push{};
-                    push.tint_opacity = overlay.tint_opacity;
-                    push.effects = overlay.effects;
-                    push.viewport_rect = viewport_rect_push;
-                    push.depth_params = world_depth_params_push;
-                    vkCmdBindDescriptorSets(command_buffer,
-                                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                            textured_overlay_pipeline_layout,
-                                            0,
-                                            1,
-                                            &descriptor_set,
-                                            0,
-                                            nullptr);
-                    vkCmdPushConstants(command_buffer,
-                                       textured_overlay_pipeline_layout,
-                                       VK_SHADER_STAGE_FRAGMENT_BIT,
-                                       0,
-                                       sizeof(push),
-                                       &push);
-                    vkCmdDraw(command_buffer, 6, 1, first_vertex, 0);
-                    first_vertex += 6u;
-                }
-                bindQuad(command_buffer);
-            }
-
-            const std::uint32_t post_ui_overlay_vertices =
-                std::min(params.post_ui_overlay_vertex_count, frame.overlay.count);
-            const std::uint32_t overlay_vertices = frame.overlay.count - post_ui_overlay_vertices;
-
-            // Most overlays sit below viewport UI shapes. A small tail segment is
-            // reserved for full-viewport state overlays, such as export dimming.
-            if (overlay_vertices > 0 && overlay_pipeline != VK_NULL_HANDLE &&
-                frame.overlay.buffer != VK_NULL_HANDLE) {
-                const VkDeviceSize offset = 0;
-                vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, overlay_pipeline);
-                vkCmdBindVertexBuffers(command_buffer, 0, 1, &frame.overlay.buffer, &offset);
-                vkCmdDraw(command_buffer, overlay_vertices, 1, 0, 0);
-                bindQuad(command_buffer);
-            }
-
-            const ShapeOverlayPush world_shape_overlay_push{
-                .viewport_rect = viewport_rect_push,
-                .params = world_depth_params_push};
-            recordShapeOverlays(command_buffer, frame.shape_overlay, frame, world_shape_overlay_push);
-
-            if (!params.pivot_overlays.empty() && pivot_pipeline != VK_NULL_HANDLE) {
-                bindQuad(command_buffer);
-                vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pivot_pipeline);
-                for (const auto& pivot : params.pivot_overlays) {
-                    PivotPush push{};
-                    push.center_size = {
-                        pivot.center_ndc.x,
-                        pivot.center_ndc.y,
-                        pivot.size_ndc.x,
-                        pivot.size_ndc.y,
-                    };
-                    push.color_opacity = {
-                        pivot.color.r,
-                        pivot.color.g,
-                        pivot.color.b,
-                        std::clamp(pivot.opacity, 0.0f, 1.0f),
-                    };
-                    vkCmdPushConstants(command_buffer,
-                                       pivot_pipeline_layout,
-                                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                       0,
-                                       sizeof(push),
-                                       &push);
-                    vkCmdDraw(command_buffer, 6, 1, 0, 0);
-                }
-            }
-
-            recordGridOverlays(command_buffer, extent, params, rect);
-
-            if (params.vignette_enabled && vignette_pipeline != VK_NULL_HANDLE) {
-                VignettePush push{};
-                push.viewport_intensity_radius = {
-                    static_cast<float>(rect.width),
-                    static_cast<float>(rect.height),
-                    params.vignette_intensity,
-                    params.vignette_radius,
-                };
-                push.softness_padding = {params.vignette_softness, 0.0f, 0.0f, 0.0f};
-                vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vignette_pipeline);
-                vkCmdPushConstants(command_buffer,
-                                   vignette_pipeline_layout,
-                                   VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   0,
-                                   sizeof(push),
-                                   &push);
-                vkCmdDraw(command_buffer, 6, 1, 0, 0);
-            }
-
-            // depth_available = 0 → UI shapes (gizmos, pivot) always render in front.
-            const ShapeOverlayPush ui_shape_overlay_push{.viewport_rect = viewport_rect_push};
-            recordShapeOverlays(command_buffer, frame.ui_shape_overlay, frame, ui_shape_overlay_push);
-
-            if (post_ui_overlay_vertices > 0 && overlay_pipeline != VK_NULL_HANDLE &&
-                frame.overlay.buffer != VK_NULL_HANDLE) {
-                const VkDeviceSize offset = 0;
-                vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, overlay_pipeline);
-                vkCmdBindVertexBuffers(command_buffer, 0, 1, &frame.overlay.buffer, &offset);
-                vkCmdDraw(command_buffer, post_ui_overlay_vertices, 1, overlay_vertices, 0);
-                bindQuad(command_buffer);
-            }
+            });
         }
 
         void reset() {

@@ -63,6 +63,9 @@ namespace lfs::vis {
         p.equirectangular = s.equirectangular;
         p.orthographic = s.orthographic;
         p.ortho_scale = s.ortho_scale;
+        p.depth_view_min = s.depth_view_min;
+        p.depth_view_max = s.depth_view_max;
+        p.depth_visualization_mode = static_cast<int>(s.depth_visualization_mode);
         p.selection_color_committed = detail::to_array(s.selection_color_committed);
         p.selection_color_preview = detail::to_array(s.selection_color_preview);
         p.selection_color_center_marker = detail::to_array(s.selection_color_center_marker);
@@ -139,6 +142,11 @@ namespace lfs::vis {
         enforceProjectionBackend(s);
         s.orthographic = p.orthographic;
         s.ortho_scale = p.ortho_scale;
+        s.depth_view_min = p.depth_view_min;
+        s.depth_view_max = p.depth_view_max;
+        s.depth_visualization_mode =
+            static_cast<lfs::rendering::DepthVisualizationMode>(p.depth_visualization_mode);
+        sanitizeDepthViewSettings(s);
         s.selection_color_committed = detail::to_vec3(p.selection_color_committed);
         s.selection_color_preview = detail::to_vec3(p.selection_color_preview);
         s.selection_color_center_marker = detail::to_vec3(p.selection_color_center_marker);

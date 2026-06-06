@@ -161,10 +161,8 @@ namespace lfs::vis {
     }
 
     void RenderingManager::handleWindowResized() {
-        LOG_DEBUG("Window resized, clearing render cache");
-        markDirty(DirtyFlag::VIEWPORT | DirtyFlag::CAMERA);
-        viewport_artifact_service_.clearViewportOutput();
-        frame_lifecycle_service_.resetViewportSize();
+        LOG_DEBUG("RenderingManager window resize: deferring viewport refresh");
+        markDirty(frame_lifecycle_service_.deferViewportRefresh());
     }
 
     void RenderingManager::handleGridSettingsChanged(const ui::GridSettingsChanged& event) {
@@ -214,7 +212,7 @@ namespace lfs::vis {
     }
 
     void RenderingManager::handleSceneCleared() {
-        viewport_artifact_service_.clearViewportOutput();
+        releaseSceneRenderResources();
         invalidateCameraMetricsRequests(true);
         SplitViewService::ModeChangeResult result;
         {
@@ -224,7 +222,6 @@ namespace lfs::vis {
         }
         camera_interaction_service_.clearCurrentCamera();
         camera_interaction_service_.clearHoveredCamera();
-        frame_lifecycle_service_.resetModelTracking();
         applySplitModeChange(result);
         markDirty();
     }

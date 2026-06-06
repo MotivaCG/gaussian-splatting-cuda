@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "core/exportable_storage.hpp"
 #include "core/splat_data.hpp"
 #include "rendering/cuda_vulkan_interop.hpp"
 #include "rendering/rasterizer/vulkan/src/gs_renderer.h"
@@ -17,8 +18,10 @@
 #include <expected>
 #include <glm/glm.hpp>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace lfs::vis {
@@ -111,9 +114,24 @@ namespace lfs::vis {
             const lfs::rendering::ViewportRenderRequest& request,
             OutputSlot output_slot = OutputSlot::Main,
             bool synchronize_input_read = false);
+        [[nodiscard]] bool nextOutputImagesNeedResize(
+            glm::ivec2 size,
+            OutputSlot output_slot = OutputSlot::Main) const;
         [[nodiscard]] std::expected<std::shared_ptr<lfs::core::Tensor>, std::string> readOutputImage(
             VulkanContext& context,
             OutputSlot output_slot = OutputSlot::Main) const;
+        [[nodiscard]] std::expected<std::shared_ptr<lfs::core::Tensor>, std::string> readOutputImageRgb8(
+            VulkanContext& context,
+            OutputSlot output_slot = OutputSlot::Main) const;
+        [[nodiscard]] std::expected<std::shared_ptr<lfs::core::Tensor>, std::string> readOutputImageRgba8(
+            VulkanContext& context,
+            OutputSlot output_slot = OutputSlot::Main) const;
+        [[nodiscard]] std::expected<void, std::string> readOutputImageIntoCpuHwc(
+            VulkanContext& context,
+            OutputSlot output_slot,
+            lfs::core::Tensor& destination,
+            int destination_x,
+            int destination_y) const;
         [[nodiscard]] std::expected<float, std::string> sampleDepthAtPixel(
             VulkanContext& context,
             int x,
@@ -125,6 +143,8 @@ namespace lfs::vis {
             const SelectionMaskRequest& request,
             bool force_input_upload);
 
+        void releasePreviewResources();
+        void releaseSceneResources();
         void reset();
 
     private:
@@ -151,7 +171,7 @@ namespace lfs::vis {
             _VulkanBuffer model_transforms{};
             bool overlays_active = true;
         };
-        [[nodiscard]] std::expected<OverlayBindingViews, std::string> uploadSelectionOverlay(
+        [[nodiscard]] std::expected<OverlayBindingViews, std::string> uploadOverlayBindings(
             VulkanContext& context,
             const lfs::rendering::ViewportRenderRequest& request,
             std::size_t num_splats,
@@ -174,7 +194,8 @@ namespace lfs::vis {
             bool transparent_background,
             bool depth_view,
             float depth_min,
-            float depth_max);
+            float depth_max,
+            lfs::rendering::DepthVisualizationMode depth_visualization_mode);
         [[nodiscard]] std::expected<void, std::string> waitForRingSlot(
             std::size_t ring_slot,
             std::string_view reason);
@@ -256,9 +277,52 @@ namespace lfs::vis {
         void releaseInputSlot(VulkanContext& context, std::size_t ring_slot);
         void releaseOpacityCopySlot(VulkanContext& context, std::size_t ring_slot);
         void logVramBreakdownIfChanged(std::string_view reason);
+        [[nodiscard]] std::expected<void, std::string> ensureSharedScratchArena(
+            VulkanContext& context,
+            std::size_t required_bytes);
+        // Re-imports the shared block if training grew it in place. Must be called
+        // while the render owns the arena frame (training excluded) so the block is
+        // stable, avoiding a cross-thread grow/re-import race.
+        [[nodiscard]] std::expected<void, std::string> reimportSharedScratchIfGrown(VulkanContext& context);
+        [[nodiscard]] std::size_t estimateSharedScratchBytes(std::size_t num_splats,
+                                                             std::size_t sort_capacity,
+                                                             std::size_t num_pixels,
+                                                             std::size_t num_tiles) const;
+        void bindSharedScratchBuffers(std::size_t num_splats,
+                                      std::size_t sort_capacity,
+                                      std::size_t num_pixels,
+                                      std::size_t num_tiles);
+        void releasePrivateScratchBuffers();
+        void detachSharedScratchBuffers();
+        void releaseSharedScratchImportOnly();
+        void releaseSharedScratchArena();
+        void releaseOutputSlot(OutputSlot output_slot);
+        // Queues a no-longer-current shared-scratch import for destruction once
+        // the GPU submission that last referenced it has retired. The old VkBuffer
+        // may still be read by in-flight graphics/compute submissions (the resize
+        // path only fences the graphics queue), so freeing it immediately is a
+        // use-after-free that surfaces as VK_ERROR_DEVICE_LOST. The timeline value
+        // the batch submit signals covers the async-compute work too.
+        void retireSharedScratchBuffer(VulkanContext::ExternalBuffer&& old);
+        // Destroys retired imports whose retirement timeline value has been
+        // reached. force=true destroys all of them unconditionally and is only
+        // safe after vkDeviceWaitIdle (reset/teardown).
+        void drainRetiredScratchBuffers(bool force);
+
+        // Lazily creates a persistent transfer command pool + buffer + fence reused by
+        // readOutputImage / sampleDepthAtPixel instead of allocating a fresh pool/fence
+        // per call. Torn down in reset() while the device is still valid.
+        [[nodiscard]] std::expected<void, std::string> ensureReadbackContext() const;
+        [[nodiscard]] std::expected<glm::ivec2, std::string> latestOutputImageSize(OutputSlot output_slot) const;
 
         VulkanContext* context_ = nullptr;
         bool initialized_ = false;
+        // Persistent readback transfer resources (see ensureReadbackContext). Mutable
+        // because the readback samplers are const but reuse these across calls.
+        mutable std::mutex readback_mutex_;
+        mutable VkCommandPool readback_pool_ = VK_NULL_HANDLE;
+        mutable VkCommandBuffer readback_cmd_ = VK_NULL_HANDLE;
+        mutable VkFence readback_fence_ = VK_NULL_HANDLE;
         // Dedicated non-blocking CUDA stream for overlay-source H2D uploads.
         // Created with cudaStreamNonBlocking so it does NOT implicitly
         // serialize with the legacy default (NULL) stream where the rest of
@@ -299,6 +363,21 @@ namespace lfs::vis {
         std::array<ModelInputSnapshot, kInputRingSize> ring_uploaded_{};
         int current_input_sh_degree_ = -1;
         std::size_t last_vram_report_signature_ = 0;
+
+        struct SharedScratchArena {
+            std::shared_ptr<lfs::core::ExportableBlock> block;
+            VulkanContext::ExternalBuffer imported_buffer{};
+            std::size_t bytes = 0;
+            std::uint64_t generation = 0;
+            bool installed_in_training_arena = false;
+        };
+        SharedScratchArena shared_scratch_{};
+        std::uint64_t shared_scratch_attempt_serial_ = 0;
+
+        // Old shared-scratch imports awaiting GPU retirement, keyed by the
+        // render-complete timeline value at which they become safe to free.
+        std::vector<std::pair<std::uint64_t, VulkanContext::ExternalBuffer>>
+            retired_scratch_buffers_;
 
         // Per-ring-slot timeline semaphore used to gate Vulkan compute on the
         // CUDA upload completing; eliminates the per-frame

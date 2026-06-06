@@ -22,6 +22,7 @@
 #include <glm/vec2.hpp>
 #include <mutex>
 #include <optional>
+#include <thread>
 
 namespace lfs::vis {
 
@@ -219,6 +220,14 @@ namespace lfs::vis {
         void updatePlyPath(const std::string& ply_name, const std::filesystem::path& ply_path);
         bool reparentNode(const std::string& node_name, const std::string& new_parent_name);
         std::string addGroupNode(const std::string& name, const std::string& parent_name = "");
+        std::string addPlySequenceNode(const std::string& name, const std::string& parent_name = "", size_t frame_count = 0);
+
+        // Allocator that backs splat tensors with Vulkan-external interop storage (the
+        // form the rasterizer can bind zero-copy). Returns an empty allocator when interop
+        // is unavailable. The PLY-sequence streaming player uses this on the main thread to
+        // upload background-decoded frames into render-ready storage.
+        [[nodiscard]] lfs::io::SplatTensorAllocator makeExternalSplatAllocator() const;
+
         std::string duplicateNodeTree(const std::string& name);
         std::string mergeGroupNode(const std::string& name);
 
@@ -293,6 +302,7 @@ namespace lfs::vis {
         void handleResetEllipsoid();
         void updateCropBoxToFitScene(bool use_percentile);
         void updateEllipsoidToFitScene(bool use_percentile);
+        void scheduleConsolidatedCompaction();
 
         core::Scene scene_;
         // Lock ordering: state_mutex_ before selection_.mutex() when both needed
@@ -339,6 +349,10 @@ namespace lfs::vis {
         std::unique_ptr<SelectionService> selection_service_;
         std::unique_ptr<op::SceneSnapshot> selection_preview_snapshot_;
         std::optional<core::Scene::SelectionStateSnapshot> selection_preview_before_;
+        std::mutex consolidated_compaction_mutex_;
+        std::jthread consolidated_compaction_thread_;
+        bool consolidated_compaction_running_ = false;
+        bool consolidated_compaction_pending_ = false;
     };
 
 } // namespace lfs::vis

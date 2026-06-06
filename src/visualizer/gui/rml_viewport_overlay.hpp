@@ -42,6 +42,14 @@ namespace lfs::vis::gui {
             std::string ssim_text;
         };
 
+        struct SplitDividerOverlayState {
+            bool visible = false;
+            float x = 0.0f;
+            float y = 0.0f;
+            float width = 0.0f;
+            float height = 0.0f;
+        };
+
         using VramHudOverlayState = VramHudOverlay::State;
 
         RmlViewportOverlay();
@@ -56,6 +64,7 @@ namespace lfs::vis::gui {
                               bool show_secondary = false,
                               float secondary_x = 0.0f,
                               float secondary_width = 0.0f);
+        void setSplitDividerOverlay(SplitDividerOverlayState state);
         void setGTMetricsOverlay(GTMetricsOverlayState state);
         void setVramHudOverlay(VramHudOverlayState state);
         bool isDueForVramProcessSample(std::chrono::milliseconds interval);
@@ -81,6 +90,7 @@ namespace lfs::vis::gui {
         bool updateToolbarRoots();
         void bindReactiveStore();
         void refreshGTMetricsOverlayFromStore();
+        void applySplitDividerOverlay();
         void applyGTMetricsOverlay();
         bool applyFrameTooltip();
         void queueCachedVulkanContext(bool refresh_cache);
@@ -91,14 +101,15 @@ namespace lfs::vis::gui {
             DocumentHook = 1u << 3,
             ViewportResize = 1u << 4,
             ToolbarLayout = 1u << 5,
-            GTMetrics = 1u << 6,
-            VramHud = 1u << 7,
-            DataModelBinding = 1u << 8,
-            PointerHover = 1u << 9,
-            PointerButton = 1u << 10,
-            PointerWheel = 1u << 11,
-            PointerDrag = 1u << 12,
-            Keyboard = 1u << 13,
+            SplitDivider = 1u << 6,
+            GTMetrics = 1u << 7,
+            VramHud = 1u << 8,
+            DataModelBinding = 1u << 9,
+            PointerHover = 1u << 10,
+            PointerButton = 1u << 11,
+            PointerWheel = 1u << 12,
+            PointerDrag = 1u << 13,
+            Keyboard = 1u << 14,
         };
         void markRenderNeeded(RenderReason reason);
         [[nodiscard]] std::string renderReasonSources() const;
@@ -141,6 +152,7 @@ namespace lfs::vis::gui {
         int last_render_w_ = 0;
         int last_render_h_ = 0;
         CachedVulkanContextRender direct_cache_;
+        SplitDividerOverlayState split_divider_overlay_;
         GTMetricsOverlayState gt_metrics_overlay_;
         lfs::vis::AppStore::GTMetricsOverlayConfig gt_metrics_config_;
         std::optional<lfs::vis::AppStore::CameraMetrics> camera_metrics_;

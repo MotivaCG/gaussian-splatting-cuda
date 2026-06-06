@@ -18,6 +18,7 @@
 #include <format>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <variant>
 
@@ -91,6 +92,45 @@ namespace lfs::training {
             }
         }
 
+        std::optional<float> computeSceneScaleFromPositions(
+            const lfs::core::Tensor& positions,
+            const lfs::core::Tensor& scene_center) {
+            if (!positions.is_valid() || positions.ndim() != 2 ||
+                positions.size(0) == 0 || positions.size(1) < 3 ||
+                !scene_center.is_valid() || scene_center.numel() < 3) {
+                return std::nullopt;
+            }
+
+            const auto center = scene_center.to(positions.device());
+            const auto dists = positions.sub(center).norm(2.0f, {1}, false);
+            if (!dists.is_valid() || dists.size(0) == 0) {
+                return std::nullopt;
+            }
+
+            const auto sorted_dists = dists.sort(0, false);
+            return sorted_dists.first[dists.size(0) / 2].item();
+        }
+
+        void recomputeInitSplatSceneScale(
+            lfs::core::SplatData& model,
+            const lfs::core::Tensor& scene_center,
+            const std::filesystem::path& init_file) {
+            const auto scene_scale = computeSceneScaleFromPositions(model.means_raw(), scene_center);
+            if (!scene_scale) {
+                LOG_WARN("Could not compute scene scale for init splat {}; keeping {}",
+                         lfs::core::path_to_utf8(init_file.filename()),
+                         model.get_scene_scale());
+                return;
+            }
+
+            const float previous_scale = model.get_scene_scale();
+            model.set_scene_scale(*scene_scale);
+            LOG_INFO("Computed init scene scale from {}: {} -> {}",
+                     lfs::core::path_to_utf8(init_file.filename()),
+                     previous_scale,
+                     *scene_scale);
+        }
+
         std::expected<std::unique_ptr<lfs::core::SplatData>, std::string> loadAddedSplat(
             const std::filesystem::path& path,
             const int target_degree) {
@@ -128,6 +168,8 @@ namespace lfs::training {
 
             const size_t base_count = static_cast<size_t>(model.size());
             size_t added_count = 0;
+            size_t frozen_count = 0;
+            std::vector<lfs::core::SplatData::FrozenRange> frozen_ranges = model.frozen_ranges();
             std::vector<std::unique_ptr<lfs::core::SplatData>> owned_added_splats;
             owned_added_splats.reserve(params.add_splat_paths.size());
 
@@ -135,13 +177,19 @@ namespace lfs::training {
             splats.reserve(params.add_splat_paths.size() + 1);
             splats.emplace_back(&model, glm::mat4{1.0f});
 
-            for (const auto& path : params.add_splat_paths) {
+            for (size_t i = 0; i < params.add_splat_paths.size(); ++i) {
+                const auto& path = params.add_splat_paths[i];
                 auto added = loadAddedSplat(path, params.optimization.sh_degree);
                 if (!added) {
                     return std::unexpected(added.error());
                 }
 
-                added_count += static_cast<size_t>((*added)->size());
+                const size_t count = static_cast<size_t>((*added)->size());
+                if (i < params.add_splat_freeze.size() && params.add_splat_freeze[i] && count > 0) {
+                    frozen_ranges.push_back({base_count + added_count, count});
+                    frozen_count += count;
+                }
+                added_count += count;
                 splats.emplace_back(added->get(), glm::mat4{1.0f});
                 owned_added_splats.push_back(std::move(*added));
             }
@@ -174,6 +222,7 @@ namespace lfs::training {
                 lfs::core::SplatData::ShNLayout::Swizzled);
             merged_with_base_scale.set_active_sh_degree(merged->get_active_sh_degree());
             applyTrainingSHDegree(merged_with_base_scale, params.optimization.sh_degree);
+            merged_with_base_scale.set_frozen_ranges(std::move(frozen_ranges));
             model = std::move(merged_with_base_scale);
 
             LOG_INFO("Added {} splat file{} to training model: {} + {} -> {} Gaussians",
@@ -182,6 +231,11 @@ namespace lfs::training {
                      base_count,
                      added_count,
                      model.size());
+            if (frozen_count > 0) {
+                LOG_INFO("Marked {} added Gaussian{} as frozen",
+                         frozen_count,
+                         frozen_count == 1 ? "" : "s");
+            }
             return {};
         }
 
@@ -200,7 +254,8 @@ namespace lfs::training {
         std::expected<void, std::string> migrateTrainingModelToAllocatorImpl(
             const lfs::core::param::TrainingParameters& params,
             lfs::core::SplatData& model,
-            const lfs::core::SplatTensorAllocator& tensor_allocator) {
+            const lfs::core::SplatTensorAllocator& tensor_allocator,
+            const bool force_reallocation) {
             if (!tensor_allocator) {
                 return {};
             }
@@ -222,7 +277,8 @@ namespace lfs::training {
                 isAllocatorBackedTrainingTensorReady(model.opacity_raw(), target_capacity) &&
                 (target_shN_capacity == 0 ||
                  isAllocatorBackedTrainingTensorReady(model.shN_raw(), target_shN_capacity));
-            if (already_allocator_backed) {
+            if (already_allocator_backed && !force_reallocation) {
+                model.set_tensor_allocator(tensor_allocator);
                 return {};
             }
 
@@ -230,6 +286,7 @@ namespace lfs::training {
                 const int max_sh = model.get_max_sh_degree();
                 const int active_sh = model.get_active_sh_degree();
                 const float scene_scale = model.get_scene_scale();
+                auto frozen_ranges = model.frozen_ranges();
                 lfs::core::Tensor deleted = model.has_deleted_mask() ? model.deleted() : lfs::core::Tensor{};
                 lfs::core::Tensor densification_info = model._densification_info;
 
@@ -287,7 +344,9 @@ namespace lfs::training {
                 if (densification_info.is_valid()) {
                     migrated._densification_info = std::move(densification_info);
                 }
+                migrated.set_frozen_ranges(std::move(frozen_ranges));
                 model = std::move(migrated);
+                model.set_tensor_allocator(tensor_allocator);
                 lfs::core::Tensor::trim_memory_pool();
 
                 LOG_INFO("Migrated training SplatData tensors to Vulkan-external storage "
@@ -308,8 +367,9 @@ namespace lfs::training {
     std::expected<void, std::string> migrateTrainingModelToAllocator(
         const lfs::core::param::TrainingParameters& params,
         lfs::core::SplatData& model,
-        const lfs::core::SplatTensorAllocator& tensor_allocator) {
-        return migrateTrainingModelToAllocatorImpl(params, model, tensor_allocator);
+        const lfs::core::SplatTensorAllocator& tensor_allocator,
+        const bool force_reallocation) {
+        return migrateTrainingModelToAllocatorImpl(params, model, tensor_allocator, force_reallocation);
     }
 
     std::expected<void, std::string> loadTrainingDataIntoScene(
@@ -394,17 +454,18 @@ namespace lfs::training {
                         scene.setTrainingModelNode("Model");
                     } else {
                         auto loader = lfs::io::Loader::create();
-                        auto load_result = loader->load(init_file);
+                        auto init_result = loader->load(init_file);
 
-                        if (!load_result) {
+                        if (!init_result) {
                             return std::unexpected(std::format("Failed to load '{}': {}",
-                                                               lfs::core::path_to_utf8(init_file), load_result.error().format()));
+                                                               lfs::core::path_to_utf8(init_file), init_result.error().format()));
                         }
 
                         try {
-                            auto splat_data = std::move(*std::get<std::shared_ptr<lfs::core::SplatData>>(load_result->data));
+                            auto splat_data = std::move(*std::get<std::shared_ptr<lfs::core::SplatData>>(init_result->data));
                             auto model = std::make_unique<lfs::core::SplatData>(std::move(splat_data));
 
+                            recomputeInitSplatSceneScale(*model, load_result->scene_center, init_file);
                             applyTrainingSHDegree(*model, params.optimization.sh_degree);
 
                             LOG_INFO("Loaded {} Gaussians from {} (sh={})",
@@ -508,6 +569,7 @@ namespace lfs::training {
             if (auto result = migrateTrainingModelToAllocator(params, *model, tensor_allocator); !result) {
                 return result;
             }
+            scene.syncTrainingModelTopology(static_cast<size_t>(model->size()));
             scene.notifyMutation(lfs::core::Scene::MutationType::MODEL_CHANGED);
             return {};
         }
@@ -747,6 +809,7 @@ namespace lfs::training {
                             auto splat_data = std::move(*std::get<std::shared_ptr<lfs::core::SplatData>>(init_result->data));
                             auto model = std::make_unique<lfs::core::SplatData>(std::move(splat_data));
 
+                            recomputeInitSplatSceneScale(*model, load_result.scene_center, init_file);
                             applyTrainingSHDegree(*model, params.optimization.sh_degree);
 
                             LOG_INFO("Loaded {} gaussians from {} (sh={})",

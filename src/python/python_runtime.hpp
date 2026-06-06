@@ -90,6 +90,9 @@ namespace lfs::python {
     // UI redraw request mechanism
     LFS_PYTHON_RUNTIME_API void request_redraw();
     LFS_PYTHON_RUNTIME_API bool consume_redraw_request();
+    LFS_PYTHON_RUNTIME_API uint64_t redraw_request_generation();
+    LFS_PYTHON_RUNTIME_API void request_pre_scene_panel_sync();
+    LFS_PYTHON_RUNTIME_API uint64_t pre_scene_panel_sync_generation();
     using MainLoopWakeCallback = void (*)();
     LFS_PYTHON_RUNTIME_API void set_main_loop_wake_callback(MainLoopWakeCallback cb);
 
@@ -470,6 +473,7 @@ namespace lfs::python {
         float pip_preview_scale = 1.0f;
         bool show_film_strip = true;
         bool equirectangular = false;
+        float sequence_fps = 24.0f;
         int preset = 0;
         int custom_width = 1920;
         int custom_height = 1080;

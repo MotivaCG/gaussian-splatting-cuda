@@ -233,7 +233,7 @@ namespace lfs::vis {
             return {};
         }
 
-        const auto visible_nodes = scene_manager->getScene().getVisibleNodes();
+        const auto visible_nodes = scene_manager->getScene().getVisibleSplatNodeSlots();
         if (visible_nodes.size() >= 2) {
             return {};
         }

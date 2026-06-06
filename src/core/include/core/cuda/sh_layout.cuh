@@ -216,11 +216,43 @@ namespace lfs::core {
         std::uint32_t active_coeffs_rest,
         cudaStream_t stream = nullptr);
 
+    // uint8 (quantised Adam moment) variants of shN_swizzled_gather_self. Same swizzled slot
+    // permutation, just uchar4 elements instead of float4.
+    void shN_swizzled_gather_self_u8(
+        const std::uint8_t* src_swizzled,
+        std::uint8_t* dst_swizzled,
+        const int* src_indices,
+        std::size_t n_dst,
+        std::size_t dst_offset,
+        std::uint32_t active_coeffs_rest,
+        cudaStream_t stream = nullptr);
+
+    void shN_swizzled_gather_self_u8_i64(
+        const std::uint8_t* src_swizzled,
+        std::uint8_t* dst_swizzled,
+        const std::int64_t* src_indices,
+        std::size_t n_dst,
+        std::size_t dst_offset,
+        std::uint32_t active_coeffs_rest,
+        cudaStream_t stream = nullptr);
+
     // Copy the first n_src primitives from one swizzled buffer into dst_offset in another
     // swizzled buffer. Source and destination may have different padded block boundaries.
     void shN_swizzled_copy_contiguous(
         const float* src_swizzled,
         float* dst_swizzled,
+        std::size_t n_src,
+        std::size_t dst_offset,
+        std::uint32_t src_active_coeffs_rest,
+        std::uint32_t dst_active_coeffs_rest,
+        cudaStream_t stream = nullptr);
+
+    // Copy n_src primitives starting at src_offset from one swizzled buffer into
+    // dst_offset in another swizzled buffer.
+    void shN_swizzled_copy_range(
+        const float* src_swizzled,
+        float* dst_swizzled,
+        std::size_t src_offset,
         std::size_t n_src,
         std::size_t dst_offset,
         std::uint32_t src_active_coeffs_rest,

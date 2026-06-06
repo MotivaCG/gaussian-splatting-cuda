@@ -14,7 +14,19 @@ namespace lfs::vis {
         }
 
         void applyGaussianCropBox(lfs::rendering::GaussianFilterState& filters, const FrameContext& ctx) {
-            if (!ctx.scene_manager || !(ctx.settings.use_crop_box || ctx.settings.show_crop_box)) {
+            if (ctx.gizmo.cropbox_active) {
+                filters.crop_region = lfs::rendering::GaussianScopedBoxFilter{
+                    .bounds =
+                        {.min = ctx.gizmo.cropbox_min,
+                         .max = ctx.gizmo.cropbox_max,
+                         .transform = glm::inverse(ctx.gizmo.cropbox_transform)},
+                    .inverse = false,
+                    .desaturate = true,
+                    .parent_node_index = -1};
+                return;
+            }
+
+            if (!(ctx.settings.use_crop_box || ctx.settings.show_crop_box)) {
                 return;
             }
 
@@ -36,11 +48,21 @@ namespace lfs::vis {
                 .inverse = cb.data->inverse,
                 .desaturate =
                     ctx.settings.show_crop_box && !ctx.settings.use_crop_box && ctx.settings.desaturate_cropping,
-                .parent_node_index = ctx.scene_manager->getScene().getVisibleNodeIndex(cb.parent_splat_id)};
+                .parent_node_index = cb.parent_node_index};
         }
 
         void applyPointCloudCropBox(lfs::rendering::PointCloudFilterState& filters, const FrameContext& ctx) {
-            if (!ctx.scene_manager || !(ctx.settings.use_crop_box || ctx.settings.show_crop_box)) {
+            if (ctx.gizmo.cropbox_active) {
+                filters.crop_box = lfs::rendering::BoundingBox{
+                    .min = ctx.gizmo.cropbox_min,
+                    .max = ctx.gizmo.cropbox_max,
+                    .transform = glm::inverse(ctx.gizmo.cropbox_transform)};
+                filters.crop_inverse = false;
+                filters.crop_desaturate = true;
+                return;
+            }
+
+            if (!(ctx.settings.use_crop_box || ctx.settings.show_crop_box)) {
                 return;
             }
 
@@ -64,13 +86,24 @@ namespace lfs::vis {
         }
 
         void applyGaussianEllipsoid(lfs::rendering::GaussianFilterState& filters, const FrameContext& ctx) {
-            if (!ctx.scene_manager || !(ctx.settings.use_ellipsoid || ctx.settings.show_ellipsoid)) {
+            if (ctx.gizmo.ellipsoid_active) {
+                filters.ellipsoid_region = lfs::rendering::GaussianScopedEllipsoidFilter{
+                    .bounds =
+                        {.radii = ctx.gizmo.ellipsoid_radii,
+                         .transform = glm::inverse(ctx.gizmo.ellipsoid_transform)},
+                    .inverse = false,
+                    .desaturate = true,
+                    .parent_node_index = -1};
                 return;
             }
 
-            const auto& scene = ctx.scene_manager->getScene();
+            if (!(ctx.settings.use_ellipsoid || ctx.settings.show_ellipsoid)) {
+                return;
+            }
+
             const auto& visible_ellipsoids = ctx.scene_state.ellipsoids;
-            const core::NodeId selected_ellipsoid_id = ctx.scene_manager->getSelectedNodeEllipsoidId();
+            const core::NodeId selected_ellipsoid_id =
+                ctx.scene_manager ? ctx.scene_manager->getSelectedNodeEllipsoidId() : core::NULL_NODE;
             for (const auto& el : visible_ellipsoids) {
                 if (!el.data) {
                     continue;
@@ -86,7 +119,7 @@ namespace lfs::vis {
                     .desaturate = ctx.settings.show_ellipsoid &&
                                   !ctx.settings.use_ellipsoid &&
                                   ctx.settings.desaturate_cropping,
-                    .parent_node_index = scene.getVisibleNodeIndex(el.parent_splat_id)};
+                    .parent_node_index = el.parent_node_index};
                 return;
             }
         }
@@ -129,10 +162,9 @@ namespace lfs::vis {
                                                                      const std::optional<SplitViewPanelId> render_panel) {
         const Viewport& viewport = source_viewport ? *source_viewport : ctx.viewport;
         const auto frame_view = ctx.makeFrameView(viewport, render_size);
-        const bool overlay_visible = panelMatches(ctx.cursor_preview.panel, render_panel);
-        const float depth_view_max = ctx.settings.depth_clip_far > frame_view.near_plane
-                                         ? ctx.settings.depth_clip_far
-                                         : frame_view.far_plane;
+        const bool selection_overlay_enabled = !ctx.training_active;
+        const bool overlay_visible =
+            selection_overlay_enabled && panelMatches(ctx.cursor_preview.panel, render_panel);
 
         lfs::rendering::ViewportRenderRequest request{
             .frame_view = frame_view,
@@ -161,27 +193,36 @@ namespace lfs::vis {
                       .saturation_preview = ctx.cursor_preview.saturation_mode,
                       .saturation_amount = ctx.cursor_preview.saturation_amount},
                  .emphasis =
-                     {.mask = ctx.scene_state.selection_mask,
+                     {.mask = selection_overlay_enabled ? ctx.scene_state.selection_mask : nullptr,
                       .transient_mask =
-                          {.mask = ctx.cursor_preview.preview_selection ? ctx.cursor_preview.preview_selection
-                                                                        : ctx.cursor_preview.selection_tensor,
-                           .additive = ctx.cursor_preview.add_mode},
-                      .emphasized_node_mask = (ctx.settings.desaturate_unselected ||
-                                               ctx.selection_flash_intensity > 0.0f)
-                                                  ? ctx.scene_state.selected_node_mask
-                                                  : std::vector<bool>{},
-                      .dim_non_emphasized = ctx.settings.desaturate_unselected,
-                      .flash_intensity = ctx.selection_flash_intensity,
-                      .focused_gaussian_id = ((ctx.cursor_preview.selection_mode == SelectionPreviewMode::Rings) &&
+                          {.mask = selection_overlay_enabled
+                                       ? (ctx.cursor_preview.preview_selection ? ctx.cursor_preview.preview_selection
+                                                                               : ctx.cursor_preview.selection_tensor)
+                                       : nullptr,
+                           .additive = selection_overlay_enabled && ctx.cursor_preview.add_mode},
+                      .emphasized_node_mask = (selection_overlay_enabled &&
+                                                       (ctx.settings.desaturate_unselected ||
+                                                        ctx.selection_flash_intensity > 0.0f)
+                                                   ? ctx.scene_state.selected_node_mask
+                                                   : std::vector<bool>{}),
+                      .dim_non_emphasized = selection_overlay_enabled && ctx.settings.desaturate_unselected,
+                      .flash_intensity = selection_overlay_enabled ? ctx.selection_flash_intensity : 0.0f,
+                      .focused_gaussian_id = (selection_overlay_enabled &&
+                                              (ctx.cursor_preview.selection_mode == SelectionPreviewMode::Rings) &&
                                               overlay_visible)
                                                  ? ctx.cursor_preview.focused_gaussian_id
                                                  : -1}},
             .transparent_background = environmentBackgroundUsesTransparentViewerCompositing(ctx.settings),
             .depth_view = ctx.settings.depth_view,
-            .depth_view_min = frame_view.near_plane,
-            .depth_view_max = depth_view_max};
+            .depth_view_min = ctx.settings.depth_view_min,
+            .depth_view_max = ctx.settings.depth_view_max,
+            .depth_visualization_mode = ctx.settings.depth_visualization_mode};
 
-        populateSelectionColors(request.overlay.selection_colors, ctx);
+        if (selection_overlay_enabled ||
+            request.overlay.markers.show_rings ||
+            request.overlay.markers.show_center_markers) {
+            populateSelectionColors(request.overlay.selection_colors, ctx);
+        }
 
         applyGaussianCropBox(request.filters, ctx);
         applyGaussianEllipsoid(request.filters, ctx);
@@ -225,12 +266,14 @@ namespace lfs::vis {
                  .node_visibility_mask = ctx.scene_state.node_visibility_mask},
             .filters = {},
             .overlay = {}};
-        state.overlay.selection_mask = ctx.scene_state.selection_mask;
-        state.overlay.transient_mask.mask = ctx.cursor_preview.preview_selection
-                                                ? ctx.cursor_preview.preview_selection
-                                                : ctx.cursor_preview.selection_tensor;
-        state.overlay.transient_mask.additive = ctx.cursor_preview.add_mode;
-        populateSelectionColors(state.overlay.selection_colors, ctx);
+        if (!ctx.training_active) {
+            state.overlay.selection_mask = ctx.scene_state.selection_mask;
+            state.overlay.transient_mask.mask = ctx.cursor_preview.preview_selection
+                                                    ? ctx.cursor_preview.preview_selection
+                                                    : ctx.cursor_preview.selection_tensor;
+            state.overlay.transient_mask.additive = ctx.cursor_preview.add_mode;
+            populateSelectionColors(state.overlay.selection_colors, ctx);
+        }
         applyPointCloudCropBox(state.filters, ctx);
         return state;
     }
@@ -254,12 +297,14 @@ namespace lfs::vis {
             .overlay = {},
             .transparent_background = environmentBackgroundUsesTransparentViewerCompositing(ctx.settings)};
 
-        request.overlay.selection_mask = ctx.scene_state.selection_mask;
-        request.overlay.transient_mask.mask = ctx.cursor_preview.preview_selection
-                                                  ? ctx.cursor_preview.preview_selection
-                                                  : ctx.cursor_preview.selection_tensor;
-        request.overlay.transient_mask.additive = ctx.cursor_preview.add_mode;
-        populateSelectionColors(request.overlay.selection_colors, ctx);
+        if (!ctx.training_active) {
+            request.overlay.selection_mask = ctx.scene_state.selection_mask;
+            request.overlay.transient_mask.mask = ctx.cursor_preview.preview_selection
+                                                      ? ctx.cursor_preview.preview_selection
+                                                      : ctx.cursor_preview.selection_tensor;
+            request.overlay.transient_mask.additive = ctx.cursor_preview.add_mode;
+            populateSelectionColors(request.overlay.selection_colors, ctx);
+        }
 
         applyPointCloudCropBox(request.filters, ctx);
         return request;

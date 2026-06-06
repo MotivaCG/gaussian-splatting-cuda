@@ -7,7 +7,8 @@ from typing import Optional
 from .tool_defs.builtin import BUILTIN_TOOLS, get_tool_by_id
 from .tool_defs.definition import ToolDef
 
-_BUILTIN_TOOL_IDS = {tool.id for tool in BUILTIN_TOOLS}
+_OPERATOR_BACKED_BUILTIN_TOOL_IDS = {"builtin.cropbox"}
+_NATIVE_BUILTIN_TOOL_IDS = {tool.id for tool in BUILTIN_TOOLS} - _OPERATOR_BACKED_BUILTIN_TOOL_IDS
 
 
 class ToolRegistry:
@@ -70,7 +71,7 @@ class ToolRegistry:
 
         gizmo = tool.gizmo or ""
         set_active_tool = getattr(lf.ui, "set_active_tool", None)
-        if tool_id in _BUILTIN_TOOL_IDS and callable(set_active_tool):
+        if tool_id in _NATIVE_BUILTIN_TOOL_IDS and callable(set_active_tool):
             set_active_tool(tool_id)
         else:
             lf.ui.set_active_operator(tool_id, gizmo)

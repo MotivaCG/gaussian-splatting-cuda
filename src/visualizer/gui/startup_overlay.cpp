@@ -234,7 +234,7 @@ namespace lfs::vis::gui {
 
         if (rml_manager_) {
             if (current == "ja" || current == "ko" || current == "zh") {
-                rml_manager_->ensureCjkFontsLoaded();
+                ensureLanguageDropdownFontsLoaded();
             }
         }
 
@@ -337,6 +337,32 @@ namespace lfs::vis::gui {
                input.has_text_editing;
     }
 
+    bool StartupOverlay::isLanguageSelectOpen() const {
+        auto* lang_el = document_ ? document_->GetElementById("lang-select") : nullptr;
+        auto* sel = dynamic_cast<Rml::ElementFormControlSelect*>(lang_el);
+        return sel && sel->IsSelectBoxVisible();
+    }
+
+    bool StartupOverlay::isLanguageSelectHit(const float local_x, const float local_y) const {
+        auto* lang_el = document_ ? document_->GetElementById("lang-select") : nullptr;
+        if (!lang_el)
+            return false;
+
+        const auto offset = lang_el->GetAbsoluteOffset(Rml::BoxArea::Border);
+        const float width = lang_el->GetOffsetWidth();
+        const float height = lang_el->GetOffsetHeight();
+        return local_x >= offset.x && local_y >= offset.y &&
+               local_x < offset.x + width && local_y < offset.y + height;
+    }
+
+    void StartupOverlay::ensureLanguageDropdownFontsLoaded() {
+        if (language_dropdown_fonts_requested_ || !rml_manager_)
+            return;
+
+        rml_manager_->ensureCjkFontsLoaded();
+        language_dropdown_fonts_requested_ = true;
+    }
+
     StartupOverlay::InputForwardResult StartupOverlay::forwardInput(
         const PanelInputState& input, float overlay_x,
         float overlay_y, float overlay_w, float overlay_h) {
@@ -357,6 +383,10 @@ namespace lfs::vis::gui {
         if (hovered) {
             const int mods = sdlModsToRml(input.key_ctrl, input.key_shift,
                                           input.key_alt, input.key_super);
+            const bool opening_language_select =
+                input.mouse_clicked[0] && isLanguageSelectHit(local_x, local_y);
+            if (isLanguageSelectOpen() || opening_language_select)
+                ensureLanguageDropdownFontsLoaded();
             rml_context_->ProcessMouseMove(static_cast<int>(local_x),
                                            static_cast<int>(local_y), mods);
             result.event_forwarded = true;
@@ -462,16 +492,25 @@ namespace lfs::vis::gui {
             refresh_cache = true;
         }
 
-        if (refresh_cache)
+        bool updated_this_frame = false;
+        if (refresh_cache) {
             rml_context_->Update();
+            updated_this_frame = true;
+        }
 
         bool escape_consumed = false;
+        bool rml_select_open = isLanguageSelectOpen();
+        bool input_event_forwarded = false;
         if (input_ && hasInputActivity(*input_)) {
             const auto input_result = forwardInput(*input_, viewport.pos.x, viewport.pos.y,
                                                    viewport.size.x, viewport.size.y);
             escape_consumed = input_result.escape_consumed;
             refresh_cache = refresh_cache || input_result.event_forwarded;
+            input_event_forwarded = input_result.event_forwarded;
+            rml_select_open = rml_select_open || isLanguageSelectOpen();
         }
+        if (input_event_forwarded || (refresh_cache && !updated_this_frame))
+            rml_context_->Update();
 
         const auto* main_viewport = ImGui::GetMainViewport();
         const float screen_x = main_viewport ? main_viewport->Pos.x : 0.0f;
@@ -503,14 +542,6 @@ namespace lfs::vis::gui {
         content_dirty_ = false;
 
         ++shown_frames_;
-
-        auto* lang_el = document_ ? document_->GetElementById("lang-select") : nullptr;
-        bool rml_select_open = false;
-        if (lang_el) {
-            auto* sel = dynamic_cast<Rml::ElementFormControlSelect*>(lang_el);
-            if (sel)
-                rml_select_open = sel->IsSelectBoxVisible();
-        }
 
         if (shown_frames_ > 2 && !rml_select_open && !drag_hovering && input_) {
             const bool mouse_clicked =

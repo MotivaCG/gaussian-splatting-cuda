@@ -621,11 +621,15 @@ namespace lfs::rendering {
         Result<RasterImageResult> renderSoftwarePointCloud(
             const Tensor& positions_source,
             const Tensor& colors_source,
-            const PointCloudRenderRequest& request) {
-            if (request.frame_view.size.x <= 0 || request.frame_view.size.y <= 0 ||
-                request.frame_view.size.x > MAX_VIEWPORT_SIZE ||
-                request.frame_view.size.y > MAX_VIEWPORT_SIZE) {
+            const PointCloudRenderRequest& request,
+            const Tensor* const deleted_mask_source) {
+            if (request.frame_view.size.x <= 0 || request.frame_view.size.y <= 0) {
                 return std::unexpected("Invalid viewport dimensions");
+            }
+            const auto width_pixels = static_cast<std::size_t>(request.frame_view.size.x);
+            const auto height_pixels = static_cast<std::size_t>(request.frame_view.size.y);
+            if (width_pixels > std::numeric_limits<std::size_t>::max() / height_pixels) {
+                return std::unexpected("Viewport dimensions overflow pixel count");
             }
             if (!positions_source.is_valid() || positions_source.ndim() != 2 || positions_source.size(1) != 3) {
                 return std::unexpected("Point cloud positions must have shape [N, 3]");
@@ -633,6 +637,10 @@ namespace lfs::rendering {
             if (!colors_source.is_valid() || colors_source.ndim() != 2 || colors_source.size(1) != 3 ||
                 colors_source.size(0) != positions_source.size(0)) {
                 return std::unexpected("Point cloud colors must have shape [N, 3]");
+            }
+            if (deleted_mask_source && deleted_mask_source->is_valid() &&
+                deleted_mask_source->numel() != positions_source.size(0)) {
+                return std::unexpected("Point cloud deleted mask must match point count");
             }
 
             Tensor positions_cuda = positions_source;
@@ -706,6 +714,20 @@ namespace lfs::rendering {
                 visibility_device = visibility_cuda.ptr<std::uint8_t>();
             }
 
+            Tensor deleted_mask_cuda;
+            const bool* deleted_mask_device = nullptr;
+            if (deleted_mask_source && deleted_mask_source->is_valid()) {
+                deleted_mask_cuda = *deleted_mask_source;
+                if (deleted_mask_cuda.dtype() != lfs::core::DataType::Bool) {
+                    deleted_mask_cuda = deleted_mask_cuda.to(lfs::core::DataType::Bool);
+                }
+                if (deleted_mask_cuda.device() != lfs::core::Device::CUDA) {
+                    deleted_mask_cuda = deleted_mask_cuda.cuda();
+                }
+                deleted_mask_cuda = deleted_mask_cuda.contiguous();
+                deleted_mask_device = deleted_mask_cuda.ptr<bool>();
+            }
+
             const glm::mat4 view = request.frame_view.getViewMatrix();
             const glm::mat4 projection = createProjectionMatrix(
                 request.frame_view.size,
@@ -733,6 +755,7 @@ namespace lfs::rendering {
             params.transforms = transforms_device;
             params.transform_indices = transform_indices_ptr;
             params.visibility_mask = visibility_device;
+            params.deleted_mask = deleted_mask_device;
             params.n_points = static_cast<std::size_t>(positions_source.size(0));
             params.n_transforms = static_cast<int>(transforms.size());
             params.n_visibility = static_cast<int>(request.scene.node_visibility_mask.size());
@@ -1692,7 +1715,11 @@ namespace lfs::rendering {
                 return std::unexpected(std::format("Failed to derive point colors from SH data: {}", e.what()));
             }
 
-            auto result = renderSoftwarePointCloud(splat_data.get_means(), colors, request);
+            auto result = renderSoftwarePointCloud(
+                splat_data.get_means(),
+                colors,
+                request,
+                splat_data.has_deleted_mask() ? &splat_data.deleted() : nullptr);
             if (!result) {
                 return std::unexpected(result.error());
             }
@@ -1705,7 +1732,7 @@ namespace lfs::rendering {
         Result<PointCloudImageResult> renderPointCloudImage(
             const lfs::core::PointCloud& point_cloud,
             const PointCloudRenderRequest& request) override {
-            auto result = renderSoftwarePointCloud(point_cloud.means, point_cloud.colors, request);
+            auto result = renderSoftwarePointCloud(point_cloud.means, point_cloud.colors, request, nullptr);
             if (!result) {
                 return std::unexpected(result.error());
             }

@@ -763,7 +763,7 @@ tool = ToolDef(
     id="my_plugin.my_tool",         # Unique identifier
     label="My Tool",                # Display label
     icon="star",                    # Icon name
-    group="utility",                # "select", "transform", "paint", "utility"
+    group="utility",                # "select", "transform", "utility"
     order=200,                      # Sort order within group
     description="Tool tooltip",     # Tooltip
     shortcut="",                    # Keyboard shortcut
@@ -797,17 +797,17 @@ from pathlib import Path
 from lfs_plugins.tool_defs.definition import ToolDef, SubmodeDef, PivotModeDef
 from lfs_plugins.tools import ToolRegistry
 
-paint_tool = ToolDef(
-    id="my_plugin.paint",
-    label="Paint",
-    icon="paint",
-    group="paint",
+measure_tool = ToolDef(
+    id="my_plugin.measure",
+    label="Measure",
+    icon="ruler",
+    group="utility",
     order=100,
-    description="Paint gaussian attributes",
+    description="Measure scene attributes",
     submodes=(
-        SubmodeDef("opacity", "Opacity", "opacity"),
-        SubmodeDef("color", "Color", "color"),
-        SubmodeDef("scale", "Scale", "scale"),
+        SubmodeDef("distance", "Distance", "ruler"),
+        SubmodeDef("angle", "Angle", "angle"),
+        SubmodeDef("bounds", "Bounds", "box"),
     ),
     pivot_modes=(
         PivotModeDef("center", "Selection Center", "circle-dot"),
@@ -818,7 +818,7 @@ paint_tool = ToolDef(
     plugin_path=str(Path(__file__).parent),
 )
 
-ToolRegistry.register_tool(paint_tool)
+ToolRegistry.register_tool(measure_tool)
 ```
 
 ### Native TRS gizmos

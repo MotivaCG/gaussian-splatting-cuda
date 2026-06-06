@@ -760,10 +760,10 @@ TEST_F(UndoHistoryTest, TensorUndoEntryRestoresTensorRoundTrip) {
 
     const auto before = node->model->sh0().clone();
     auto entry = std::make_unique<lfs::vis::op::TensorUndoEntry>(
-        "brush.saturation",
+        "tensor.edit",
         lfs::vis::op::UndoMetadata{
-            .id = "tensor.saturation",
-            .label = "Saturation Brush",
+            .id = "tensor.edit",
+            .label = "Tensor Edit",
             .source = "operator",
             .scope = "tensor",
         },

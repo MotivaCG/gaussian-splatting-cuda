@@ -19,6 +19,10 @@ PACK_STRUCT(struct VulkanGSRendererUniforms {
     uint32_t sort_capacity;
     uint32_t shN_layout_slots;
     uint32_t mip_filter;
+    uint32_t render_origin_x;
+    uint32_t render_origin_y;
+    uint32_t camera_width;
+    uint32_t camera_height;
     uint32_t pad2;
     float fx;
     float fy;
@@ -27,7 +31,7 @@ PACK_STRUCT(struct VulkanGSRendererUniforms {
     float dist_coeffs[4];
     float world_view_transform[16];
 });
-static_assert(sizeof(VulkanGSRendererUniforms) == 144);
+static_assert(sizeof(VulkanGSRendererUniforms) == 160);
 
 PACK_STRUCT(struct VulkanGSSelectionMaskUniforms {
     uint32_t num_splats;
@@ -81,7 +85,8 @@ public:
                             VkDevice external_device,
                             VkQueue external_queue,
                             uint32_t external_queue_family_index,
-                            VmaAllocator external_allocator);
+                            VmaAllocator external_allocator,
+                            VkPipelineCache external_pipeline_cache = VK_NULL_HANDLE);
     void cleanup();
 
     void tagDeferredVisibleCountReadback(VkSemaphore semaphore, std::uint64_t value);
@@ -165,6 +170,8 @@ protected:
                                       const char* cpu_timer_prefix);
     void executePrepareTileSort(const VulkanGSRendererUniforms& uniforms,
                                 VulkanGSPipelineBuffers& buffers);
+    void executeBatchedRasterizeForward(const VulkanGSRendererUniforms& uniforms,
+                                        VulkanGSPipelineBuffers& buffers);
 
     _ComputePipeline pipeline_projection_forward = _ComputePipeline(19);
     _ComputePipeline pipeline_projection_forward_3dgut = _ComputePipeline(19);
@@ -185,6 +192,10 @@ protected:
     _ComputePipelinePair pipeline_rasterize_forward_3dgut = _ComputePipelinePair(20);
     _ComputePipelinePair pipeline_rasterize_forward_plain = _ComputePipelinePair(14);
     _ComputePipelinePair pipeline_rasterize_forward_3dgut_plain = _ComputePipelinePair(20);
+    _ComputePipeline pipeline_tile_batch_counts = _ComputePipeline(2);
+    _ComputePipeline pipeline_tile_batch_descriptors = _ComputePipeline(4);
+    _ComputePipelinePair pipeline_rasterize_forward_batches_plain = _ComputePipelinePair(7);
+    _ComputePipeline pipeline_compose_tile_batches_plain = _ComputePipeline(12);
     struct _CumsumComputePipeline {
         _ComputePipeline single_pass = _ComputePipeline(2);
         _ComputePipeline block_scan = _ComputePipeline(3);

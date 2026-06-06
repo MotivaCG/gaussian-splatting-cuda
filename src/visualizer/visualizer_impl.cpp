@@ -17,7 +17,6 @@
 #include "operation/undo_history.hpp"
 #include "operator/operator_registry.hpp"
 #include "operator/ops/align_ops.hpp"
-#include "operator/ops/brush_ops.hpp"
 #include "operator/ops/edit_ops.hpp"
 #include "operator/ops/scene_ops.hpp"
 #include "operator/ops/selection_ops.hpp"
@@ -27,7 +26,6 @@
 #include "rendering/coordinate_conventions.hpp"
 #include "scene/scene_manager.hpp"
 #include "tools/align_tool.hpp"
-#include "tools/brush_tool.hpp"
 #include "tools/builtin_tools.hpp"
 #include "tools/selection_tool.hpp"
 #include "visualizer/app_store.hpp"
@@ -119,7 +117,6 @@ namespace lfs::vis {
         op::registerTransformOperators();
         op::registerAlignOperators();
         op::registerSelectionOperators();
-        op::registerBrushOperators();
         op::registerEditOperators();
         op::registerSceneOperators();
 
@@ -136,7 +133,6 @@ namespace lfs::vis {
         // Clear operator system
         op::unregisterEditOperators();
         op::unregisterSceneOperators();
-        op::unregisterBrushOperators();
         op::unregisterSelectionOperators();
         op::unregisterAlignOperators();
         op::unregisterTransformOperators();
@@ -144,7 +140,6 @@ namespace lfs::vis {
 
         callback_cleanup_.clear();
         trainer_manager_.reset();
-        brush_tool_.reset();
         tool_context_.reset();
         if (gui_manager_) {
             gui_manager_->shutdown();
@@ -167,14 +162,6 @@ namespace lfs::vis {
         // Connect tool context to input controller
         if (input_controller_) {
             input_controller_->setToolContext(tool_context_.get());
-        }
-
-        brush_tool_ = std::make_shared<tools::BrushTool>();
-        if (!brush_tool_->initialize(*tool_context_)) {
-            LOG_ERROR("Failed to initialize brush tool");
-            brush_tool_.reset();
-        } else if (input_controller_) {
-            input_controller_->setBrushTool(brush_tool_);
         }
 
         align_tool_ = std::make_shared<tools::AlignTool>();
@@ -481,6 +468,7 @@ namespace lfs::vis {
                 state.pip_preview_scale = s.pip_preview_scale;
                 state.show_film_strip = s.show_film_strip;
                 state.equirectangular = s.equirectangular;
+                state.sequence_fps = s.sequence_fps;
             }
 
             s.show_camera_path = state.show_camera_path;
@@ -492,6 +480,7 @@ namespace lfs::vis {
             s.pip_preview_scale = state.pip_preview_scale;
             s.show_film_strip = state.show_film_strip;
             s.equirectangular = state.equirectangular;
+            s.sequence_fps = state.sequence_fps;
             const auto sel = gm->sequencer().selectedKeyframe();
             s.selected_keyframe = sel.has_value() ? static_cast<int>(*sel) : -1;
             sequencer_ui_initialized_ = true;
@@ -981,8 +970,11 @@ namespace lfs::vis {
 
         // Initialize window first and ensure it has proper size
         if (!window_initialized_) {
-            if (!window_manager_->init()) {
-                return false;
+            {
+                LOG_TIMER("startup.window_manager.init"); // wraps Vulkan instance/device/swapchain bring-up
+                if (!window_manager_->init()) {
+                    return false;
+                }
             }
             window_initialized_ = true;
 
@@ -1005,6 +997,7 @@ namespace lfs::vis {
 
         // Initialize GUI (sets up ImGui, builds font atlas)
         if (!gui_initialized_) {
+            LOG_TIMER("startup.gui_manager.init");
             gui_manager_->init();
             gui_initialized_ = true;
         }
@@ -1029,11 +1022,22 @@ namespace lfs::vis {
         if (scene_manager_)
             scene_manager_->initSelectionService();
 
-        python::ensure_initialized();
-        python::ensure_builtin_ui_registered();
-        python::preload_user_plugins_async();
-
-        window_manager_->showWindow();
+        {
+            LOG_TIMER("startup.python.ensure_initialized");
+            python::ensure_initialized();
+        }
+        {
+            LOG_TIMER("startup.python.builtin_ui_registered");
+            python::ensure_builtin_ui_registered();
+        }
+        {
+            LOG_TIMER("startup.python.preload_plugins_async");
+            python::preload_user_plugins_async();
+        }
+        {
+            LOG_TIMER("startup.window.showWindow");
+            window_manager_->showWindow();
+        }
 
         fully_initialized_ = true;
         return true;
@@ -1076,9 +1080,6 @@ namespace lfs::vis {
         // Update editor context state from scene/trainer
         editor_context_.update(scene_manager_.get(), trainer_manager_.get());
 
-        if (brush_tool_ && brush_tool_->isEnabled() && tool_context_) {
-            brush_tool_->update(*tool_context_);
-        }
         if (selection_tool_ && selection_tool_->isEnabled() && tool_context_) {
             selection_tool_->update(*tool_context_);
         }
@@ -1291,6 +1292,12 @@ namespace lfs::vis {
             }
         }
 
+        if (gui_manager_) {
+            gui_manager_->updateInteractiveTransitions();
+        }
+        const bool interactive_transition_settling =
+            gui_manager_ && gui_manager_->isInteractiveTransitionSettling();
+
         // Get viewport region from GUI. This accounts for menu/tool/status panels and must be
         // shared by every graphics backend so camera aspect and render resolution match the viewport.
         ViewportRegion viewport_region;
@@ -1326,6 +1333,9 @@ namespace lfs::vis {
             store_dirty = app_store().store().drain_dirty_into_frame();
         }
 
+        if (gui_manager_)
+            gui_manager_->sequencerUI().tickPlaybackBeforeSceneRender();
+
         const bool is_training = trainer_manager_ && trainer_manager_->isRunning();
         const FrameDemand frame_demand = collectFrameDemand(viewport_export_locked, store_dirty);
         if (gui_frame_rendered_ && !frame_demand.shouldRenderFrame()) {
@@ -1345,7 +1355,10 @@ namespace lfs::vis {
             return;
         }
 
-        if (!viewport_export_locked) {
+        if (!viewport_export_locked && !interactive_transition_settling) {
+            if (frame_demand.python_redraw && gui_manager_)
+                gui_manager_->syncVisiblePanelsBeforeSceneRender();
+
             const auto vulkan_frame = rendering_manager_->renderVulkanFrame(context);
             if (gui_manager_) {
                 if (vulkan_frame.external_image != VK_NULL_HANDLE) {
@@ -1390,13 +1403,21 @@ namespace lfs::vis {
                     gui_manager_->clearVulkanDepthBlitImage();
                 }
             }
+        } else if (interactive_transition_settling) {
+            LOG_DEBUG("Skipping Vulkan viewport render during interactive transition settle: scene_dirty={}, gui_animation={}, input_event={}, render_work={}, store_dirty={}",
+                      frame_demand.scene_dirty,
+                      frame_demand.gui_animation,
+                      frame_demand.input_event,
+                      frame_demand.render_work,
+                      frame_demand.store_dirty);
         }
         if (gui_manager_) {
             LOG_TIMER("VisualizerImpl::render.gui_frame_total_with_swapchain_wait");
             gui_manager_->render();
+        } else {
+            processRenderWorkQueue();
         }
 
-        processRenderWorkQueue();
         python::flush_signals();
         gui_frame_rendered_ = true;
         update_work_processed_ = false;
@@ -1467,12 +1488,6 @@ namespace lfs::vis {
                 trainer_manager_->waitForCompletion();
             }
             trainer_manager_.reset();
-        }
-
-        // Shutdown tools
-        if (brush_tool_) {
-            brush_tool_->shutdown();
-            brush_tool_.reset();
         }
 
         // Clean up tool context

@@ -131,7 +131,60 @@ namespace lfs::vis {
         }
     }
 
+    void RenderingManager::releaseSceneModelResources() {
+        clearVulkanMeshFrame();
+
+        point_cloud_colors_cache_ = {};
+        point_cloud_colors_cache_key_ = nullptr;
+        point_cloud_colors_cache_size_ = 0;
+        ++point_cloud_data_revision_;
+        ++point_cloud_preview_selection_revision_;
+
+        if (vksplat_viewport_renderer_) {
+            vksplat_viewport_renderer_->releaseSceneResources();
+        }
+        if (point_cloud_vulkan_renderer_) {
+            point_cloud_vulkan_renderer_->reset();
+        }
+        frame_lifecycle_service_.resetModelTracking();
+    }
+
+    void RenderingManager::releaseSceneRenderResources() {
+        viewport_artifact_service_.clearViewportOutput();
+        vulkan_viewport_image_.reset();
+        vulkan_viewport_image_generation_ = 0;
+        vulkan_external_viewport_image_ = VK_NULL_HANDLE;
+        vulkan_external_viewport_image_view_ = VK_NULL_HANDLE;
+        vulkan_external_viewport_image_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+        vulkan_external_viewport_image_generation_ = 0;
+        split_view_image_generation_ = 0;
+        vulkan_viewport_image_size_ = {0, 0};
+        vulkan_viewport_image_flip_y_ = false;
+
+        clearVulkanMeshFrame();
+
+        point_cloud_colors_cache_ = {};
+        point_cloud_colors_cache_key_ = nullptr;
+        point_cloud_colors_cache_size_ = 0;
+        ++point_cloud_data_revision_;
+        ++point_cloud_preview_selection_revision_;
+
+        if (vksplat_viewport_renderer_) {
+            vksplat_viewport_renderer_->reset();
+        }
+        if (point_cloud_vulkan_renderer_) {
+            point_cloud_vulkan_renderer_->reset();
+        }
+        frame_lifecycle_service_.resetModelTracking();
+        lfs::core::Tensor::trim_memory_pool();
+    }
+
     void RenderingManager::updateSettings(const RenderSettings& new_settings) {
+        updateSettings(new_settings, DirtyFlag::ALL);
+    }
+
+    void RenderingManager::updateSettings(const RenderSettings& new_settings,
+                                          const DirtyMask dirty_flags) {
         bool clear_metrics = false;
         {
             std::lock_guard<std::mutex> lock(settings_mutex_);
@@ -169,6 +222,7 @@ namespace lfs::vis {
                                                  settings_.raster_backend, settings_.gut);
             settings_.gut = lfs::rendering::isGutBackend(settings_.raster_backend);
             enforceProjectionBackend(settings_);
+            sanitizeDepthViewSettings(settings_);
             settings_.grid_plane = clampGridPlane(settings_.grid_plane);
             if (split_view_service_.isIndependentDualActive(settings_)) {
                 if (grid_plane_changed) {
@@ -177,8 +231,11 @@ namespace lfs::vis {
             } else {
                 syncGridPlanesLocked(settings_.grid_plane);
             }
-            markDirty();
+            markDirty(dirty_flags);
         }
+
+        auto& render_settings_generation = app_store().render_settings_generation;
+        render_settings_generation.set(render_settings_generation.get() + 1);
 
         if (clear_metrics) {
             invalidateCameraMetricsRequests(true);
@@ -502,7 +559,13 @@ namespace lfs::vis {
         const auto content_bounds = getContentBounds(glm::ivec2(
             std::max(static_cast<int>(viewport_size.x), 0),
             std::max(static_cast<int>(viewport_size.y), 0)));
-        return viewport_pos.x + content_bounds.x + content_bounds.width * settings_.split_position;
+        const int content_width = std::max(static_cast<int>(std::lround(content_bounds.width)), 0);
+        if (content_width <= 0) {
+            return std::nullopt;
+        }
+
+        return viewport_pos.x + content_bounds.x +
+               static_cast<float>(splitViewDividerPixel(content_width, settings_.split_position));
     }
 
     Viewport& RenderingManager::resolvePanelViewport(Viewport& primary_viewport, const SplitViewPanelId panel) {

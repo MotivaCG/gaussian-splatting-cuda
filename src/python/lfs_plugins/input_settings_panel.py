@@ -27,7 +27,6 @@ class InputSettingsPanel(Panel):
     TOOL_MODES = [
         lf.keymap.ToolMode.GLOBAL,
         lf.keymap.ToolMode.SELECTION,
-        lf.keymap.ToolMode.BRUSH,
         lf.keymap.ToolMode.TRANSLATE,
         lf.keymap.ToolMode.ROTATE,
         lf.keymap.ToolMode.SCALE,
@@ -81,10 +80,6 @@ class InputSettingsPanel(Panel):
             lf.keymap.Action.TOGGLE_SELECTION_CROP_FILTER,
             lf.keymap.Action.DEPTH_ADJUST_FAR,
         ],
-        "brush": [
-            lf.keymap.Action.CYCLE_BRUSH_MODE,
-            lf.keymap.Action.BRUSH_RESIZE,
-        ],
         "crop_box": [
             lf.keymap.Action.APPLY_CROP_BOX,
         ],
@@ -114,13 +109,13 @@ class InputSettingsPanel(Panel):
             lf.keymap.Action.TOOL_ROTATE,
             lf.keymap.Action.TOOL_SCALE,
             lf.keymap.Action.TOOL_MIRROR,
-            lf.keymap.Action.TOOL_BRUSH,
             lf.keymap.Action.TOOL_ALIGN,
             lf.keymap.Action.PIE_MENU,
         ],
         "ui_global": [
             lf.keymap.Action.TOGGLE_UI,
             lf.keymap.Action.TOGGLE_FULLSCREEN,
+            lf.keymap.Action.HISTOGRAM_ZOOM_MARKED,
         ],
         "sequencer_global": [
             lf.keymap.Action.SEQUENCER_ADD_KEYFRAME,
@@ -136,7 +131,6 @@ class InputSettingsPanel(Panel):
     )
     GAUSSIAN_SELECTION_MODES = (
         lf.keymap.ToolMode.SELECTION,
-        lf.keymap.ToolMode.BRUSH,
         lf.keymap.ToolMode.ALIGN,
         lf.keymap.ToolMode.CROP_BOX,
     )
@@ -548,29 +542,23 @@ class InputSettingsPanel(Panel):
             for action in self.BINDING_SECTIONS["navigation_global"]:
                 rows.append(self._binding_row_record(action, mode))
 
-        if mode in (lf.keymap.ToolMode.SELECTION, lf.keymap.ToolMode.BRUSH):
+        if mode == lf.keymap.ToolMode.SELECTION:
             selection_actions = list(self.BINDING_SECTIONS["selection"])
-            if mode == lf.keymap.ToolMode.SELECTION:
-                selection_actions.extend(self.BINDING_SECTIONS["selection_modal"])
+            selection_actions.extend(self.BINDING_SECTIONS["selection_modal"])
             selection_actions.append(lf.keymap.Action.DELETE_SELECTED)
+            selection_actions.append(lf.keymap.Action.BRUSH_RESIZE)
             self._append_binding_section(
                 rows, tr("input_settings.section.selection"),
                 selection_actions, mode)
 
-            if mode == lf.keymap.ToolMode.SELECTION:
-                self._append_binding_section(
-                    rows, tr("input_settings.section.depth"),
-                    self.BINDING_SECTIONS["depth"], mode)
+            self._append_binding_section(
+                rows, tr("input_settings.section.depth"),
+                self.BINDING_SECTIONS["depth"], mode)
 
         if mode == lf.keymap.ToolMode.GLOBAL:
             self._append_binding_section(
                 rows, tr("input_settings.section.selection"),
                 self.BINDING_SECTIONS["selection_global"], mode)
-
-        if mode == lf.keymap.ToolMode.BRUSH:
-            self._append_binding_section(
-                rows, tr("input_settings.section.brush"),
-                self.BINDING_SECTIONS["brush"], mode)
 
         if mode == lf.keymap.ToolMode.CROP_BOX:
             self._append_binding_section(
@@ -589,8 +577,7 @@ class InputSettingsPanel(Panel):
             for action in self.BINDING_SECTIONS["editing"]:
                 editing_rows.append(self._binding_row_record(action, mode))
         elif mode in self.GAUSSIAN_SELECTION_MODES and mode not in (
-                lf.keymap.ToolMode.SELECTION,
-                lf.keymap.ToolMode.BRUSH):
+                lf.keymap.ToolMode.SELECTION,):
             self._append_binding_section(
                 rows, tr("input_settings.section.selection"),
                 [lf.keymap.Action.DELETE_SELECTED], mode)

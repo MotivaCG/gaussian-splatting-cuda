@@ -9,22 +9,13 @@
     background-color: @{menu.background};
 }
 
+.viewport-split-divider {
+    background-color: @{menu.background};
+}
+
 .toolbar-vertical {
     background-color: transparent;
     border-radius: 0;
-}
-
-.toolbar-flyout {
-    background-color: @{toolbar.background};
-    border-color: @{overlay.border};
-}
-
-.flyout-corner-marker {
-    border-bottom-color: @{viewport.icon_dim};
-}
-
-.icon-btn.selected .flyout-corner-marker {
-    border-bottom-color: @{background};
 }
 
 .toolbar-separator {
@@ -36,19 +27,30 @@
     border-color: @{overlay.border};
 }
 
+.viewport-export-status {
+    background-color: @{toolbar.background};
+    border-color: @{overlay.border};
+    color: @{text};
+}
+
 .viewport-transform-meta__tool,
 .viewport-transform-axis-label {
     color: @{text};
 }
 
-.viewport-transform-meta__target,
-.viewport-transform-group-label,
-.viewport-transform-toggle-label {
+.viewport-transform-meta__target {
     color: @{text_dim};
 }
 
 .viewport-transform-axis--split {
     border-color: @{alpha(border,0.30)};
+}
+
+.viewport-transform-option-group,
+.viewport-transform-tool-group,
+.viewport-selection-tool-group {
+    background-color: @{toolbar.sub_background};
+    border-color: @{alpha(border,0.39)};
 }
 
 .icon-btn img {
@@ -59,16 +61,28 @@
     background-color: @{viewport.hover_bg};
 }
 
+.toolbar-vertical .icon-btn:hover,
+.toolbar-hcenter .icon-btn:hover {
+    background-color: @{alpha(primary,0.16)};
+    border-color: @{alpha(primary,0.42)};
+}
+
 .icon-btn.selected {
     background-color: @{primary};
 }
 
-.toolbar-vertical .icon-btn.selected {
+.toolbar-vertical .icon-btn.selected,
+.toolbar-hcenter .icon-btn.selected {
     border-color: @{alpha(text,0.25)};
 }
 
 .icon-btn.selected:hover {
     background-color: @{viewport.selected_hover};
+}
+
+.toolbar-vertical .icon-btn.selected:hover,
+.toolbar-hcenter .icon-btn.selected:hover {
+    border-color: @{alpha(text,0.35)};
 }
 
 .icon-btn.selected img {

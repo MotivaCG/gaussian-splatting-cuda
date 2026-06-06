@@ -32,7 +32,6 @@ namespace lfs::vis {
             case ToolType::Rotate: return "builtin.rotate";
             case ToolType::Scale: return "builtin.scale";
             case ToolType::Mirror: return "builtin.mirror";
-            case ToolType::Brush: return "builtin.brush";
             case ToolType::Align: return "builtin.align";
             case ToolType::None:
             default: return {};
@@ -157,7 +156,6 @@ namespace lfs::vis {
         case ToolType::None:
             return true;
         case ToolType::Selection:
-        case ToolType::Brush:
             return has_gaussians_;
         case ToolType::Mirror:
             return has_gaussians_ && has_editable_splat_selection_;
@@ -181,8 +179,6 @@ namespace lfs::vis {
         case ToolType::None:
             return nullptr;
         case ToolType::Selection:
-            return has_gaussians_ ? nullptr : "no gaussians";
-        case ToolType::Brush:
             return has_gaussians_ ? nullptr : "no gaussians";
         case ToolType::Mirror:
             if (!has_gaussians_)

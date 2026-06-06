@@ -419,7 +419,7 @@ namespace lfs::vis::gui {
 
         [[nodiscard]] std::vector<DialogFilter> imageFilters() {
             return {makeFilter("Image Files",
-                               {".png", ".jpg", ".jpeg", ".bmp", ".tga", ".hdr", ".exr"})};
+                               {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tga", ".hdr", ".exr"})};
         }
 
         [[nodiscard]] std::vector<DialogFilter> environmentMapFilters() {
@@ -663,6 +663,28 @@ namespace lfs::vis::gui {
                                              const std::filesystem::path& defaultPath) {
         std::filesystem::path result;
         runDialog(makeSaveFileRequest(jsonFilters(), defaultPath, defaultName, ".json"), result);
+        return result;
+    }
+
+    std::filesystem::path SavePngFileDialog(const std::string& defaultName,
+                                            const std::filesystem::path& defaultPath) {
+        std::filesystem::path result;
+        runDialog(makeSaveFileRequest(singleExtensionFilter("PNG Image", ".png"),
+                                      defaultPath,
+                                      defaultName,
+                                      ".png"),
+                  result);
+        return result;
+    }
+
+    std::filesystem::path SaveJpgFileDialog(const std::string& defaultName,
+                                            const std::filesystem::path& defaultPath) {
+        std::filesystem::path result;
+        runDialog(makeSaveFileRequest(singleExtensionFilter("JPEG Image", ".jpg"),
+                                      defaultPath,
+                                      defaultName,
+                                      ".jpg"),
+                  result);
         return result;
     }
 

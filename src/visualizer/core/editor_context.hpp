@@ -41,7 +41,6 @@ namespace lfs::vis {
         Rotate,
         Scale,
         Mirror,
-        Brush,
         Align
     };
 

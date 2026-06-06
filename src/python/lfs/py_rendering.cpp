@@ -3,6 +3,7 @@
 
 #include "py_rendering.hpp"
 #include "core/checkpoint_format.hpp"
+#include "core/image_io.hpp"
 #include "core/logger.hpp"
 #include "core/mesh_data.hpp"
 #include "core/path_utils.hpp"
@@ -29,6 +30,7 @@
 #include <array>
 #include <atomic>
 #include <cassert>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -47,7 +49,13 @@ namespace lfs::python {
         constexpr std::uintmax_t MAX_RENDERED_ASSET_PREVIEW_BYTES =
             2ull * 1024ull * 1024ull * 1024ull;
 
-        [[nodiscard]] std::optional<PyViewportRender> toPyViewportRender(
+        enum class PreviewReadback {
+            FloatRgb,
+            UInt8Rgb,
+            UInt8Rgba,
+        };
+
+        [[nodiscard]] std::optional<core::Tensor> viewportRenderImageHwc(
             const std::optional<vis::ViewportRender>& render,
             const bool clone_for_async) {
             if (!render || !render->image)
@@ -63,6 +71,15 @@ namespace lfs::python {
             } else {
                 image = image.contiguous();
             }
+            return image;
+        }
+
+        [[nodiscard]] std::optional<PyViewportRender> toPyViewportRender(
+            const std::optional<vis::ViewportRender>& render,
+            const bool clone_for_async) {
+            auto image = viewportRenderImageHwc(render, clone_for_async);
+            if (!image)
+                return std::nullopt;
 
             std::optional<PyTensor> screen_pos;
             if (render->screen_positions) {
@@ -73,7 +90,7 @@ namespace lfs::python {
             }
 
             return PyViewportRender{
-                .image = PyTensor(std::move(image), true),
+                .image = PyTensor(std::move(*image), true),
                 .screen_positions = std::move(screen_pos),
             };
         }
@@ -269,6 +286,7 @@ namespace lfs::python {
                 options.max_width = 0;
                 options.images_folder = "images";
                 options.validate_only = false;
+                options.splat_tensor_allocator = rendering_manager->makeSplatTensorAllocator();
 
                 const auto asset_path = core::utf8_to_path(path);
                 std::error_code file_size_error;
@@ -285,7 +303,9 @@ namespace lfs::python {
                 auto ext = asset_path.extension().string();
                 std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
                 if (ext == ".ckpt" || ext == ".resume") {
-                    auto checkpoint_result = core::load_checkpoint_splat_data(asset_path);
+                    auto checkpoint_result = core::load_checkpoint_splat_data(
+                        asset_path,
+                        rendering_manager->makeSplatTensorAllocator());
                     if (!checkpoint_result) {
                         LOG_DEBUG(
                             "Checkpoint asset preview load failed for '{}': {}",
@@ -386,6 +406,204 @@ namespace lfs::python {
                 .run =
                     [path, width, height, focal_length_mm, rotation, translation, finish]() mutable {
                         finish(renderAssetPreviewOnViewerThread(path, width, height, focal_length_mm, rotation, translation));
+                    },
+                .cancel =
+                    [finish]() mutable {
+                        finish(std::nullopt);
+                    }});
+            if (!posted) {
+                return std::nullopt;
+            }
+
+            nb::gil_scoped_release release;
+            return future.get();
+        }
+
+        [[nodiscard]] std::optional<glm::mat3> tensorToVisualizerRotation(const PyTensor& py_tensor) {
+            const auto& tensor = py_tensor.tensor();
+            if (!tensor.is_valid() || tensor.ndim() != 2 || tensor.size(0) != 3 || tensor.size(1) != 3) {
+                return std::nullopt;
+            }
+
+            try {
+                const auto cpu = tensor.to(core::Device::CPU).to(core::DataType::Float32).contiguous();
+                const auto* const data = static_cast<const float*>(cpu.data_ptr());
+                if (!data) {
+                    return std::nullopt;
+                }
+
+                glm::mat3 rotation{};
+                for (int row = 0; row < 3; ++row) {
+                    for (int col = 0; col < 3; ++col) {
+                        const float value = data[row * 3 + col];
+                        if (!std::isfinite(value)) {
+                            return std::nullopt;
+                        }
+                        rotation[col][row] = value;
+                    }
+                }
+                return rotation;
+            } catch (const std::exception& e) {
+                LOG_DEBUG("render_view rotation conversion failed: {}", e.what());
+            } catch (...) {
+                LOG_DEBUG("render_view rotation conversion failed: unknown error");
+            }
+            return std::nullopt;
+        }
+
+        [[nodiscard]] std::optional<glm::vec3> tensorToVisualizerTranslation(const PyTensor& py_tensor) {
+            const auto& tensor = py_tensor.tensor();
+            if (!tensor.is_valid() || tensor.ndim() != 1 || tensor.size(0) != 3) {
+                return std::nullopt;
+            }
+
+            try {
+                const auto cpu = tensor.to(core::Device::CPU).to(core::DataType::Float32).contiguous();
+                const auto* const data = static_cast<const float*>(cpu.data_ptr());
+                if (!data) {
+                    return std::nullopt;
+                }
+
+                const glm::vec3 translation{data[0], data[1], data[2]};
+                if (!std::isfinite(translation.x) || !std::isfinite(translation.y) || !std::isfinite(translation.z)) {
+                    return std::nullopt;
+                }
+                return translation;
+            } catch (const std::exception& e) {
+                LOG_DEBUG("render_view translation conversion failed: {}", e.what());
+            } catch (...) {
+                LOG_DEBUG("render_view translation conversion failed: unknown error");
+            }
+            return std::nullopt;
+        }
+
+        [[nodiscard]] std::optional<core::Tensor> renderViewOnViewerThread(
+            const glm::mat3& rotation,
+            const glm::vec3& translation,
+            const int width,
+            const int height,
+            const float fov_degrees,
+            const PreviewReadback readback,
+            const std::optional<glm::vec3>& background_color_override,
+            const std::optional<bool> orthographic_override = std::nullopt,
+            const std::optional<float> ortho_scale_override = std::nullopt) {
+            if (width <= 0 || height <= 0 || !std::isfinite(fov_degrees) || fov_degrees <= 0.0f) {
+                return std::nullopt;
+            }
+
+            auto* const viewer = get_visualizer();
+            auto* const rendering_manager = viewer ? viewer->getRenderingManager() : nullptr;
+            auto* const scene_manager = viewer ? viewer->getSceneManager() : nullptr;
+            if (!rendering_manager || !scene_manager) {
+                return std::nullopt;
+            }
+
+            std::shared_ptr<core::Tensor> image;
+            if (readback == PreviewReadback::UInt8Rgba) {
+                image = rendering_manager->renderPreviewImageRgba8(
+                    scene_manager,
+                    rotation,
+                    translation,
+                    lfs::rendering::vFovToFocalLength(fov_degrees),
+                    width,
+                    height,
+                    orthographic_override,
+                    ortho_scale_override);
+            } else if (readback == PreviewReadback::UInt8Rgb) {
+                image = rendering_manager->renderPreviewImageRgb8(
+                    scene_manager,
+                    rotation,
+                    translation,
+                    lfs::rendering::vFovToFocalLength(fov_degrees),
+                    width,
+                    height,
+                    background_color_override,
+                    orthographic_override,
+                    ortho_scale_override);
+            } else {
+                image = rendering_manager->renderPreviewImage(
+                    scene_manager,
+                    rotation,
+                    translation,
+                    lfs::rendering::vFovToFocalLength(fov_degrees),
+                    width,
+                    height,
+                    background_color_override,
+                    orthographic_override,
+                    ortho_scale_override);
+            }
+            if (readback != PreviewReadback::FloatRgb) {
+                rendering_manager->releasePreviewImageResources();
+            }
+            if (!image || !image->is_valid()) {
+                return std::nullopt;
+            }
+            return *image;
+        }
+
+        [[nodiscard]] std::optional<core::Tensor> renderViewThreadSafe(
+            const glm::mat3& rotation,
+            const glm::vec3& translation,
+            const int width,
+            const int height,
+            const float fov_degrees,
+            const PreviewReadback readback,
+            const std::optional<glm::vec3>& background_color_override,
+            const std::optional<bool> orthographic_override = std::nullopt,
+            const std::optional<float> ortho_scale_override = std::nullopt) {
+            auto invoke_render = [&]() -> std::optional<core::Tensor> {
+                return renderViewOnViewerThread(
+                    rotation,
+                    translation,
+                    width,
+                    height,
+                    fov_degrees,
+                    readback,
+                    background_color_override,
+                    orthographic_override,
+                    ortho_scale_override);
+            };
+
+            auto* const viewer = get_visualizer();
+            if (!viewer || viewer->isOnViewerThread()) {
+                return invoke_render();
+            }
+            if (!viewer->acceptsPostedWork()) {
+                return std::nullopt;
+            }
+
+            auto promise = std::make_shared<std::promise<std::optional<core::Tensor>>>();
+            auto future = promise->get_future();
+            auto completed = std::make_shared<std::atomic_bool>(false);
+
+            auto finish = [promise, completed](std::optional<core::Tensor> result) mutable {
+                if (!completed->exchange(true)) {
+                    promise->set_value(std::move(result));
+                }
+            };
+
+            const bool posted = viewer->postWork(vis::Visualizer::WorkItem{
+                .run =
+                    [rotation,
+                     translation,
+                     width,
+                     height,
+                     fov_degrees,
+                     readback,
+                     background_color_override,
+                     orthographic_override,
+                     ortho_scale_override,
+                     finish]() mutable {
+                        finish(renderViewOnViewerThread(
+                            rotation,
+                            translation,
+                            width,
+                            height,
+                            fov_degrees,
+                            readback,
+                            background_color_override,
+                            orthographic_override,
+                            ortho_scale_override));
                     },
                 .cancel =
                     [finish]() mutable {
@@ -591,6 +809,14 @@ namespace lfs::python {
                      2);
         add_bool(&Proxy::mip_filter, "mip_filter", "Mip Filter", "Enable mip-map filtering", false);
         add_float(&Proxy::render_scale, "render_scale", "Render Scale", "Render resolution scale", 1.0, 0.25, 1.0);
+        add_float(&Proxy::depth_view_min, "depth_view_min", "Depth Near", "Depth-map visualization near range",
+                  lfs::rendering::DEFAULT_DEPTH_VIEW_MIN, 0.0, lfs::rendering::MAX_DEPTH_VIEW_DISTANCE);
+        add_float(&Proxy::depth_view_max, "depth_view_max", "Depth Far", "Depth-map visualization far range",
+                  lfs::rendering::DEFAULT_DEPTH_VIEW_MAX, lfs::rendering::DEFAULT_DEPTH_VIEW_MIN,
+                  lfs::rendering::MAX_DEPTH_VIEW_DISTANCE);
+        add_int_enum(&Proxy::depth_visualization_mode, "depth_visualization_mode", "Depth Mode",
+                     "Depth-map visualization mode",
+                     {{"Color", "palette", 0}, {"Gray", "gray", 1}}, 0);
         add_int_enum(&Proxy::camera_metrics_mode, "camera_metrics_mode", "Camera Metrics",
                      "Compute metrics when jumping to a source camera",
                      {{"Off", "OFF", 0}, {"PSNR", "PSNR", 1}, {"PSNR + SSIM", "PSNR_SSIM", 2}}, 0);
@@ -811,6 +1037,179 @@ namespace lfs::python {
             return panel_id ? vis::get_view_info_for_panel(*panel_id)
                             : vis::get_current_view_info();
         }
+
+        [[nodiscard]] std::string normalizeExportImageFormat(std::string format,
+                                                             const std::filesystem::path& path) {
+            if (format.empty()) {
+                format = path.extension().string();
+            }
+            if (!format.empty() && format.front() == '.') {
+                format.erase(format.begin());
+            }
+            std::transform(format.begin(), format.end(), format.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+
+            if (format == "jpg" || format == "jpeg")
+                return "jpg";
+            if (format == "png")
+                return "png";
+            throw std::invalid_argument("format must be 'jpg' or 'png'");
+        }
+
+        [[nodiscard]] std::filesystem::path imageExportPathForFormat(std::filesystem::path path,
+                                                                     const std::string& format) {
+            if (path.empty()) {
+                throw std::invalid_argument("export path is empty");
+            }
+
+            auto ext = path.extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+
+            if (format == "png") {
+                if (ext != ".png") {
+                    path.replace_extension(".png");
+                }
+                return path;
+            }
+
+            if (ext != ".jpg" && ext != ".jpeg") {
+                path.replace_extension(".jpg");
+            }
+            return path;
+        }
+
+        [[nodiscard]] glm::mat3 viewInfoRotationMatrix(const vis::ViewInfo& view_info) {
+            glm::mat3 rotation{};
+            for (int row = 0; row < 3; ++row) {
+                for (int col = 0; col < 3; ++col) {
+                    rotation[col][row] = view_info.rotation[static_cast<std::size_t>(row * 3 + col)];
+                }
+            }
+            return rotation;
+        }
+
+        [[nodiscard]] std::optional<float> scaledViewInfoOrthoScale(const vis::ViewInfo& view_info,
+                                                                    const int target_height) {
+            if (!view_info.orthographic) {
+                return std::nullopt;
+            }
+            if (view_info.height <= 0 || target_height <= 0 ||
+                !std::isfinite(view_info.ortho_scale) || view_info.ortho_scale <= 0.0f) {
+                return std::nullopt;
+            }
+
+            const double scale = static_cast<double>(view_info.ortho_scale) *
+                                 static_cast<double>(target_height) /
+                                 static_cast<double>(view_info.height);
+            if (!std::isfinite(scale) || scale <= 0.0) {
+                return std::nullopt;
+            }
+            return static_cast<float>(scale);
+        }
+
+        [[nodiscard]] core::Tensor toU8Hwc(core::Tensor image) {
+            if (!image.is_valid() || image.ndim() != 3) {
+                throw std::runtime_error("viewport export expected a 3D image tensor");
+            }
+            if (image.shape()[0] <= 4 && image.shape()[2] > 4) {
+                image = image.permute({1, 2, 0});
+            }
+            image = image.to(core::Device::CPU);
+            if (image.dtype() != core::DataType::UInt8) {
+                image = (image.to(core::DataType::Float32).clamp(0, 1) * 255.0f)
+                            .to(core::DataType::UInt8);
+            }
+            image = image.contiguous();
+            if (image.ndim() != 3 || image.shape()[2] < 1 || image.shape()[2] > 4) {
+                throw std::runtime_error("viewport export image channels must be in [1..4]");
+            }
+            return image;
+        }
+
+        [[nodiscard]] core::Tensor renderCurrentViewRgb8(const vis::ViewInfo& view_info,
+                                                         const int width,
+                                                         const int height,
+                                                         const std::optional<glm::vec3>& background_color_override) {
+            auto image = renderViewThreadSafe(
+                viewInfoRotationMatrix(view_info),
+                glm::vec3{view_info.translation[0], view_info.translation[1], view_info.translation[2]},
+                width,
+                height,
+                view_info.fov,
+                PreviewReadback::UInt8Rgb,
+                background_color_override,
+                view_info.orthographic,
+                scaledViewInfoOrthoScale(view_info, height));
+            if (!image || !image->is_valid()) {
+                throw std::runtime_error("viewport export render failed");
+            }
+            return toU8Hwc(std::move(*image));
+        }
+
+        [[nodiscard]] core::Tensor renderCurrentViewRgba8(const vis::ViewInfo& view_info,
+                                                          const int width,
+                                                          const int height) {
+            auto image = renderViewThreadSafe(
+                viewInfoRotationMatrix(view_info),
+                glm::vec3{view_info.translation[0], view_info.translation[1], view_info.translation[2]},
+                width,
+                height,
+                view_info.fov,
+                PreviewReadback::UInt8Rgba,
+                std::nullopt,
+                view_info.orthographic,
+                scaledViewInfoOrthoScale(view_info, height));
+            if (!image || !image->is_valid()) {
+                throw std::runtime_error("transparent viewport export render failed");
+            }
+            return toU8Hwc(std::move(*image));
+        }
+
+        [[nodiscard]] core::Tensor recoverAlphaRgba(core::Tensor black_rgb, core::Tensor white_rgb) {
+            black_rgb = toU8Hwc(std::move(black_rgb));
+            white_rgb = toU8Hwc(std::move(white_rgb));
+
+            if (black_rgb.shape() != white_rgb.shape() || black_rgb.shape()[2] < 3) {
+                throw std::runtime_error("transparent viewport export expected matching RGB images");
+            }
+
+            const auto height = black_rgb.shape()[0];
+            const auto width = black_rgb.shape()[1];
+            auto rgba = core::Tensor::empty({height, width, std::size_t{4}},
+                                            core::Device::CPU,
+                                            core::DataType::UInt8);
+
+            const auto* const black = black_rgb.ptr<uint8_t>();
+            const auto* const white = white_rgb.ptr<uint8_t>();
+            auto* const out = rgba.ptr<uint8_t>();
+            const auto pixel_count = height * width;
+            const auto src_channels = black_rgb.shape()[2];
+
+            for (std::size_t i = 0; i < pixel_count; ++i) {
+                const auto src = i * src_channels;
+                const auto dst = i * std::size_t{4};
+                const float delta =
+                    (static_cast<float>(white[src]) - static_cast<float>(black[src]) +
+                     static_cast<float>(white[src + 1]) - static_cast<float>(black[src + 1]) +
+                     static_cast<float>(white[src + 2]) - static_cast<float>(black[src + 2])) /
+                    (3.0f * 255.0f);
+                const float alpha = std::clamp(1.0f - delta, 0.0f, 1.0f);
+                for (std::size_t channel = 0; channel < 3; ++channel) {
+                    const float recovered = alpha > 1.0e-6f
+                                                ? static_cast<float>(black[src + channel]) / alpha
+                                                : 0.0f;
+                    out[dst + channel] = static_cast<uint8_t>(
+                        std::lround(std::clamp(recovered, 0.0f, 255.0f)));
+                }
+                out[dst + 3] = static_cast<uint8_t>(
+                    std::lround(std::clamp(alpha * 255.0f, 0.0f, 255.0f)));
+            }
+
+            return rgba;
+        }
     } // namespace
 
     std::optional<PyCameraState> get_camera(const std::string& panel) {
@@ -912,13 +1311,78 @@ namespace lfs::python {
 
     std::optional<PyTensor> render_view(const PyTensor& rotation, const PyTensor& translation, int width, int height,
                                         float fov_degrees, const PyTensor* bg_color) {
-        (void)rotation;
-        (void)translation;
-        (void)width;
-        (void)height;
-        (void)fov_degrees;
         (void)bg_color;
-        return std::nullopt;
+
+        const auto rotation_matrix = tensorToVisualizerRotation(rotation);
+        const auto translation_vector = tensorToVisualizerTranslation(translation);
+        if (!rotation_matrix || !translation_vector) {
+            return std::nullopt;
+        }
+
+        auto image = renderViewThreadSafe(
+            *rotation_matrix,
+            *translation_vector,
+            width,
+            height,
+            fov_degrees,
+            PreviewReadback::FloatRgb,
+            std::nullopt);
+        if (!image || !image->is_valid() || image->ndim() != 3) {
+            return std::nullopt;
+        }
+        if (image->size(0) <= 0 || image->size(1) <= 0 || image->size(2) != 3) {
+            return std::nullopt;
+        }
+
+        auto output = *image;
+        if (output.device() != core::Device::CPU) {
+            output = output.cpu();
+        }
+        if (output.dtype() != core::DataType::Float32) {
+            output = output.to(core::DataType::Float32);
+        }
+        output = output.contiguous();
+        return PyTensor(std::move(output), true);
+    }
+
+    std::optional<PyTensor> render_view_u8(const PyTensor& rotation, const PyTensor& translation, int width, int height,
+                                           float fov_degrees, const PyTensor* bg_color,
+                                           std::optional<bool> orthographic,
+                                           std::optional<float> ortho_scale) {
+        (void)bg_color;
+
+        const auto rotation_matrix = tensorToVisualizerRotation(rotation);
+        const auto translation_vector = tensorToVisualizerTranslation(translation);
+        if (!rotation_matrix || !translation_vector) {
+            return std::nullopt;
+        }
+
+        auto image = renderViewThreadSafe(
+            *rotation_matrix,
+            *translation_vector,
+            width,
+            height,
+            fov_degrees,
+            PreviewReadback::UInt8Rgb,
+            std::nullopt,
+            orthographic,
+            ortho_scale);
+        if (!image || !image->is_valid() || image->ndim() != 3) {
+            return std::nullopt;
+        }
+        if (image->size(0) <= 0 || image->size(1) <= 0 || image->size(2) != 3) {
+            return std::nullopt;
+        }
+
+        auto output = *image;
+        if (output.device() != core::Device::CPU) {
+            output = output.cpu();
+        }
+        if (output.dtype() != core::DataType::UInt8) {
+            output = output.to(core::DataType::UInt8);
+        }
+        output = output.contiguous();
+        return PyTensor(std::move(output), true);
     }
 
     std::optional<PyTensor> compute_screen_positions(const PyTensor& rotation, const PyTensor& translation, int width,
@@ -960,6 +1424,90 @@ namespace lfs::python {
 
     std::optional<PyViewportRender> capture_viewport() {
         return toPyViewportRender(captureViewportRenderThreadSafe(), true);
+    }
+
+    nb::dict export_viewport_image(const std::string& path,
+                                   const std::string& format,
+                                   int width,
+                                   int height,
+                                   const bool transparent,
+                                   const int jpeg_quality) {
+        auto output_path = core::utf8_to_path(path);
+        const auto normalized_format = normalizeExportImageFormat(format, output_path);
+        if (transparent && normalized_format != "png") {
+            throw std::invalid_argument("transparent viewport export requires PNG format");
+        }
+        output_path = imageExportPathForFormat(std::move(output_path), normalized_format);
+
+        auto view_info = viewInfoForPanelArg("main");
+        if (!view_info) {
+            throw std::runtime_error("no active viewport is available");
+        }
+
+        const int current_width = std::max(1, view_info->width);
+        const int current_height = std::max(1, view_info->height);
+        int target_width = width;
+        int target_height = height;
+
+        core::Tensor image;
+        if (!transparent && target_width <= 0 && target_height <= 0) {
+            auto captured = viewportRenderImageHwc(captureViewportRenderThreadSafe(), true);
+            if (!captured || !captured->is_valid()) {
+                throw std::runtime_error("viewport capture failed");
+            }
+            image = toU8Hwc(std::move(*captured));
+            target_height = static_cast<int>(image.shape()[0]);
+            target_width = static_cast<int>(image.shape()[1]);
+        } else {
+            if (target_width <= 0 && target_height <= 0) {
+                target_width = current_width;
+                target_height = current_height;
+            } else if (target_width <= 0) {
+                target_width = static_cast<int>(std::lround(
+                    static_cast<double>(target_height) *
+                    static_cast<double>(current_width) /
+                    static_cast<double>(current_height)));
+            } else if (target_height <= 0) {
+                target_height = static_cast<int>(std::lround(
+                    static_cast<double>(target_width) *
+                    static_cast<double>(current_height) /
+                    static_cast<double>(current_width)));
+            }
+            target_width = std::max(1, target_width);
+            target_height = std::max(1, target_height);
+
+            if (transparent) {
+                try {
+                    image = renderCurrentViewRgba8(*view_info, target_width, target_height);
+                } catch (const std::exception& e) {
+                    LOG_DEBUG("transparent viewport export direct RGBA render failed, falling back to BW2A: {}", e.what());
+                    auto black = renderCurrentViewRgb8(
+                        *view_info,
+                        target_width,
+                        target_height,
+                        std::optional<glm::vec3>{glm::vec3{0.0f}});
+                    auto white = renderCurrentViewRgb8(
+                        *view_info,
+                        target_width,
+                        target_height,
+                        std::optional<glm::vec3>{glm::vec3{1.0f}});
+                    image = recoverAlphaRgba(std::move(black), std::move(white));
+                }
+            } else {
+                image = renderCurrentViewRgb8(*view_info, target_width, target_height, std::nullopt);
+            }
+        }
+
+        core::save_image_u8(output_path, image, jpeg_quality);
+
+        nb::dict result;
+        result["path"] = core::path_to_utf8(output_path);
+        result["width"] = static_cast<int>(image.shape()[1]);
+        result["height"] = static_cast<int>(image.shape()[0]);
+        result["channels"] = static_cast<int>(image.shape()[2]);
+        result["transparent"] = transparent;
+        result["format"] = normalized_format;
+        return result;
     }
 
     std::tuple<PyTensor, PyTensor> look_at(const std::tuple<float, float, float>& eye,
@@ -1047,6 +1595,29 @@ namespace lfs::python {
         m.def("capture_viewport", &capture_viewport,
               "Capture viewport render explicitly (may read back from GPU; clones data, safe to use from background threads)");
 
+        m.def("export_viewport_image",
+              &export_viewport_image,
+              nb::arg("path"),
+              nb::arg("format") = std::string{},
+              nb::arg("width") = 0,
+              nb::arg("height") = 0,
+              nb::arg("transparent") = false,
+              nb::arg("jpeg_quality") = 95,
+              R"doc(
+Export the active viewport image to PNG or JPEG.
+
+Args:
+    path: Output path. The selected format extension is enforced when needed.
+    format: 'png', 'jpg', or empty to infer from path.
+    width: Target width in pixels. If zero with a positive height, preserves viewport aspect.
+    height: Target height in pixels. If both dimensions are zero, captures the current viewport.
+    transparent: For PNG only, export straight RGBA from the preview renderer.
+    jpeg_quality: JPEG compression quality in [1, 100].
+
+Returns:
+    Dict with path, width, height, channels, format, and transparent.
+)doc");
+
         m.def("render_view", &render_view, nb::arg("rotation"), nb::arg("translation"), nb::arg("width"), nb::arg("height"),
               nb::arg("fov") = DEFAULT_FOV, nb::arg("bg_color") = nb::none(),
               R"doc(
@@ -1058,10 +1629,30 @@ Args:
     width: Render width in pixels
     height: Render height in pixels
     fov: Vertical field of view in degrees (default: 60)
-    bg_color: Optional [3] RGB background color
+    bg_color: Accepted for compatibility; the Vulkan preview path uses current render settings
 
 Returns:
-    Tensor [H, W, 3] RGB image on CUDA, or None if scene not available
+    CPU Tensor [H, W, 3] RGB image, or None if no active visualizer scene is available
+)doc");
+
+        m.def("render_view_u8", &render_view_u8, nb::arg("rotation"), nb::arg("translation"), nb::arg("width"), nb::arg("height"),
+              nb::arg("fov") = DEFAULT_FOV, nb::arg("bg_color") = nb::none(),
+              nb::arg("orthographic") = nb::none(), nb::arg("ortho_scale") = nb::none(),
+              R"doc(
+Render scene from arbitrary camera parameters as an 8-bit RGB image.
+
+Args:
+    rotation: [3, 3] camera-to-world rotation in visualizer coordinates
+    translation: [3] camera position in visualizer world coordinates
+    width: Render width in pixels
+    height: Render height in pixels
+    fov: Vertical field of view in degrees (default: 60)
+    bg_color: Accepted for compatibility; the Vulkan preview path uses current render settings
+    orthographic: Optional projection override. None uses current render settings.
+    ortho_scale: Optional orthographic pixels-per-world-unit override.
+
+Returns:
+    CPU uint8 Tensor [H, W, 3] RGB image, or None if no active visualizer scene is available
 )doc");
 
         m.def("compute_screen_positions", &compute_screen_positions, nb::arg("rotation"), nb::arg("translation"),

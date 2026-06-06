@@ -9,6 +9,7 @@
 #include "diagnostics/vram_profiler.hpp"
 #include "gui/rmlui/vulkan/rmlui_shaders_spv.hpp"
 #include "internal/resource_paths.hpp"
+#include "python/python_runtime.hpp"
 #include <RmlUi/Core/Core.h>
 #include <RmlUi/Core/FileInterface.h>
 #include <RmlUi/Core/Log.h>
@@ -375,6 +376,8 @@ void RenderInterface_VK::RenderGeometry(Rml::CompiledGeometryHandle geometry, Rm
     RMLUI_VK_ASSERTMSG(m_p_current_command_buffer, "must be valid otherwise you can't render now!!! (can't be)");
 
     texture_data_t* p_texture = reinterpret_cast<texture_data_t*>(texture);
+    if (p_texture && p_texture->m_is_async_preview)
+        m_current_context_used_preview_texture = true;
 
     VkDescriptorImageInfo info_descriptor_image = {};
     if (p_texture && p_texture->m_p_vk_descriptor_set == nullptr) {
@@ -1038,6 +1041,7 @@ Rml::TextureHandle RenderInterface_VK::LoadAsyncPreviewTexture(Rml::Vector2i& te
     auto* texture = reinterpret_cast<texture_data_t*>(handle);
     if (!texture)
         return 0;
+    texture->m_is_async_preview = true;
 
     auto state = std::make_shared<async_preview_state_t>();
     state->texture = texture;
@@ -1052,6 +1056,7 @@ Rml::TextureHandle RenderInterface_VK::LoadAsyncPreviewTexture(Rml::Vector2i& te
                 state->result = std::move(result);
             }
             state->ready.store(true, std::memory_order_release);
+            lfs::python::request_redraw();
         }).detach();
     } catch (const std::exception& e) {
         LOG_WARN("Failed to start async preview texture worker for '{}': {}", lfs::core::path_to_utf8(request->path), e.what());
@@ -1127,6 +1132,8 @@ void RenderInterface_VK::ProcessAsyncPreviewUploads() {
 
     constexpr int kUploadBudgetPerFrame = 2;
     int uploads_remaining = kUploadBudgetPerFrame;
+    bool uploaded_any = false;
+    bool needs_followup_redraw = false;
 
     for (auto it = m_async_preview_textures.begin(); it != m_async_preview_textures.end();) {
         const std::shared_ptr<async_preview_state_t>& state = *it;
@@ -1138,8 +1145,10 @@ void RenderInterface_VK::ProcessAsyncPreviewUploads() {
             ++it;
             continue;
         }
-        if (uploads_remaining <= 0)
+        if (uploads_remaining <= 0) {
+            needs_followup_redraw = true;
             break;
+        }
 
         async_preview_result_t result;
         {
@@ -1152,15 +1161,22 @@ void RenderInterface_VK::ProcessAsyncPreviewUploads() {
             const Rml::TextureHandle replacement_handle = CreateTexture({result.pixels.data(), result.pixels.size()}, dimensions, state->source);
             auto* replacement = reinterpret_cast<texture_data_t*>(replacement_handle);
             if (replacement) {
+                replacement->m_is_async_preview = true;
                 QueueTextureForDeferredDeletion(new texture_data_t(*state->texture));
                 *state->texture = *replacement;
                 delete replacement;
                 --uploads_remaining;
+                uploaded_any = true;
             }
         }
 
         it = m_async_preview_textures.erase(it);
     }
+
+    if (uploaded_any)
+        m_preview_texture_generation.fetch_add(1, std::memory_order_acq_rel);
+    if (needs_followup_redraw)
+        lfs::python::request_redraw();
 }
 
 Rml::TextureHandle RenderInterface_VK::GenerateTexture(Rml::Span<const Rml::byte> source_data, Rml::Vector2i source_dimensions) {
@@ -1500,6 +1516,7 @@ void RenderInterface_VK::BeginFrame() {
     m_is_use_scissor_specified = false;
     m_is_use_stencil_pipeline = false;
     m_is_apply_to_regular_geometry_stencil = false;
+    m_current_context_used_preview_texture = false;
     SetContextOffset(0.0f, 0.0f);
     SetTransform(nullptr);
     m_context_clip_enabled = false;

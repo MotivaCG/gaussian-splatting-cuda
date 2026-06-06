@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "core/export.hpp"
 #include "core/scene.hpp"
 #include "gui/gizmo_transform.hpp"
 #include "gui/panel_layout.hpp"
@@ -13,6 +14,7 @@
 #include <chrono>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -50,8 +52,12 @@ namespace lfs::vis {
             void setCurrentOperation(GizmoOperation op) { current_operation_ = op; }
             [[nodiscard]] SelectionSubMode getSelectionSubMode() const { return selection_mode_; }
 
-            [[nodiscard]] bool isCropboxGizmoActive() const { return cropbox_gizmo_active_; }
-            [[nodiscard]] bool isEllipsoidGizmoActive() const { return ellipsoid_gizmo_active_; }
+            [[nodiscard]] bool isCropboxGizmoActive() const;
+            [[nodiscard]] bool isEllipsoidGizmoActive() const;
+            LFS_VIS_API void setCropToolShape(const std::string& shape);
+            [[nodiscard]] LFS_VIS_API std::string cropToolShape() const;
+            LFS_VIS_API void fitActiveCropTool(bool use_percentile);
+            LFS_VIS_API void applyActiveCropTool();
             [[nodiscard]] bool isViewportGizmoDragging() const { return viewport_gizmo_dragging_; }
             [[nodiscard]] bool isPositionInViewportGizmo(double x, double y) const;
             [[nodiscard]] ToolType getCurrentToolMode() const;
@@ -71,7 +77,6 @@ namespace lfs::vis {
                 bool ui_hidden = false;
                 bool has_scene_manager = false;
                 bool has_selected_node = false;
-                const void* brush_tool = nullptr;
                 const void* align_tool = nullptr;
                 const void* selection_tool = nullptr;
                 const void* rendering_manager = nullptr;
@@ -113,6 +118,19 @@ namespace lfs::vis {
             core::EllipsoidData ellipsoid_data_before_drag_;
             glm::mat4 ellipsoid_transform_before_drag_{1.0f};
 
+            enum class CropToolShape {
+                Box,
+                Ellipsoid,
+            };
+
+            CropToolShape crop_tool_shape_ = CropToolShape::Box;
+            bool crop_tool_initialized_ = false;
+            core::NodeId crop_tool_target_node_id_ = core::NULL_NODE;
+            glm::vec3 crop_tool_box_min_{-0.5f};
+            glm::vec3 crop_tool_box_max_{0.5f};
+            glm::vec3 crop_tool_ellipsoid_radii_{1.0f};
+            glm::mat4 crop_tool_visualizer_transform_{1.0f};
+
             // Unified gizmo context
             GizmoTransformContext gizmo_context_;
 
@@ -153,7 +171,20 @@ namespace lfs::vis {
 
             void handlePieMenuSelection();
             void handleCropAction(const std::string& action_id);
-            void addCropObject(bool is_cropbox);
+            [[nodiscard]] bool isCropToolActive() const;
+            [[nodiscard]] std::optional<core::NodeId> selectedCropTargetNodeId() const;
+            [[nodiscard]] bool ensureCropToolState();
+            [[nodiscard]] bool computeCropToolTargetBounds(core::NodeId target_id,
+                                                           bool use_percentile,
+                                                           glm::vec3& bounds_min,
+                                                           glm::vec3& bounds_max) const;
+            void setCropToolBounds(core::NodeId target_id,
+                                   const glm::vec3& bounds_min,
+                                   const glm::vec3& bounds_max);
+            void updateCropToolOverlayState();
+            void clearCropToolOverlayState();
+            void renderCropToolBoxGizmo(const UIContext& ctx, const ViewportLayout& viewport);
+            void renderCropToolEllipsoidGizmo(const UIContext& ctx, const ViewportLayout& viewport);
         };
 
     } // namespace gui

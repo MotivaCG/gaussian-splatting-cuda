@@ -42,6 +42,8 @@ namespace lfs::training::mrnf_strategy {
         float* __restrict__ means,
         const float* __restrict__ raw_opacities,
         const float* __restrict__ vis_count,
+        const bool* __restrict__ frozen_mask,
+        size_t frozen_mask_size,
         float lr_mean,
         float noise_weight,
         float median_scale,
@@ -50,6 +52,8 @@ namespace lfs::training::mrnf_strategy {
 
         const size_t idx = threadIdx.x + blockIdx.x * static_cast<size_t>(blockDim.x);
         if (idx >= N)
+            return;
+        if (frozen_mask != nullptr && idx < frozen_mask_size && frozen_mask[idx])
             return;
 
         if (vis_count[idx] <= 0.0f)
@@ -76,6 +80,8 @@ namespace lfs::training::mrnf_strategy {
         float* means,
         const float* raw_opacities,
         const float* vis_count,
+        const bool* frozen_mask,
+        size_t frozen_mask_size,
         float lr_mean,
         float noise_weight,
         float median_scale,
@@ -92,12 +98,15 @@ namespace lfs::training::mrnf_strategy {
 
         mrnf_noise_injection_kernel<<<blocks, threads, 0, s>>>(
             means, raw_opacities, vis_count,
+            frozen_mask, frozen_mask_size,
             lr_mean, noise_weight, median_scale, N, seed);
     }
 
     __global__ void mrnf_decay_kernel(
         float* __restrict__ raw_opacities,
         float* __restrict__ log_scales,
+        const bool* __restrict__ frozen_mask,
+        size_t frozen_mask_size,
         float opacity_decay,
         float scale_decay,
         float train_t,
@@ -105,6 +114,8 @@ namespace lfs::training::mrnf_strategy {
 
         const size_t idx = threadIdx.x + blockIdx.x * static_cast<size_t>(blockDim.x);
         if (idx >= N)
+            return;
+        if (frozen_mask != nullptr && idx < frozen_mask_size && frozen_mask[idx])
             return;
 
         const float t_shrink = 1.0f - train_t;
@@ -123,6 +134,8 @@ namespace lfs::training::mrnf_strategy {
     void launch_mrnf_decay(
         float* raw_opacities,
         float* log_scales,
+        const bool* frozen_mask,
+        size_t frozen_mask_size,
         float opacity_decay,
         float scale_decay,
         float train_t,
@@ -137,7 +150,8 @@ namespace lfs::training::mrnf_strategy {
         cudaStream_t s = stream ? static_cast<cudaStream_t>(stream) : nullptr;
 
         mrnf_decay_kernel<<<blocks, threads, 0, s>>>(
-            raw_opacities, log_scales, opacity_decay, scale_decay, train_t, N);
+            raw_opacities, log_scales, frozen_mask, frozen_mask_size,
+            opacity_decay, scale_decay, train_t, N);
     }
 
     __global__ void elementwise_add_inplace_kernel(

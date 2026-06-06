@@ -227,6 +227,10 @@ namespace lfs::vis {
         bool orthographic = false;
         float ortho_scale = 100.0f; // Pixels per world unit (larger = more zoomed in)
         bool depth_view = false;
+        float depth_view_min = lfs::rendering::DEFAULT_DEPTH_VIEW_MIN;
+        float depth_view_max = lfs::rendering::DEFAULT_DEPTH_VIEW_MAX;
+        lfs::rendering::DepthVisualizationMode depth_visualization_mode =
+            lfs::rendering::DepthVisualizationMode::Palette;
 
         // Selection colors (RGB: committed=219,83,83 preview=0,222,76 center=0,154,187)
         glm::vec3 selection_color_committed{0.859f, 0.325f, 0.325f};
@@ -253,6 +257,34 @@ namespace lfs::vis {
         glm::vec3 depth_filter_max = glm::vec3(50.0f, 10000.0f, 100.0f);
         lfs::geometry::EuclideanTransform depth_filter_transform;
     };
+
+    inline void sanitizeDepthViewSettings(RenderSettings& settings) {
+        constexpr float kMinGap = 1.0e-4f;
+
+        if (!std::isfinite(settings.depth_view_min)) {
+            settings.depth_view_min = lfs::rendering::DEFAULT_DEPTH_VIEW_MIN;
+        }
+        if (!std::isfinite(settings.depth_view_max)) {
+            settings.depth_view_max = lfs::rendering::DEFAULT_DEPTH_VIEW_MAX;
+        }
+        settings.depth_view_min = std::clamp(
+            settings.depth_view_min,
+            0.0f,
+            lfs::rendering::MAX_DEPTH_VIEW_DISTANCE - kMinGap);
+        settings.depth_view_max = std::clamp(
+            settings.depth_view_max,
+            settings.depth_view_min + kMinGap,
+            lfs::rendering::MAX_DEPTH_VIEW_DISTANCE);
+
+        switch (settings.depth_visualization_mode) {
+        case lfs::rendering::DepthVisualizationMode::Palette:
+        case lfs::rendering::DepthVisualizationMode::Grayscale:
+            break;
+        default:
+            settings.depth_visualization_mode = lfs::rendering::DepthVisualizationMode::Palette;
+            break;
+        }
+    }
 
     inline void enforceProjectionBackend(RenderSettings& settings) {
         if (!settings.equirectangular) {

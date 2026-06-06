@@ -44,6 +44,7 @@ def _install_lf_stub(monkeypatch, tmp_path):
         panel_enabled_calls=[],
         load_file_calls=[],
         load_checkpoint_calls=[],
+        clear_scene_calls=0,
         dataset_browse_path=str(tmp_path / "dataset_browse"),
         output_browse_path=str(tmp_path / "output_browse"),
         init_browse_path=str(tmp_path / "seed.ply"),
@@ -92,6 +93,11 @@ def _install_lf_stub(monkeypatch, tmp_path):
     lf_stub.detect_dataset_info = lambda path: state.dataset_infos[str(path)]
     lf_stub.is_dataset_path = lambda path: str(path) in state.dataset_infos
     lf_stub.optimization_params = lambda: None
+    lf_stub.clear_scene = lambda: setattr(
+        state,
+        "clear_scene_calls",
+        state.clear_scene_calls + 1,
+    )
     lf_stub.load_file = _load_file
     lf_stub.read_checkpoint_header = lambda _path: state.checkpoint_header
     lf_stub.read_checkpoint_params = lambda _path: state.checkpoint_params
@@ -232,6 +238,22 @@ def test_dataset_import_panel_show_and_load(import_dialog_module):
     assert state.panel_enabled_calls[-1] == ("lfs.dataset_import", False)
 
 
+def test_dataset_import_panel_can_clear_scene_on_confirm(import_dialog_module):
+    module, state = import_dialog_module
+    panel = module.DatasetImportPanel()
+    panel._handle = _HandleStub()
+
+    assert (
+        panel.show(str(state.dataset_info.base_path), clear_scene_on_load=True)
+        is True
+    )
+
+    panel._on_do_load()
+
+    assert state.clear_scene_calls == 1
+    assert state.load_file_calls[0]["path"] == str(state.dataset_info.base_path)
+
+
 def test_dataset_import_panel_preserves_unicode_paths(import_dialog_module):
     module, state = import_dialog_module
     panel = module.DatasetImportPanel()
@@ -311,7 +333,7 @@ def test_watch_directory_discovery_imports_resume_checkpoints(import_dialog_modu
 
     index = index_module.AssetIndex(tmp_path / "asset_manager" / "library.json")
     index.ensure_default_catalog()
-    project = index.create_project("Default")
+    folder = index.create_folder("Default")
 
     metadata_list = module._discover_asset_metadata(
         scanner_module.AssetScanner(),
@@ -324,7 +346,7 @@ def test_watch_directory_discovery_imports_resume_checkpoints(import_dialog_modu
         index,
         None,
         metadata_list,
-        project_id=project.id,
+        folder_id=folder.id,
     )
     assert [asset.name for asset in created_assets] == ["checkpoint.resume"]
 
@@ -333,7 +355,7 @@ def test_watch_directory_discovery_imports_resume_checkpoints(import_dialog_modu
     assert list(reloaded.assets.values())[0]["type"] == "checkpoint"
 
 
-def test_watch_directory_import_allows_same_path_in_multiple_projects(
+def test_watch_directory_import_allows_same_path_in_multiple_folders(
     import_dialog_module,
     tmp_path,
 ):
@@ -347,21 +369,21 @@ def test_watch_directory_import_allows_same_path_in_multiple_projects(
 
     index = index_module.AssetIndex(tmp_path / "asset_manager" / "library.json")
     index.ensure_default_catalog()
-    default_project = index.create_project("Default")
-    target_project = index.create_project("Target")
+    default_folder = index.create_folder("Default")
+    target_folder = index.create_folder("Target")
 
     metadata_list = [{"path": str(checkpoint_path), "type": "checkpoint"}]
     default_assets = module._register_discovered_assets(
         index,
         None,
         metadata_list,
-        project_id=default_project.id,
+        folder_id=default_folder.id,
     )
     target_assets = module._register_discovered_assets(
         index,
         None,
         metadata_list,
-        project_id=target_project.id,
+        folder_id=target_folder.id,
     )
 
     assert len(default_assets) == 1
@@ -371,8 +393,8 @@ def test_watch_directory_import_allows_same_path_in_multiple_projects(
 
     reloaded = index_module.AssetIndex(tmp_path / "asset_manager" / "library.json")
     assert reloaded.load() is True
-    assert len(reloaded.list_assets(project_id=default_project.id)) == 1
-    assert len(reloaded.list_assets(project_id=target_project.id)) == 1
+    assert len(reloaded.list_assets(folder_id=default_folder.id)) == 1
+    assert len(reloaded.list_assets(folder_id=target_folder.id)) == 1
 
 
 def test_watch_dialog_uses_loaded_catalog_state(
@@ -385,13 +407,13 @@ def test_watch_dialog_uses_loaded_catalog_state(
 
     index = index_module.AssetIndex(tmp_path / "asset_manager" / "library.json")
     index.ensure_default_catalog()
-    project = index.create_project("Default")
-    index.set_watch_dirs(project.id, [str(tmp_path / "watched")])
+    folder = index.create_folder("Default")
+    index.set_watch_dirs(folder.id, [str(tmp_path / "watched")])
     monkeypatch.setattr(module, "load_asset_index", lambda: index)
 
     panel = module.WatchDirsDialogPanel()
-    assert panel.show(project.id) is True
-    assert panel._project_id == project.id
+    assert panel.show(folder.id) is True
+    assert panel._folder_id == folder.id
     assert panel._watch_dirs == [str(tmp_path / "watched")]
 
 
@@ -401,19 +423,19 @@ def test_watch_dialog_does_not_mutate_active_panel_selection(import_dialog_modul
 
     index = index_module.AssetIndex(tmp_path / "asset_manager" / "library.json")
     index.ensure_default_catalog()
-    default_project = index.create_project("Default")
-    target_project = index.create_project("Target")
+    default_folder = index.create_folder("Default")
+    target_folder = index.create_folder("Target")
 
     selection_calls = []
 
     class _PanelStub:
         def __init__(self):
             self._asset_index = index
-            self._selected_project_id = default_project.id
+            self._selected_folder_id = default_folder.id
 
-        def _select_project_id(self, project_id):
-            selection_calls.append(project_id)
-            self._selected_project_id = project_id
+        def _select_folder_id(self, folder_id):
+            selection_calls.append(folder_id)
+            self._selected_folder_id = folder_id
             return True
 
     active_panel = _PanelStub()
@@ -421,10 +443,10 @@ def test_watch_dialog_does_not_mutate_active_panel_selection(import_dialog_modul
     monkeypatch.setattr(module, "load_asset_index", lambda: index)
 
     panel = module.WatchDirsDialogPanel()
-    assert panel.show(target_project.id) is True
+    assert panel.show(target_folder.id) is True
     assert selection_calls == []
-    assert panel._project_id == target_project.id
-    assert active_panel._selected_project_id == default_project.id
+    assert panel._folder_id == target_folder.id
+    assert active_panel._selected_folder_id == default_folder.id
 
 
 def test_asset_scanner_rejects_html_assets(import_dialog_module):
@@ -664,3 +686,12 @@ def test_watch_dirs_dialog_unmount_cancels_and_joins_scan_thread(import_dialog_m
     assert scan_thread.join_calls == [module.THREAD_JOIN_TIMEOUT_SEC]
     assert panel._scan_thread is None
     assert document.removed_models == ["watch_dirs_dialog"]
+
+
+def test_asset_catalog_storage_is_isolated_from_real_home(isolate_asset_manager_catalog):
+    from lfs_plugins.asset_index import resolve_asset_manager_storage_path
+
+    resolved = resolve_asset_manager_storage_path()
+
+    assert resolved == isolate_asset_manager_catalog
+    assert ".lichtfeld" not in resolved.parts

@@ -143,7 +143,6 @@ namespace lfs::python {
             .value("TOGGLE_SELECTION_DEPTH_FILTER", Action::TOGGLE_SELECTION_DEPTH_FILTER)
             .value("TOGGLE_SELECTION_CROP_FILTER", Action::TOGGLE_SELECTION_CROP_FILTER)
             .value("BRUSH_RESIZE", Action::BRUSH_RESIZE)
-            .value("CYCLE_BRUSH_MODE", Action::CYCLE_BRUSH_MODE)
             .value("CONFIRM_POLYGON", Action::CONFIRM_POLYGON)
             .value("CANCEL_POLYGON", Action::CANCEL_POLYGON)
             .value("UNDO_POLYGON_VERTEX", Action::UNDO_POLYGON_VERTEX)
@@ -169,16 +168,15 @@ namespace lfs::python {
             .value("TOOL_ROTATE", Action::TOOL_ROTATE)
             .value("TOOL_SCALE", Action::TOOL_SCALE)
             .value("TOOL_MIRROR", Action::TOOL_MIRROR)
-            .value("TOOL_BRUSH", Action::TOOL_BRUSH)
             .value("TOOL_ALIGN", Action::TOOL_ALIGN)
             .value("PIE_MENU", Action::PIE_MENU)
-            .value("DEPTH_ADJUST_NEAR", Action::DEPTH_ADJUST_NEAR);
+            .value("DEPTH_ADJUST_NEAR", Action::DEPTH_ADJUST_NEAR)
+            .value("HISTOGRAM_ZOOM_MARKED", Action::HISTOGRAM_ZOOM_MARKED);
 
         // Expose ToolMode enum
         nb::enum_<ToolMode>(keymap, "ToolMode")
             .value("GLOBAL", ToolMode::GLOBAL)
             .value("SELECTION", ToolMode::SELECTION)
-            .value("BRUSH", ToolMode::BRUSH)
             .value("TRANSLATE", ToolMode::TRANSLATE)
             .value("ROTATE", ToolMode::ROTATE)
             .value("SCALE", ToolMode::SCALE)
@@ -225,6 +223,16 @@ namespace lfs::python {
             },
             nb::arg("mode"), nb::arg("key"), nb::arg("modifiers") = 0,
             "Get action bound to a key in given mode");
+
+        keymap.def(
+            "get_action_for_scroll",
+            [](ToolMode mode, int modifiers, std::vector<int> held_keys) {
+                if (!get_keymap_bindings())
+                    return Action::NONE;
+                return get_keymap_bindings()->getActionForScroll(mode, modifiers, held_keys);
+            },
+            nb::arg("mode"), nb::arg("modifiers") = 0, nb::arg("held_keys") = std::vector<int>{},
+            "Get action bound to a mouse scroll trigger in given mode");
 
         keymap.def(
             "get_key_for_action",

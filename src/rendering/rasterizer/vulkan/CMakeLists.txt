@@ -167,6 +167,10 @@ _vulkan_add_slang_shader(rasterize_forward               alphablend_shader.slang
 _vulkan_add_slang_shader(rasterize_forward_3dgut         alphablend_shader.slang EXPORT_MODE=0 LFS_3DGUT_RASTERIZE=1)
 _vulkan_add_slang_shader(rasterize_forward_plain         alphablend_shader.slang EXPORT_MODE=0 LFS_RASTER_OVERLAYS=0)
 _vulkan_add_slang_shader(rasterize_forward_3dgut_plain   alphablend_shader.slang EXPORT_MODE=0 LFS_3DGUT_RASTERIZE=1 LFS_RASTER_OVERLAYS=0)
+_vulkan_add_slang_shader(tile_batch_counts               tile_batch_shader.slang TILE_BATCH_ENTRY=1)
+_vulkan_add_slang_shader(tile_batch_descriptors          tile_batch_shader.slang TILE_BATCH_ENTRY=2)
+_vulkan_add_slang_shader(rasterize_forward_batches_plain tile_batch_shader.slang TILE_BATCH_ENTRY=3)
+_vulkan_add_slang_shader(compose_tile_batches_plain      tile_batch_shader.slang TILE_BATCH_ENTRY=4)
 
 # Radix sort GLSL .comp
 _vulkan_add_glsl_shader(upsweep    upsweep.comp)

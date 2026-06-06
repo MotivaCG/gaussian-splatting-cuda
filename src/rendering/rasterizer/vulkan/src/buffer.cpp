@@ -41,6 +41,12 @@ size_t VulkanGSPipelineBuffers::getTotalOwnedAllocSize() const {
     ADD_OWNED(tile_sort_count);
     ADD_OWNED(tile_sort_dispatch_args);
     ADD_OWNED(tile_ranges);
+    ADD_OWNED(tile_batch_counts);
+    ADD_OWNED(tile_batch_offsets);
+    ADD_OWNED(tile_batch_dispatch_args);
+    ADD_OWNED(tile_batch_descriptors);
+    ADD_OWNED(tile_batch_pixel_state);
+    ADD_OWNED(tile_batch_n_contributors);
     ADD_OWNED(pixel_state);
     ADD_OWNED(pixel_depth);
     ADD_OWNED(n_contributors);
@@ -92,6 +98,12 @@ std::map<std::string, size_t> VulkanGSPipelineBuffers::getOwnedVramBreakdown() c
     ADD_OWNED(tile_sort_count);
     ADD_OWNED(tile_sort_dispatch_args);
     ADD_OWNED(tile_ranges);
+    ADD_OWNED(tile_batch_counts);
+    ADD_OWNED(tile_batch_offsets);
+    ADD_OWNED(tile_batch_dispatch_args);
+    ADD_OWNED(tile_batch_descriptors);
+    ADD_OWNED(tile_batch_pixel_state);
+    ADD_OWNED(tile_batch_n_contributors);
     ADD_OWNED(pixel_state);
     ADD_OWNED(pixel_depth);
     ADD_OWNED(n_contributors);

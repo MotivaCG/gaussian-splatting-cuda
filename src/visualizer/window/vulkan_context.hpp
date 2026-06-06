@@ -4,11 +4,13 @@
 
 #pragma once
 
+#include "core/export.hpp"
 #include "vulkan_image_barrier_tracker.hpp"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -51,6 +53,12 @@ namespace lfs::vis {
             VkImageView swapchain_image_view = VK_NULL_HANDLE;
             VkImageView depth_stencil_image_view = VK_NULL_HANDLE;
             VkExtent2D extent{};
+        };
+
+        struct WindowCapture {
+            int width = 0;
+            int height = 0;
+            std::vector<std::uint8_t> rgba;
         };
 
 #ifdef _WIN32
@@ -148,6 +156,7 @@ namespace lfs::vis {
 
         [[nodiscard]] bool beginFrame(const VkClearValue& clear_value, Frame& frame);
         [[nodiscard]] bool endFrame();
+        [[nodiscard]] LFS_VIS_API std::expected<WindowCapture, std::string> captureActiveFrameRgba();
         [[nodiscard]] bool waitForCurrentFrameSlot();
         [[nodiscard]] bool waitForSubmittedFrames();
         [[nodiscard]] bool deviceWaitIdle();
@@ -226,7 +235,8 @@ namespace lfs::vis {
         bool pickPhysicalDevice();
         bool createDevice();
         bool createAllocator();
-        bool createSwapchain(int framebuffer_width, int framebuffer_height);
+        bool createSwapchain(int framebuffer_width, int framebuffer_height,
+                             VkSwapchainKHR old_swapchain = VK_NULL_HANDLE);
         bool createImageViews();
         bool createDepthStencilResources();
         bool createCommandPool();
@@ -235,6 +245,7 @@ namespace lfs::vis {
         bool createDebugMessenger();
         bool createPipelineCache();
         bool recreateSwapchain();
+        bool finishActiveRendering(VkCommandBuffer command_buffer);
 
         void destroyDebugMessenger();
         void destroyAllocator();
@@ -327,10 +338,13 @@ namespace lfs::vis {
         std::size_t active_acquire_index_ = 0;
         std::array<VkSemaphore, kFramesInFlight> render_finished_{};
         std::array<VkFence, kFramesInFlight> in_flight_{};
+        std::array<std::uint64_t, kFramesInFlight> frame_submit_serials_{};
+        std::uint64_t frame_submit_serial_ = 0;
         std::vector<VkFence> swapchain_images_in_flight_;
 
         bool framebuffer_resized_ = false;
         bool frame_active_ = false;
+        bool frame_rendering_active_ = false;
         bool frame_suboptimal_ = false;
         bool debug_utils_enabled_ = false;
         bool validation_enabled_ = false;
