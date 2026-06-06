@@ -848,14 +848,6 @@ class ExportPanel(Panel):
                 # Convert percentages to ratios (e.g., 100 -> 1.0, 50 -> 0.5)
                 rad_lod_ratios = [lod / 100.0 for lod in self._rad_lod_list]
 
-            lf.export_scene(
-                int(self._format),
-                path,
-                selected_nodes,
-                self._export_sh_degree,
-                rad_lod_ratios=rad_lod_ratios,
-                rad_flip_y=self._rad_flip_y,
-            )
             self._exporting = True
             self._last_progress = -1.0
             self._progress_value = "0"
@@ -873,6 +865,18 @@ class ExportPanel(Panel):
                 "progress_stage",
                 "progress_value",
             )
+
+            try:
+                lf.export_scene(
+                    int(self._format),
+                    path,
+                    selected_nodes,
+                    self._export_sh_degree,
+                    rad_lod_ratios=rad_lod_ratios,
+                    rad_flip_y=self._rad_flip_y,
+                )
+            finally:
+                self._request_reactive_update()
 
     # ── Progress helpers ─────────────────────────────────────
 
@@ -906,20 +910,41 @@ class ExportPanel(Panel):
                 self._register_export(self._last_export_path, self._last_export_format)
             self._last_export_path = None
             self._last_export_format = None
+            self._last_progress = -1.0
+            self._progress_value = "0"
+            self._dirty_model(
+                "show_form",
+                "show_progress",
+                "progress_value",
+                "progress_title",
+                "progress_pct",
+                "progress_stage",
+            )
             lf.ui.set_panel_enabled("lfs.export", False)
             return True
 
         progress = state.get("progress", 0.0)
         current_format = state.get("format", "file")
         current_stage = state.get("stage", "")
+        was_exporting = self._exporting
+        self._exporting = True
+        self._request_reactive_update()
         if (
             progress != self._last_progress
             or current_format != previous_format
             or current_stage != previous_stage
+            or not was_exporting
         ):
             self._last_progress = progress
             self._progress_value = str(progress)
-            self._dirty_model("progress_value", "progress_title", "progress_pct", "progress_stage")
+            self._dirty_model(
+                "show_form",
+                "show_progress",
+                "progress_value",
+                "progress_title",
+                "progress_pct",
+                "progress_stage",
+            )
             return True
 
         return False

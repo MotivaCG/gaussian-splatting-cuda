@@ -17,6 +17,11 @@ namespace lfs::rendering {
         ThreeDgut = 3,
     };
 
+    enum class DepthVisualizationMode : int {
+        Palette = 0,
+        Grayscale = 1,
+    };
+
     inline bool isGutBackend(const GaussianRasterBackend backend) {
         return backend == GaussianRasterBackend::ThreeDgut;
     }
@@ -58,8 +63,9 @@ namespace lfs::rendering {
 
     constexpr float DEFAULT_NEAR_PLANE = 0.1f;
     constexpr float DEFAULT_FAR_PLANE = 100000.0f;
-    constexpr int MAX_VIEWPORT_SIZE = 16384;
-
+    constexpr float DEFAULT_DEPTH_VIEW_MIN = DEFAULT_NEAR_PLANE;
+    constexpr float DEFAULT_DEPTH_VIEW_MAX = 100.0f;
+    constexpr float MAX_DEPTH_VIEW_DISTANCE = 10000.0f;
     // 35mm full-frame sensor dimensions
     constexpr float SENSOR_WIDTH_35MM = 36.0f;
     constexpr float SENSOR_HEIGHT_35MM = 24.0f;

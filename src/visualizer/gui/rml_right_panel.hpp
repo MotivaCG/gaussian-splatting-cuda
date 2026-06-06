@@ -29,6 +29,7 @@ namespace lfs::vis::gui {
         std::string id;
         std::string label;
         std::string dom_id;
+        bool closeable = false;
         bool operator==(const TabSnapshot&) const = default;
     };
 
@@ -62,6 +63,7 @@ namespace lfs::vis::gui {
         CursorRequest getCursorRequest() const;
 
         std::function<void(const std::string&)> on_tab_changed;
+        std::function<void(const std::string&)> on_tab_closed;
         std::function<void(float)> on_splitter_delta;
         std::function<void()> on_splitter_end;
         std::function<void(float)> on_resize_delta;

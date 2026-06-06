@@ -8,6 +8,8 @@
 #include "core/point_cloud.hpp"
 #include "core/tensor.hpp"
 
+#include <atomic>
+#include <cstdint>
 #include <expected>
 #include <filesystem>
 #include <functional>
@@ -50,6 +52,11 @@ namespace lfs::core {
             Swizzled
         };
 
+        struct FrozenRange {
+            std::size_t start = 0;
+            std::size_t count = 0;
+        };
+
         SplatData() = default;
         ~SplatData();
 
@@ -83,6 +90,7 @@ namespace lfs::core {
         int get_active_sh_degree() const { return _active_sh_degree; }
         int get_max_sh_degree() const { return _max_sh_degree; }
         float get_scene_scale() const { return _scene_scale; }
+        void set_scene_scale(float scene_scale) { _scene_scale = scene_scale; }
         unsigned long size() const { return static_cast<unsigned long>(_means.shape()[0]); }
 
         // ========== Raw tensor access (for optimization) ==========
@@ -140,6 +148,23 @@ namespace lfs::core {
         [[nodiscard]] const Tensor& deleted() const { return _deleted; }
         [[nodiscard]] bool has_deleted_mask() const { return _deleted.is_valid(); }
         [[nodiscard]] unsigned long visible_count() const;
+
+        // Cached count of deleted gaussians, refreshed by the owner (trainer) on its
+        // own thread/stream via refresh_deleted_count(). Lets other threads (e.g. the
+        // Vulkan viewer) decide whether the soft-delete path is needed with a plain
+        // atomic read — no GPU reduction on the shared mask, which would race the
+        // strategy's writes and can deadlock against the render interop handshake.
+        [[nodiscard]] std::size_t deleted_count() const {
+            return _deleted_count.load(std::memory_order_relaxed);
+        }
+        void refresh_deleted_count();
+
+        [[nodiscard]] const std::vector<FrozenRange>& frozen_ranges() const { return _frozen_ranges; }
+        [[nodiscard]] bool has_frozen_ranges() const { return !_frozen_ranges.empty(); }
+        void set_frozen_ranges(std::vector<FrozenRange> ranges) { _frozen_ranges = std::move(ranges); }
+        void clear_frozen_ranges() { _frozen_ranges.clear(); }
+        void remap_frozen_ranges_after_keep(size_t old_size, const std::vector<int>& kept_old_indices);
+        void remap_frozen_ranges_after_keep(size_t old_size, const std::vector<int64_t>& kept_old_indices);
 
         // Mark gaussians as deleted, returns previous state for undo
         Tensor soft_delete(const Tensor& mask);
@@ -203,9 +228,13 @@ namespace lfs::core {
 
         // Soft deletion mask: bool tensor [N], true = hidden from rendering
         Tensor _deleted;
+        // Cached nonzero count of _deleted; see refresh_deleted_count(). Atomic so
+        // the render thread can read it without a data race on the writer.
+        std::atomic<std::size_t> _deleted_count{0};
 
         // Backing allocator for parameter tensors (see set_tensor_allocator).
         SplatTensorAllocator _tensor_allocator;
+        std::vector<FrozenRange> _frozen_ranges;
 
         // Allow free functions in splat_data_transform.cpp to access private members
         friend LFS_CORE_API SplatData& transform(SplatData&, const glm::mat4&);

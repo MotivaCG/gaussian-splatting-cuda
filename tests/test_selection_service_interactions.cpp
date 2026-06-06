@@ -244,7 +244,7 @@ TEST_F(SelectionServiceInteractionsTest, CancelInteractiveSelectionLeavesSelecti
     EXPECT_EQ(lfs::vis::op::undoHistory().redoCount(), 0u);
 }
 
-TEST_F(SelectionServiceInteractionsTest, PointCloudModeBrushUsesScreenPositionFallback) {
+TEST_F(SelectionServiceInteractionsTest, TestingScreenPositionsBrushFallbackWorksInPointCloudMode) {
     auto settings = rendering_manager_->getSettings();
     settings.point_cloud_mode = true;
     rendering_manager_->updateSettings(settings);
@@ -267,7 +267,7 @@ TEST_F(SelectionServiceInteractionsTest, PointCloudModeBrushUsesScreenPositionFa
     EXPECT_EQ(selection_values(*scene_manager_), (std::vector<uint8_t>{1, 0}));
 }
 
-TEST_F(SelectionServiceInteractionsTest, PointCloudModeRectangleUsesScreenPositionFallback) {
+TEST_F(SelectionServiceInteractionsTest, TestingScreenPositionsRectangleFallbackWorksInPointCloudMode) {
     auto settings = rendering_manager_->getSettings();
     settings.point_cloud_mode = true;
     rendering_manager_->updateSettings(settings);
@@ -291,7 +291,7 @@ TEST_F(SelectionServiceInteractionsTest, PointCloudModeRectangleUsesScreenPositi
     EXPECT_EQ(selection_values(*scene_manager_), (std::vector<uint8_t>{1, 0}));
 }
 
-TEST_F(SelectionServiceInteractionsTest, PointCloudModePolygonUsesScreenPositionFallback) {
+TEST_F(SelectionServiceInteractionsTest, TestingScreenPositionsPolygonFallbackWorksInPointCloudMode) {
     auto settings = rendering_manager_->getSettings();
     settings.point_cloud_mode = true;
     rendering_manager_->updateSettings(settings);
@@ -316,7 +316,7 @@ TEST_F(SelectionServiceInteractionsTest, PointCloudModePolygonUsesScreenPosition
     EXPECT_EQ(selection_values(*scene_manager_), (std::vector<uint8_t>{1, 0}));
 }
 
-TEST_F(SelectionServiceInteractionsTest, PointCloudModeSelectionFallbackAppliesDepthFilter) {
+TEST_F(SelectionServiceInteractionsTest, TestingScreenPositionsFallbackAppliesDepthFilterInPointCloudMode) {
     auto settings = rendering_manager_->getSettings();
     settings.point_cloud_mode = true;
     settings.depth_filter_enabled = true;
@@ -347,7 +347,7 @@ TEST_F(SelectionServiceInteractionsTest, PointCloudModeSelectionFallbackAppliesD
     EXPECT_EQ(selection_values(*scene_manager_), (std::vector<uint8_t>{1, 0}));
 }
 
-TEST_F(SelectionServiceInteractionsTest, PointCloudModeCommandSelectionUsesScreenPositionFallback) {
+TEST_F(SelectionServiceInteractionsTest, TestingScreenPositionsCommandFallbackWorksInPointCloudMode) {
     auto settings = rendering_manager_->getSettings();
     settings.point_cloud_mode = true;
     rendering_manager_->updateSettings(settings);

@@ -11,7 +11,7 @@
 
 namespace lfs::vis::tools {
 
-    class SelectionTool : public ToolBase {
+    class LFS_VIS_API SelectionTool : public ToolBase {
     public:
         SelectionTool();
         ~SelectionTool() override = default;
@@ -35,7 +35,7 @@ namespace lfs::vis::tools {
         [[nodiscard]] float getDepthFar() const { return depth_far_; }
         [[nodiscard]] float getDepthFrustumHalfWidth() const { return frustum_half_width_; }
         void setDepthFilterEnabled(bool enabled);
-        LFS_VIS_API void setDepthFilterRange(bool enabled, float depth_near, float depth_far, float frustum_half_width);
+        void setDepthFilterRange(bool enabled, float depth_near, float depth_far, float frustum_half_width);
         void toggleDepthFilter() { setDepthFilterEnabled(!depth_filter_enabled_); }
         void adjustDepthFar(float scale);
         void syncDepthFilterToCamera(const Viewport& viewport);
@@ -64,7 +64,7 @@ namespace lfs::vis::tools {
 
         static constexpr float DEPTH_MIN = 0.01f;
         static constexpr float DEPTH_MAX = 1000.0f;
-        static constexpr float DEFAULT_DEPTH_FAR = 5.3f;
+        static constexpr float DEFAULT_DEPTH_FAR = 6.0f;
         static constexpr float DEFAULT_FRUSTUM_HALF_WIDTH = 1.35f;
 
         void applySelectionFilterSettings(const ToolContext& ctx) const;

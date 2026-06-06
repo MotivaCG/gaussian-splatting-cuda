@@ -47,6 +47,8 @@ namespace lfs::vis::gui {
         float clip_y1 = 0.0f;
         float clip_x2 = 0.0f;
         float clip_y2 = 0.0f;
+        bool depends_on_preview_textures = false;
+        uint64_t preview_texture_generation = 0;
     };
 
     struct RmlRect {
@@ -178,6 +180,7 @@ namespace lfs::vis::gui {
         std::unique_ptr<RmlTextInputHandler> text_input_handler_;
         std::vector<std::vector<std::byte>> font_blobs_;
         bool cjk_fonts_loaded_ = false;
+        bool cjk_fonts_load_attempted_ = false;
         std::unordered_map<std::string, Rml::Context*> contexts_;
         std::unordered_map<const Rml::Context*, std::string> context_names_;
         std::unordered_map<const Rml::Context*, TrackedContextFrame> tracked_context_frames_;

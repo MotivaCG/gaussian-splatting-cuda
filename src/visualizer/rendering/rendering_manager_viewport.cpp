@@ -4,6 +4,7 @@
 
 #include "core/logger.hpp"
 #include "model_renderability.hpp"
+#include "rendering/coordinate_conventions.hpp"
 #include "rendering/viewport_request_builder.hpp"
 #include "rendering_manager.hpp"
 #include "scene/scene_manager.hpp"
@@ -12,12 +13,19 @@
 #include "training/training_manager.hpp"
 #include "vksplat_viewport_renderer.hpp"
 #include <algorithm>
+#include <cmath>
+#include <format>
 #include <shared_mutex>
 #include <utility>
+#include <vector>
 
 namespace lfs::vis {
 
     namespace {
+        constexpr std::size_t kPreviewPixelStateBytesPerPixel = 4u * sizeof(float);
+        constexpr std::size_t kMaxNativePreviewPixelStateBytes =
+            (std::size_t{4} << 30) - (std::size_t{64} << 20);
+
         [[nodiscard]] std::optional<std::shared_lock<std::shared_mutex>> acquireLiveModelRenderLock(
             const SceneManager* const scene_manager) {
             std::optional<std::shared_lock<std::shared_mutex>> lock;
@@ -29,10 +37,48 @@ namespace lfs::vis {
             return lock;
         }
 
+        [[nodiscard]] bool previewRenderNeedsTiling(const int width, const int height) {
+            if (width <= 0 || height <= 0) {
+                return false;
+            }
+            const auto pixel_count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+            return pixel_count > kMaxNativePreviewPixelStateBytes / kPreviewPixelStateBytesPerPixel;
+        }
+
+        [[nodiscard]] int previewTileHeightForWidth(const int width) {
+            if (width <= 0) {
+                return 1;
+            }
+            const std::size_t max_pixels = kMaxNativePreviewPixelStateBytes / kPreviewPixelStateBytesPerPixel;
+            return std::max(1, static_cast<int>(max_pixels / static_cast<std::size_t>(width)));
+        }
+
+        [[nodiscard]] lfs::rendering::CameraIntrinsics previewTileIntrinsics(
+            const int full_width,
+            const int full_height,
+            const float focal_length_mm) {
+            const auto [fx, fy] = lfs::rendering::computePixelFocalLengths(
+                {full_width, full_height},
+                focal_length_mm);
+            return lfs::rendering::CameraIntrinsics{
+                .focal_x = fx,
+                .focal_y = fy,
+                .center_x = static_cast<float>(full_width) * 0.5f,
+                .center_y = static_cast<float>(full_height) * 0.5f,
+            };
+        }
+
     } // namespace
 
     RenderingManager::ContentBounds RenderingManager::getContentBounds(const glm::ivec2& viewport_size) const {
-        ContentBounds bounds{0.0f, 0.0f, static_cast<float>(viewport_size.x), static_cast<float>(viewport_size.y), false};
+        const int viewport_width = std::max(viewport_size.x, 0);
+        const int viewport_height = std::max(viewport_size.y, 0);
+        ContentBounds bounds{
+            0.0f,
+            0.0f,
+            static_cast<float>(viewport_width),
+            static_cast<float>(viewport_height),
+            false};
 
         if (split_view_service_.isGTComparisonActive(settings_)) {
             glm::ivec2 content_dims{0, 0};
@@ -41,22 +87,31 @@ namespace lfs::vis {
             } else {
                 content_dims = vulkan_gt_comparison_content_size_;
             }
-            if (content_dims.x <= 0 || content_dims.y <= 0) {
+            if (content_dims.x <= 0 || content_dims.y <= 0 ||
+                viewport_width <= 0 || viewport_height <= 0) {
                 return bounds;
             }
 
             const float content_aspect = static_cast<float>(content_dims.x) / content_dims.y;
-            const float viewport_aspect = static_cast<float>(viewport_size.x) / viewport_size.y;
+            const float viewport_aspect = static_cast<float>(viewport_width) / viewport_height;
 
             if (content_aspect > viewport_aspect) {
-                bounds.width = static_cast<float>(viewport_size.x);
-                bounds.height = viewport_size.x / content_aspect;
+                const int content_height =
+                    std::clamp(static_cast<int>(std::lround(static_cast<float>(viewport_width) / content_aspect)),
+                               1,
+                               viewport_height);
+                bounds.width = static_cast<float>(viewport_width);
+                bounds.height = static_cast<float>(content_height);
                 bounds.x = 0.0f;
-                bounds.y = (viewport_size.y - bounds.height) / 2.0f;
+                bounds.y = static_cast<float>(std::max((viewport_height - content_height) / 2, 0));
             } else {
-                bounds.height = static_cast<float>(viewport_size.y);
-                bounds.width = viewport_size.y * content_aspect;
-                bounds.x = (viewport_size.x - bounds.width) / 2.0f;
+                const int content_width =
+                    std::clamp(static_cast<int>(std::lround(static_cast<float>(viewport_height) * content_aspect)),
+                               1,
+                               viewport_width);
+                bounds.height = static_cast<float>(viewport_height);
+                bounds.width = static_cast<float>(content_width);
+                bounds.x = static_cast<float>(std::max((viewport_width - content_width) / 2, 0));
                 bounds.y = 0.0f;
             }
             bounds.letterboxed = true;
@@ -241,17 +296,41 @@ namespace lfs::vis {
         return hovered_camera;
     }
 
+    RenderingManager::PreviewImageReadbackConfig RenderingManager::previewImageReadbackConfig(
+        const PreviewImageReadback readback,
+        const bool has_background_color_override) {
+        PreviewImageReadbackConfig config{};
+        switch (readback) {
+        case PreviewImageReadback::FloatRgb:
+            config.dtype = lfs::core::DataType::Float32;
+            config.channels = 3;
+            break;
+        case PreviewImageReadback::UInt8Rgb:
+            config.dtype = lfs::core::DataType::UInt8;
+            config.channels = 3;
+            break;
+        case PreviewImageReadback::UInt8Rgba:
+            config.dtype = lfs::core::DataType::UInt8;
+            config.channels = 4;
+            config.transparent_background_override = true;
+            break;
+        }
+        if (has_background_color_override && !config.transparent_background_override.has_value()) {
+            config.transparent_background_override = false;
+        }
+        return config;
+    }
+
     std::shared_ptr<lfs::core::Tensor> RenderingManager::renderPreviewImage(SceneManager* const scene_manager,
                                                                             const glm::mat3& rotation,
                                                                             const glm::vec3& position,
                                                                             const float focal_length_mm,
                                                                             const int width,
-                                                                            const int height) {
+                                                                            const int height,
+                                                                            std::optional<glm::vec3> background_color_override,
+                                                                            std::optional<bool> orthographic_override,
+                                                                            std::optional<float> ortho_scale_override) {
         if (width <= 0 || height <= 0) {
-            return {};
-        }
-        if (!last_vulkan_context_) {
-            LOG_TRACE("Gaussian preview image skipped: no Vulkan context is available");
             return {};
         }
         auto render_lock = acquireLiveModelRenderLock(scene_manager);
@@ -261,67 +340,143 @@ namespace lfs::vis {
             return {};
         }
 
-        RenderSettings preview_settings = getSettings();
-        preview_settings.focal_length_mm = std::clamp(
-            focal_length_mm,
-            lfs::rendering::MIN_FOCAL_LENGTH_MM,
-            lfs::rendering::MAX_FOCAL_LENGTH_MM);
-        preview_settings.split_view_mode = SplitViewMode::Disabled;
-        preview_settings.equirectangular = false;
-
-        Viewport preview_viewport(
-            static_cast<std::size_t>(width),
-            static_cast<std::size_t>(height));
-        preview_viewport.setViewMatrix(rotation, position);
-
-        FrameContext frame_ctx{
-            .viewport = preview_viewport,
-            .render_lock_held = render_lock.has_value(),
-            .scene_manager = scene_manager,
-            .model = model,
-            .scene_state = std::move(render_state),
-            .settings = preview_settings,
-            .render_size = {width, height},
-            .viewport_pos = {0, 0},
-            .cursor_preview = {},
-            .gizmo = {},
-            .view_panels = {},
-        };
-
-        auto request = buildViewportRenderRequest(frame_ctx, frame_ctx.render_size);
-        request.raster_backend =
-            lfs::rendering::normalizeViewerRasterBackend(request.raster_backend, request.gut);
-        request.gut = lfs::rendering::isGutBackend(request.raster_backend);
-        if (!lfs::rendering::isVkSplatBackend(request.raster_backend)) {
-            LOG_TRACE("Gaussian preview image skipped: unsupported raster backend '{}'",
-                      lfs::rendering::gaussianRasterBackendId(request.raster_backend));
-            return {};
+        if (previewRenderNeedsTiling(width, height)) {
+            return renderPreviewImageTiledWithState(
+                scene_manager,
+                *model,
+                std::move(render_state),
+                rotation,
+                position,
+                focal_length_mm,
+                width,
+                height,
+                render_lock.has_value(),
+                background_color_override,
+                orthographic_override,
+                ortho_scale_override,
+                PreviewImageReadback::FloatRgb);
         }
 
-        if (!vksplat_viewport_renderer_) {
-            vksplat_viewport_renderer_ = std::make_unique<VksplatViewportRenderer>();
-        }
-
-        auto render_result = vksplat_viewport_renderer_->render(
-            *last_vulkan_context_,
+        return renderPreviewImageWithState(
+            scene_manager,
             *model,
-            request,
-            false,
-            VksplatViewportRenderer::OutputSlot::Preview,
-            false);
-        if (!render_result) {
-            LOG_TRACE("Gaussian preview image render failed: {}", render_result.error());
+            std::move(render_state),
+            rotation,
+            position,
+            focal_length_mm,
+            width,
+            height,
+            render_lock.has_value(),
+            std::nullopt,
+            orthographic_override,
+            ortho_scale_override,
+            background_color_override,
+            PreviewImageReadback::FloatRgb);
+    }
+
+    std::shared_ptr<lfs::core::Tensor> RenderingManager::renderPreviewImageRgb8(SceneManager* const scene_manager,
+                                                                                const glm::mat3& rotation,
+                                                                                const glm::vec3& position,
+                                                                                const float focal_length_mm,
+                                                                                const int width,
+                                                                                const int height,
+                                                                                std::optional<glm::vec3> background_color_override,
+                                                                                std::optional<bool> orthographic_override,
+                                                                                std::optional<float> ortho_scale_override) {
+        if (width <= 0 || height <= 0) {
+            return {};
+        }
+        auto render_lock = acquireLiveModelRenderLock(scene_manager);
+        auto render_state = scene_manager ? scene_manager->buildRenderState() : SceneRenderState{};
+        const auto* const model = render_state.combined_model;
+        if (!hasRenderableGaussians(model)) {
             return {};
         }
 
-        auto image = vksplat_viewport_renderer_->readOutputImage(
-            *last_vulkan_context_,
-            VksplatViewportRenderer::OutputSlot::Preview);
-        if (!image) {
-            LOG_TRACE("Gaussian preview image readback failed: {}", image.error());
+        if (previewRenderNeedsTiling(width, height)) {
+            return renderPreviewImageTiledWithState(
+                scene_manager,
+                *model,
+                std::move(render_state),
+                rotation,
+                position,
+                focal_length_mm,
+                width,
+                height,
+                render_lock.has_value(),
+                background_color_override,
+                orthographic_override,
+                ortho_scale_override,
+                PreviewImageReadback::UInt8Rgb);
+        }
+
+        return renderPreviewImageWithState(
+            scene_manager,
+            *model,
+            std::move(render_state),
+            rotation,
+            position,
+            focal_length_mm,
+            width,
+            height,
+            render_lock.has_value(),
+            std::nullopt,
+            orthographic_override,
+            ortho_scale_override,
+            background_color_override,
+            PreviewImageReadback::UInt8Rgb);
+    }
+
+    std::shared_ptr<lfs::core::Tensor> RenderingManager::renderPreviewImageRgba8(SceneManager* const scene_manager,
+                                                                                 const glm::mat3& rotation,
+                                                                                 const glm::vec3& position,
+                                                                                 const float focal_length_mm,
+                                                                                 const int width,
+                                                                                 const int height,
+                                                                                 std::optional<bool> orthographic_override,
+                                                                                 std::optional<float> ortho_scale_override) {
+        if (width <= 0 || height <= 0) {
             return {};
         }
-        return std::move(*image);
+        auto render_lock = acquireLiveModelRenderLock(scene_manager);
+        auto render_state = scene_manager ? scene_manager->buildRenderState() : SceneRenderState{};
+        const auto* const model = render_state.combined_model;
+        if (!hasRenderableGaussians(model)) {
+            return {};
+        }
+
+        if (previewRenderNeedsTiling(width, height)) {
+            return renderPreviewImageTiledWithState(
+                scene_manager,
+                *model,
+                std::move(render_state),
+                rotation,
+                position,
+                focal_length_mm,
+                width,
+                height,
+                render_lock.has_value(),
+                std::nullopt,
+                orthographic_override,
+                ortho_scale_override,
+                PreviewImageReadback::UInt8Rgba);
+        }
+
+        return renderPreviewImageWithState(
+            scene_manager,
+            *model,
+            std::move(render_state),
+            rotation,
+            position,
+            focal_length_mm,
+            width,
+            height,
+            render_lock.has_value(),
+            std::nullopt,
+            orthographic_override,
+            ortho_scale_override,
+            std::nullopt,
+            PreviewImageReadback::UInt8Rgba);
     }
 
     std::shared_ptr<lfs::core::Tensor> RenderingManager::renderPreviewImage(const lfs::core::SplatData& model,
@@ -330,16 +485,234 @@ namespace lfs::vis {
                                                                             const glm::vec3& position,
                                                                             const float focal_length_mm,
                                                                             const int width,
-                                                                            const int height) {
+                                                                            const int height,
+                                                                            std::optional<glm::vec3> background_color_override,
+                                                                            std::optional<bool> orthographic_override,
+                                                                            std::optional<float> ortho_scale_override) {
         if (width <= 0 || height <= 0) {
             return {};
         }
-        if (!last_vulkan_context_) {
-            LOG_TRACE("Gaussian preview image skipped: no Vulkan context is available");
+        if (previewRenderNeedsTiling(width, height)) {
+            return renderPreviewImageTiledWithState(
+                nullptr,
+                model,
+                std::move(scene_state),
+                rotation,
+                position,
+                focal_length_mm,
+                width,
+                height,
+                false,
+                background_color_override,
+                orthographic_override,
+                ortho_scale_override,
+                PreviewImageReadback::FloatRgb);
+        }
+
+        return renderPreviewImageWithState(
+            nullptr,
+            model,
+            std::move(scene_state),
+            rotation,
+            position,
+            focal_length_mm,
+            width,
+            height,
+            false,
+            std::nullopt,
+            orthographic_override,
+            ortho_scale_override,
+            background_color_override,
+            PreviewImageReadback::FloatRgb);
+    }
+
+    std::shared_ptr<lfs::core::Tensor> RenderingManager::renderPreviewImageRgb8(const lfs::core::SplatData& model,
+                                                                                SceneRenderState scene_state,
+                                                                                const glm::mat3& rotation,
+                                                                                const glm::vec3& position,
+                                                                                const float focal_length_mm,
+                                                                                const int width,
+                                                                                const int height,
+                                                                                std::optional<glm::vec3> background_color_override,
+                                                                                std::optional<bool> orthographic_override,
+                                                                                std::optional<float> ortho_scale_override) {
+        if (width <= 0 || height <= 0) {
             return {};
         }
-        if (!hasRenderableGaussians(&model)) {
+        if (previewRenderNeedsTiling(width, height)) {
+            return renderPreviewImageTiledWithState(
+                nullptr,
+                model,
+                std::move(scene_state),
+                rotation,
+                position,
+                focal_length_mm,
+                width,
+                height,
+                false,
+                background_color_override,
+                orthographic_override,
+                ortho_scale_override,
+                PreviewImageReadback::UInt8Rgb);
+        }
+
+        return renderPreviewImageWithState(
+            nullptr,
+            model,
+            std::move(scene_state),
+            rotation,
+            position,
+            focal_length_mm,
+            width,
+            height,
+            false,
+            std::nullopt,
+            orthographic_override,
+            ortho_scale_override,
+            background_color_override,
+            PreviewImageReadback::UInt8Rgb);
+    }
+
+    std::shared_ptr<lfs::core::Tensor> RenderingManager::renderPreviewImageRgba8(const lfs::core::SplatData& model,
+                                                                                 SceneRenderState scene_state,
+                                                                                 const glm::mat3& rotation,
+                                                                                 const glm::vec3& position,
+                                                                                 const float focal_length_mm,
+                                                                                 const int width,
+                                                                                 const int height,
+                                                                                 std::optional<bool> orthographic_override,
+                                                                                 std::optional<float> ortho_scale_override) {
+        if (width <= 0 || height <= 0) {
             return {};
+        }
+        if (previewRenderNeedsTiling(width, height)) {
+            return renderPreviewImageTiledWithState(
+                nullptr,
+                model,
+                std::move(scene_state),
+                rotation,
+                position,
+                focal_length_mm,
+                width,
+                height,
+                false,
+                std::nullopt,
+                orthographic_override,
+                ortho_scale_override,
+                PreviewImageReadback::UInt8Rgba);
+        }
+
+        return renderPreviewImageWithState(
+            nullptr,
+            model,
+            std::move(scene_state),
+            rotation,
+            position,
+            focal_length_mm,
+            width,
+            height,
+            false,
+            std::nullopt,
+            orthographic_override,
+            ortho_scale_override,
+            std::nullopt,
+            PreviewImageReadback::UInt8Rgba);
+    }
+
+    void RenderingManager::releasePreviewImageResources() {
+        if (vksplat_viewport_renderer_) {
+            vksplat_viewport_renderer_->releasePreviewResources();
+        }
+    }
+
+    std::shared_ptr<lfs::core::Tensor> RenderingManager::renderPreviewImageWithState(
+        SceneManager* const scene_manager,
+        const lfs::core::SplatData& model,
+        SceneRenderState scene_state,
+        const glm::mat3& rotation,
+        const glm::vec3& position,
+        const float focal_length_mm,
+        const int width,
+        const int height,
+        const bool render_lock_held,
+        std::optional<lfs::rendering::CameraIntrinsics> intrinsics_override,
+        std::optional<bool> orthographic_override,
+        std::optional<float> ortho_scale_override,
+        std::optional<glm::vec3> background_color_override,
+        const PreviewImageReadback readback) {
+        const auto readback_config =
+            previewImageReadbackConfig(readback, background_color_override.has_value());
+
+        auto rendered = renderPreviewImageToPreviewSlotWithState(
+            scene_manager,
+            model,
+            std::move(scene_state),
+            rotation,
+            position,
+            focal_length_mm,
+            width,
+            height,
+            render_lock_held,
+            std::move(intrinsics_override),
+            {},
+            {},
+            orthographic_override,
+            ortho_scale_override,
+            background_color_override,
+            readback_config.transparent_background_override);
+        if (!rendered) {
+            LOG_ERROR("Gaussian preview image render failed: {}", rendered.error());
+            return {};
+        }
+
+        std::expected<std::shared_ptr<lfs::core::Tensor>, std::string> image =
+            std::unexpected("unsupported preview image readback format");
+        if (readback_config.dtype == lfs::core::DataType::UInt8 &&
+            readback_config.channels == 4) {
+            image = vksplat_viewport_renderer_->readOutputImageRgba8(
+                *last_vulkan_context_,
+                VksplatViewportRenderer::OutputSlot::Preview);
+        } else if (readback_config.dtype == lfs::core::DataType::UInt8) {
+            image = vksplat_viewport_renderer_->readOutputImageRgb8(
+                *last_vulkan_context_,
+                VksplatViewportRenderer::OutputSlot::Preview);
+        } else {
+            image = vksplat_viewport_renderer_->readOutputImage(
+                *last_vulkan_context_,
+                VksplatViewportRenderer::OutputSlot::Preview);
+        }
+        if (!image) {
+            LOG_ERROR("Gaussian preview image readback failed: {}", image.error());
+            return {};
+        }
+        return std::move(*image);
+    }
+
+    std::expected<void, std::string> RenderingManager::renderPreviewImageToPreviewSlotWithState(
+        SceneManager* const scene_manager,
+        const lfs::core::SplatData& model,
+        SceneRenderState scene_state,
+        const glm::mat3& rotation,
+        const glm::vec3& position,
+        const float focal_length_mm,
+        const int width,
+        const int height,
+        const bool render_lock_held,
+        std::optional<lfs::rendering::CameraIntrinsics> intrinsics_override,
+        const glm::ivec2 subregion_origin,
+        const glm::ivec2 subregion_full_size,
+        std::optional<bool> orthographic_override,
+        std::optional<float> ortho_scale_override,
+        std::optional<glm::vec3> background_color_override,
+        std::optional<bool> transparent_background_override) {
+        if (width <= 0 || height <= 0) {
+            return std::unexpected("invalid preview render dimensions");
+        }
+        if (!last_vulkan_context_) {
+            return std::unexpected("no Vulkan context is available");
+        }
+        if (!hasRenderableGaussians(&model)) {
+            return std::unexpected("no renderable Gaussian model is available");
         }
         if (!scene_state.combined_model) {
             scene_state.combined_model = &model;
@@ -352,11 +725,15 @@ namespace lfs::vis {
             lfs::rendering::MAX_FOCAL_LENGTH_MM);
         preview_settings.split_view_mode = SplitViewMode::Disabled;
         preview_settings.equirectangular = false;
-        preview_settings.use_crop_box = false;
-        preview_settings.show_crop_box = false;
-        preview_settings.use_ellipsoid = false;
-        preview_settings.show_ellipsoid = false;
-        preview_settings.depth_filter_enabled = false;
+        if (background_color_override) {
+            preview_settings.background_color = *background_color_override;
+        }
+        if (orthographic_override) {
+            preview_settings.orthographic = *orthographic_override;
+        }
+        if (ortho_scale_override && std::isfinite(*ortho_scale_override) && *ortho_scale_override > 0.0f) {
+            preview_settings.ortho_scale = *ortho_scale_override;
+        }
 
         Viewport preview_viewport(
             static_cast<std::size_t>(width),
@@ -365,8 +742,8 @@ namespace lfs::vis {
 
         FrameContext frame_ctx{
             .viewport = preview_viewport,
-            .render_lock_held = false,
-            .scene_manager = nullptr,
+            .render_lock_held = render_lock_held,
+            .scene_manager = scene_manager,
             .model = &model,
             .scene_state = std::move(scene_state),
             .settings = preview_settings,
@@ -378,13 +755,19 @@ namespace lfs::vis {
         };
 
         auto request = buildViewportRenderRequest(frame_ctx, frame_ctx.render_size);
+        if (transparent_background_override) {
+            request.transparent_background = *transparent_background_override;
+        }
+        request.frame_view.intrinsics_override = std::move(intrinsics_override);
+        request.frame_view.subregion_origin = subregion_origin;
+        request.frame_view.subregion_full_size = subregion_full_size;
         request.raster_backend =
             lfs::rendering::normalizeViewerRasterBackend(request.raster_backend, request.gut);
         request.gut = lfs::rendering::isGutBackend(request.raster_backend);
         if (!lfs::rendering::isVkSplatBackend(request.raster_backend)) {
-            LOG_TRACE("Gaussian preview image skipped: unsupported raster backend '{}'",
-                      lfs::rendering::gaussianRasterBackendId(request.raster_backend));
-            return {};
+            return std::unexpected(std::format(
+                "unsupported raster backend '{}'",
+                lfs::rendering::gaussianRasterBackendId(request.raster_backend)));
         }
 
         if (!vksplat_viewport_renderer_) {
@@ -399,18 +782,100 @@ namespace lfs::vis {
             VksplatViewportRenderer::OutputSlot::Preview,
             false);
         if (!render_result) {
-            LOG_TRACE("Gaussian preview image render failed: {}", render_result.error());
+            return std::unexpected(render_result.error());
+        }
+        return {};
+    }
+
+    std::shared_ptr<lfs::core::Tensor> RenderingManager::renderPreviewImageTiledWithState(
+        SceneManager* const scene_manager,
+        const lfs::core::SplatData& model,
+        SceneRenderState scene_state,
+        const glm::mat3& rotation,
+        const glm::vec3& position,
+        const float focal_length_mm,
+        const int width,
+        const int height,
+        const bool render_lock_held,
+        std::optional<glm::vec3> background_color_override,
+        std::optional<bool> orthographic_override,
+        std::optional<float> ortho_scale_override,
+        const PreviewImageReadback readback) {
+        if (width <= 0 || height <= 0) {
+            return {};
+        }
+        const auto readback_config =
+            previewImageReadbackConfig(readback, background_color_override.has_value());
+
+        const int tile_width = width;
+        const int tile_height_limit = previewTileHeightForWidth(tile_width);
+        if (tile_height_limit <= 0) {
             return {};
         }
 
-        auto image = vksplat_viewport_renderer_->readOutputImage(
-            *last_vulkan_context_,
-            VksplatViewportRenderer::OutputSlot::Preview);
-        if (!image) {
-            LOG_TRACE("Gaussian preview image readback failed: {}", image.error());
+        LOG_INFO("Gaussian preview image {}x{} uses tiled render readback: tile_width={} max_tile_height={}",
+                 width,
+                 height,
+                 tile_width,
+                 tile_height_limit);
+
+        auto output = lfs::core::Tensor::empty(
+            {static_cast<std::size_t>(height),
+             static_cast<std::size_t>(width),
+             static_cast<std::size_t>(readback_config.channels)},
+            lfs::core::Device::CPU,
+            readback_config.dtype);
+        if (!output.is_valid()) {
+            LOG_TRACE("Gaussian preview tiled render failed to allocate output tensor");
             return {};
         }
-        return std::move(*image);
+
+        for (int tile_y = 0; tile_y < height; tile_y += tile_height_limit) {
+            const int tile_height = std::min(tile_height_limit, height - tile_y);
+            const auto intrinsics = previewTileIntrinsics(
+                width,
+                height,
+                focal_length_mm);
+            auto rendered = renderPreviewImageToPreviewSlotWithState(
+                scene_manager,
+                model,
+                scene_state,
+                rotation,
+                position,
+                focal_length_mm,
+                tile_width,
+                tile_height,
+                render_lock_held,
+                intrinsics,
+                {0, tile_y},
+                {width, height},
+                orthographic_override,
+                ortho_scale_override,
+                background_color_override,
+                readback_config.transparent_background_override);
+            if (!rendered) {
+                LOG_TRACE("Gaussian preview tiled render failed at tile y={} height={}: {}",
+                          tile_y,
+                          tile_height,
+                          rendered.error());
+                return {};
+            }
+            auto copied = vksplat_viewport_renderer_->readOutputImageIntoCpuHwc(
+                *last_vulkan_context_,
+                VksplatViewportRenderer::OutputSlot::Preview,
+                output,
+                0,
+                tile_y);
+            if (!copied) {
+                LOG_TRACE("Gaussian preview tiled readback failed at tile y={} height={}: {}",
+                          tile_y,
+                          tile_height,
+                          copied.error());
+                return {};
+            }
+        }
+
+        return std::make_shared<lfs::core::Tensor>(std::move(output));
     }
 
     float RenderingManager::getDepthAtPixel(const int x, const int y,

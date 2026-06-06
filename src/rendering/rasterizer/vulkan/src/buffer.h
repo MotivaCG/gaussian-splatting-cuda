@@ -123,14 +123,18 @@ struct VulkanGSPipelineBuffers {
     Buffer<uint32_t> visible_sort_dispatch_args; // VkDispatchIndirectCommand for visible primitive radix sort
 
     // tiles
-    Buffer<int32_t> index_buffer_offset;      // N
-    Buffer<sortingKey_t> sorting_keys_1;      // NInt [no_shrink]
-    Buffer<sortingKey_t> sorting_keys_2;      // NInt [no_shrink]
-    Buffer<int32_t> sorting_gauss_idx_1;      // NInt [no_shrink]
-    Buffer<int32_t> sorting_gauss_idx_2;      // NInt [no_shrink]
-    Buffer<uint32_t> tile_sort_count;         // (1,) actual tile instance count
-    Buffer<uint32_t> tile_sort_dispatch_args; // VkDispatchIndirectCommand for tile-instance radix sort
-    Buffer<int32_t> tile_ranges;              // (Gh*Gw, 2)
+    Buffer<int32_t> index_buffer_offset;       // N
+    Buffer<sortingKey_t> sorting_keys_1;       // NInt [no_shrink]
+    Buffer<sortingKey_t> sorting_keys_2;       // NInt [no_shrink]
+    Buffer<int32_t> sorting_gauss_idx_1;       // NInt [no_shrink]
+    Buffer<int32_t> sorting_gauss_idx_2;       // NInt [no_shrink]
+    Buffer<uint32_t> tile_sort_count;          // (1,) actual tile instance count
+    Buffer<uint32_t> tile_sort_dispatch_args;  // VkDispatchIndirectCommand for tile-instance radix sort
+    Buffer<int32_t> tile_ranges;               // (Gh*Gw, 2)
+    Buffer<int32_t> tile_batch_counts;         // (Gh*Gw,) bounded raster chunks per tile
+    Buffer<int32_t> tile_batch_offsets;        // (Gh*Gw,) inclusive prefix sum of tile_batch_counts
+    Buffer<uint32_t> tile_batch_dispatch_args; // VkDispatchIndirectCommand for raster chunks
+    Buffer<uint32_t> tile_batch_descriptors;   // (num_batches, uint4: tile, start, end, reserved)
     bool is_unsorted_1 = true;
     Buffer<sortingKey_t>& unsorted_keys() { return is_unsorted_1 ? sorting_keys_1 : sorting_keys_2; }
     Buffer<sortingKey_t>& sorted_keys() { return is_unsorted_1 ? sorting_keys_2 : sorting_keys_1; }
@@ -138,9 +142,11 @@ struct VulkanGSPipelineBuffers {
     Buffer<sortingKey_t>& sorted_gauss_idx() { return is_unsorted_1 ? sorting_gauss_idx_2 : sorting_gauss_idx_1; }
 
     // pixels
-    Buffer<float> pixel_state;      // (H, W, 4)
-    Buffer<float> pixel_depth;      // (H, W, 1), median view-space depth
-    Buffer<int32_t> n_contributors; // (H, W, 1)
+    Buffer<float> tile_batch_pixel_state;      // (num_batches, TILE_SIZE, 4)
+    Buffer<int32_t> tile_batch_n_contributors; // (num_batches, TILE_SIZE)
+    Buffer<float> pixel_state;                 // (H, W, 4)
+    Buffer<float> pixel_depth;                 // (H, W, 1), median view-space depth
+    Buffer<int32_t> n_contributors;            // (H, W, 1)
 
     // intermediate buffers
     Buffer<int32_t> _cumsum_blockSums;

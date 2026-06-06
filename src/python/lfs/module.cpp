@@ -5,10 +5,12 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/tuple.h>
 #include <nanobind/stl/vector.h>
 
 #include <deque>
 #include <optional>
+#include <tuple>
 
 #include "notification_bridge.hpp"
 #include "py_animation.hpp"
@@ -1443,6 +1445,12 @@ NB_MODULE(lichtfeld, m) {
         "reset_camera", []() { lfs::core::events::cmd::ResetCamera{}.emit(); },
         "Reset camera to default position and orientation");
     m.def(
+        "focus_selection", []() -> bool {
+            auto* const controller = lfs::vis::InputController::instance();
+            return controller ? controller->focusSelection() : false;
+        },
+        "Focus the active viewport on the selection, or the whole scene when nothing is selected");
+    m.def(
         "get_camera_navigation_mode", []() -> std::string {
             const auto* controller = lfs::vis::InputController::instance();
             if (!controller)
@@ -1541,10 +1549,15 @@ NB_MODULE(lichtfeld, m) {
             if (!rm)
                 return;
             auto settings = rm->getSettings();
-            settings.point_cloud_mode = (mode == RenderMode::Points);
+            const bool enable_point_cloud_mode = mode == RenderMode::Points;
+            const bool point_cloud_mode_changed = settings.point_cloud_mode != enable_point_cloud_mode;
+            settings.point_cloud_mode = enable_point_cloud_mode;
             settings.show_rings = (mode == RenderMode::Rings);
             settings.show_center_markers = (mode == RenderMode::Centers);
-            rm->updateSettings(settings);
+            rm->updateSettings(settings,
+                               point_cloud_mode_changed && enable_point_cloud_mode
+                                   ? lfs::vis::DirtyFlag::ALL
+                                   : lfs::vis::DirtyFlag::SELECTION);
         },
         nb::arg("mode"), "Set the render mode (Splats, Points, Rings, Centers)");
 
@@ -1569,9 +1582,64 @@ NB_MODULE(lichtfeld, m) {
                 return;
             auto settings = rm->getSettings();
             settings.depth_view = enabled;
-            rm->updateSettings(settings);
+            rm->updateSettings(settings, lfs::vis::DirtyFlag::ALL);
         },
         nb::arg("enabled"), "Enable or disable depth-map view");
+
+    m.def(
+        "get_depth_view_range", []() -> std::tuple<float, float> {
+            const auto* rm = lfs::python::get_rendering_manager();
+            if (!rm)
+                return {
+                    lfs::rendering::DEFAULT_DEPTH_VIEW_MIN,
+                    lfs::rendering::DEFAULT_DEPTH_VIEW_MAX,
+                };
+            const auto& settings = rm->getSettings();
+            return {settings.depth_view_min, settings.depth_view_max};
+        },
+        "Get depth-map visualization range: (near, far)");
+
+    m.def(
+        "set_depth_view_range", [](float depth_min, float depth_max) {
+            auto* rm = lfs::python::get_rendering_manager();
+            if (!rm)
+                return;
+            auto settings = rm->getSettings();
+            settings.depth_view_min = depth_min;
+            settings.depth_view_max = depth_max;
+            lfs::vis::sanitizeDepthViewSettings(settings);
+            rm->updateSettings(settings, lfs::vis::DirtyFlag::ALL);
+        },
+        nb::arg("depth_min"), nb::arg("depth_max"), "Set depth-map visualization range");
+
+    m.def(
+        "get_depth_view_mode", []() -> std::string {
+            const auto* rm = lfs::python::get_rendering_manager();
+            if (!rm)
+                return "palette";
+            const auto& settings = rm->getSettings();
+            return settings.depth_visualization_mode == lfs::rendering::DepthVisualizationMode::Grayscale
+                       ? "gray"
+                       : "palette";
+        },
+        "Get depth-map visualization mode: 'palette' or 'gray'");
+
+    m.def(
+        "set_depth_view_mode", [](const std::string& mode) {
+            auto* rm = lfs::python::get_rendering_manager();
+            if (!rm)
+                return;
+            auto settings = rm->getSettings();
+            if (mode == "palette" || mode == "color" || mode == "current") {
+                settings.depth_visualization_mode = lfs::rendering::DepthVisualizationMode::Palette;
+            } else if (mode == "gray" || mode == "grayscale") {
+                settings.depth_visualization_mode = lfs::rendering::DepthVisualizationMode::Grayscale;
+            } else {
+                throw nb::value_error("Depth view mode must be 'palette' or 'gray'");
+            }
+            rm->updateSettings(settings, lfs::vis::DirtyFlag::ALL);
+        },
+        nb::arg("mode"), "Set depth-map visualization mode");
 
     m.def(
         "set_orthographic", [](bool ortho) {
@@ -1850,6 +1918,7 @@ NB_MODULE(lichtfeld, m) {
                     case lfs::core::NodeType::SPLAT: type_name = "SPLAT"; break;
                     case lfs::core::NodeType::POINTCLOUD: type_name = "POINTCLOUD"; break;
                     case lfs::core::NodeType::GROUP: type_name = "GROUP"; break;
+                    case lfs::core::NodeType::PLY_SEQUENCE: type_name = "PLY_SEQUENCE"; break;
                     case lfs::core::NodeType::CROPBOX: type_name = "CROPBOX"; break;
                     case lfs::core::NodeType::ELLIPSOID: type_name = "ELLIPSOID"; break;
                     case lfs::core::NodeType::DATASET: type_name = "DATASET"; break;

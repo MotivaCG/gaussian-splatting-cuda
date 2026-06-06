@@ -147,6 +147,8 @@ namespace lfs::vis {
             SplatSimplifyStateValue,
             ScriptsGeneration,
             LanguageGeneration,
+            RenderSettingsGeneration,
+            ViewportToolbarGeneration,
         };
 
         AppStore();
@@ -182,6 +184,8 @@ namespace lfs::vis {
         lfs::core::reactive::Observable<TaskProgressState> splat_simplify_state;
         lfs::core::reactive::Observable<std::uint64_t> scripts_generation;
         lfs::core::reactive::Observable<std::uint64_t> language_generation;
+        lfs::core::reactive::Observable<std::uint64_t> render_settings_generation;
+        lfs::core::reactive::Observable<std::uint64_t> viewport_toolbar_generation;
 
     private:
         lfs::core::reactive::Store store_;
@@ -189,5 +193,6 @@ namespace lfs::vis {
 
     LFS_VIS_API AppStore& app_store();
     LFS_VIS_API void publish_language_generation();
+    LFS_VIS_API void publish_viewport_toolbar_generation();
 
 } // namespace lfs::vis

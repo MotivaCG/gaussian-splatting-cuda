@@ -248,6 +248,9 @@ namespace lfs::vis::gui {
             if (scope.rfind("vulkan.", 0) == 0) {
                 return firstDotSegments(scope, 3);
             }
+            if (scope == "shared.scratch" && !label.empty()) {
+                return "shared.scratch." + std::string(label);
+            }
             if (scope.rfind("train.", 0) == 0 || scope.find("/train.") != std::string_view::npos) {
                 return firstScopeSegments(lastTrainScopeComponent(scope), 2);
             }
@@ -484,7 +487,12 @@ namespace lfs::vis::gui {
                       });
 
             if (unattributed_balance > 0) {
-                model.entries.push_back({"not attributed by profiler", unattributed_balance, true, false});
+                // process_used is the NVML per-PID reading: CUDA context working set,
+                // driver-internal reservations, and heap fragmentation no per-allocation
+                // hook can observe. After every itemizable source is rowed above, this
+                // remainder is genuinely untrackable rather than a profiler miss.
+                model.entries.push_back(
+                    {"driver/context reserved (NVML, untracked)", unattributed_balance, true, false});
             }
 
             std::size_t row_sum = tracked_total;

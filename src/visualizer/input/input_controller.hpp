@@ -31,7 +31,6 @@ namespace lfs::vis {
 
     // Forward declarations
     namespace tools {
-        class BrushTool;
         class AlignTool;
         class SelectionTool;
     } // namespace tools
@@ -49,11 +48,6 @@ namespace lfs::vis {
         ~InputController();
 
         void initialize();
-
-        // Set brush tool
-        void setBrushTool(std::shared_ptr<tools::BrushTool> tool) {
-            brush_tool_ = tool;
-        }
 
         // Set align tool
         void setAlignTool(std::shared_ptr<tools::AlignTool> tool) {
@@ -78,6 +72,7 @@ namespace lfs::vis {
         void setFocusedSplitPanel(const SplitViewPanelId panel) {
             focusSplitPanel(panel);
         }
+        void applySplitterCursorOverride() const;
 
         void toggleIndependentSplitView() {
             lfs::core::events::cmd::ToggleIndependentSplitView{.viewport = &viewport_}.emit();
@@ -128,6 +123,7 @@ namespace lfs::vis {
         void handleKey(int physical_key, int logical_key, int scancode, int action, int mods);
         void handleFileDrop(const std::vector<std::string>& paths);
         void onWindowFocusLost();
+        bool focusSelection();
 
     private:
         struct PanelInteractionState {
@@ -156,7 +152,7 @@ namespace lfs::vis {
         void updateCameraSpeed(bool increase);
         void updateZoomSpeed(bool increase);
         void publishCameraMove(Viewport* target_viewport = nullptr);
-        bool isNearSplitter(double x) const;
+        bool isNearSplitter(double x, double y) const;
         int getModifierKeys() const;
         bool isKeyPressed(int app_key) const;
         bool isMouseButtonPressed(int app_button) const;
@@ -190,7 +186,6 @@ namespace lfs::vis {
         input::InputBindings bindings_;
 
         // Tool support
-        std::shared_ptr<tools::BrushTool> brush_tool_;
         std::shared_ptr<tools::AlignTool> align_tool_;
         std::shared_ptr<tools::SelectionTool> selection_tool_;
         ToolContext* tool_context_ = nullptr;
@@ -207,8 +202,7 @@ namespace lfs::vis {
             Rotate,
             Orbit,
             Gizmo,
-            Splitter,
-            Brush
+            Splitter
         };
         DragMode drag_mode_ = DragMode::None;
         CameraNavigationMode camera_navigation_mode_ = CameraNavigationMode::Orbit;
@@ -254,7 +248,7 @@ namespace lfs::vis {
 
         // Cached movement key bindings, indexed by ToolMode. Refreshed on
         // binding change; read site picks the cache for the current tool mode
-        // so a key rebound only in GLOBAL doesn't leak into Selection/Brush/etc.
+        // so a key rebound only in GLOBAL doesn't leak into tool-local modes.
         struct MovementKeys {
             int forward = -1, backward = -1, left = -1, right = -1, up = -1, down = -1;
         };

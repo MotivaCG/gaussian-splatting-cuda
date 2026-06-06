@@ -21,15 +21,15 @@ namespace lfs::vis::input {
 
     enum class ToolMode {
         GLOBAL = 0,
-        SELECTION,
-        BRUSH,
-        TRANSLATE,
-        ROTATE,
-        SCALE,
-        ALIGN,
-        CROP_BOX,
+        SELECTION = 1,
+        TRANSLATE = 3,
+        ROTATE = 4,
+        SCALE = 5,
+        ALIGN = 6,
+        CROP_BOX = 7,
     };
 
+    // Highest persisted ToolMode value plus one. Value 2 was the removed brush tool mode.
     inline constexpr size_t kToolModeCount = 8;
 
     enum class Action {
@@ -77,8 +77,7 @@ namespace lfs::vis::input {
         TOGGLE_SELECTION_CROP_FILTER,
         // Tools
         BRUSH_RESIZE,
-        CYCLE_BRUSH_MODE,
-        CONFIRM_POLYGON,
+        CONFIRM_POLYGON = 40,
         CANCEL_POLYGON,
         UNDO_POLYGON_VERTEX,
         CYCLE_SELECTION_VIS,
@@ -110,12 +109,12 @@ namespace lfs::vis::input {
         TOOL_ROTATE,
         TOOL_SCALE,
         TOOL_MIRROR,
-        TOOL_BRUSH,
-        TOOL_ALIGN,
+        TOOL_ALIGN = 67,
         // Pie menu
         PIE_MENU,
         DEPTH_ADJUST_NEAR, // Deprecated: migrated to DEPTH_ADJUST_FAR on load
         CAMERA_RESET_HOME,
+        HISTOGRAM_ZOOM_MARKED,
 
     };
 
@@ -194,7 +193,6 @@ namespace lfs::vis::input {
         Selection,
         SelectionGlobal,
         Depth,
-        Brush,
         CropBox,
         Editing,
         ViewGlobal,

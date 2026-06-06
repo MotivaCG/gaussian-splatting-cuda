@@ -26,11 +26,13 @@ namespace lfs::vis::input {
 
     namespace {
 
-        constexpr int PROFILE_VERSION = 13; // Version 13 adds CAMERA_SET_HOME action.
-        constexpr std::array<ToolMode, 8> ALL_MODES = {
+        constexpr int PROFILE_VERSION = 15; // Version 15 adds crop apply Enter bindings.
+        constexpr int REMOVED_TOOL_MODE_2 = 2;
+        constexpr int REMOVED_ACTION_39 = 39;
+        constexpr int REMOVED_ACTION_66 = 66;
+        constexpr std::array<ToolMode, 7> ALL_MODES = {
             ToolMode::GLOBAL,
             ToolMode::SELECTION,
-            ToolMode::BRUSH,
             ToolMode::ALIGN,
             ToolMode::CROP_BOX,
             ToolMode::TRANSLATE,
@@ -49,9 +51,8 @@ namespace lfs::vis::input {
             ToolMode::ROTATE,
             ToolMode::SCALE,
         };
-        constexpr std::array<ToolMode, 4> DELETE_GAUSSIANS_MODES = {
+        constexpr std::array<ToolMode, 3> DELETE_GAUSSIANS_MODES = {
             ToolMode::SELECTION,
-            ToolMode::BRUSH,
             ToolMode::ALIGN,
             ToolMode::CROP_BOX,
         };
@@ -70,7 +71,7 @@ namespace lfs::vis::input {
         [[nodiscard]] std::optional<Action> findActionByDescription(std::string_view description) {
             static const auto* const table = [] {
                 auto* const m = new std::unordered_map<std::string, Action>();
-                constexpr int kActionCount = static_cast<int>(Action::DEPTH_ADJUST_NEAR) + 1;
+                constexpr int kActionCount = static_cast<int>(Action::HISTOGRAM_ZOOM_MARKED) + 1;
                 for (int i = 0; i < kActionCount; ++i) {
                     const auto a = static_cast<Action>(i);
                     m->emplace(toLowerCopy(getActionName(a)), a);
@@ -362,10 +363,19 @@ namespace lfs::vis::input {
             bindings_.clear();
 
             for (const auto& b : j["bindings"]) {
+                const int mode_value = b.value("mode", 0);
+                const int action_value = b["action"].get<int>();
+                if (mode_value == REMOVED_TOOL_MODE_2 ||
+                    action_value == REMOVED_ACTION_39 ||
+                    action_value == REMOVED_ACTION_66) {
+                    LOG_INFO("Dropping input binding for removed tool/action");
+                    continue;
+                }
+
                 Binding binding;
                 // Version 1 had no mode field, default to GLOBAL
-                binding.mode = static_cast<ToolMode>(b.value("mode", 0));
-                binding.action = static_cast<Action>(b["action"].get<int>());
+                binding.mode = static_cast<ToolMode>(mode_value);
+                binding.action = static_cast<Action>(action_value);
                 binding.description = b.value("description", getActionName(binding.action));
 
                 // Cross-version safeguard: if the stored description doesn't
@@ -480,17 +490,24 @@ namespace lfs::vis::input {
                 def.action == Action::BRUSH_RESIZE &&
                 std::holds_alternative<MouseScrollTrigger>(def.trigger) &&
                 std::get<MouseScrollTrigger>(def.trigger).modifiers == MODIFIER_SHIFT;
+            const auto* key_trigger = std::get_if<KeyTrigger>(&def.trigger);
+            const bool crop_apply_num_enter =
+                def.action == Action::APPLY_CROP_BOX &&
+                key_trigger &&
+                key_trigger->key == KEY_KP_ENTER;
             const bool should_add =
                 (version < 6 && def.action == Action::CAMERA_ROLL) ||
                 (version < 7 && def.action == Action::BRUSH_RESIZE && !brush_resize_shift_scroll) ||
                 (version < 9 && def.action == Action::CONFIRM_POLYGON) ||
                 (version < 10 && def.action == Action::UNDO_POLYGON_VERTEX) ||
                 (version < 12 && brush_resize_shift_scroll) ||
-                (version < 13 && def.action == Action::CAMERA_SET_HOME);
+                (version < 13 && def.action == Action::CAMERA_SET_HOME) ||
+                (version < 14 && def.action == Action::HISTOGRAM_ZOOM_MARKED) ||
+                (version < 15 && def.action == Action::APPLY_CROP_BOX);
             if (!should_add) {
                 continue;
             }
-            if (!brush_resize_shift_scroll) {
+            if (!brush_resize_shift_scroll && !crop_apply_num_enter) {
                 const bool action_already_bound = std::ranges::any_of(
                     bindings_, [&](const Binding& current) {
                         return current.mode == def.mode && current.action == def.action;
@@ -980,6 +997,7 @@ namespace lfs::vis::input {
             // UI
             {KeyTrigger{KEY_F12, MODIFIER_NONE}, Action::TOGGLE_UI, "Hide UI"},
             {KeyTrigger{KEY_F11, MODIFIER_NONE}, Action::TOGGLE_FULLSCREEN, "Fullscreen"},
+            {MouseScrollTrigger{MODIFIER_CTRL}, Action::HISTOGRAM_ZOOM_MARKED, "Zoom histogram at cursor"},
             // Sequencer
             {KeyTrigger{KEY_K, MODIFIER_NONE}, Action::SEQUENCER_ADD_KEYFRAME, "Add keyframe"},
             {KeyTrigger{KEY_U, MODIFIER_NONE}, Action::SEQUENCER_UPDATE_KEYFRAME, "Update keyframe"},
@@ -990,8 +1008,7 @@ namespace lfs::vis::input {
             {KeyTrigger{KEY_3}, Action::TOOL_ROTATE, "Rotate"},
             {KeyTrigger{KEY_4}, Action::TOOL_SCALE, "Scale"},
             {KeyTrigger{KEY_5}, Action::TOOL_MIRROR, "Mirror"},
-            {KeyTrigger{KEY_6}, Action::TOOL_BRUSH, "Brush"},
-            {KeyTrigger{KEY_7}, Action::TOOL_ALIGN, "Align"},
+            {KeyTrigger{KEY_6}, Action::TOOL_ALIGN, "Align"},
             {KeyTrigger{KEY_GRAVE_ACCENT}, Action::PIE_MENU, "Pie Menu"},
         };
 
@@ -1004,10 +1021,8 @@ namespace lfs::vis::input {
             {MouseDragTrigger{MouseButton::LEFT, MODIFIER_SHIFT}, Action::SELECTION_ADD, "Add sel"},
             {MouseDragTrigger{MouseButton::LEFT, MODIFIER_CTRL}, Action::SELECTION_REMOVE, "Remove sel"},
         };
-        for (const auto mode : std::array{ToolMode::SELECTION, ToolMode::BRUSH}) {
-            for (const auto& b : selection_drags) {
-                profile.bindings.push_back({mode, b.trigger, b.action, b.desc});
-            }
+        for (const auto& b : selection_drags) {
+            profile.bindings.push_back({ToolMode::SELECTION, b.trigger, b.action, b.desc});
         }
 
         profile.bindings.push_back({ToolMode::SELECTION,
@@ -1038,30 +1053,22 @@ namespace lfs::vis::input {
                                     KeyTrigger{KEY_C, MODIFIER_CTRL | MODIFIER_ALT},
                                     Action::TOGGLE_SELECTION_CROP_FILTER,
                                     "Crop filter"});
-        profile.bindings.push_back({ToolMode::BRUSH,
-                                    MouseScrollTrigger{MODIFIER_CTRL},
-                                    Action::BRUSH_RESIZE,
-                                    "Brush size"});
-        profile.bindings.push_back({ToolMode::BRUSH,
-                                    MouseScrollTrigger{MODIFIER_SHIFT},
-                                    Action::BRUSH_RESIZE,
-                                    "Brush size"});
-        profile.bindings.push_back({ToolMode::BRUSH,
-                                    KeyTrigger{KEY_B, MODIFIER_NONE},
-                                    Action::CYCLE_BRUSH_MODE,
-                                    "Brush mode"});
         profile.bindings.push_back({ToolMode::CROP_BOX,
                                     KeyTrigger{KEY_ENTER, MODIFIER_NONE},
                                     Action::APPLY_CROP_BOX,
                                     "Apply/confirm"});
+        profile.bindings.push_back({ToolMode::CROP_BOX,
+                                    KeyTrigger{KEY_KP_ENTER, MODIFIER_NONE},
+                                    Action::APPLY_CROP_BOX,
+                                    "Apply/confirm"});
 
-        // Node picking only for transform modes (not selection/cropbox/brush/align)
+        // Node picking only for transform modes (not selection/cropbox/align)
         for (const auto mode : NODE_PICK_MODES) {
             profile.bindings.push_back({mode, MouseButtonTrigger{MouseButton::LEFT, MODIFIER_NONE}, Action::NODE_PICK, "Pick node"});
             profile.bindings.push_back({mode, MouseDragTrigger{MouseButton::LEFT, MODIFIER_NONE}, Action::NODE_RECT_SELECT, "Rectangle select nodes"});
         }
 
-        // Delete key: GLOBAL/transform modes delete node, SELECTION/BRUSH delete Gaussians
+        // Delete key: GLOBAL/transform modes delete node, selection-like modes delete Gaussians.
         for (const auto mode : DELETE_NODE_MODES) {
             profile.bindings.push_back({mode, KeyTrigger{KEY_DELETE, MODIFIER_NONE}, Action::DELETE_NODE, "Delete node"});
         }
@@ -1115,7 +1122,6 @@ namespace lfs::vis::input {
         case Action::TOGGLE_SELECTION_DEPTH_FILTER: return "Toggle Depth Box";
         case Action::TOGGLE_SELECTION_CROP_FILTER: return "Toggle Selection Crop Filter";
         case Action::BRUSH_RESIZE: return "Resize Brush";
-        case Action::CYCLE_BRUSH_MODE: return "Cycle Brush Mode";
         case Action::CONFIRM_POLYGON: return "Confirm Polygon";
         case Action::CANCEL_POLYGON: return "Cancel Polygon";
         case Action::UNDO_POLYGON_VERTEX: return "Undo Polygon Vertex / Cancel Selection";
@@ -1142,9 +1148,9 @@ namespace lfs::vis::input {
         case Action::TOOL_ROTATE: return "Rotate Tool";
         case Action::TOOL_SCALE: return "Scale Tool";
         case Action::TOOL_MIRROR: return "Mirror Tool";
-        case Action::TOOL_BRUSH: return "Brush Tool";
         case Action::TOOL_ALIGN: return "Align Tool";
         case Action::PIE_MENU: return "Pie Menu";
+        case Action::HISTOGRAM_ZOOM_MARKED: return "Zoom Histogram at Cursor";
         default: return "Unknown";
         }
     }
@@ -1192,7 +1198,6 @@ namespace lfs::vis::input {
         case Action::TOGGLE_SELECTION_DEPTH_FILTER: return "toggle_selection_depth_filter";
         case Action::TOGGLE_SELECTION_CROP_FILTER: return "toggle_selection_crop_filter";
         case Action::BRUSH_RESIZE: return "brush_resize";
-        case Action::CYCLE_BRUSH_MODE: return "cycle_brush_mode";
         case Action::CONFIRM_POLYGON: return "confirm_polygon";
         case Action::CANCEL_POLYGON: return "cancel_polygon";
         case Action::UNDO_POLYGON_VERTEX: return "undo_polygon_vertex";
@@ -1219,9 +1224,9 @@ namespace lfs::vis::input {
         case Action::TOOL_ROTATE: return "tool_rotate";
         case Action::TOOL_SCALE: return "tool_scale";
         case Action::TOOL_MIRROR: return "tool_mirror";
-        case Action::TOOL_BRUSH: return "tool_brush";
         case Action::TOOL_ALIGN: return "tool_align";
         case Action::PIE_MENU: return "pie_menu";
+        case Action::HISTOGRAM_ZOOM_MARKED: return "histogram_zoom_marked";
         default: return {};
         }
     }
@@ -1229,7 +1234,7 @@ namespace lfs::vis::input {
     std::optional<Action> actionFromName(std::string_view name) {
         static const auto table = [] {
             std::unordered_map<std::string, Action> m;
-            for (int i = 0; i <= static_cast<int>(Action::PIE_MENU); ++i) {
+            for (int i = 0; i <= static_cast<int>(Action::HISTOGRAM_ZOOM_MARKED); ++i) {
                 const auto action = static_cast<Action>(i);
                 const auto key = actionNameKey(action);
                 if (!key.empty())
@@ -1263,7 +1268,6 @@ namespace lfs::vis::input {
         constexpr ToolModeEntry kToolModeEntries[] = {
             {ToolMode::GLOBAL, "global", "Global"},
             {ToolMode::SELECTION, "selection", "Selection"},
-            {ToolMode::BRUSH, "brush", "Brush"},
             {ToolMode::TRANSLATE, "translate", "Translate"},
             {ToolMode::ROTATE, "rotate", "Rotate"},
             {ToolMode::SCALE, "scale", "Scale"},
@@ -1759,11 +1763,7 @@ namespace lfs::vis::input {
 
         static constexpr ActionDescriptor d_brush_scroll{
             .allowed_kinds = K::TRIGGER_KIND_MOUSE_SCROLL,
-            .ui_section = ActionSection::Brush,
-        };
-        static constexpr ActionDescriptor d_brush_key{
-            .allowed_kinds = K::TRIGGER_KIND_KEY,
-            .ui_section = ActionSection::Brush,
+            .ui_section = ActionSection::Selection,
         };
 
         static constexpr ActionDescriptor d_crop_box_key{
@@ -1788,6 +1788,11 @@ namespace lfs::vis::input {
         };
         static constexpr ActionDescriptor d_ui_key{
             .allowed_kinds = K::TRIGGER_KIND_KEY,
+            .inherits_from_global = true,
+            .ui_section = ActionSection::UI,
+        };
+        static constexpr ActionDescriptor d_ui_scroll{
+            .allowed_kinds = K::TRIGGER_KIND_MOUSE_SCROLL,
             .inherits_from_global = true,
             .ui_section = ActionSection::UI,
         };
@@ -1866,8 +1871,6 @@ namespace lfs::vis::input {
 
         case Action::BRUSH_RESIZE:
             return d_brush_scroll;
-        case Action::CYCLE_BRUSH_MODE:
-            return d_brush_key;
 
         case Action::CONFIRM_POLYGON:
             return d_polygon_confirm;
@@ -1899,6 +1902,8 @@ namespace lfs::vis::input {
         case Action::TOGGLE_UI:
         case Action::TOGGLE_FULLSCREEN:
             return d_ui_key;
+        case Action::HISTOGRAM_ZOOM_MARKED:
+            return d_ui_scroll;
 
         case Action::SEQUENCER_ADD_KEYFRAME:
         case Action::SEQUENCER_UPDATE_KEYFRAME:
@@ -1910,7 +1915,6 @@ namespace lfs::vis::input {
         case Action::TOOL_ROTATE:
         case Action::TOOL_SCALE:
         case Action::TOOL_MIRROR:
-        case Action::TOOL_BRUSH:
         case Action::TOOL_ALIGN:
             return d_tools_key;
 
@@ -1927,7 +1931,6 @@ namespace lfs::vis::input {
         case Action::TOOL_ROTATE:
         case Action::TOOL_SCALE:
         case Action::TOOL_MIRROR:
-        case Action::TOOL_BRUSH:
         case Action::TOOL_ALIGN:
         case Action::TOGGLE_UI:
         case Action::TOGGLE_FULLSCREEN:

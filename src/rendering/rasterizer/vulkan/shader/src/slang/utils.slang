@@ -983,8 +983,8 @@ float2 ellipse_range_bound(
     float bv0 = -b*v0, bv1 = -b*v1;
 
     float inv_a = 1.0f / a;
-    float x0 = inv_a * (bv0 - sqrt(bv0*bv0 - a*(c*v0*v0-1.f)));
-    float x1 = inv_a * (bv1 + sqrt(bv1*bv1 - a*(c*v1*v1-1.f)));
+    float x0 = inv_a * (bv0 - sqrt(max(bv0*bv0 - a*(c*v0*v0-1.f), 0.0f)));
+    float x1 = inv_a * (bv1 + sqrt(max(bv1*bv1 - a*(c*v1*v1-1.f), 0.0f)));
 
     return float2(x0, x1);
 
@@ -1044,6 +1044,10 @@ struct Uniforms {
     uint sort_capacity;
     uint shN_layout_slots;
     uint mip_filter;
+    uint render_origin_x;
+    uint render_origin_y;
+    uint camera_width;
+    uint camera_height;
     uint pad2;
     float fx;
     float fy;
@@ -1073,7 +1077,8 @@ static const uint OVERLAY_PARAM_CURSOR_FLAGS = 21;
 static const uint OVERLAY_PARAM_MARKER_FLAGS = 22;
 static const uint OVERLAY_PARAM_SELECTION_CURSOR = 23;
 static const uint OVERLAY_PARAM_SELECTION_FLAGS = 24;
-static const uint OVERLAY_PARAM_COUNT = 25;
+static const uint OVERLAY_PARAM_VISIBILITY_FLAGS = 25;
+static const uint OVERLAY_PARAM_COUNT = 26;
 
 [ForceInline]
 bool overlay_enabled(float value)

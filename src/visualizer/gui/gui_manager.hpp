@@ -54,6 +54,7 @@ namespace lfs::core {
 namespace lfs::vis {
     class VisualizerImpl;
     class VulkanContext;
+    class WindowManager;
     struct VulkanSceneInteropTarget;
 
     namespace gui {
@@ -77,6 +78,9 @@ namespace lfs::vis {
             void init();
             void shutdown();
             void render();
+            void updateInteractiveTransitions();
+            [[nodiscard]] bool isInteractiveTransitionSettling() const;
+            void syncVisiblePanelsBeforeSceneRender();
             void setRmlResizeDeferring(bool defer) { rmlui_manager_.setResizeDeferring(defer); }
 
             // Sub-manager access
@@ -110,6 +114,8 @@ namespace lfs::vis {
 
             [[nodiscard]] SequencerController& sequencer() { return sequencer_ui_.controller(); }
             [[nodiscard]] const SequencerController& sequencer() const { return sequencer_ui_.controller(); }
+            [[nodiscard]] SequencerUIManager& sequencerUI() { return sequencer_ui_; }
+            [[nodiscard]] const SequencerUIManager& sequencerUI() const { return sequencer_ui_; }
 
             [[nodiscard]] panels::SequencerUIState& getSequencerUIState() { return sequencer_ui_state_; }
             [[nodiscard]] const panels::SequencerUIState& getSequencerUIState() const { return sequencer_ui_state_; }
@@ -223,6 +229,22 @@ namespace lfs::vis {
 
             [[nodiscard]] bool isVramHudOverlayVisible() const;
             [[nodiscard]] bool isVramHudPublishDue(std::chrono::steady_clock::time_point now) const;
+            [[nodiscard]] bool drainVulkanFramesForInteractiveTransition(
+                lfs::vis::WindowManager& window_manager,
+                const char* transition_name);
+            void applyInteractiveTransitionCooldown(
+                std::chrono::steady_clock::time_point& next_allowed_at,
+                std::chrono::steady_clock::time_point now,
+                bool training_active);
+            void queueUiVisibilityToggle();
+            void requestUiVisibilityToggle();
+            void updateUiVisibilityTransition();
+            void queueFullscreenToggle();
+            void requestFullscreenToggle();
+            void updateFullscreenTransition();
+            void beginInteractiveTransitionGuard();
+            void updateInteractiveTransitionGuard();
+            void endInteractiveTransitionGuard();
 
             struct EditorContextUpdateStamp {
                 bool valid = false;
@@ -253,6 +275,13 @@ namespace lfs::vis {
             bool show_vram_hud_ = true;
             bool vram_hud_visible_published_ = false;
             std::chrono::steady_clock::time_point next_vram_hud_publish_{};
+            std::chrono::steady_clock::time_point ui_toggle_next_allowed_at_{};
+            bool ui_toggle_pending_ = false;
+            std::chrono::steady_clock::time_point fullscreen_toggle_next_allowed_at_{};
+            std::chrono::steady_clock::time_point interactive_transition_guard_until_{};
+            bool fullscreen_toggle_pending_ = false;
+            bool fullscreen_target_state_ = false;
+            bool interactive_transition_resume_training_ = false;
             std::optional<AppStore::GTMetricsOverlayConfig> published_gt_metrics_overlay_config_;
             bool menu_labels_synced_ = false;
             std::uint64_t synced_menu_entries_version_ = 0;
@@ -380,6 +409,7 @@ namespace lfs::vis {
                 RightPanelPointerRegion::None;
             bool bottom_dock_pointer_live_capture_ = false;
             std::string last_ui_layout_active_tab_;
+            std::uint64_t last_pre_scene_panel_sync_generation_ = 0;
 
             struct DevResourceWatchState {
                 bool enabled = false;

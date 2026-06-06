@@ -1948,6 +1948,16 @@ def save_json_file_dialog(default_name: str = 'config.json') -> str:
     Open a save file dialog for JSON files. Returns empty string if cancelled.
     """
 
+def save_png_file_dialog(default_name: str = 'export.png') -> str:
+    """
+    Open a save file dialog for PNG images. Returns empty string if cancelled.
+    """
+
+def save_jpg_file_dialog(default_name: str = 'export.jpg') -> str:
+    """
+    Open a save file dialog for JPEG images. Returns empty string if cancelled.
+    """
+
 def save_ply_file_dialog(default_name: str = 'export') -> str:
     """
     Open a save file dialog for PLY files. Returns empty string if cancelled.
@@ -2003,7 +2013,7 @@ def open_url(url: str) -> None:
 
 def set_tool(tool: str) -> None:
     """
-    Switch to a toolbar tool (none, selection, translate, rotate, scale, mirror, brush, align, cropbox)
+    Switch to a toolbar tool (none, selection, translate, rotate, scale, mirror, align, cropbox)
     """
 
 class Key(enum.Enum):
@@ -2156,6 +2166,18 @@ def reveal_in_file_manager(path: str) -> bool:
 
 def apply_cropbox() -> None:
     """Apply the selected cropbox"""
+
+def set_crop_tool_shape(shape: str) -> None:
+    """Set the active crop tool shape: box or ellipsoid"""
+
+def get_crop_tool_shape() -> str:
+    """Get the active crop tool shape"""
+
+def apply_crop_tool() -> None:
+    """Apply the active crop tool primitive"""
+
+def fit_crop_tool(use_percentile: bool = False) -> None:
+    """Fit the active crop tool primitive to the selected node"""
 
 def fit_cropbox_to_scene(use_percentile: bool = False) -> None:
     """Fit cropbox to scene bounds"""
@@ -2317,6 +2339,13 @@ class SequencerUIState:
 
     @show_film_strip.setter
     def show_film_strip(self, arg: bool, /) -> None: ...
+
+    @property
+    def sequence_fps(self) -> float:
+        """Playback FPS for loaded PLY sequences"""
+
+    @sequence_fps.setter
+    def sequence_fps(self, arg: float, /) -> None: ...
 
     @property
     def selected_keyframe(self) -> int: ...

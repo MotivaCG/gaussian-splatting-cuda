@@ -740,8 +740,13 @@ namespace lfs::vis::gui {
         const int render_h = static_cast<int>(h_px);
         const bool theme_current =
             has_theme_signature_ && rml_theme::currentThemeSignature() == last_theme_signature_;
+        const auto now = std::chrono::steady_clock::now();
+        const bool refresh_due =
+            next_refresh_at_ == std::chrono::steady_clock::time_point{} ||
+            now >= next_refresh_at_;
         const bool can_reuse = theme_current && !model_dirty_ && !animation_active_ &&
-                               render_w == last_render_w_ && render_h == last_render_h_;
+                               !refresh_due && render_w == last_render_w_ &&
+                               render_h == last_render_h_;
         if (!can_reuse) {
             render(ctx, x, y, w_px, h_px, screen_w, screen_h);
             return;

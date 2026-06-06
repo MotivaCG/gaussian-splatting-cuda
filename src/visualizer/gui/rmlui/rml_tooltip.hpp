@@ -26,9 +26,8 @@ namespace lfs::vis::gui {
     // hovered context and is positioned in that context's local coordinates.
     class RmlTooltipController {
     public:
-        // Called once per input pass per element. Pass {} / nullptr when no
-        // tooltip should be shown (or skip the call — apply() will also clear
-        // state if setHover() was not called this frame).
+        // Called from input when the hovered tooltip target changes. Pass
+        // {} / nullptr when no tooltip should be shown.
         void setHover(const std::string& text, const void* target);
 
         // Called once per render pass. Creates a `frame-tooltip` div under
@@ -38,7 +37,7 @@ namespace lfs::vis::gui {
         bool apply(Rml::Element* body, int mouse_x, int mouse_y,
                    int doc_w, int doc_h);
         [[nodiscard]] bool hasActiveState() const {
-            return seen_this_frame_ || visible_ || pending_target_ != nullptr || !pending_text_.empty();
+            return visible_ || pending_target_ != nullptr || !pending_text_.empty();
         }
         [[nodiscard]] bool needsFrame() const {
             return pending_target_ != nullptr && !pending_text_.empty() && !visible_;
@@ -48,7 +47,6 @@ namespace lfs::vis::gui {
         std::string pending_text_;
         const void* pending_target_ = nullptr;
         std::chrono::steady_clock::time_point hover_started_at_{};
-        bool seen_this_frame_ = false;
 
         bool visible_ = false;
         std::string applied_text_;

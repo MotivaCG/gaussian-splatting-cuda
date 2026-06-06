@@ -501,7 +501,8 @@ namespace lfs::vis {
 
             const auto settings = rendering_manager->getSettings();
             if (lfs::rendering::isVkSplatBackend(settings.raster_backend)) {
-                LOG_DEBUG("SelectionService: VkSplat polygon selection unavailable: {}", result.error());
+                LOG_DEBUG("SelectionService: VkSplat polygon selection query unavailable, falling back to screen-position path: {}",
+                          result.error());
             }
             return std::nullopt;
         }
@@ -2075,7 +2076,7 @@ namespace lfs::vis {
             return false;
         }
         const auto settings = rendering_manager_->getSettings();
-        if (!settings.point_cloud_mode && !testing_screen_positions_ && !testing_viewport_) {
+        if (!testing_screen_positions_ && !testing_viewport_) {
             Viewport projection_viewport = *session.viewport_context->viewport;
             projection_viewport.windowSize = {info.render_width, info.render_height};
             const auto frame_view = frameViewFromViewport(
@@ -2139,7 +2140,7 @@ namespace lfs::vis {
             std::max(render_start.y, render_end.y),
         }};
         const auto settings = rendering_manager_->getSettings();
-        if (!settings.point_cloud_mode && !testing_screen_positions_ && !testing_viewport_) {
+        if (!testing_screen_positions_ && !testing_viewport_) {
             Viewport projection_viewport = *session.viewport_context->viewport;
             projection_viewport.windowSize = {info.render_width, info.render_height};
             const auto frame_view = frameViewFromViewport(
@@ -2189,7 +2190,7 @@ namespace lfs::vis {
         }
 
         const auto settings = rendering_manager_->getSettings();
-        if (!settings.point_cloud_mode && !testing_screen_positions_ && !testing_viewport_) {
+        if (!testing_screen_positions_ && !testing_viewport_) {
             Viewport projection_viewport = *session.viewport_context->viewport;
             projection_viewport.windowSize = {info.render_width, info.render_height};
             const auto frame_view = frameViewFromViewport(
@@ -2250,7 +2251,7 @@ namespace lfs::vis {
             render_points.emplace_back(projected->x, projected->y);
         }
 
-        if (!settings.point_cloud_mode && !testing_screen_positions_ && !testing_viewport_) {
+        if (!testing_screen_positions_ && !testing_viewport_) {
             const auto frame_view = frameViewFromViewport(
                 viewportDataFromViewer(projection_viewport, session.viewport_context->info, settings),
                 settings.background_color,

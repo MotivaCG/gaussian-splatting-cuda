@@ -43,8 +43,6 @@ _STEP_CONFIG = {
 
 _AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
 _NUMERIC_TRANSFORM_TOOL_IDS = ("builtin.translate", "builtin.rotate", "builtin.scale")
-_MIRROR_TOOL_ID = "builtin.mirror"
-_TRANSFORM_OVERLAY_TOOL_IDS = (*_NUMERIC_TRANSFORM_TOOL_IDS, _MIRROR_TOOL_ID)
 _SPACE_LOCAL = 0
 _SPACE_WORLD = 1
 _PIVOT_ORIGIN = 0
@@ -168,11 +166,6 @@ class TransformControlsController:
         model.bind_func("transform_show_rotate", lambda: self._active_tool == "builtin.rotate")
         model.bind_func("transform_show_scale", lambda: self._active_tool == "builtin.scale")
         model.bind_func("transform_show_actions", lambda: self._active_tool in _NUMERIC_TRANSFORM_TOOL_IDS)
-        model.bind_func("transform_submode_label", self._submode_label)
-        model.bind_func("transform_submode_tooltip_key", self._submode_tooltip_key)
-        model.bind_func("transform_space_label", self._space_label)
-        model.bind_func("transform_pivot_label", self._pivot_label)
-
         for axis in ("x", "y", "z"):
             idx = _AXIS_INDEX[axis]
             model.bind(
@@ -250,7 +243,7 @@ class TransformControlsController:
         if active_tool is _MISSING:
             active_tool = lf.ui.get_active_tool() or ""
         self._active_tool = active_tool or ""
-        active_transform_tool = self._active_tool in _TRANSFORM_OVERLAY_TOOL_IDS
+        active_transform_tool = self._active_tool in _NUMERIC_TRANSFORM_TOOL_IDS
         wrap = doc.get_element_by_id("transform-block")
         if not active_transform_tool and not self._visible:
             if wrap:
@@ -284,10 +277,6 @@ class TransformControlsController:
 
         if tuple(self._selected) != prev_selected:
             self._commit_active_edit()
-
-        if self._active_tool == _MIRROR_TOOL_ID:
-            self._step_repeat_prop = None
-            return self._dirty_if_display_state_changed(dirty)
 
         if len(self._selected) == 1:
             self._update_single_node()
@@ -323,29 +312,8 @@ class TransformControlsController:
             "builtin.translate": _ui_label("toolbar.translate", "Move"),
             "builtin.rotate": _ui_label("toolbar.rotate", "Rotate"),
             "builtin.scale": _ui_label("toolbar.scale", "Scale"),
-            _MIRROR_TOOL_ID: _ui_label("toolbar.mirror", "Mirror"),
         }
         return labels.get(self._active_tool, _ui_label("transform.tool", "Transform"))
-
-    def _space_label(self):
-        if self._transform_space == _SPACE_LOCAL:
-            return _ui_label("toolbar.local_space", "Local")
-        return _ui_label("toolbar.world_space", "World")
-
-    def _submode_label(self):
-        if self._active_tool == _MIRROR_TOOL_ID:
-            return _ui_label("transform.axis", "Axis")
-        return _ui_label("transform.space_plain", "Space")
-
-    def _submode_tooltip_key(self):
-        if self._active_tool == _MIRROR_TOOL_ID:
-            return "tooltip.transform_axis"
-        return "tooltip.transform_space"
-
-    def _pivot_label(self):
-        if self._pivot_mode == _PIVOT_BOUNDS:
-            return _ui_label("toolbar.bounds_center_pivot", "Bounds")
-        return _ui_label("toolbar.origin_pivot", "Origin")
 
     def _current_transform_space(self) -> int:
         value = _native_store_value("transform_space", _MISSING)
@@ -487,10 +455,6 @@ class TransformControlsController:
         self._handle.dirty("transform_show_rotate")
         self._handle.dirty("transform_show_scale")
         self._handle.dirty("transform_show_actions")
-        self._handle.dirty("transform_submode_label")
-        self._handle.dirty("transform_submode_tooltip_key")
-        self._handle.dirty("transform_space_label")
-        self._handle.dirty("transform_pivot_label")
 
     def _begin_edit(self):
         if len(self._selected) == 1:

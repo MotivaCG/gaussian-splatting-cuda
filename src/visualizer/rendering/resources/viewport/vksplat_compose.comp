@@ -10,7 +10,7 @@ layout(push_constant) uniform PushConstants {
     vec4 background;
     float depth_min;
     float depth_max;
-    float pad1;
+    uint depth_visualization_mode;
     float pad2;
 } pc;
 
@@ -89,11 +89,9 @@ void main() {
         const bool empty = alpha < 0.02 || depth >= 1.0e9 || depth <= 0.0;
         const float depth_t = empty ? 1.0 : normalizedDepth(depth, lo, hi);
         const float near_t = 1.0 - depth_t;
-        vec3 depth_color = depthPalette(near_t);
-
-        const float band = abs(fract(depth_t * 24.0) - 0.5);
-        const float contour = smoothstep(0.475, 0.5, band);
-        depth_color *= 1.0 - contour * 0.07;
+        vec3 depth_color = pc.depth_visualization_mode == 1u
+                                ? vec3(near_t)
+                                : depthPalette(near_t);
 
         const float coverage = empty ? 0.0 : smoothstep(0.02, 0.72, alpha);
         if (pc.transparent_background != 0u) {

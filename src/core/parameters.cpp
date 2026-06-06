@@ -376,6 +376,9 @@ namespace lfs::core {
                 if (resume_checkpoint.has_value()) {
                     return "--add-splat cannot be used together with --resume";
                 }
+                if (!add_splat_freeze.empty() && add_splat_freeze.size() != add_splat_paths.size()) {
+                    return "--add-splat freeze metadata is inconsistent";
+                }
                 for (const auto& path : add_splat_paths) {
                     if (path.empty()) {
                         return "--add-splat path cannot be empty";

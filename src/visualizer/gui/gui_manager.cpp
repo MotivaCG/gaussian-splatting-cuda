@@ -60,7 +60,6 @@
 #include "scene/scene_manager.hpp"
 #include "scene/scene_render_state.hpp"
 #include "theme/theme.hpp"
-#include "tools/brush_tool.hpp"
 #include "tools/selection_tool.hpp"
 #include "training/trainer.hpp"
 #include "training/training_manager.hpp"
@@ -130,6 +129,10 @@ namespace lfs::vis::gui {
 
     namespace {
         const FrameInputBuffer* s_frame_input = nullptr;
+        constexpr auto kInteractiveTrainingPauseWait = std::chrono::milliseconds(300);
+        constexpr auto kInteractiveTransitionGuardDuration = std::chrono::milliseconds(1200);
+        constexpr auto kInteractiveIdleToggleMinInterval = std::chrono::milliseconds(750);
+        constexpr auto kInteractiveTrainingToggleMinInterval = std::chrono::milliseconds(3000);
 
         void capturePressedKeysForRebinding(InputController& input_controller,
                                             const FrameInputBuffer& input) {
@@ -2198,6 +2201,23 @@ namespace lfs::vis::gui {
                                    4.5f);
             }
 
+            if (gizmo.cropbox_active) {
+                appendProjectedBox(params.overlay_triangles, params, panel, settings,
+                                   gizmo.cropbox_min,
+                                   gizmo.cropbox_max,
+                                   gizmo.cropbox_transform,
+                                   cropGuideColor(glm::vec3(1.0f, 1.0f, 0.0f), false, 0.0f),
+                                   2.0f);
+            }
+
+            if (gizmo.ellipsoid_active) {
+                appendProjectedEllipsoid(params.overlay_triangles, params, panel, settings,
+                                         gizmo.ellipsoid_radii,
+                                         gizmo.ellipsoid_transform,
+                                         cropGuideColor(glm::vec3(0.5f, 0.85f, 1.0f), false, 0.0f),
+                                         2.0f);
+            }
+
             if (!scene_state || !scene_manager) {
                 return;
             }
@@ -3119,6 +3139,15 @@ namespace lfs::vis::gui {
         rml_right_panel_.on_tab_changed = [this](const std::string& id) {
             panel_layout_.setActiveTab(id);
         };
+        rml_right_panel_.on_tab_closed = [this](const std::string& id) {
+            if (id.empty())
+                return;
+            PanelRegistry::instance().set_panel_enabled(id, false);
+            if (panel_layout_.getActiveTab() == id)
+                panel_layout_.setActiveTab({});
+            if (focus_panel_name_ == id)
+                focus_panel_name_.clear();
+        };
         rml_right_panel_.on_splitter_delta = [this](float delta_y) {
             viewer_->getRenderingManager()->setViewportResizeActive(true);
             const auto* mvp = ImGui::GetMainViewport();
@@ -3551,6 +3580,11 @@ namespace lfs::vis::gui {
     }
 
     void GuiManager::shutdown() {
+        endInteractiveTransitionGuard();
+        ui_toggle_pending_ = false;
+        fullscreen_toggle_pending_ = false;
+        interactive_transition_guard_until_ = {};
+
         if (dev_resource_watch_.scan_future.valid())
             dev_resource_watch_.scan_future.wait();
 
@@ -3984,6 +4018,8 @@ namespace lfs::vis::gui {
 
         {
             LOG_TIMER("interop.copyTensorToSurface");
+            assert(target.layout == VK_IMAGE_LAYOUT_GENERAL &&
+                   "CUDA surf2Dwrite requires VK_IMAGE_LAYOUT_GENERAL");
             if (!target.interop.copyTensorToSurface(*vulkan_scene_image_)) {
                 fail_required_interop(std::format("CUDA copy failed: {}", target.interop.lastError()));
             }
@@ -4201,6 +4237,8 @@ namespace lfs::vis::gui {
             target.layout = VK_IMAGE_LAYOUT_GENERAL;
         }
 
+        assert(target.layout == VK_IMAGE_LAYOUT_GENERAL &&
+               "CUDA surf2Dwrite requires VK_IMAGE_LAYOUT_GENERAL");
         if (!target.interop.copyTensorToSurface(*vulkan_split_right_image_)) {
             fail_required_interop(std::format("CUDA copy failed: {}", target.interop.lastError()));
         }
@@ -4415,6 +4453,8 @@ namespace lfs::vis::gui {
             target.layout = VK_IMAGE_LAYOUT_GENERAL;
         }
 
+        assert(target.layout == VK_IMAGE_LAYOUT_GENERAL &&
+               "CUDA surf2Dwrite requires VK_IMAGE_LAYOUT_GENERAL");
         if (!target.interop.copyTensorToSurface(*vulkan_depth_blit_image_)) {
             fail_required_interop(std::format("CUDA copy failed: {}", target.interop.lastError()));
         }
@@ -4729,11 +4769,300 @@ namespace lfs::vis::gui {
         vulkan_viewport_pass_->record(command_buffer, extent, params);
     }
 
+    bool GuiManager::drainVulkanFramesForInteractiveTransition(
+        WindowManager& window_manager,
+        const char* const transition_name) {
+        auto* const vulkan_context = window_manager.getVulkanContext();
+        if (!vulkan_context) {
+            return true;
+        }
+
+        const auto drain_start = std::chrono::steady_clock::now();
+        if (vulkan_context->waitForSubmittedFrames()) {
+            LOG_DEBUG("Vulkan frame drain before {} transition complete: elapsed_ms={:.1f}",
+                      transition_name,
+                      std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - drain_start)
+                          .count());
+            return true;
+        }
+
+        LOG_WARN("Skipping {} transition because Vulkan frame drain failed after {:.1f} ms: {}",
+                 transition_name,
+                 std::chrono::duration<double, std::milli>(
+                     std::chrono::steady_clock::now() - drain_start)
+                     .count(),
+                 vulkan_context->lastError());
+        return false;
+    }
+
+    void GuiManager::applyInteractiveTransitionCooldown(
+        std::chrono::steady_clock::time_point& next_allowed_at,
+        const std::chrono::steady_clock::time_point now,
+        const bool training_active) {
+        next_allowed_at =
+            now + (training_active ? kInteractiveTrainingToggleMinInterval
+                                   : kInteractiveIdleToggleMinInterval);
+        interactive_transition_guard_until_ =
+            std::max(interactive_transition_guard_until_,
+                     now + kInteractiveTransitionGuardDuration);
+    }
+
+    void GuiManager::queueUiVisibilityToggle() {
+        if (!viewer_) {
+            return;
+        }
+
+        if (viewer_->isOnViewerThread()) {
+            requestUiVisibilityToggle();
+            return;
+        }
+
+        const bool posted = viewer_->postWork(VisualizerImpl::WorkItem{
+            .run = [this] {
+                requestUiVisibilityToggle();
+            },
+            .cancel = {},
+        });
+        if (!posted) {
+            LOG_DEBUG("Dropping UI visibility transition request because the viewer is shutting down");
+        }
+    }
+
+    void GuiManager::requestUiVisibilityToggle() {
+        auto* const wm = viewer_ ? viewer_->getWindowManager() : nullptr;
+        if (!wm) {
+            return;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto cooldown_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                ui_toggle_next_allowed_at_ > now ? ui_toggle_next_allowed_at_ - now
+                                                 : std::chrono::steady_clock::duration::zero())
+                .count();
+        LOG_DEBUG("Request UI visibility transition: pending={}, ui_hidden={}, cooldown_remaining_ms={}",
+                  ui_toggle_pending_,
+                  ui_hidden_,
+                  cooldown_ms);
+        if (ui_toggle_pending_) {
+            wm->wakeEventLoop();
+            return;
+        }
+
+        ui_toggle_pending_ = true;
+        wm->wakeEventLoop();
+    }
+
+    void GuiManager::updateUiVisibilityTransition() {
+        if (!ui_toggle_pending_) {
+            return;
+        }
+
+        auto* const wm = viewer_ ? viewer_->getWindowManager() : nullptr;
+        if (!wm) {
+            ui_toggle_pending_ = false;
+            return;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now < ui_toggle_next_allowed_at_) {
+            return;
+        }
+
+        ui_toggle_pending_ = false;
+        beginInteractiveTransitionGuard();
+        if (!drainVulkanFramesForInteractiveTransition(*wm, "UI visibility")) {
+            ui_toggle_pending_ = true;
+            ui_toggle_next_allowed_at_ = now + kInteractiveTrainingToggleMinInterval;
+            LOG_WARN("UI visibility transition deferred after Vulkan drain failure: next_retry_ms={}, guard_kept_active=true, guard_remaining_ms={}",
+                     kInteractiveTrainingToggleMinInterval.count(),
+                     std::chrono::duration_cast<std::chrono::milliseconds>(
+                         interactive_transition_guard_until_ > std::chrono::steady_clock::now()
+                             ? interactive_transition_guard_until_ - std::chrono::steady_clock::now()
+                             : std::chrono::steady_clock::duration::zero())
+                         .count());
+            return;
+        }
+
+        auto* const trainer = viewer_ ? viewer_->getTrainerManager() : nullptr;
+        const bool training_active = trainer && trainer->isRunning();
+        ui_hidden_ = !ui_hidden_;
+
+        applyInteractiveTransitionCooldown(ui_toggle_next_allowed_at_,
+                                           std::chrono::steady_clock::now(),
+                                           training_active);
+        LOG_DEBUG("UI visibility transition applied: ui_hidden_after={}, training_active={}, next_allowed_in_ms={}",
+                  ui_hidden_,
+                  training_active,
+                  (training_active ? kInteractiveTrainingToggleMinInterval
+                                   : kInteractiveIdleToggleMinInterval)
+                      .count());
+    }
+
+    void GuiManager::queueFullscreenToggle() {
+        if (!viewer_) {
+            return;
+        }
+
+        if (viewer_->isOnViewerThread()) {
+            requestFullscreenToggle();
+            return;
+        }
+
+        const bool posted = viewer_->postWork(VisualizerImpl::WorkItem{
+            .run = [this] {
+                requestFullscreenToggle();
+            },
+            .cancel = {},
+        });
+        if (!posted) {
+            LOG_DEBUG("Dropping fullscreen transition request because the viewer is shutting down");
+        }
+    }
+
+    void GuiManager::requestFullscreenToggle() {
+        auto* const wm = viewer_ ? viewer_->getWindowManager() : nullptr;
+        if (!wm) {
+            return;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto cooldown_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                fullscreen_toggle_next_allowed_at_ > now ? fullscreen_toggle_next_allowed_at_ - now
+                                                         : std::chrono::steady_clock::duration::zero())
+                .count();
+        LOG_DEBUG("Request fullscreen transition: pending={}, current={}, target={}, cooldown_remaining_ms={}",
+                  fullscreen_toggle_pending_,
+                  wm->isFullscreen(),
+                  !wm->isFullscreen(),
+                  cooldown_ms);
+        if (fullscreen_toggle_pending_) {
+            wm->wakeEventLoop();
+            return;
+        }
+
+        fullscreen_target_state_ = !wm->isFullscreen();
+        fullscreen_toggle_pending_ = true;
+        wm->wakeEventLoop();
+    }
+
+    void GuiManager::updateFullscreenTransition() {
+        if (!fullscreen_toggle_pending_) {
+            return;
+        }
+
+        auto* const wm = viewer_ ? viewer_->getWindowManager() : nullptr;
+        if (!wm) {
+            fullscreen_toggle_pending_ = false;
+            return;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now < fullscreen_toggle_next_allowed_at_) {
+            return;
+        }
+
+        fullscreen_toggle_pending_ = false;
+        if (wm->isFullscreen() == fullscreen_target_state_) {
+            LOG_DEBUG("Fullscreen transition already satisfied: target={}", fullscreen_target_state_);
+            return;
+        }
+
+        beginInteractiveTransitionGuard();
+        if (!drainVulkanFramesForInteractiveTransition(*wm, "fullscreen")) {
+            fullscreen_toggle_pending_ = true;
+            fullscreen_toggle_next_allowed_at_ = now + kInteractiveTrainingToggleMinInterval;
+            LOG_WARN("Fullscreen transition deferred after Vulkan drain failure: target={}, next_retry_ms={}, guard_kept_active=true, guard_remaining_ms={}",
+                     fullscreen_target_state_,
+                     kInteractiveTrainingToggleMinInterval.count(),
+                     std::chrono::duration_cast<std::chrono::milliseconds>(
+                         interactive_transition_guard_until_ > std::chrono::steady_clock::now()
+                             ? interactive_transition_guard_until_ - std::chrono::steady_clock::now()
+                             : std::chrono::steady_clock::duration::zero())
+                         .count());
+            return;
+        }
+
+        auto* const trainer = viewer_ ? viewer_->getTrainerManager() : nullptr;
+        const bool training_active = trainer && trainer->isRunning();
+        wm->setFullscreen(fullscreen_target_state_);
+
+        applyInteractiveTransitionCooldown(fullscreen_toggle_next_allowed_at_,
+                                           std::chrono::steady_clock::now(),
+                                           training_active);
+        LOG_DEBUG("Fullscreen transition applied: target={}, training_active={}, next_allowed_in_ms={}",
+                  fullscreen_target_state_,
+                  training_active,
+                  (training_active ? kInteractiveTrainingToggleMinInterval
+                                   : kInteractiveIdleToggleMinInterval)
+                      .count());
+    }
+
+    void GuiManager::beginInteractiveTransitionGuard() {
+        const auto now = std::chrono::steady_clock::now();
+        interactive_transition_guard_until_ =
+            now + kInteractiveTransitionGuardDuration;
+
+        if (interactive_transition_resume_training_) {
+            return;
+        }
+
+        auto* const trainer = viewer_ ? viewer_->getTrainerManager() : nullptr;
+        if (!trainer || !trainer->isRunning()) {
+            return;
+        }
+
+        const auto pause_result = trainer->pauseTrainingTemporaryAndWait(kInteractiveTrainingPauseWait);
+        interactive_transition_resume_training_ = pause_result.resume_required;
+        if (!pause_result.synchronized) {
+            LOG_WARN("Vulkan UI transition proceeding without a synchronized training pause");
+        }
+    }
+
+    void GuiManager::updateInteractiveTransitionGuard() {
+        if (!interactive_transition_resume_training_) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now < interactive_transition_guard_until_) {
+            return;
+        }
+
+        endInteractiveTransitionGuard();
+    }
+
+    void GuiManager::endInteractiveTransitionGuard() {
+        if (!interactive_transition_resume_training_) {
+            return;
+        }
+
+        interactive_transition_resume_training_ = false;
+        auto* const trainer = viewer_ ? viewer_->getTrainerManager() : nullptr;
+        if (trainer && trainer->isRunning()) {
+            trainer->resumeTrainingTemporary();
+            LOG_TRACE("Training resumed after Vulkan UI transition guard");
+        }
+    }
+
+    void GuiManager::updateInteractiveTransitions() {
+        updateFullscreenTransition();
+        updateUiVisibilityTransition();
+        updateInteractiveTransitionGuard();
+    }
+
+    bool GuiManager::isInteractiveTransitionSettling() const {
+        return std::chrono::steady_clock::now() < interactive_transition_guard_until_;
+    }
+
     void GuiManager::render() {
         auto* window_manager = viewer_ ? viewer_->getWindowManager() : nullptr;
         auto* vulkan_context = (vulkan_gui_ && window_manager) ? window_manager->getVulkanContext() : nullptr;
-        if (vulkan_gui_ && !vulkan_context)
+        if (vulkan_gui_ && !vulkan_context) {
+            updateInteractiveTransitionGuard();
             return;
+        }
 
         std::optional<::lfs::core::ScopedTimer> cpu_ui_before_vulkan_timer;
         if (vulkan_gui_) {
@@ -4772,6 +5101,8 @@ namespace lfs::vis::gui {
         {
             LOG_TIMER_THRESHOLD("gui_render.imgui_newFrame", 0.25);
             ImGui_ImplSDL3_NewFrame();
+            if (auto* input_controller = viewer_->getInputController())
+                input_controller->applySplitterCursorOverride();
             rmlui_manager_.clearVulkanQueue();
         }
         const auto& sdl_input = viewer_->getWindowManager()->frameInput();
@@ -5216,6 +5547,7 @@ namespace lfs::vis::gui {
                     .id = t.id,
                     .label = t.label,
                     .dom_id = makeRmlTabDomId(t.id),
+                    .closeable = t.tab_closeable,
                 });
             }
 
@@ -5443,6 +5775,27 @@ namespace lfs::vis::gui {
         rml_viewport_overlay_.setViewportBounds(
             viewport_layout_.pos, viewport_layout_.size,
             {panel_input.screen_x, panel_input.screen_y});
+        RmlViewportOverlay::SplitDividerOverlayState split_divider_state;
+        if (auto* const rendering = viewer_ ? viewer_->getRenderingManager() : nullptr;
+            rendering && rendering->isSplitViewActive()) {
+            const auto divider_x = rendering->getSplitDividerScreenX(viewport_layout_.pos, viewport_layout_.size);
+            const auto content_bounds = rendering->getContentBounds(glm::ivec2(
+                std::max(static_cast<int>(viewport_layout_.size.x), 0),
+                std::max(static_cast<int>(viewport_layout_.size.y), 0)));
+            if (divider_x && content_bounds.width > 0.0f && content_bounds.height > 0.0f) {
+                const auto& t = theme();
+                constexpr float kSplitDividerMinWidthPx = 10.0f;
+                const float divider_width =
+                    std::max(kSplitDividerMinWidthPx * current_ui_scale_,
+                             std::round(t.viewport.border_size * current_ui_scale_ * 4.0f));
+                split_divider_state.visible = true;
+                split_divider_state.x = std::round((*divider_x - viewport_layout_.pos.x) - divider_width * 0.5f);
+                split_divider_state.y = content_bounds.y;
+                split_divider_state.width = divider_width;
+                split_divider_state.height = content_bounds.height;
+            }
+        }
+        rml_viewport_overlay_.setSplitDividerOverlay(split_divider_state);
         AppStore::GTMetricsOverlayConfig gt_metrics_config;
         if (auto* const rendering = viewer_ ? viewer_->getRenderingManager() : nullptr) {
             const auto settings = rendering->getSettings();
@@ -5625,6 +5978,8 @@ namespace lfs::vis::gui {
         apply_cursor(panel_layout_.getCursorRequest());
         if (SDL_Cursor* const cursor = systemCursorForImGuiCursor(ImGui::GetMouseCursor()))
             SDL_SetCursor(cursor);
+        if (auto* input_controller = viewer_->getInputController())
+            input_controller->applySplitterCursorOverride();
         syncWindowTextInput(viewer_->getWindow());
 
         if (vulkan_gui_) {
@@ -5725,6 +6080,9 @@ namespace lfs::vis::gui {
                         rmlui_manager_.clearVulkanQueue();
                     }
                 }
+                if (viewer_) {
+                    viewer_->processRenderWorkQueue();
+                }
                 {
                     LOG_TIMER("frame_pacing.vulkan_endFrame_present");
                     if (!vulkan_context->endFrame()) {
@@ -5735,7 +6093,16 @@ namespace lfs::vis::gui {
                 rmlui_manager_.clearVulkanQueue();
                 clearLineRendererCommands();
                 if (!vulkan_context->lastError().empty()) {
-                    LOG_WARN("Vulkan GUI frame begin failed: {}", vulkan_context->lastError());
+                    LOG_WARN("Vulkan GUI frame begin failed: {} (ui_hidden={}, fullscreen_pending={}, ui_pending={}, settling={}, resume_training_pending={})",
+                             vulkan_context->lastError(),
+                             ui_hidden_,
+                             fullscreen_toggle_pending_,
+                             ui_toggle_pending_,
+                             isInteractiveTransitionSettling(),
+                             interactive_transition_resume_training_);
+                }
+                if (viewer_) {
+                    viewer_->processRenderWorkQueue();
                 }
             }
 
@@ -5743,8 +6110,14 @@ namespace lfs::vis::gui {
                 --ui_layout_settle_frames_;
 
             persistImGuiSettingsIfNeeded();
+            updateInteractiveTransitionGuard();
             return;
         }
+
+        if (!vulkan_gui_ && viewer_) {
+            viewer_->processRenderWorkQueue();
+        }
+        updateInteractiveTransitionGuard();
     }
 
     void GuiManager::renderSelectionOverlays(const UIContext& ctx) {
@@ -5752,9 +6125,6 @@ namespace lfs::vis::gui {
             return;
         }
 
-        if (auto* const tool = ctx.viewer->getBrushTool(); tool && tool->isEnabled() && !ui_hidden_) {
-            tool->renderUI(ctx, nullptr);
-        }
         if (auto* const tool = ctx.viewer->getSelectionTool(); tool && tool->isEnabled() && !ui_hidden_) {
             tool->renderUI(ctx, nullptr);
         }
@@ -6146,40 +6516,6 @@ namespace lfs::vis::gui {
                 }
             }
         }
-
-        auto* const rendering = viewer_ ? viewer_->getRenderingManager() : nullptr;
-        if (!rendering || viewport_layout_.size.x <= 0.0f || viewport_layout_.size.y <= 0.0f) {
-            return;
-        }
-
-        if (!rendering->isSplitViewActive()) {
-            return;
-        }
-
-        const auto& t = theme();
-        auto* const draw_list = ImGui::GetBackgroundDrawList(ImGui::GetMainViewport());
-        const auto divider_x = rendering->getSplitDividerScreenX(viewport_layout_.pos, viewport_layout_.size);
-        if (!divider_x) {
-            return;
-        }
-        constexpr float kSplitDividerMinWidthPx = 10.0f;
-        const float divider_width =
-            std::max(kSplitDividerMinWidthPx * current_ui_scale_,
-                     std::round(t.viewport.border_size * current_ui_scale_ * 4.0f));
-        const float divider_left = std::round(*divider_x - divider_width * 0.5f);
-        const float divider_right = std::round(*divider_x + divider_width * 0.5f);
-        const ImU32 divider_fill_color = toU32(t.menu_background());
-
-        draw_list->PushClipRect(
-            ImVec2(viewport_layout_.pos.x, viewport_layout_.pos.y),
-            ImVec2(viewport_layout_.pos.x + viewport_layout_.size.x,
-                   viewport_layout_.pos.y + viewport_layout_.size.y),
-            true);
-        draw_list->AddRectFilled(
-            ImVec2(divider_left, viewport_layout_.pos.y),
-            ImVec2(divider_right, viewport_layout_.pos.y + viewport_layout_.size.y),
-            divider_fill_color);
-        draw_list->PopClipRect();
     }
 
     void GuiManager::updateInputOverrides(const PanelInputState& input,
@@ -6327,7 +6663,7 @@ namespace lfs::vis::gui {
         });
 
         ui::ToggleUI::when([this](const auto&) {
-            ui_hidden_ = !ui_hidden_;
+            queueUiVisibilityToggle();
         });
 
         ui::ToggleVramHud::when([this](const auto&) {
@@ -6336,9 +6672,7 @@ namespace lfs::vis::gui {
         });
 
         ui::ToggleFullscreen::when([this](const auto&) {
-            if (auto* wm = viewer_->getWindowManager()) {
-                wm->toggleFullscreen();
-            }
+            queueFullscreenToggle();
         });
 
         internal::DisplayScaleChanged::when([this](const auto& e) {
@@ -6594,7 +6928,112 @@ namespace lfs::vis::gui {
                 now >= next_vram_hud_publish_);
     }
 
+    void GuiManager::syncVisiblePanelsBeforeSceneRender() {
+        const std::uint64_t sync_generation = lfs::python::pre_scene_panel_sync_generation();
+        if (sync_generation == 0 ||
+            sync_generation == last_pre_scene_panel_sync_generation_)
+            return;
+        last_pre_scene_panel_sync_generation_ = sync_generation;
+
+        if (!viewer_ || !show_main_panel_ || ui_hidden_) {
+            return;
+        }
+
+        auto& reg = PanelRegistry::instance();
+        const auto main_tabs = reg.get_panels_for_space(PanelSpace::MainPanelTab);
+        if (main_tabs.empty()) {
+            return;
+        }
+
+        panel_layout_.syncActiveTab(main_tabs, focus_panel_name_);
+        const std::string& active_tab = panel_layout_.getActiveTab();
+        if (active_tab.empty()) {
+            return;
+        }
+
+        const ImGuiViewport* const mvp = ImGui::GetMainViewport();
+        if (!mvp || mvp->WorkSize.x <= 0.0f || mvp->WorkSize.y <= 0.0f) {
+            return;
+        }
+
+        auto& editor_ctx = viewer_->getEditorContext();
+        auto* scene_manager = viewer_->getSceneManager();
+        auto* trainer_manager = viewer_->getTrainerManager();
+        editor_ctx.update(scene_manager, trainer_manager);
+
+        UIContext ctx{
+            .viewer = viewer_,
+            .window_states = &window_states_,
+            .editor = &editor_ctx,
+            .sequencer_controller = &sequencer_ui_.controller(),
+            .rml_manager = &rmlui_manager_,
+            .fonts = buildFontSet()};
+
+        lfs::core::Scene* scene = nullptr;
+        if (scene_manager)
+            scene = &scene_manager->getScene();
+
+        PanelDrawContext draw_ctx;
+        draw_ctx.ui = &ctx;
+        draw_ctx.viewport = &viewport_layout_;
+        draw_ctx.scene = scene;
+        draw_ctx.ui_hidden = ui_hidden_;
+        draw_ctx.scene_generation = python::get_scene_generation();
+        if (scene_manager)
+            draw_ctx.has_selection = scene_manager->hasSelectedNode();
+        if (auto* cc = lfs::event::command_center())
+            draw_ctx.is_training = cc->snapshot().is_running;
+
+        PanelInputState input;
+        input.mouse_x = -1.0e9f;
+        input.mouse_y = -1.0e9f;
+        input.screen_x = mvp->Pos.x;
+        input.screen_y = mvp->Pos.y;
+        input.screen_w = static_cast<int>(mvp->Size.x);
+        input.screen_h = static_cast<int>(mvp->Size.y);
+
+        const float dpi = lfs::python::get_shared_dpi_scale();
+        const float panel_h = mvp->WorkSize.y - PanelLayoutManager::STATUS_BAR_HEIGHT * dpi;
+        if (panel_h <= 0.0f) {
+            return;
+        }
+
+        constexpr float kPanelPad = 8.0f;
+        constexpr float kPreloadMaxHeight = 100000.0f;
+        const float content_w = panel_layout_.getRightPanelWidth() - 2.0f * kPanelPad;
+        if (content_w <= 0.0f) {
+            return;
+        }
+
+        const float splitter_h = PanelLayoutManager::SPLITTER_H * dpi;
+        const float tab_bar_h = PanelLayoutManager::TAB_BAR_H * dpi;
+        const float avail_h = panel_h - 2.0f * kPanelPad;
+        const float scene_h =
+            std::max(80.0f * dpi,
+                     avail_h * panel_layout_.getScenePanelRatio() - splitter_h * 0.5f);
+        const float content_top = mvp->WorkPos.y + kPanelPad;
+        const float tab_content_y = content_top + scene_h + splitter_h + tab_bar_h;
+        const float tab_content_h =
+            std::max(0.0f, content_top + avail_h - tab_content_y);
+        const float clip_y_min = tab_content_y;
+        const float clip_y_max = tab_content_y + tab_content_h;
+
+        reg.preload_single_panel_direct(active_tab, content_w, kPreloadMaxHeight, draw_ctx,
+                                        clip_y_min, clip_y_max, &input);
+        reg.preload_child_panels_direct(active_tab, content_w, kPreloadMaxHeight, draw_ctx,
+                                        clip_y_min, clip_y_max, &input);
+    }
+
     bool GuiManager::needsAnimationFrame() const {
+        const auto now = std::chrono::steady_clock::now();
+        const bool ui_toggle_due =
+            ui_toggle_pending_ && now >= ui_toggle_next_allowed_at_;
+        const bool fullscreen_toggle_due =
+            fullscreen_toggle_pending_ && now >= fullscreen_toggle_next_allowed_at_;
+        if (ui_toggle_due || fullscreen_toggle_due || interactive_transition_resume_training_ ||
+            now < interactive_transition_guard_until_) {
+            return true;
+        }
         if (isViewportExportLocked())
             return true;
         if (startup_overlay_.needsAnimationFrame())
@@ -6607,7 +7046,7 @@ namespace lfs::vis::gui {
             return true;
         if (ui_layout_settle_frames_ > 0)
             return true;
-        if (isVramHudPublishDue(std::chrono::steady_clock::now()))
+        if (isVramHudPublishDue(now))
             return true;
         if (rml_viewport_overlay_.needsAnimationFrame())
             return true;

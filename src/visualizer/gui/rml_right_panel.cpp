@@ -38,6 +38,7 @@ namespace lfs::vis::gui {
             h.RegisterMember("id", &TabSnapshot::id);
             h.RegisterMember("label", &TabSnapshot::label);
             h.RegisterMember("dom_id", &TabSnapshot::dom_id);
+            h.RegisterMember("closeable", &TabSnapshot::closeable);
         }
         ctor.RegisterArray<std::vector<TabSnapshot>>();
         ctor.Bind("tabs", &tabs_);
@@ -52,6 +53,15 @@ namespace lfs::vis::gui {
                                        auto id = args[0].Get<Rml::String>();
                                        if (!id.empty() && on_tab_changed)
                                            on_tab_changed(std::string(id));
+                                   }
+                               });
+        ctor.BindEventCallback("tab_close",
+                               [this](Rml::DataModelHandle, Rml::Event& event, const Rml::VariantList& args) {
+                                   event.StopPropagation();
+                                   if (!args.empty()) {
+                                       auto id = args[0].Get<Rml::String>();
+                                       if (!id.empty() && on_tab_closed)
+                                           on_tab_closed(std::string(id));
                                    }
                                });
         ctor.BindEventCallback("scroll_tabs_left",

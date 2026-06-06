@@ -18,11 +18,11 @@
 #include "internal/resource_paths.hpp"
 #include "io/exporter.hpp"
 #include "io/formats/colmap.hpp"
-#include "rendering/image_layout.hpp"
 #include "rendering/mesh2splat.hpp"
 #include "rendering/rendering.hpp"
 #include "rendering/rendering_manager.hpp"
 #include "scene/scene_manager.hpp"
+#include "scene/scene_render_state.hpp"
 #include "sequencer/keyframe.hpp"
 #include "sequencer/sequencer_controller.hpp"
 #include "training/training_manager.hpp"
@@ -320,15 +320,7 @@ namespace lfs::vis::gui {
         if (!image.is_valid() || image.ndim() != 3) {
             return image;
         }
-
-        const auto layout = lfs::rendering::detectImageLayout(image);
-        if (layout == lfs::rendering::ImageLayout::Unknown) {
-            return image.contiguous();
-        }
-
-        // Match the viewport preview path, which presents rendered frames through
-        // a bottom-left texture origin before the user sees them.
-        return lfs::rendering::flipImageVertical(image, layout);
+        return image.contiguous();
     }
 
     void applyVideoExportPointCloudFilters(rendering::PointCloudFilterState& filters,
@@ -376,7 +368,75 @@ namespace lfs::vis::gui {
             .transparent_background = environmentBackgroundEnabled(render_settings)};
     }
 
+    SceneRenderState makeVideoExportGaussianSceneState(const VideoExportSceneSnapshot& snapshot) {
+        SceneRenderState state;
+        state.combined_model = snapshot.combined_model.get();
+        state.model_transforms = snapshot.model_transforms;
+        state.transform_indices = snapshot.transform_indices;
+        state.selection_mask = snapshot.selection_mask;
+        state.selected_node_mask = snapshot.selected_node_mask;
+        state.node_visibility_mask = snapshot.node_visibility_mask;
+        state.selected_cropbox_index = snapshot.selected_cropbox_index;
+        state.has_selection = state.selection_mask && state.selection_mask->is_valid();
+        state.visible_splat_count = snapshot.model_transforms.size();
+
+        state.cropboxes.reserve(snapshot.cropboxes.size());
+        for (const auto& cb : snapshot.cropboxes) {
+            state.cropboxes.push_back(lfs::core::Scene::RenderableCropBox{
+                .node_id = cb.node_id,
+                .parent_splat_id = cb.parent_splat_id,
+                .parent_node_index = cb.parent_node_index,
+                .data = cb.has_data ? &cb.data : nullptr,
+                .world_transform = cb.world_transform,
+                .local_transform = glm::mat4(1.0f),
+            });
+        }
+
+        if (snapshot.active_ellipsoid) {
+            const auto& el = *snapshot.active_ellipsoid;
+            state.ellipsoids.push_back(lfs::core::Scene::RenderableEllipsoid{
+                .node_id = el.node_id,
+                .parent_splat_id = el.parent_splat_id,
+                .parent_node_index = el.parent_node_index,
+                .data = &el.data,
+                .world_transform = el.world_transform,
+                .local_transform = glm::mat4(1.0f),
+            });
+        }
+        return state;
+    }
+
+    std::expected<lfs::core::Tensor, std::string> makeGaussianPreviewVideoFrame(
+        const std::shared_ptr<lfs::core::Tensor>& image) {
+        if (!image || !image->is_valid() || image->ndim() != 3) {
+            return std::unexpected("Rendered Gaussian frame is invalid");
+        }
+        if (image->size(0) <= 0 || image->size(1) <= 0 || image->size(2) != 3) {
+            return std::unexpected("Rendered Gaussian frame must have shape [H, W, 3]");
+        }
+
+        auto frame = *image;
+        if (frame.dtype() != lfs::core::DataType::Float32) {
+            frame = frame.to(lfs::core::DataType::Float32);
+        }
+        frame = frame.permute({2, 0, 1}).contiguous();
+        if (frame.device() != lfs::core::Device::CUDA) {
+            frame = frame.cuda();
+        }
+        return frame.contiguous();
+    }
+
+    rendering::FrameMetadata makeVideoExportFrameMetadata(const rendering::FrameView& frame_view,
+                                                          const bool color_has_alpha) {
+        return rendering::FrameMetadata{
+            .valid = true,
+            .far_plane = frame_view.far_plane,
+            .orthographic = frame_view.orthographic,
+            .color_has_alpha = color_has_alpha};
+    }
+
     std::expected<lfs::core::Tensor, std::string> renderVideoExportFrame(
+        RenderingManager& rendering_manager,
         rendering::RenderingEngine& engine,
         VideoExportEnvironmentState& environment_state,
         const VideoExportSceneSnapshot& snapshot,
@@ -424,8 +484,34 @@ namespace lfs::vis::gui {
                 }
                 primary_frame = std::move(*render_result);
             } else {
-                return std::unexpected(
-                    "Gaussian video export needs a Vulkan offscreen export path");
+                auto scene_state = makeVideoExportGaussianSceneState(snapshot);
+                auto preview_image = rendering_manager.renderPreviewImage(
+                    *snapshot.combined_model,
+                    std::move(scene_state),
+                    glm::mat3_cast(cam_state.rotation),
+                    cam_state.position,
+                    cam_state.focal_length_mm,
+                    width,
+                    height);
+                auto video_frame = makeGaussianPreviewVideoFrame(preview_image);
+                if (!video_frame) {
+                    return std::unexpected(video_frame.error());
+                }
+
+                if (!requires_composite_pass) {
+                    return std::move(*video_frame);
+                }
+
+                auto frame_image = std::make_shared<lfs::core::Tensor>(std::move(*video_frame));
+                auto materialized = engine.materializeGpuFrame(
+                    frame_image,
+                    makeVideoExportFrameMetadata(frame_view, false),
+                    {width, height});
+                if (!materialized || !materialized->valid()) {
+                    return std::unexpected(materialized ? "Rendered Gaussian frame is invalid"
+                                                        : materialized.error());
+                }
+                primary_frame = std::move(*materialized);
             }
         } else if (snapshot.point_cloud && snapshot.point_cloud->size() > 0) {
             const std::vector<glm::mat4> point_cloud_transforms = {snapshot.point_cloud_transform};
@@ -1637,7 +1723,7 @@ namespace lfs::vis::gui {
 
         video_export_state_.thread.emplace(
             [this, viewer = viewer_, path, export_options, total_frames, width, height,
-             engine, render_settings,
+             engine, rendering_manager, render_settings,
              environment_state = video_export_environment_state_.get(),
              snapshot = *snapshot_result,
              frame_states = std::move(frame_states)](std::stop_token stop_token) mutable {
@@ -1705,10 +1791,17 @@ namespace lfs::vis::gui {
 
                     auto frame_tensor = postToViewerAndWait(
                         viewer,
-                        [engine, environment_state, snapshot, render_settings, width, height,
+                        [engine, rendering_manager, environment_state, snapshot, render_settings, width, height,
                          cam_state = frame_states[frame]]() -> std::expected<lfs::core::Tensor, std::string> {
                             return renderVideoExportFrame(
-                                *engine, *environment_state, snapshot, render_settings, cam_state, width, height);
+                                *rendering_manager,
+                                *engine,
+                                *environment_state,
+                                snapshot,
+                                render_settings,
+                                cam_state,
+                                width,
+                                height);
                         });
 
                     if (!frame_tensor) {

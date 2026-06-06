@@ -422,6 +422,11 @@ def free_icon(texture_id: int) -> None:
 def reset_camera() -> None:
     """Reset camera to default position and orientation"""
 
+def focus_selection() -> bool:
+    """
+    Focus the active viewport on the selection, or the whole scene when nothing is selected
+    """
+
 def get_camera_navigation_mode() -> str:
     """Get the active camera navigation mode ('orbit', 'trackball', or 'fpv')"""
 
@@ -465,6 +470,18 @@ def get_depth_view() -> bool:
 
 def set_depth_view(enabled: bool) -> None:
     """Enable or disable depth-map view"""
+
+def get_depth_view_range() -> tuple[float, float]:
+    """Get depth-map visualization range: (near, far)"""
+
+def set_depth_view_range(depth_min: float, depth_max: float) -> None:
+    """Set depth-map visualization range"""
+
+def get_depth_view_mode() -> str:
+    """Get depth-map visualization mode: 'palette' or 'gray'"""
+
+def set_depth_view_mode(mode: str) -> None:
+    """Set depth-map visualization mode"""
 
 def set_orthographic(ortho: bool) -> None:
     """Enable or disable orthographic projection"""
@@ -1219,6 +1236,22 @@ def capture_viewport() -> ViewportRender | None:
     Capture viewport render explicitly (may read back from GPU; clones data, safe to use from background threads)
     """
 
+def export_viewport_image(path: str, format: str = '', width: int = 0, height: int = 0, transparent: bool = False, jpeg_quality: int = 95) -> dict:
+    """
+    Export the active viewport image to PNG or JPEG.
+
+    Args:
+        path: Output path. The selected format extension is enforced when needed.
+        format: 'png', 'jpg', or empty to infer from path.
+        width: Target width in pixels. If zero with a positive height, preserves viewport aspect.
+        height: Target height in pixels. If both dimensions are zero, captures the current viewport.
+        transparent: For PNG only, export straight RGBA from the preview renderer.
+        jpeg_quality: JPEG compression quality in [1, 100].
+
+    Returns:
+        Dict with path, width, height, channels, format, and transparent.
+    """
+
 def render_view(rotation: Tensor, translation: Tensor, width: int, height: int, fov: float = 60.0, bg_color: Tensor | None = None) -> Tensor | None:
     """
     Render scene from arbitrary camera parameters.
@@ -1229,10 +1262,28 @@ def render_view(rotation: Tensor, translation: Tensor, width: int, height: int, 
         width: Render width in pixels
         height: Render height in pixels
         fov: Vertical field of view in degrees (default: 60)
-        bg_color: Optional [3] RGB background color
+        bg_color: Accepted for compatibility; the Vulkan preview path uses current render settings
 
     Returns:
-        Tensor [H, W, 3] RGB image on CUDA, or None if scene not available
+        CPU Tensor [H, W, 3] RGB image, or None if no active visualizer scene is available
+    """
+
+def render_view_u8(rotation: Tensor, translation: Tensor, width: int, height: int, fov: float = 60.0, bg_color: Tensor | None = None, orthographic: bool | None = None, ortho_scale: float | None = None) -> Tensor | None:
+    """
+    Render scene from arbitrary camera parameters as an 8-bit RGB image.
+
+    Args:
+        rotation: [3, 3] camera-to-world rotation in visualizer coordinates
+        translation: [3] camera position in visualizer world coordinates
+        width: Render width in pixels
+        height: Render height in pixels
+        fov: Vertical field of view in degrees (default: 60)
+        bg_color: Accepted for compatibility; the Vulkan preview path uses current render settings
+        orthographic: Optional projection override. None uses current render settings.
+        ortho_scale: Optional orthographic pixels-per-world-unit override.
+
+    Returns:
+        CPU uint8 Tensor [H, W, 3] RGB image, or None if no active visualizer scene is available
     """
 
 def compute_screen_positions(rotation: Tensor, translation: Tensor, width: int, height: int, fov: float = 60.0) -> Tensor | None:

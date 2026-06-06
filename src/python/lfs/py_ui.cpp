@@ -38,6 +38,7 @@
 #include "rendering/render_constants.hpp"
 #include "visualizer/app_store.hpp"
 #include "visualizer/core/editor_context.hpp"
+#include "visualizer/gui/gui_manager.hpp"
 #include "visualizer/gui/panel_registry.hpp"
 #include "visualizer/operation/undo_history.hpp"
 #include "visualizer/operator/operator_context.hpp"
@@ -938,7 +939,10 @@ namespace lfs::python {
                     }
                     try {
                         PyEvent py_event = convert_modal_event(event);
+                        const auto redraw_generation_before = lfs::python::redraw_request_generation();
                         nb::object result = instance.attr("modal")(nb::none(), py_event);
+                        if (lfs::python::redraw_request_generation() != redraw_generation_before)
+                            lfs::python::request_pre_scene_panel_sync();
                         const auto status = parse_operator_result(result, instance);
                         if (has_undo && status == vis::op::OperatorResult::FINISHED) {
                             push_python_operator_undo_entry(label.empty() ? class_id : label, instance);
@@ -3941,6 +3945,24 @@ namespace lfs::python {
             "Open a save file dialog for JSON files. Returns empty string if cancelled.");
 
         m.def(
+            "save_png_file_dialog",
+            [](const std::string& default_name) -> std::string {
+                auto result = lfs::vis::gui::SavePngFileDialog(default_name);
+                return result.empty() ? "" : lfs::core::path_to_utf8(result);
+            },
+            nb::arg("default_name") = "export.png",
+            "Open a save file dialog for PNG images. Returns empty string if cancelled.");
+
+        m.def(
+            "save_jpg_file_dialog",
+            [](const std::string& default_name) -> std::string {
+                auto result = lfs::vis::gui::SaveJpgFileDialog(default_name);
+                return result.empty() ? "" : lfs::core::path_to_utf8(result);
+            },
+            nb::arg("default_name") = "export.jpg",
+            "Open a save file dialog for JPEG images. Returns empty string if cancelled.");
+
+        m.def(
             "save_ply_file_dialog",
             [](const std::string& default_name) -> std::string {
                 auto result = lfs::vis::gui::SavePlyFileDialog(default_name);
@@ -4059,7 +4081,6 @@ namespace lfs::python {
                     {"rotate", ToolType::Rotate},
                     {"scale", ToolType::Scale},
                     {"mirror", ToolType::Mirror},
-                    {"brush", ToolType::Brush},
                     {"align", ToolType::Align},
                 };
 
@@ -4074,7 +4095,7 @@ namespace lfs::python {
 
                 lfs::core::events::tools::SetToolbarTool{.tool_mode = static_cast<int>(it->second)}.emit();
             },
-            nb::arg("tool"), "Switch to a toolbar tool (none, selection, translate, rotate, scale, mirror, brush, align, cropbox)");
+            nb::arg("tool"), "Switch to a toolbar tool (none, selection, translate, rotate, scale, mirror, align, cropbox)");
 
         // Key enum (subset of commonly used keys)
         nb::enum_<ImGuiKey>(m, "Key")
@@ -4273,7 +4294,6 @@ namespace lfs::python {
                 case vis::ToolType::Rotate: return "builtin.rotate";
                 case vis::ToolType::Scale: return "builtin.scale";
                 case vis::ToolType::Mirror: return "builtin.mirror";
-                case vis::ToolType::Brush: return "builtin.brush";
                 case vis::ToolType::Align: return "builtin.align";
                 default: return "";
                 }
@@ -4288,7 +4308,6 @@ namespace lfs::python {
                     {"builtin.rotate", vis::ToolType::Rotate},
                     {"builtin.scale", vis::ToolType::Scale},
                     {"builtin.mirror", vis::ToolType::Mirror},
-                    {"builtin.brush", vis::ToolType::Brush},
                     {"builtin.align", vis::ToolType::Align},
                 };
                 auto it = tool_map.find(id);
@@ -4425,6 +4444,45 @@ namespace lfs::python {
             "apply_cropbox",
             []() { lfs::core::events::cmd::ApplyCropBox{}.emit(); },
             "Apply the selected cropbox");
+
+        m.def(
+            "set_crop_tool_shape",
+            [](const std::string& shape) {
+                if (auto* const gui = lfs::python::get_gui_manager()) {
+                    gui->gizmo().setCropToolShape(shape);
+                }
+            },
+            nb::arg("shape"),
+            "Set the active crop tool shape: box or ellipsoid");
+
+        m.def(
+            "get_crop_tool_shape",
+            []() -> std::string {
+                if (auto* const gui = lfs::python::get_gui_manager()) {
+                    return gui->gizmo().cropToolShape();
+                }
+                return "box";
+            },
+            "Get the active crop tool shape");
+
+        m.def(
+            "apply_crop_tool",
+            []() {
+                if (auto* const gui = lfs::python::get_gui_manager()) {
+                    gui->gizmo().applyActiveCropTool();
+                }
+            },
+            "Apply the active crop tool primitive");
+
+        m.def(
+            "fit_crop_tool",
+            [](bool use_percentile) {
+                if (auto* const gui = lfs::python::get_gui_manager()) {
+                    gui->gizmo().fitActiveCropTool(use_percentile);
+                }
+            },
+            nb::arg("use_percentile") = false,
+            "Fit the active crop tool primitive to the selected node");
 
         m.def(
             "fit_cropbox_to_scene",
@@ -4795,6 +4853,7 @@ namespace lfs::python {
             .def_rw("show_pip_preview", &SequencerUIStateData::show_pip_preview, "Whether PiP preview window is shown")
             .def_rw("pip_preview_scale", &SequencerUIStateData::pip_preview_scale, "Picture-in-picture preview scale factor")
             .def_rw("show_film_strip", &SequencerUIStateData::show_film_strip, "Whether film strip thumbnails are shown above sequencer")
+            .def_rw("sequence_fps", &SequencerUIStateData::sequence_fps, "Playback FPS for loaded PLY sequences")
             .def_ro("selected_keyframe", &SequencerUIStateData::selected_keyframe);
 
         m.def(

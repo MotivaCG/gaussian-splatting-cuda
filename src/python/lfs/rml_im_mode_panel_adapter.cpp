@@ -172,6 +172,8 @@ namespace lfs::vis::gui {
         (void)ctx;
         if (!host_)
             return false;
+        if (needsAnimationFrame())
+            return false;
 
         const auto& ops = lfs::python::get_rml_panel_host_ops();
         return ops.draw_direct_cached ? ops.draw_direct_cached(host_, x, y, w, h) : false;

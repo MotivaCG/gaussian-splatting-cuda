@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Regression tests for Asset Manager panel record formatting and selection."""
 
+import asyncio
 from importlib import import_module
 from pathlib import Path, PureWindowsPath
 from types import ModuleType, SimpleNamespace
@@ -9,6 +10,7 @@ from urllib.parse import quote
 import json
 import re
 import sys
+import time
 
 import pytest
 
@@ -42,8 +44,8 @@ def _install_lf_stub(monkeypatch):
 
 @pytest.fixture
 def asset_manager_panel_module(monkeypatch):
-    project_root = Path(__file__).parent.parent.parent
-    source_python = project_root / "src" / "python"
+    folder_root = Path(__file__).parent.parent.parent
+    source_python = folder_root / "src" / "python"
     if str(source_python) not in sys.path:
         sys.path.insert(0, str(source_python))
 
@@ -175,7 +177,7 @@ def _make_asset():
             "image_root": "images",
         },
         "geometry_metadata": {},
-        "project_id": "p1",
+        "folder_id": "p1",
         "scene_id": "s1",
         "created_at": "2026-02-15T21:52:45.881056",
         "modified_at": "2026-04-28T14:48:57.606369",
@@ -270,7 +272,7 @@ def test_asset_card_title_uses_asset_path_leaf(asset_manager_panel_module):
     asset["absolute_path"] = "/data/tandt/truck/train"
     fields = panel._get_asset_display_fields(
         asset,
-        project_name="tandt",
+        folder_name="tandt",
         scene_name="truck",
     )
 
@@ -279,9 +281,9 @@ def test_asset_card_title_uses_asset_path_leaf(asset_manager_panel_module):
 
 
 def test_asset_manager_rml_uses_text_interpolation_for_display_values():
-    project_root = Path(__file__).parent.parent.parent
+    folder_root = Path(__file__).parent.parent.parent
     rml_path = (
-        project_root
+        folder_root
         / "src"
         / "visualizer"
         / "gui"
@@ -305,9 +307,9 @@ def test_asset_manager_rml_uses_text_interpolation_for_display_values():
 
 
 def test_asset_manager_card_thumbs_do_not_use_gradient_placeholders():
-    project_root = Path(__file__).parent.parent.parent
+    folder_root = Path(__file__).parent.parent.parent
     rcss_path = (
-        project_root
+        folder_root
         / "src"
         / "visualizer"
         / "gui"
@@ -334,11 +336,13 @@ def test_dataset_thumbnail_uses_first_dataset_image(asset_manager_panel_module, 
     ignored_mask.write_bytes(b"not a real jpeg")
 
     thumbnails = asset_manager_panel_module.AssetThumbnails(tmp_path / "thumbs")
-    thumb_path = thumbnails.generate_dataset_preview(
-        "dataset",
-        "dataset_asset",
-        dataset_dir,
-        {"image_root": "images"},
+    thumb_path = asyncio.run(
+        thumbnails.generate_dataset_preview(
+            "dataset",
+            "dataset_asset",
+            dataset_dir,
+            {"image_root": "images"},
+        )
     )
 
     assert thumb_path is not None
@@ -363,17 +367,19 @@ def test_dataset_thumbnail_cache_uses_gallery_aspect(
     Image.new("RGB", (320, 240), "#cc3333").save(first)
 
     thumbnails = asset_manager_panel_module.AssetThumbnails(tmp_path / "thumbs")
-    thumb_path = thumbnails.generate_dataset_preview(
-        "dataset",
-        "dataset_asset",
-        dataset_dir,
-        {"image_root": "images"},
+    thumb_path = asyncio.run(
+        thumbnails.generate_dataset_preview(
+            "dataset",
+            "dataset_asset",
+            dataset_dir,
+            {"image_root": "images"},
+        )
     )
 
-    assert thumb_path == thumbnails.get_dataset_thumbnail_path("dataset_asset")
+    # generate_dataset_preview returns the source image path directly
+    assert thumb_path == first
     with Image.open(thumb_path) as img:
-        assert img.size[0] > img.size[1]
-    assert thumbnails.thumbnail_matches_expected_size(thumb_path)
+        assert img.size == (320, 240)
 
 
 def test_stale_managed_thumbnail_requests_refresh(
@@ -425,10 +431,12 @@ def test_rendered_thumbnails_cover_geometry_and_checkpoints(
     for asset_type in ("checkpoint", "mesh", "ply_pcl"):
         asset_path = tmp_path / f"asset.{asset_type}"
         asset_path.write_bytes(b"asset")
-        thumb_path = thumbnails.generate_rendered_preview(
-            asset_type,
-            f"{asset_type}_asset",
-            asset_path,
+        thumb_path = asyncio.run(
+            thumbnails.generate_rendered_preview(
+                asset_type,
+                f"{asset_type}_asset",
+                asset_path,
+            )
         )
 
         assert re.fullmatch(
@@ -459,7 +467,7 @@ def test_cleanup_orphans_preserves_timestamped_rendered_thumbnails(
     for path in (keep_rendered, keep_dataset, keep_placeholder, orphan_rendered, orphan_dataset):
         path.write_bytes(b"thumb")
 
-    removed = thumbnails.cleanup_orphans({"alive"})
+    removed = asyncio.run(thumbnails.cleanup_orphans({"alive"}))
 
     assert keep_rendered.exists()
     assert keep_dataset.exists()
@@ -499,13 +507,15 @@ def test_rendered_thumbnail_from_camera_passes_dimensions_by_keyword(
     asset_path.write_bytes(b"asset")
 
     thumbnails = asset_manager_panel_module.AssetThumbnails(tmp_path / "thumbs")
-    thumb_path = thumbnails.generate_rendered_preview_from_camera(
-        "mesh",
-        "mesh_asset",
-        asset_path,
-        eye=(1.0, 2.0, 3.0),
-        target=(4.0, 5.0, 6.0),
-        up=(0.0, 0.0, 1.0),
+    thumb_path = asyncio.run(
+        thumbnails.generate_rendered_preview_from_camera(
+            "mesh",
+            "mesh_asset",
+            asset_path,
+            eye=(1.0, 2.0, 3.0),
+            target=(4.0, 5.0, 6.0),
+            up=(0.0, 0.0, 1.0),
+        )
     )
 
     assert thumb_path is not None
@@ -534,8 +544,8 @@ def test_mesh_extension_detects_as_mesh(asset_manager_panel_module, tmp_path):
 
 
 def test_asset_manager_load_context_actions_are_localized():
-    project_root = Path(__file__).parent.parent.parent
-    locale_dir = project_root / "src" / "visualizer" / "gui" / "resources" / "locales"
+    folder_root = Path(__file__).parent.parent.parent
+    locale_dir = folder_root / "src" / "visualizer" / "gui" / "resources" / "locales"
     required_keys = (
         "action.load_new",
         "action.add_to_scene",
@@ -565,8 +575,8 @@ def test_asset_selection_dirties_info_fields(asset_manager_panel_module):
     panel._handle = _HandleStub()
     panel._asset_index = SimpleNamespace(
         assets={"a1": _make_asset()},
-        projects={"p1": {"id": "p1", "name": "Imported Datasets", "scene_ids": ["s1"]}},
-        scenes={"s1": {"id": "s1", "name": "bicycle", "project_id": "p1"}},
+        folders={"p1": {"id": "p1", "name": "Imported Datasets", "scene_ids": ["s1"]}},
+        scenes={"s1": {"id": "s1", "name": "bicycle", "folder_id": "p1"}},
         tags={},
         collections={},
     )
@@ -586,8 +596,8 @@ def test_asset_selection_resolves_asset_id_from_clicked_element(asset_manager_pa
     panel._handle = _HandleStub()
     panel._asset_index = SimpleNamespace(
         assets={"a1": _make_asset()},
-        projects={"p1": {"id": "p1", "name": "Imported Datasets", "scene_ids": ["s1"]}},
-        scenes={"s1": {"id": "s1", "name": "bicycle", "project_id": "p1"}},
+        folders={"p1": {"id": "p1", "name": "Imported Datasets", "scene_ids": ["s1"]}},
+        scenes={"s1": {"id": "s1", "name": "bicycle", "folder_id": "p1"}},
         tags={},
         collections={},
     )
@@ -634,6 +644,7 @@ def test_generate_asset_thumbnail_prefers_dataset_preview(asset_manager_panel_mo
         "/tmp/bicycle",
         {"image_root": "images"},
     )
+    time.sleep(0.1)
 
     assert panel._asset_thumbnails.placeholder_calls == []
     assert updates == [("a1", {"thumbnail_path": "/tmp/rendered-dataset.png"})]
@@ -655,6 +666,7 @@ def test_generate_asset_thumbnail_falls_back_to_placeholder(asset_manager_panel_
     )
 
     panel._generate_asset_thumbnail_for_values("a1", "ply", "/tmp/model.ply", {})
+    time.sleep(0.1)
 
     assert updates == [("a1", {"thumbnail_path": "/tmp/placeholder.png"})]
 
@@ -664,8 +676,8 @@ def test_dom_card_click_selects_asset_from_stable_parent(asset_manager_panel_mod
     panel._handle = _HandleStub()
     panel._asset_index = SimpleNamespace(
         assets={"a1": _make_asset()},
-        projects={"p1": {"id": "p1", "name": "Imported Datasets", "scene_ids": ["s1"]}},
-        scenes={"s1": {"id": "s1", "name": "bicycle", "project_id": "p1"}},
+        folders={"p1": {"id": "p1", "name": "Imported Datasets", "scene_ids": ["s1"]}},
+        scenes={"s1": {"id": "s1", "name": "bicycle", "folder_id": "p1"}},
         tags={},
         collections={},
     )
@@ -695,8 +707,8 @@ def test_dom_card_ctrl_click_adds_to_multi_selection(asset_manager_panel_module)
     second["absolute_path"] = "/tmp/garden"
     panel._asset_index = SimpleNamespace(
         assets={"a1": first, "a2": second},
-        projects={"p1": {"id": "p1", "name": "Imported Datasets", "scene_ids": ["s1"]}},
-        scenes={"s1": {"id": "s1", "name": "bicycle", "project_id": "p1"}},
+        folders={"p1": {"id": "p1", "name": "Imported Datasets", "scene_ids": ["s1"]}},
+        scenes={"s1": {"id": "s1", "name": "bicycle", "folder_id": "p1"}},
         tags={},
         collections={},
     )
@@ -724,15 +736,18 @@ def test_dom_card_ctrl_click_adds_to_multi_selection(asset_manager_panel_module)
     assert panel.get_selection_type() == "multiple"
 
 
-def test_dom_card_double_click_loads_asset(asset_manager_panel_module, monkeypatch):
+def test_dom_card_double_click_opens_dataset_import_panel(
+    asset_manager_panel_module,
+    monkeypatch,
+):
     panel = asset_manager_panel_module.AssetManagerPanel()
     panel._handle = _HandleStub()
     panel._asset_index = SimpleNamespace(
         assets={"a1": _make_asset()},
-        projects={
+        folders={
             "p1": {"id": "p1", "name": "Imported Datasets", "scene_ids": ["s1"]}
         },
-        scenes={"s1": {"id": "s1", "name": "bicycle", "project_id": "p1"}},
+        scenes={"s1": {"id": "s1", "name": "bicycle", "folder_id": "p1"}},
         tags={},
         collections={},
     )
@@ -741,10 +756,12 @@ def test_dom_card_double_click_loads_asset(asset_manager_panel_module, monkeypat
         asset_manager_panel_module.os.path, "exists", lambda _path: True
     )
     monkeypatch.setattr(
-        asset_manager_panel_module.lf,
-        "load_file",
-        lambda *args, **kwargs: calls.append((args, kwargs)),
-        raising=False,
+        asset_manager_panel_module,
+        "open_dataset_import_panel",
+        lambda path, *, clear_scene_on_load=False: calls.append(
+            (path, clear_scene_on_load)
+        )
+        or True,
     )
 
     container = _ElementStub({"id": "asset-popup-content"})
@@ -757,14 +774,46 @@ def test_dom_card_double_click_loads_asset(asset_manager_panel_module, monkeypat
 
     panel._on_asset_manager_double_click(event)
 
-    assert calls == [
-        (
-            ("/tmp/bicycle",),
-            {"is_dataset": True, "output_path": "/tmp/bicycle/output"},
-        )
-    ]
+    assert calls == [("/tmp/bicycle", False)]
     assert panel.get_selected_asset_name() == "bicycle"
     assert event.stopped is True
+
+
+def test_dataset_load_new_opens_import_panel_with_scene_clear(
+    asset_manager_panel_module,
+    monkeypatch,
+):
+    panel = asset_manager_panel_module.AssetManagerPanel()
+    panel._handle = _HandleStub()
+    panel._asset_index = SimpleNamespace(
+        assets={"a1": _make_asset()},
+        folders={
+            "p1": {"id": "p1", "name": "Imported Datasets", "scene_ids": ["s1"]}
+        },
+        scenes={"s1": {"id": "s1", "name": "bicycle", "folder_id": "p1"}},
+        tags={},
+        collections={},
+    )
+    calls = []
+
+    monkeypatch.setattr(
+        asset_manager_panel_module.os.path,
+        "exists",
+        lambda _path: True,
+    )
+    monkeypatch.setattr(
+        asset_manager_panel_module,
+        "open_dataset_import_panel",
+        lambda path, *, clear_scene_on_load=False: calls.append(
+            (path, clear_scene_on_load)
+        )
+        or True,
+    )
+
+    panel._load_asset("a1", replace_scene=True)
+
+    assert calls == [("/tmp/bicycle", True)]
+    assert panel.get_selected_asset_name() == "bicycle"
 
 
 def test_dom_card_double_click_ignored_during_input_capture(
@@ -775,10 +824,10 @@ def test_dom_card_double_click_ignored_during_input_capture(
     panel._handle = _HandleStub()
     panel._asset_index = SimpleNamespace(
         assets={"a1": _make_asset()},
-        projects={
+        folders={
             "p1": {"id": "p1", "name": "Imported Datasets", "scene_ids": ["s1"]}
         },
-        scenes={"s1": {"id": "s1", "name": "bicycle", "project_id": "p1"}},
+        scenes={"s1": {"id": "s1", "name": "bicycle", "folder_id": "p1"}},
         tags={},
         collections={},
     )
@@ -809,10 +858,10 @@ def test_dataset_remove_deletes_catalog_json_entry(asset_manager_panel_module, t
     index = asset_manager_panel_module.AssetIndex(
         library_path=tmp_path / "library.json"
     )
-    project = index.create_project("truck")
-    scene = index.create_scene(project.id, "train")
+    folder = index.create_folder("truck")
+    scene = index.create_scene(folder.id, "train")
     asset = index.create_asset(
-        project_id=project.id,
+        folder_id=folder.id,
         scene_id=scene.id,
         name="train",
         type="dataset",
@@ -834,11 +883,11 @@ def test_dataset_remove_deletes_catalog_json_entry(asset_manager_panel_module, t
     data = json.loads((tmp_path / "library.json").read_text(encoding="utf-8"))
     assert asset.id not in data["assets"]
     assert scene.id not in data["scenes"]
-    assert project.id not in data["projects"]
+    assert folder.id not in data["folders"]
     assert panel.get_selected_count() == 0
 
 
-def test_edit_watch_dirs_uses_clicked_project_without_selecting_it(
+def test_edit_watch_dirs_uses_clicked_folder_without_selecting_it(
     asset_manager_panel_module,
     monkeypatch,
 ):
@@ -846,7 +895,7 @@ def test_edit_watch_dirs_uses_clicked_project_without_selecting_it(
     panel._handle = _HandleStub()
     panel._asset_index = SimpleNamespace(
         assets={},
-        projects={
+        folders={
             "default": {"id": "default", "name": "Default", "scene_ids": []},
             "target": {"id": "target", "name": "Target", "scene_ids": []},
         },
@@ -854,18 +903,18 @@ def test_edit_watch_dirs_uses_clicked_project_without_selecting_it(
         tags={},
         collections={},
     )
-    panel._selected_project_id = "default"
+    panel._selected_folder_id = "default"
     opened = []
 
     monkeypatch.setattr(
         asset_manager_panel_module,
         "open_watch_dirs_dialog",
-        lambda project_id: opened.append(project_id) or True,
+        lambda folder_id: opened.append(folder_id) or True,
     )
 
     panel.on_edit_watch_dirs(None, None, ["target"])
 
-    assert panel._selected_project_id == "default"
+    assert panel._selected_folder_id == "default"
     assert opened == ["target"]
 
 
@@ -904,3 +953,37 @@ def test_gallery_precise_scroll_moves_scroll_container(asset_manager_panel_modul
 
     assert gallery_scroll.scroll_top == 152.0
     assert event.stopped is True
+
+
+def test_folder_count_matches_visible_list(asset_manager_panel_module, tmp_path):
+    present_file = tmp_path / "present.ply"
+    present_file.write_bytes(b"ply")
+
+    def _asset(asset_id, path):
+        asset = dict(_make_asset())
+        asset["id"] = asset_id
+        asset["absolute_path"] = str(path)
+        asset["path"] = str(path)
+        asset["folder_id"] = "p1"
+        asset["scene_id"] = "s1"
+        return asset
+
+    panel = asset_manager_panel_module.AssetManagerPanel()
+    panel._handle = _HandleStub()
+    panel._asset_index = SimpleNamespace(
+        assets={
+            "present": _asset("present", present_file),
+            "missing": _asset("missing", tmp_path / "deleted.ply"),
+        },
+        folders={"p1": {"id": "p1", "name": "Default", "scene_ids": ["s1"]}},
+        scenes={"s1": {"id": "s1", "name": "scene", "folder_id": "p1"}},
+        tags={},
+        collections={},
+    )
+
+    visible = panel.get_filtered_assets()
+
+    assert len(panel._asset_index.assets) == 2
+    assert [asset["id"] for asset in visible] == ["present"]
+    assert panel._folder_asset_count("p1") == len(visible)
+    assert panel._scene_asset_count("s1") == 1

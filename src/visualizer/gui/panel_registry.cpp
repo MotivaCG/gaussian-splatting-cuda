@@ -9,6 +9,7 @@
 #include "gui/ui_context.hpp"
 #include "gui/ui_widgets.hpp"
 #include "theme/theme.hpp"
+#include "visualizer/app_store.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -1066,7 +1067,7 @@ namespace lfs::vis::gui {
         std::vector<PanelSummary> result;
         for (const auto& p : panels_) {
             if (p.space == space && p.enabled && !p.error_disabled && p.parent_id.empty())
-                result.push_back({p.label, p.id, p.space, p.order, p.enabled});
+                result.push_back({p.label, p.id, p.space, p.order, p.enabled, p.tab_closeable});
         }
         std::stable_sort(result.begin(), result.end(), [](const PanelSummary& a, const PanelSummary& b) {
             if (a.order != b.order)
@@ -1108,25 +1109,35 @@ namespace lfs::vis::gui {
     }
 
     void PanelRegistry::set_panel_enabled(const std::string& id, bool enabled) {
-        std::lock_guard lock(mutex_);
-        for (auto& p : panels_) {
-            if (p.id == id) {
-                p.enabled = enabled;
-                if (enabled && p.space == PanelSpace::Floating) {
-                    p.float_x = NAN;
-                    p.float_y = NAN;
-                    p.float_auto_center = true;
-                    resetFloatingPanelSize(p, floatingUiScale());
-                    bring_floating_panel_to_front_locked(p);
-                } else if (!enabled) {
-                    p.float_last_bounds_valid = false;
-                    guiFocusState().want_capture_mouse = false;
-                    guiFocusState().want_capture_keyboard = false;
-                    guiFocusState().want_text_input = false;
+        bool changed = false;
+        {
+            std::lock_guard lock(mutex_);
+            for (auto& p : panels_) {
+                if (p.id == id) {
+                    changed = p.enabled != enabled;
+                    if (!changed)
+                        break;
+
+                    p.enabled = enabled;
+                    if (enabled && p.space == PanelSpace::Floating) {
+                        p.float_x = NAN;
+                        p.float_y = NAN;
+                        p.float_auto_center = true;
+                        resetFloatingPanelSize(p, floatingUiScale());
+                        bring_floating_panel_to_front_locked(p);
+                    } else if (!enabled) {
+                        p.float_last_bounds_valid = false;
+                        guiFocusState().want_capture_mouse = false;
+                        guiFocusState().want_capture_keyboard = false;
+                        guiFocusState().want_text_input = false;
+                    }
+                    break;
                 }
-                return;
             }
         }
+
+        if (changed)
+            lfs::vis::publish_viewport_toolbar_generation();
     }
 
     void PanelRegistry::set_panel_disabled_override(const std::string& id) {

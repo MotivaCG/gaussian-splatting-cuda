@@ -57,6 +57,26 @@ def test_builtin_select_activation_uses_toolbar_tool_and_resets_brush_mode(monke
     assert state.active_submode == "centers"
 
 
+def test_crop_activation_uses_active_operator(monkeypatch):
+    calls = []
+    lf_stub = ModuleType("lichtfeld")
+    lf_stub.ui = SimpleNamespace(
+        ops=SimpleNamespace(cancel_modal=lambda: calls.append(("cancel_modal",))),
+        clear_gizmo=lambda: calls.append(("clear_gizmo",)),
+        set_active_tool=lambda tool_id: calls.append(("set_active_tool", tool_id)),
+        set_active_operator=lambda tool_id, gizmo="": calls.append(("set_active_operator", tool_id, gizmo)),
+        set_gizmo_type=lambda gizmo: calls.append(("set_gizmo_type", gizmo)),
+        clear_active_operator=lambda: calls.append(("clear_active_operator",)),
+    )
+
+    tools = _import_tools_with_runtime_stub(monkeypatch, lf_stub)
+
+    assert tools.ToolRegistry.set_active("builtin.cropbox") is True
+    assert ("set_active_operator", "builtin.cropbox", "translate") in calls
+    assert ("set_gizmo_type", "translate") in calls
+    assert not any(call == ("set_active_tool", "builtin.cropbox") for call in calls)
+
+
 def test_clear_active_clears_cpp_toolbar_tool(monkeypatch):
     calls = []
     lf_stub = ModuleType("lichtfeld")

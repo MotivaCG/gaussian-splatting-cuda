@@ -8,6 +8,7 @@
 #include "core/material.hpp"
 #include "core/mesh_data.hpp"
 #include "diagnostics/vram_profiler.hpp"
+#include "window/vulkan_barrier2.hpp"
 #include "window/vulkan_context.hpp"
 
 #include <array>
@@ -168,6 +169,13 @@ namespace lfs::vis {
             ShadowTarget shadow{};
             glm::mat4 cached_light_vp{1.0f};
             bool cached_light_vp_valid = false;
+
+            // Inputs the rendered shadow map depends on. The shadow is re-rendered (a
+            // blocking GPU submit) only when one of these changes.
+            glm::mat4 shadow_key_model{0.0f};
+            glm::vec3 shadow_key_light_dir{0.0f};
+            int shadow_key_resolution = -1;
+            std::uint32_t shadow_key_generation = std::numeric_limits<std::uint32_t>::max();
         };
 
         // Placeholder 1x1 shadow image bound when shadow_enabled=false; satisfies the
@@ -488,21 +496,10 @@ namespace lfs::vis {
             // shadow render is valid (e.g. when shadows are disabled).
             VkCommandBuffer cb = beginSingleTimeCommands();
             if (cb != VK_NULL_HANDLE) {
-                VkImageMemoryBarrier b{};
-                b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-                b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-                b.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-                b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                b.image = out.image;
-                b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-                b.subresourceRange.levelCount = 1;
-                b.subresourceRange.layerCount = 1;
-                b.srcAccessMask = 0;
-                b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-                vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                                     0, 0, nullptr, 0, nullptr, 1, &b);
+                cmdImageBarrier2(cb, out.image, VK_IMAGE_ASPECT_DEPTH_BIT,
+                                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                                 VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE,
+                                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
                 endSingleTimeCommands(cb);
             }
             return true;
@@ -598,20 +595,10 @@ namespace lfs::vis {
             }
 
             // UNDEFINED → TRANSFER_DST_OPTIMAL
-            VkImageMemoryBarrier to_dst{};
-            to_dst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            to_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            to_dst.image = out.image;
-            to_dst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            to_dst.subresourceRange.levelCount = 1;
-            to_dst.subresourceRange.layerCount = 1;
-            to_dst.srcAccessMask = 0;
-            to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                 0, 0, nullptr, 0, nullptr, 1, &to_dst);
+            cmdImageBarrier2(cb, out.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE,
+                             VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
 
             VkBufferImageCopy region{};
             region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -620,20 +607,10 @@ namespace lfs::vis {
             vkCmdCopyBufferToImage(cb, staging, out.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                    1, &region);
 
-            VkImageMemoryBarrier to_shader{};
-            to_shader.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            to_shader.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            to_shader.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            to_shader.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            to_shader.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            to_shader.image = out.image;
-            to_shader.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            to_shader.subresourceRange.levelCount = 1;
-            to_shader.subresourceRange.layerCount = 1;
-            to_shader.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            to_shader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                                 0, 0, nullptr, 0, nullptr, 1, &to_shader);
+            cmdImageBarrier2(cb, out.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                             VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
 
             if (!endSingleTimeCommands(cb)) {
                 vmaDestroyBuffer(allocator, staging, staging_alloc);
@@ -1485,21 +1462,12 @@ namespace lfs::vis {
                 return false;
             }
 
-            VkImageMemoryBarrier to_attach{};
-            to_attach.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            to_attach.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-            to_attach.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-            to_attach.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            to_attach.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            to_attach.image = gpu.shadow.image;
-            to_attach.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-            to_attach.subresourceRange.levelCount = 1;
-            to_attach.subresourceRange.layerCount = 1;
-            to_attach.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            to_attach.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                                 VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-                                 0, 0, nullptr, 0, nullptr, 1, &to_attach);
+            cmdImageBarrier2(cb, gpu.shadow.image, VK_IMAGE_ASPECT_DEPTH_BIT,
+                             VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                             VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
+                             VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
 
             VkClearValue clear{};
             clear.depthStencil = {1.0f, 0};
@@ -1546,21 +1514,12 @@ namespace lfs::vis {
 
             vkCmdEndRendering(cb);
 
-            VkImageMemoryBarrier to_read{};
-            to_read.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            to_read.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-            to_read.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-            to_read.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            to_read.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            to_read.image = gpu.shadow.image;
-            to_read.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-            to_read.subresourceRange.levelCount = 1;
-            to_read.subresourceRange.layerCount = 1;
-            to_read.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-            to_read.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                                 0, 0, nullptr, 0, nullptr, 1, &to_read);
+            cmdImageBarrier2(cb, gpu.shadow.image, VK_IMAGE_ASPECT_DEPTH_BIT,
+                             VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                             VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                             VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
 
             return endSingleTimeCommands(cb);
         }
@@ -1598,10 +1557,29 @@ namespace lfs::vis {
                 if (!ensureShadowTarget(gpu, item.shadow_map_resolution)) {
                     continue;
                 }
+                // recordShadowPass does a blocking GPU submit; only pay it when an input
+                // the shadow map depends on actually changed. A static shadowed mesh then
+                // renders its shadow once instead of every frame.
+                const bool shadow_dirty =
+                    !gpu.cached_light_vp_valid ||
+                    gpu.shadow_key_generation != gpu.generation ||
+                    gpu.shadow_key_resolution != item.shadow_map_resolution ||
+                    gpu.shadow_key_model != item.model ||
+                    gpu.shadow_key_light_dir != item.light_dir;
+                if (!shadow_dirty) {
+                    continue;
+                }
                 const glm::mat4 light_vp = computeLightVp(gpu, item.model, item.light_dir);
+                if (!recordShadowPass(gpu, light_vp * item.model)) {
+                    gpu.cached_light_vp_valid = false;
+                    continue;
+                }
                 gpu.cached_light_vp = light_vp;
                 gpu.cached_light_vp_valid = true;
-                recordShadowPass(gpu, light_vp * item.model);
+                gpu.shadow_key_generation = gpu.generation;
+                gpu.shadow_key_resolution = item.shadow_map_resolution;
+                gpu.shadow_key_model = item.model;
+                gpu.shadow_key_light_dir = item.light_dir;
             }
 
             constexpr std::uint64_t kEvictAfter = 120;

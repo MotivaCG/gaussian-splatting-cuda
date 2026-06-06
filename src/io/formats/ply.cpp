@@ -7,6 +7,7 @@
 #include "core/logger.hpp"
 #include "core/path_utils.hpp"
 #include "core/tensor.hpp"
+#include "core/tensor/internal/cuda_stream_context.hpp"
 #include "io/error.hpp"
 #include "io/ply_export_internal.hpp"
 #include "tinyply.hpp"
@@ -641,11 +642,21 @@ namespace lfs::io {
         }
 
         if (tensor.device() == Device::CUDA) {
-            const cudaError_t status = cudaMemcpy(
+            // Upload on the caller's current CUDA stream rather than the legacy default
+            // stream. A default-stream cudaMemcpy inserts a device-wide barrier, so when a
+            // background thread (e.g. the PLY-sequence streaming player) uploads here it
+            // would serialise against the render thread's GPU work and stall it for the
+            // whole copy. cudaMemcpyAsync on the thread's (non-blocking) stream avoids that.
+            const cudaStream_t stream = lfs::core::getCurrentCUDAStream();
+            cudaError_t status = cudaMemcpyAsync(
                 tensor.data_ptr(),
                 data.data(),
                 data.size_bytes(),
-                cudaMemcpyHostToDevice);
+                cudaMemcpyHostToDevice,
+                stream);
+            if (status == cudaSuccess) {
+                status = cudaStreamSynchronize(stream);
+            }
             if (status != cudaSuccess) {
                 throw std::runtime_error(std::format(
                     "CUDA upload failed for '{}': {} ({})",

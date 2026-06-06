@@ -26,7 +26,6 @@
 #include "rendering/rendering_manager.hpp"
 #include "scene/scene_manager.hpp"
 #include "tools/align_tool.hpp"
-#include "tools/brush_tool.hpp"
 #include "tools/selection_tool.hpp"
 #include "tools/tool_base.hpp"
 #include "tools/unified_tool_registry.hpp"
@@ -265,9 +264,6 @@ namespace lfs::vis {
             case input::Action::TOOL_MIRROR:
                 tool = ToolType::Mirror;
                 break;
-            case input::Action::TOOL_BRUSH:
-                tool = ToolType::Brush;
-                break;
             case input::Action::TOOL_ALIGN:
                 tool = ToolType::Align;
                 break;
@@ -401,6 +397,12 @@ namespace lfs::vis {
         bindings_.setOnBindingsChanged([this]() { refreshMovementKeyCache(); });
     }
 
+    void InputController::applySplitterCursorOverride() const {
+        if (current_cursor_ == CursorType::Resize && resize_cursor_) {
+            SDL_SetCursor(resize_cursor_);
+        }
+    }
+
     void InputController::refreshMovementKeyCache() {
         for (size_t i = 0; i < input::kToolModeCount; ++i) {
             const auto mode = static_cast<input::ToolMode>(i);
@@ -481,9 +483,17 @@ namespace lfs::vis {
         return mods;
     }
 
-    bool InputController::isNearSplitter(double x) const {
+    bool InputController::isNearSplitter(double x, double y) const {
         auto* const rendering = services().renderingOrNull();
         if (!rendering) {
+            return false;
+        }
+
+        const glm::ivec2 viewport_size{
+            std::max(static_cast<int>(std::lround(viewport_bounds_.width)), 0),
+            std::max(static_cast<int>(std::lround(viewport_bounds_.height)), 0)};
+        const auto content_bounds = rendering->getContentBounds(viewport_size);
+        if (content_bounds.width <= 0.0f || content_bounds.height <= 0.0f) {
             return false;
         }
 
@@ -495,7 +505,13 @@ namespace lfs::vis {
         }
 
         constexpr float SPLITTER_HIT_HALF_WIDTH = 12.0f;
-        return std::abs(x - *split_x) < SPLITTER_HIT_HALF_WIDTH;
+        const float content_left = viewport_bounds_.x + content_bounds.x;
+        const float content_top = viewport_bounds_.y + content_bounds.y;
+        return x >= content_left &&
+               x < content_left + content_bounds.width &&
+               y >= content_top &&
+               y < content_top + content_bounds.height &&
+               std::abs(x - *split_x) < SPLITTER_HIT_HALF_WIDTH;
     }
 
     // Core handlers
@@ -563,7 +579,24 @@ namespace lfs::vis {
             return;
         }
 
-        // Check for splitter drag FIRST
+        if (is_left_button &&
+            action == input::ACTION_PRESS &&
+            isInViewport(x, y) &&
+            isNearSplitter(x, y)) {
+            if (isIndependentSplitViewActive()) {
+                focusSplitPanel(splitPanelForScreenX(x));
+            }
+            if (auto* const rendering = services().renderingOrNull()) {
+                drag_mode_ = DragMode::Splitter;
+                splitter_start_pos_ = rendering->getSplitPosition();
+                splitter_start_x_ = x;
+                SDL_SetCursor(resize_cursor_);
+                current_cursor_ = CursorType::Resize;
+                LOG_TRACE("Started splitter drag");
+                return;
+            }
+        }
+
         if (!over_gui &&
             is_left_button &&
             action == input::ACTION_PRESS) {
@@ -606,21 +639,12 @@ namespace lfs::vis {
                 last_click_pos_ = {-1000, -1000};
                 last_clicked_camera_id_ = -1;
             }
-
-            // Check for splitter drag
-            if (isNearSplitter(x) && services().renderingOrNull()) {
-                drag_mode_ = DragMode::Splitter;
-                splitter_start_pos_ = services().renderingOrNull()->getSplitPosition();
-                splitter_start_x_ = x;
-                SDL_SetCursor(resize_cursor_);
-                LOG_TRACE("Started splitter drag");
-                return;
-            }
         }
 
         if (action == input::ACTION_RELEASE && drag_mode_ == DragMode::Splitter) {
             drag_mode_ = DragMode::None;
             SDL_SetCursor(SDL_GetDefaultCursor());
+            current_cursor_ = CursorType::Default;
             LOG_TRACE("Ended splitter drag");
             return;
         }
@@ -854,25 +878,6 @@ namespace lfs::vis {
                         if (result.status == op::OperatorResult::RUNNING_MODAL) {
                             // Operator is now modal, don't set drag mode - modal dispatch handles it
                         }
-                    } else if (brush_tool_ && brush_tool_->isEnabled()) {
-                        // Only invoke brush operator for add/remove actions (not replace)
-                        if (bound_action == input::Action::SELECTION_ADD ||
-                            bound_action == input::Action::SELECTION_REMOVE) {
-                            const int brush_mode = static_cast<int>(brush_tool_->getMode());
-                            const int brush_action = (bound_action == input::Action::SELECTION_REMOVE) ? 1 : 0;
-
-                            op::OperatorProperties props;
-                            props.set("x", x);
-                            props.set("y", y);
-                            props.set("button", button);
-                            props.set("modifiers", mods);
-                            props.set("mode", brush_mode);
-                            props.set("action", brush_action);
-                            props.set("brush_radius", brush_tool_->getBrushRadius());
-                            props.set("saturation_amount", brush_tool_->getSaturationAmount());
-
-                            op::operators().invoke(op::BuiltinOp::BrushStroke, &props);
-                        }
                     } else if (align_tool_ && align_tool_->isEnabled()) {
                         op::OperatorProperties props;
                         props.set("x", x);
@@ -955,10 +960,6 @@ namespace lfs::vis {
                 drag_mode_ = DragMode::None;
                 drag_button_ = -1;
                 was_dragging = true;
-            } else if (drag_mode_ == DragMode::Brush) {
-                // Selection and brush tools now use operator system (modal dispatch handles release)
-                drag_mode_ = DragMode::None;
-                drag_button_ = -1;
             }
             drag_viewport_ = nullptr;
 
@@ -1126,6 +1127,10 @@ namespace lfs::vis {
 
         const bool over_viewport_gizmo = gui && gui->gizmo().isPositionInViewportGizmo(x, y);
         const bool over_transform_gizmo = isTransformGizmoOverOrUsing();
+        const bool over_splitter =
+            drag_mode_ == DragMode::None &&
+            isInViewport(x, y) &&
+            isNearSplitter(x, y);
 
         if (pending_click_drag_.active) {
             if (!isMouseButtonPressed(pending_click_drag_.button)) {
@@ -1172,6 +1177,7 @@ namespace lfs::vis {
             isInViewport(x, y) &&
             drag_mode_ == DragMode::None &&
             !over_gui &&
+            !over_splitter &&
             !over_viewport_gizmo &&
             !over_transform_gizmo) {
 
@@ -1231,20 +1237,10 @@ namespace lfs::vis {
             }
         }
 
-        // Determine if we should show resize cursor for splitter
-        bool should_show_resize = false;
-        if (const auto* const rendering = services().renderingOrNull();
-            rendering && rendering->isSplitViewActive()) {
-            should_show_resize = (drag_mode_ == DragMode::None &&
-                                  isInViewport(x, y) &&
-                                  isNearSplitter(x) &&
-                                  !over_gui);
-        }
-
-        if (should_show_resize && current_cursor_ != CursorType::Resize) {
+        if (over_splitter) {
             SDL_SetCursor(resize_cursor_);
             current_cursor_ = CursorType::Resize;
-        } else if (!should_show_resize && current_cursor_ == CursorType::Resize) {
+        } else if (current_cursor_ == CursorType::Resize) {
             SDL_SetCursor(SDL_GetDefaultCursor());
             current_cursor_ = CursorType::Default;
         }
@@ -1343,7 +1339,7 @@ namespace lfs::vis {
             }
         }
 
-        // Brush radius adjustment for selection/brush tools. Modal operators
+        // Brush radius adjustment for the selection tool. Modal operators
         // for selection strokes pass scroll through, so it's safe to honor
         // BRUSH_RESIZE here even mid-stroke — that's what lets the user grow
         // or shrink the ring while in the middle of an add or subtract drag.
@@ -1351,11 +1347,6 @@ namespace lfs::vis {
             if (selection_tool_ && selection_tool_->isEnabled()) {
                 const float scale = (yoff > 0) ? 1.1f : 0.9f;
                 selection_tool_->setBrushRadius(selection_tool_->getBrushRadius() * scale);
-                return;
-            }
-            if (brush_tool_ && brush_tool_->isEnabled()) {
-                const float scale = (yoff > 0) ? 1.1f : 0.9f;
-                brush_tool_->setBrushRadius(brush_tool_->getBrushRadius() * scale);
                 return;
             }
         }
@@ -1718,15 +1709,6 @@ namespace lfs::vis {
                 return;
             }
 
-            case input::Action::CYCLE_BRUSH_MODE:
-                if (brush_tool_ && brush_tool_->isEnabled()) {
-                    const auto current = brush_tool_->getMode();
-                    brush_tool_->setMode(current == tools::BrushMode::Select
-                                             ? tools::BrushMode::Saturation
-                                             : tools::BrushMode::Select);
-                }
-                return;
-
             case input::Action::CAMERA_SPEED_UP:
                 updateCameraSpeed(true);
                 return;
@@ -1883,13 +1865,7 @@ namespace lfs::vis {
             press_selected_camera_frustum_ = false;
             pressed_camera_frustum_id_ = -1;
             SDL_SetCursor(SDL_GetDefaultCursor());
-        }
-
-        if (drag_mode_ == DragMode::Brush && drag_button_released) {
-            drag_mode_ = DragMode::None;
-            drag_button_ = -1;
-            press_selected_camera_frustum_ = false;
-            pressed_camera_frustum_id_ = -1;
+            current_cursor_ = CursorType::Default;
         }
 
         // Sync movement key states with actual keyboard (using cached keys)
@@ -2266,7 +2242,8 @@ namespace lfs::vis {
         if (selected.empty()) {
             // Focus on entire scene (skip group nodes)
             for (const auto* node : scene.getNodes()) {
-                if (node->type == core::NodeType::GROUP || node->type == core::NodeType::CAMERA_GROUP ||
+                if (node->type == core::NodeType::GROUP || node->type == core::NodeType::PLY_SEQUENCE ||
+                    node->type == core::NodeType::CAMERA_GROUP ||
                     node->type == core::NodeType::IMAGE_GROUP)
                     continue;
                 accumulateBounds(node);
@@ -2285,6 +2262,10 @@ namespace lfs::vis {
             return true;
         }
         return false;
+    }
+
+    bool InputController::focusSelection() {
+        return handleFocusSelection(activeKeyboardViewport());
     }
 
     // Helpers
@@ -2810,10 +2791,10 @@ namespace lfs::vis {
     }
 
     input::ToolMode InputController::getCurrentToolMode() const {
+        if (UnifiedToolRegistry::instance().getActiveTool() == "builtin.cropbox")
+            return input::ToolMode::CROP_BOX;
         if (selection_tool_ && selection_tool_->isEnabled())
             return input::ToolMode::SELECTION;
-        if (brush_tool_ && brush_tool_->isEnabled())
-            return input::ToolMode::BRUSH;
         if (align_tool_ && align_tool_->isEnabled())
             return input::ToolMode::ALIGN;
         // Check GUI tool mode for transform tools

@@ -8,7 +8,9 @@
 #include "core/scene.hpp"
 #include "python/python_runtime.hpp"
 #include "rendering/rendering_manager.hpp"
+#include "rendering/vulkan_external_tensor.hpp"
 #include "scene/scene_manager.hpp"
+#include "training/training_setup.hpp"
 #include "undo_history.hpp"
 #include <algorithm>
 #include <array>
@@ -691,6 +693,24 @@ namespace lfs::vis::op {
             return cloned;
         }
 
+        std::unique_ptr<lfs::core::SplatData> cloneRendererReadySplatData(
+            const lfs::core::SplatData& src,
+            const lfs::core::SplatTensorAllocator& allocator) {
+            auto cloned = cloneSplatData(src);
+            if (!allocator) {
+                return cloned;
+            }
+
+            lfs::core::param::TrainingParameters params;
+            params.optimization.max_cap = 0;
+            if (auto migrated = lfs::training::migrateTrainingModelToAllocator(params, *cloned, allocator);
+                !migrated) {
+                throw std::runtime_error("Failed to prepare restored splat tensors for rendering: " +
+                                         migrated.error());
+            }
+            return cloned;
+        }
+
         std::shared_ptr<lfs::core::PointCloud> clonePointCloud(const lfs::core::PointCloud& src) {
             auto cloned = std::make_shared<lfs::core::PointCloud>();
             cloned->means = src.means.is_valid() ? src.means.clone() : src.means;
@@ -994,7 +1014,8 @@ namespace lfs::vis::op {
                     .total_gaussians = scene_manager.getScene().getTotalGaussianCount(),
                     .is_visible = node->visible,
                     .parent_name = snapshot.parent_name,
-                    .is_group = node->type == lfs::core::NodeType::GROUP,
+                    .is_group = node->type == lfs::core::NodeType::GROUP ||
+                                node->type == lfs::core::NodeType::PLY_SEQUENCE,
                     .node_type = static_cast<int>(node->type),
                     .from_history = true}
                     .emit();
@@ -1024,7 +1045,14 @@ namespace lfs::vis::op {
             case lfs::core::NodeType::SPLAT:
                 if (!snapshot.model)
                     return false;
-                node_id = scene.addSplat(snapshot.name, cloneSplatData(*snapshot.model), parent_id);
+                {
+                    auto allocator = makeViewerSplatTensorAllocator();
+                    auto model = cloneRendererReadySplatData(*snapshot.model, allocator);
+                    if (allocator) {
+                        scene.setCombinedModelAllocator(std::move(allocator));
+                    }
+                    node_id = scene.addSplat(snapshot.name, std::move(model), parent_id);
+                }
                 break;
             case lfs::core::NodeType::POINTCLOUD:
                 if (!snapshot.point_cloud)
@@ -1050,6 +1078,9 @@ namespace lfs::vis::op {
                 break;
             case lfs::core::NodeType::DATASET:
                 node_id = scene.addDataset(snapshot.name);
+                break;
+            case lfs::core::NodeType::PLY_SEQUENCE:
+                node_id = scene.addPlySequence(snapshot.name, parent_id, snapshot.gaussian_count);
                 break;
             case lfs::core::NodeType::CAMERA_GROUP:
                 node_id = scene.addCameraGroup(snapshot.name, parent_id, snapshot.gaussian_count);

@@ -403,6 +403,8 @@ void main(
     const uint32_t H = uniforms.image_height;
     const uint32_t W = uniforms.image_width;
     const uint grid_width = uniforms.grid_width;
+    const uint32_t camera_H = uniforms.camera_height == 0 ? H : uniforms.camera_height;
+    const uint32_t camera_W = uniforms.camera_width == 0 ? W : uniforms.camera_width;
 
     uint2 pix_coord = dispatchThreadID.xy;
 
@@ -429,8 +431,10 @@ void main(
     Camera cam = load_camera(uniforms.world_view_transform,
         uniforms.fx, uniforms.fy, uniforms.cx, uniforms.cy,
         base_camera_model(uniforms.camera_model), uniforms.dist_coeffs,
-        H, W);
-    WorldRay ray = pixel_to_world_ray(float2(pix_coord) + 0.5f, cam);
+        camera_H, camera_W);
+    const float2 camera_pix_coord =
+        float2(pix_coord) + float2(uniforms.render_origin_x, uniforms.render_origin_y);
+    WorldRay ray = pixel_to_world_ray(camera_pix_coord + 0.5f, cam);
     ray_origin = ray.origin;
     ray_direction = ray.direction;
     thread_active = thread_active && ray.valid;

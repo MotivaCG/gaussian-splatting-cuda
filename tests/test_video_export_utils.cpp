@@ -7,7 +7,6 @@
 #include "core/tensor.hpp"
 #include "gui/video_export_utils.hpp"
 #include "rendering/coordinate_conventions.hpp"
-#include "rendering/render_constants.hpp"
 #include "scene/scene_manager.hpp"
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -186,25 +185,21 @@ TEST(VideoExportUtilsTest, ValidateVideoExportOptionsRejectsInvalidValues) {
                                                             .height = 1080,
                                                             .framerate = 0,
                                                             .crf = 18}));
-    EXPECT_FALSE(lfs::vis::gui::validateVideoExportOptions({.width = lfs::rendering::MAX_VIEWPORT_SIZE + 1,
-                                                            .height = 1080,
-                                                            .framerate = 30,
-                                                            .crf = 18}));
     EXPECT_FALSE(lfs::vis::gui::validateVideoExportOptions({.width = 1920,
                                                             .height = 1080,
                                                             .framerate = 30,
                                                             .crf = 99}));
 }
 
-TEST(VideoExportUtilsTest, ValidateVideoExportOptionsAcceptsTypicalPreset) {
-    auto result = lfs::vis::gui::validateVideoExportOptions({.width = 1920,
-                                                             .height = 1080,
+TEST(VideoExportUtilsTest, ValidateVideoExportOptionsAcceptsNativeResolution) {
+    auto result = lfs::vis::gui::validateVideoExportOptions({.width = 32768,
+                                                             .height = 17280,
                                                              .framerate = 30,
                                                              .crf = 18});
 
     ASSERT_TRUE(result.has_value()) << result.error();
-    EXPECT_EQ(result->width, 1920);
-    EXPECT_EQ(result->height, 1080);
+    EXPECT_EQ(result->width, 32768);
+    EXPECT_EQ(result->height, 17280);
     EXPECT_EQ(result->framerate, 30);
     EXPECT_EQ(result->crf, 18);
 }

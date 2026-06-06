@@ -3,10 +3,10 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "gui/video_export_utils.hpp"
-#include "rendering/render_constants.hpp"
+#include "io/loader.hpp"
+#include "rendering/vulkan_external_tensor.hpp"
 #include "scene/scene_manager.hpp"
 #include "training/training_manager.hpp"
-#include <format>
 #include <optional>
 #include <shared_mutex>
 
@@ -96,6 +96,13 @@ namespace lfs::vis::gui {
         if (const auto* const model = scene_manager.getModelForRendering();
             model && model->size() > 0) {
             snapshot.combined_model = std::shared_ptr<lfs::core::SplatData>(cloneSplatData(*model).release());
+            if (auto allocator = lfs::vis::makeViewerSplatTensorAllocator()) {
+                if (auto migrated = lfs::io::migrateSplatTensorsToAllocator(*snapshot.combined_model, allocator);
+                    !migrated) {
+                    return std::unexpected("Failed to prepare splat tensors for video export: " +
+                                           migrated.error().format());
+                }
+            }
             snapshot.model_transforms = render_state.model_transforms;
             snapshot.transform_indices = cloneOptionalTensor(render_state.transform_indices);
             snapshot.selection_mask = cloneOptionalTensor(render_state.selection_mask);
@@ -122,6 +129,7 @@ namespace lfs::vis::gui {
             VideoExportCropBoxSnapshot cropbox_snapshot;
             cropbox_snapshot.has_data = cb.data != nullptr;
             cropbox_snapshot.node_id = cb.node_id;
+            cropbox_snapshot.parent_splat_id = cb.parent_splat_id;
             cropbox_snapshot.parent_node_index = scene.getVisibleNodeIndex(cb.parent_splat_id);
             cropbox_snapshot.world_transform = cb.world_transform;
             if (cb.data) {
@@ -139,6 +147,7 @@ namespace lfs::vis::gui {
                 continue;
             snapshot.active_ellipsoid = VideoExportEllipsoidSnapshot{
                 .node_id = el.node_id,
+                .parent_splat_id = el.parent_splat_id,
                 .parent_node_index = scene.getVisibleNodeIndex(el.parent_splat_id),
                 .data = *el.data,
                 .world_transform = el.world_transform,
@@ -152,6 +161,7 @@ namespace lfs::vis::gui {
                     continue;
                 snapshot.active_ellipsoid = VideoExportEllipsoidSnapshot{
                     .node_id = el.node_id,
+                    .parent_splat_id = el.parent_splat_id,
                     .parent_node_index = scene.getVisibleNodeIndex(el.parent_splat_id),
                     .data = *el.data,
                     .world_transform = el.world_transform,
@@ -171,12 +181,6 @@ namespace lfs::vis::gui {
         lfs::io::video::VideoExportOptions options) {
         if (options.width <= 0 || options.height <= 0) {
             return std::unexpected("Video export width and height must be positive");
-        }
-        if (options.width > lfs::rendering::MAX_VIEWPORT_SIZE ||
-            options.height > lfs::rendering::MAX_VIEWPORT_SIZE) {
-            return std::unexpected(
-                std::format("Video export resolution exceeds maximum viewport size of {}",
-                            lfs::rendering::MAX_VIEWPORT_SIZE));
         }
         if (options.framerate <= 0) {
             return std::unexpected("Video export framerate must be positive");

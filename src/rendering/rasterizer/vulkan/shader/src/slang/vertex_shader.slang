@@ -390,6 +390,8 @@ void main(
     const uint image_width = uniforms.image_width;
     const uint grid_height = uniforms.grid_height;
     const uint grid_width = uniforms.grid_width;
+    const uint camera_height = uniforms.camera_height == 0 ? image_height : uniforms.camera_height;
+    const uint camera_width = uniforms.camera_width == 0 ? image_width : uniforms.camera_width;
     const uint camera_model = base_camera_model(uniforms.camera_model);
     const float4x4 world_view_transform = (uniforms.world_view_transform);
 
@@ -425,7 +427,7 @@ void main(
     Camera cam = no_diff load_camera(world_view_transform,
         uniforms.fx, uniforms.fy, uniforms.cx, uniforms.cy,
         camera_model, uniforms.dist_coeffs,
-        image_height, image_width);
+        camera_height, camera_width);
   #if EXPORT_MODE == EXPORT_MODE_VULKAN_FORWARD
     Gaussian_3D gauss = load_gaussian_split(
         g_idx, xyz_ws, sh0, shN, rotations,
@@ -535,6 +537,13 @@ void main(
         }
     }
 
+    float4 visibility_flags = overlay_params[OVERLAY_PARAM_VISIBILITY_FLAGS];
+    if (active && overlay_enabled(visibility_flags.x) && node_data_enabled && node_idx >= 0 && node_idx < node_count) {
+        if (read_byte(node_mask, uint(node_idx)) == 0) {
+            active = false;
+        }
+    }
+
     if (!active) {
         out_overlay_flags[g_idx] = overlay_flags;
         out_radii[g_idx] = 0;
@@ -596,6 +605,7 @@ void main(
 
     // radii, bounds, number of tiles
 #if EXPORT_MODE != EXPORT_MODE_VULKAN_BACKWARD
+    splat.xyz_vs.xy -= float2(uniforms.render_origin_x, uniforms.render_origin_y);
 
     if (splat.xyz_vs.z <= NEAR_CLIP ||
         splat.inv_cov_vs_opac.w <= ALPHA_THRESHOLD ||

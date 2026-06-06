@@ -125,7 +125,6 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
 
         # Tools
         tools/selection_tool.cpp
-        tools/brush_tool.cpp
         tools/align_tool.cpp
         tools/unified_tool_registry.cpp
         tools/builtin_tools.cpp
@@ -148,7 +147,6 @@ add_library(lfs_visualizer ${LFS_VIS_LIB_TYPE}
         operator/operator_registry.cpp
         operator/property_schema.cpp
         operator/ops/align_ops.cpp
-        operator/ops/brush_ops.cpp
         operator/ops/edit_ops.cpp
         operator/ops/scene_ops.cpp
         operator/ops/selection_ops.cpp

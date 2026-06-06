@@ -101,8 +101,8 @@ namespace lfs::vis {
         Viewport viewport(200, 200);
         InputController controller(nullptr, viewport);
 
-        controller.getBindings().startCapture(input::ToolMode::BRUSH,
-                                              input::Action::CYCLE_BRUSH_MODE);
+        controller.getBindings().startCapture(input::ToolMode::GLOBAL,
+                                              input::Action::TOOL_ALIGN);
         lfs::python::request_keyboard_capture("input-controller-focus-test");
         controller.handleKey(input::KEY_B, input::ACTION_PRESS, input::KEYMOD_NONE);
         lfs::python::release_keyboard_capture("input-controller-focus-test");
@@ -296,7 +296,7 @@ namespace lfs::vis {
                       input::ToolMode::SELECTION, input::MouseButton::RIGHT, input::KEYMOD_NONE),
                   input::Action::CAMERA_ORBIT);
         EXPECT_EQ(bindings.getActionForDrag(
-                      input::ToolMode::BRUSH, input::MouseButton::RIGHT, input::KEYMOD_NONE),
+                      input::ToolMode::ALIGN, input::MouseButton::RIGHT, input::KEYMOD_NONE),
                   input::Action::CAMERA_PAN);
     }
 
@@ -683,6 +683,72 @@ namespace lfs::vis {
 
         EXPECT_EQ(loaded.getActionForScroll(input::ToolMode::GLOBAL, input::MODIFIER_NONE),
                   input::Action::NONE);
+
+        std::filesystem::remove(profile_path);
+    }
+
+    TEST_F(InputControllerFocusTest, HistogramZoomMarkedDefaultsToCtrlScroll) {
+        input::InputBindings bindings;
+
+        EXPECT_EQ(bindings.getActionForScroll(input::ToolMode::GLOBAL, input::MODIFIER_CTRL),
+                  input::Action::HISTOGRAM_ZOOM_MARKED);
+
+        const auto trigger = bindings.getTriggerForAction(input::Action::HISTOGRAM_ZOOM_MARKED,
+                                                          input::ToolMode::GLOBAL);
+        ASSERT_TRUE(trigger.has_value());
+        const auto* scroll_trigger = std::get_if<input::MouseScrollTrigger>(&*trigger);
+        ASSERT_NE(scroll_trigger, nullptr);
+        EXPECT_EQ(scroll_trigger->modifiers, input::MODIFIER_CTRL);
+        EXPECT_FALSE(scroll_trigger->chord_key.has_value());
+        EXPECT_TRUE(input::describe(input::Action::HISTOGRAM_ZOOM_MARKED).allowed_kinds &
+                    input::TRIGGER_KIND_MOUSE_SCROLL);
+    }
+
+    TEST_F(InputControllerFocusTest, CropApplyDefaultsToEnterAndNumEnter) {
+        input::InputBindings bindings;
+
+        EXPECT_EQ(bindings.getActionForKey(input::ToolMode::CROP_BOX,
+                                           input::KEY_ENTER,
+                                           input::MODIFIER_NONE),
+                  input::Action::APPLY_CROP_BOX);
+        EXPECT_EQ(bindings.getActionForKey(input::ToolMode::CROP_BOX,
+                                           input::KEY_KP_ENTER,
+                                           input::MODIFIER_NONE),
+                  input::Action::APPLY_CROP_BOX);
+    }
+
+    TEST_F(InputControllerFocusTest, VersionFourteenProfileMigratesCropApplyEnterBindings) {
+        const auto profile_path = std::filesystem::temp_directory_path() / "lfs_input_bindings_legacy_v14.json";
+        std::filesystem::remove(profile_path);
+        {
+            std::ofstream file(profile_path);
+            ASSERT_TRUE(file.is_open());
+            file << R"({
+  "name": "LegacyV14",
+  "version": 14,
+  "bindings": [
+    {
+      "mode": 0,
+      "action": 71,
+      "description": "Zoom Histogram at Cursor",
+      "trigger_type": "scroll",
+      "modifiers": 2
+    }
+  ]
+})";
+        }
+
+        input::InputBindings loaded;
+        ASSERT_TRUE(loaded.loadProfileFromFile(profile_path));
+
+        EXPECT_EQ(loaded.getActionForKey(input::ToolMode::CROP_BOX,
+                                         input::KEY_ENTER,
+                                         input::MODIFIER_NONE),
+                  input::Action::APPLY_CROP_BOX);
+        EXPECT_EQ(loaded.getActionForKey(input::ToolMode::CROP_BOX,
+                                         input::KEY_KP_ENTER,
+                                         input::MODIFIER_NONE),
+                  input::Action::APPLY_CROP_BOX);
 
         std::filesystem::remove(profile_path);
     }

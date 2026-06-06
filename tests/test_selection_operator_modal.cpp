@@ -317,7 +317,7 @@ TEST_F(SelectionOperatorModalTest, DepthFilterDoesNotOverrideGaussianRenderMode)
     lfs::vis::tools::SelectionTool tool;
     ASSERT_TRUE(tool.initialize(tool_context));
     tool.setEnabled(true);
-    tool.setDepthFilterRange(true, 0.0f, 5.3f, 1.35f);
+    tool.setDepthFilterRange(true, 0.0f, 15.0f, 1.35f);
 
     auto enabled_settings = rendering_manager_->getSettings();
     EXPECT_TRUE(enabled_settings.depth_filter_enabled);

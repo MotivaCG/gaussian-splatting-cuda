@@ -177,6 +177,8 @@ namespace lfs::python {
 
         // Redraw request flag
         std::atomic<bool> g_redraw_requested{false};
+        std::atomic<uint64_t> g_redraw_generation{0};
+        std::atomic<uint64_t> g_pre_scene_panel_sync_generation{0};
         MainLoopWakeCallback g_main_loop_wake_callback = nullptr;
     } // namespace
 
@@ -213,12 +215,26 @@ namespace lfs::python {
     // Redraw request mechanism
     void request_redraw() {
         const bool was_requested = g_redraw_requested.exchange(true, std::memory_order_acq_rel);
+        g_redraw_generation.fetch_add(1, std::memory_order_acq_rel);
         if (!was_requested && g_main_loop_wake_callback)
             g_main_loop_wake_callback();
     }
 
     bool consume_redraw_request() {
         return g_redraw_requested.exchange(false, std::memory_order_acq_rel);
+    }
+
+    uint64_t redraw_request_generation() {
+        return g_redraw_generation.load(std::memory_order_acquire);
+    }
+
+    void request_pre_scene_panel_sync() {
+        g_pre_scene_panel_sync_generation.store(redraw_request_generation(),
+                                                std::memory_order_release);
+    }
+
+    uint64_t pre_scene_panel_sync_generation() {
+        return g_pre_scene_panel_sync_generation.load(std::memory_order_acquire);
     }
 
     void set_main_loop_wake_callback(MainLoopWakeCallback cb) {

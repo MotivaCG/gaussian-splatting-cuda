@@ -47,6 +47,9 @@ namespace lfs::vis::gui {
         void populateLanguages();
         void updateTheme();
         void updateLocalizedText();
+        void ensureLanguageDropdownFontsLoaded();
+        [[nodiscard]] bool isLanguageSelectOpen() const;
+        [[nodiscard]] bool isLanguageSelectHit(float local_x, float local_y) const;
         [[nodiscard]] bool hasInputActivity(const PanelInputState& input) const;
         InputForwardResult forwardInput(const PanelInputState& input, float overlay_x, float overlay_y,
                                         float overlay_w, float overlay_h);
@@ -70,6 +73,7 @@ namespace lfs::vis::gui {
         bool last_mouse_valid_ = false;
         float last_mouse_x_ = 0.0f;
         float last_mouse_y_ = 0.0f;
+        bool language_dropdown_fonts_requested_ = false;
 
         Rml::EventListener* link_listener_ = nullptr;
         Rml::EventListener* lang_listener_ = nullptr;

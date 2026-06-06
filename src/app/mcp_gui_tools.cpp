@@ -44,6 +44,7 @@
 #include "visualizer/scene_coordinate_utils.hpp"
 #include "visualizer/visualizer.hpp"
 #include "visualizer/visualizer_impl.hpp"
+#include "visualizer/window/vulkan_context.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -170,10 +171,25 @@ namespace lfs::app {
             vis::Visualizer* viewer,
             int width = 0,
             int height = 0) {
-            (void)viewer;
-            (void)width;
-            (void)height;
-            return std::unexpected("Full-window capture needs a Vulkan swapchain readback path; use render.capture for viewport capture");
+            auto* const viewer_impl = dynamic_cast<vis::VisualizerImpl*>(viewer);
+            if (!viewer_impl)
+                return std::unexpected("Full-window capture requires a GUI visualizer");
+
+            auto* const window_manager = viewer_impl->getWindowManager();
+            auto* const vulkan_context = window_manager ? window_manager->getVulkanContext() : nullptr;
+            if (!vulkan_context)
+                return std::unexpected("Full-window capture requires a Vulkan window");
+
+            auto capture = vulkan_context->captureActiveFrameRgba();
+            if (!capture)
+                return std::unexpected(capture.error());
+
+            return mcp::encode_pixels_to_base64(capture->rgba.data(),
+                                                capture->width,
+                                                capture->height,
+                                                4,
+                                                width,
+                                                height);
         }
 
         json selection_state_json(core::Scene& scene, const int max_indices = 100000) {
@@ -220,6 +236,8 @@ namespace lfs::app {
                 return "pointcloud";
             case core::NodeType::GROUP:
                 return "group";
+            case core::NodeType::PLY_SEQUENCE:
+                return "ply_sequence";
             case core::NodeType::CROPBOX:
                 return "crop_box";
             case core::NodeType::ELLIPSOID:
@@ -579,6 +597,9 @@ namespace lfs::app {
                                  {"equirectangular", settings.equirectangular},
                                  {"orthographic", settings.orthographic},
                                  {"ortho_scale", settings.ortho_scale},
+                                 {"depth_view_min", settings.depth_view_min},
+                                 {"depth_view_max", settings.depth_view_max},
+                                 {"depth_visualization_mode", static_cast<int>(settings.depth_visualization_mode)},
                                  {"selection_color_committed", json::array({settings.selection_color_committed[0], settings.selection_color_committed[1], settings.selection_color_committed[2]})},
                                  {"selection_color_preview", json::array({settings.selection_color_preview[0], settings.selection_color_preview[1], settings.selection_color_preview[2]})},
                                  {"selection_color_center_marker", json::array({settings.selection_color_center_marker[0], settings.selection_color_center_marker[1], settings.selection_color_center_marker[2]})},
@@ -714,6 +735,9 @@ namespace lfs::app {
             set_bool("equirectangular", settings.equirectangular);
             set_bool("orthographic", settings.orthographic);
             set_float("ortho_scale", settings.ortho_scale);
+            set_float("depth_view_min", settings.depth_view_min);
+            set_float("depth_view_max", settings.depth_view_max);
+            set_int("depth_visualization_mode", settings.depth_visualization_mode);
             set_bool("depth_clip_enabled", settings.depth_clip_enabled);
             set_float("depth_clip_far", settings.depth_clip_far);
             set_bool("mesh_wireframe", settings.mesh_wireframe);
@@ -4176,6 +4200,21 @@ namespace lfs::app {
                 .save_path = [](const std::string& path) { return python::save_camera_path(path); },
                 .load_path = [](const std::string& path) { return python::load_camera_path(path); },
                 .set_playback_speed = [](const float speed) { python::set_playback_speed(speed); },
+                .load_ply_sequence =
+                    [](const std::string& directory, const float fps) {
+                        core::events::cmd::SequencerLoadPlySequence{.directory = directory, .fps = fps}.emit();
+                    },
+                .scrub_to_time =
+                    [viewer_impl](const float time) {
+                        auto* const gui_manager = viewer_impl ? viewer_impl->getGuiManager() : nullptr;
+                        if (gui_manager)
+                            gui_manager->sequencer().seek(time);
+                    },
+                .ply_sequence_status =
+                    [viewer_impl]() -> std::string {
+                    auto* const gui_manager = viewer_impl ? viewer_impl->getGuiManager() : nullptr;
+                    return gui_manager ? gui_manager->sequencerUI().plyPlayerStatusJson() : std::string{};
+                },
             });
 
         // --- Plugin tools ---

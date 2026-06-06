@@ -575,8 +575,50 @@ namespace lfs::core {
         std::mt19937 rng(seed);
         std::shuffle(all_indices.begin(), all_indices.end(), rng);
 
-        std::vector<int> selected_indices(all_indices.begin(),
-                                          all_indices.begin() + num_required_splat);
+        std::vector<unsigned char> old_frozen(static_cast<size_t>(num_points), 0);
+        if (!splat_data._frozen_ranges.empty()) {
+            for (const auto& range : splat_data._frozen_ranges) {
+                if (range.count == 0 || range.start >= old_frozen.size()) {
+                    continue;
+                }
+                const size_t end = range.count > old_frozen.size() - range.start
+                                       ? old_frozen.size()
+                                       : range.start + range.count;
+                std::fill(old_frozen.begin() + static_cast<std::ptrdiff_t>(range.start),
+                          old_frozen.begin() + static_cast<std::ptrdiff_t>(end),
+                          1);
+            }
+        }
+        const size_t frozen_total = std::count(old_frozen.begin(), old_frozen.end(), 1);
+
+        std::vector<int> selected_indices;
+        selected_indices.reserve(static_cast<size_t>(num_required_splat));
+        if (splat_data._frozen_ranges.empty()) {
+            selected_indices.assign(all_indices.begin(), all_indices.begin() + num_required_splat);
+        } else {
+            std::vector<int> trainable_indices;
+            trainable_indices.reserve(all_indices.size());
+            for (const int idx : all_indices) {
+                if (old_frozen[static_cast<size_t>(idx)]) {
+                    if (static_cast<int>(selected_indices.size()) < num_required_splat) {
+                        selected_indices.push_back(idx);
+                    }
+                } else {
+                    trainable_indices.push_back(idx);
+                }
+            }
+
+            if (frozen_total > static_cast<size_t>(num_required_splat)) {
+                LOG_WARN("random_choose kept only frozen rows because requested count {} is smaller than frozen count",
+                         num_required_splat);
+            }
+            for (const int idx : trainable_indices) {
+                if (static_cast<int>(selected_indices.size()) >= num_required_splat) {
+                    break;
+                }
+                selected_indices.push_back(idx);
+            }
+        }
 
         auto indices_tensor = Tensor::from_vector(
             selected_indices,
@@ -611,6 +653,11 @@ namespace lfs::core {
         splat_data._scaling = splat_data._scaling.index_select(0, indices_tensor).contiguous();
         splat_data._rotation = splat_data._rotation.index_select(0, indices_tensor).contiguous();
         splat_data._opacity = splat_data._opacity.index_select(0, indices_tensor).contiguous();
+        if (!splat_data._frozen_ranges.empty()) {
+            splat_data.remap_frozen_ranges_after_keep(
+                static_cast<size_t>(num_points),
+                selected_indices);
+        }
 
         if (splat_data._densification_info.is_valid() && splat_data._densification_info.size(0) == num_points) {
             splat_data._densification_info = splat_data._densification_info.index_select(0, indices_tensor).contiguous();
