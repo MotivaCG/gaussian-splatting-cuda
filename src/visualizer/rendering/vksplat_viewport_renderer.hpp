@@ -169,7 +169,7 @@ namespace lfs::vis {
             _VulkanBuffer node_mask{};
             _VulkanBuffer overlay_params{};
             _VulkanBuffer model_transforms{};
-            bool overlays_active = true;
+            bool raster_overlays_active = true;
         };
         [[nodiscard]] std::expected<OverlayBindingViews, std::string> uploadOverlayBindings(
             VulkanContext& context,
@@ -233,6 +233,9 @@ namespace lfs::vis {
             std::array<glm::vec4, lfs::rendering::kSelectionColorTableCount> cached_color_palette{};
             bool color_table_uploaded = false;
             lfs::core::Tensor transform_indices_source;
+            const void* cached_transform_indices_ptr = nullptr;
+            std::size_t cached_transform_indices_bytes = 0;
+            bool transform_indices_uploaded = false;
             std::vector<std::uint8_t> node_mask_upload_cpu;
             // Fingerprint of emphasized_node_mask currently staged in the
             // interop buffer.
@@ -323,14 +326,6 @@ namespace lfs::vis {
         mutable VkCommandPool readback_pool_ = VK_NULL_HANDLE;
         mutable VkCommandBuffer readback_cmd_ = VK_NULL_HANDLE;
         mutable VkFence readback_fence_ = VK_NULL_HANDLE;
-        // Dedicated non-blocking CUDA stream for overlay-source H2D uploads.
-        // Created with cudaStreamNonBlocking so it does NOT implicitly
-        // serialize with the legacy default (NULL) stream where the rest of
-        // the project's CUDA work runs — otherwise sub-KB uploads would still
-        // wait for unrelated CUDA work to drain. Downstream Vulkan compute
-        // observes the upload via the per-slot timeline semaphore signal, so
-        // cross-API ordering is preserved without per-frame sync.
-        cudaStream_t overlay_upload_stream_ = nullptr;
         VulkanGSRenderer renderer_;
         VulkanGSPipelineBuffers buffers_;
         std::unique_ptr<ComposePipeline> compose_;

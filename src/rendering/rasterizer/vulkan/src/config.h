@@ -12,6 +12,9 @@
 #define TILE_HEIGHT 16
 #define TILE_WIDTH  16
 
+#define RASTER_BATCH_SIZE           1024
+#define RASTER_DENSE_TILE_THRESHOLD RASTER_BATCH_SIZE
+
 // reordering for better memory colaescing
 // see config.slang for details
 #define SH_REORDER_SIZE SUBGROUP_SIZE

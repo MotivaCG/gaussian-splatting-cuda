@@ -339,6 +339,9 @@ namespace lfs::vis {
         [[nodiscard]] uint64_t getViewportArtifactGeneration() const {
             return viewport_artifact_service_.artifactGeneration();
         }
+        [[nodiscard]] uint64_t getViewportProjectionGeneration() const {
+            return viewport_projection_generation_;
+        }
 
         void setCursorPreviewState(bool active, float x, float y, float radius, bool add_mode = true,
                                    lfs::core::Tensor* selection_tensor = nullptr,
@@ -596,6 +599,7 @@ namespace lfs::vis {
 
         std::shared_ptr<const lfs::core::Tensor> vulkan_viewport_image_;
         std::uint64_t vulkan_viewport_image_generation_ = 0;
+        std::uint64_t viewport_projection_generation_ = 1;
         std::unique_ptr<VksplatViewportRenderer> vksplat_viewport_renderer_;
         std::unique_ptr<PointCloudVulkanRenderer> point_cloud_vulkan_renderer_;
         // Cached SH0→RGB derivation for the point-cloud Vulkan path. Refreshed

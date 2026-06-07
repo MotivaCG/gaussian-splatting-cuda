@@ -681,6 +681,14 @@ namespace lfs::vis {
         }
 
         DirtyMask frame_dirty = dirty_mask_.exchange(0);
+        constexpr DirtyMask projection_dirty =
+            DirtyFlag::CAMERA | DirtyFlag::SPLATS | DirtyFlag::VIEWPORT | DirtyFlag::SPLIT_VIEW;
+        if ((frame_dirty & projection_dirty) != 0) {
+            ++viewport_projection_generation_;
+            if (viewport_projection_generation_ == 0) {
+                ++viewport_projection_generation_;
+            }
+        }
         LOG_PERF("renderVulkanFrame.frame_dirty=0x{:x} model={} pc={} mesh={} env={}",
                  frame_dirty, has_renderable_model, has_point_cloud, has_meshes, has_environment);
         if (!has_render_content) {
