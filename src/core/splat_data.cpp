@@ -66,6 +66,8 @@ namespace {
                  num_points - high_conf_count,
                  untrusted_scale_multiplier,
                  untrusted_opacity_multiplier);
+    }
+
     template <typename Index>
     [[nodiscard]] std::vector<lfs::core::SplatData::FrozenRange> remap_frozen_ranges_after_keep(
         const std::vector<lfs::core::SplatData::FrozenRange>& ranges,
