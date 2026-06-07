@@ -18,6 +18,9 @@
 #define TILE_WIDTH 16
 #define TILE_SIZE (TILE_HEIGHT*TILE_WIDTH)
 
+#define RASTER_BATCH_SIZE 1024u
+#define RASTER_DENSE_TILE_THRESHOLD RASTER_BATCH_SIZE
+
 // 0: none
 // 1: gsplat
 // 2: all nonzero

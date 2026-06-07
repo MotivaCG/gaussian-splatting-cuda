@@ -51,6 +51,24 @@ namespace lfs::rendering {
         int n_primitives);
 
     void set_selection_element(bool* selection, int index, bool value);
+    [[nodiscard]] Tensor project_screen_positions_tensor(
+        const Tensor& means,
+        int width,
+        int height,
+        const std::array<float, 9>& view_rotation_rows,
+        const std::array<float, 3>& translation,
+        float pixel_focal_x,
+        float pixel_focal_y,
+        bool orthographic,
+        float ortho_scale,
+        const Tensor* model_transforms = nullptr,
+        const Tensor* transform_indices = nullptr,
+        const std::vector<bool>& node_visibility_mask = {});
+    [[nodiscard]] int pick_projected_gaussian_tensor(
+        const Tensor& screen_positions,
+        float x,
+        float y,
+        float radius);
 
     void brush_select_tensor(
         const Tensor& screen_positions,

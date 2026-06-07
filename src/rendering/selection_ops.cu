@@ -146,6 +146,192 @@ namespace lfs::rendering {
             }
         }
 
+        __device__ __forceinline__ void writeInvalidScreenPosition(float2* const output, const int idx) {
+            output[idx] = make_float2(kInvalidScreenPositionThreshold * 100000.0f,
+                                      kInvalidScreenPositionThreshold * 100000.0f);
+        }
+
+        __global__ void projectScreenPositionsKernel(
+            const float3* __restrict__ means,
+            float2* __restrict__ output,
+            const int n,
+            const int width,
+            const int height,
+            const float3 view_row0,
+            const float3 view_row1,
+            const float3 view_row2,
+            const float3 translation,
+            const float pixel_focal_x,
+            const float pixel_focal_y,
+            const bool orthographic,
+            const float ortho_scale,
+            const float* __restrict__ model_transforms,
+            const int* __restrict__ transform_indices,
+            const int num_model_transforms,
+            const uint8_t* __restrict__ node_visibility,
+            const int node_visibility_count) {
+            const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if (idx >= n) {
+                return;
+            }
+
+            int transform_idx = transform_indices != nullptr ? transform_indices[idx] : 0;
+            if (node_visibility != nullptr && transform_indices != nullptr) {
+                if (transform_idx < 0 ||
+                    transform_idx >= node_visibility_count ||
+                    node_visibility[transform_idx] == 0) {
+                    writeInvalidScreenPosition(output, idx);
+                    return;
+                }
+            }
+
+            float3 pos = means[idx];
+            if (model_transforms != nullptr && num_model_transforms > 0) {
+                transform_idx = min(max(transform_idx, 0), num_model_transforms - 1);
+                const float* const m = model_transforms + transform_idx * 16;
+                pos = make_float3(
+                    m[0] * pos.x + m[1] * pos.y + m[2] * pos.z + m[3],
+                    m[4] * pos.x + m[5] * pos.y + m[6] * pos.z + m[7],
+                    m[8] * pos.x + m[9] * pos.y + m[10] * pos.z + m[11]);
+            }
+
+            const float dx = pos.x - translation.x;
+            const float dy = pos.y - translation.y;
+            const float dz = pos.z - translation.z;
+            const float view_x = view_row0.x * dx + view_row0.y * dy + view_row0.z * dz;
+            const float view_y = view_row1.x * dx + view_row1.y * dy + view_row1.z * dz;
+            const float view_z = view_row2.x * dx + view_row2.y * dy + view_row2.z * dz;
+            if (!isfinite(view_x) || !isfinite(view_y) || !isfinite(view_z) || view_z >= -1.0e-6f) {
+                writeInvalidScreenPosition(output, idx);
+                return;
+            }
+
+            const float cx = static_cast<float>(width) * 0.5f;
+            const float cy = static_cast<float>(height) * 0.5f;
+            if (orthographic) {
+                if (!isfinite(ortho_scale) || ortho_scale <= 0.0f) {
+                    writeInvalidScreenPosition(output, idx);
+                    return;
+                }
+                output[idx] = make_float2(cx + view_x * ortho_scale, cy - view_y * ortho_scale);
+                return;
+            }
+
+            const float depth = -view_z;
+            output[idx] = make_float2(
+                cx + view_x * pixel_focal_x / depth,
+                cy - view_y * pixel_focal_y / depth);
+        }
+
+        __device__ __forceinline__ bool betterPickCandidate(
+            const float dist_sq,
+            const int index,
+            const float best_dist_sq,
+            const int best_index) {
+            return index >= 0 &&
+                   (best_index < 0 ||
+                    dist_sq < best_dist_sq ||
+                    (dist_sq == best_dist_sq && index > best_index));
+        }
+
+        __global__ void pickProjectedGaussianBlocksKernel(
+            const float2* __restrict__ positions,
+            const float x,
+            const float y,
+            const float max_dist_sq,
+            float* __restrict__ block_dist_sq,
+            int* __restrict__ block_index,
+            const int n) {
+            __shared__ float shared_dist[kBlockSize];
+            __shared__ int shared_index[kBlockSize];
+
+            float best_dist_sq = max_dist_sq;
+            int best_index = -1;
+            for (int idx = blockIdx.x * blockDim.x + threadIdx.x;
+                 idx < n;
+                 idx += blockDim.x * gridDim.x) {
+                const float2 pos = positions[idx];
+                if (pos.x < kInvalidScreenPositionThreshold ||
+                    pos.y < kInvalidScreenPositionThreshold ||
+                    !isfinite(pos.x) ||
+                    !isfinite(pos.y)) {
+                    continue;
+                }
+
+                const float dx = pos.x - x;
+                const float dy = pos.y - y;
+                const float dist_sq = dx * dx + dy * dy;
+                if (dist_sq <= max_dist_sq &&
+                    betterPickCandidate(dist_sq, idx, best_dist_sq, best_index)) {
+                    best_dist_sq = dist_sq;
+                    best_index = idx;
+                }
+            }
+
+            shared_dist[threadIdx.x] = best_dist_sq;
+            shared_index[threadIdx.x] = best_index;
+            __syncthreads();
+
+            for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+                if (threadIdx.x < stride) {
+                    const float other_dist = shared_dist[threadIdx.x + stride];
+                    const int other_index = shared_index[threadIdx.x + stride];
+                    if (betterPickCandidate(
+                            other_dist, other_index, shared_dist[threadIdx.x], shared_index[threadIdx.x])) {
+                        shared_dist[threadIdx.x] = other_dist;
+                        shared_index[threadIdx.x] = other_index;
+                    }
+                }
+                __syncthreads();
+            }
+
+            if (threadIdx.x == 0) {
+                block_dist_sq[blockIdx.x] = shared_dist[0];
+                block_index[blockIdx.x] = shared_index[0];
+            }
+        }
+
+        __global__ void reduceProjectedGaussianPickKernel(
+            const float* __restrict__ block_dist_sq,
+            const int* __restrict__ block_index,
+            int* __restrict__ result_index,
+            const int block_count) {
+            __shared__ float shared_dist[kBlockSize];
+            __shared__ int shared_index[kBlockSize];
+
+            float best_dist_sq = 0.0f;
+            int best_index = -1;
+            for (int idx = threadIdx.x; idx < block_count; idx += blockDim.x) {
+                const int candidate = block_index[idx];
+                const float dist_sq = block_dist_sq[idx];
+                if (betterPickCandidate(dist_sq, candidate, best_dist_sq, best_index)) {
+                    best_dist_sq = dist_sq;
+                    best_index = candidate;
+                }
+            }
+
+            shared_dist[threadIdx.x] = best_dist_sq;
+            shared_index[threadIdx.x] = best_index;
+            __syncthreads();
+
+            for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+                if (threadIdx.x < stride) {
+                    const float other_dist = shared_dist[threadIdx.x + stride];
+                    const int other_index = shared_index[threadIdx.x + stride];
+                    if (betterPickCandidate(
+                            other_dist, other_index, shared_dist[threadIdx.x], shared_index[threadIdx.x])) {
+                        shared_dist[threadIdx.x] = other_dist;
+                        shared_index[threadIdx.x] = other_index;
+                    }
+                }
+                __syncthreads();
+            }
+
+            if (threadIdx.x == 0) {
+                result_index[0] = shared_index[0];
+            }
+        }
+
         __global__ void rectSelectKernel(
             const float2* __restrict__ positions,
             const float x0,
@@ -594,6 +780,155 @@ namespace lfs::rendering {
         }
         setSelectionElementKernel<<<1, 1, 0, currentSelectionStream()>>>(selection, index, value);
         checkCudaLaunch("setSelectionElementKernel");
+    }
+
+    Tensor project_screen_positions_tensor(
+        const Tensor& means,
+        const int width,
+        const int height,
+        const std::array<float, 9>& view_rotation_rows,
+        const std::array<float, 3>& translation,
+        const float pixel_focal_x,
+        const float pixel_focal_y,
+        const bool orthographic,
+        const float ortho_scale,
+        const Tensor* const model_transforms,
+        const Tensor* const transform_indices,
+        const std::vector<bool>& node_visibility_mask) {
+        if (!means.is_valid() || means.size(0) == 0) {
+            return {};
+        }
+        if (means.device() != lfs::core::Device::CUDA ||
+            means.dtype() != lfs::core::DataType::Float32 ||
+            means.ndim() != 2 ||
+            means.size(1) != 3) {
+            throw std::runtime_error("project_screen_positions_tensor expects a CUDA Float32 [N, 3] means tensor");
+        }
+        if (width <= 0 || height <= 0) {
+            return {};
+        }
+
+        const int n = checkedToInt(means.size(0), "screen position count exceeds int range");
+        const Tensor means_contig = means.is_contiguous() ? means : means.contiguous();
+        Tensor output = Tensor::empty(
+            {static_cast<std::size_t>(n), std::size_t{2}},
+            lfs::core::Device::CUDA,
+            lfs::core::DataType::Float32);
+
+        Tensor model_transforms_contig;
+        const Tensor* prepared_model_transforms = model_transforms;
+        if (model_transforms && model_transforms->is_valid() && model_transforms->numel() > 0) {
+            model_transforms_contig = *model_transforms;
+            if (model_transforms_contig.dtype() != lfs::core::DataType::Float32) {
+                model_transforms_contig = model_transforms_contig.to(lfs::core::DataType::Float32);
+            }
+            if (model_transforms_contig.device() != lfs::core::Device::CUDA) {
+                model_transforms_contig = model_transforms_contig.cuda();
+            }
+            if (!model_transforms_contig.is_contiguous()) {
+                model_transforms_contig = model_transforms_contig.contiguous();
+            }
+            prepared_model_transforms = &model_transforms_contig;
+        }
+        const auto prepared_transforms = PreparedModelTransforms::from(prepared_model_transforms);
+
+        Tensor transform_indices_contig;
+        const int* transform_indices_ptr = nullptr;
+        if (transform_indices && transform_indices->is_valid() &&
+            transform_indices->numel() >= static_cast<std::size_t>(n)) {
+            transform_indices_contig = *transform_indices;
+            if (transform_indices_contig.dtype() != lfs::core::DataType::Int32) {
+                transform_indices_contig = transform_indices_contig.to(lfs::core::DataType::Int32);
+            }
+            if (transform_indices_contig.device() != lfs::core::Device::CUDA) {
+                transform_indices_contig = transform_indices_contig.cuda();
+            }
+            if (!transform_indices_contig.is_contiguous()) {
+                transform_indices_contig = transform_indices_contig.contiguous();
+            }
+            transform_indices_ptr = transform_indices_contig.ptr<int>();
+        }
+
+        Tensor visibility_cuda;
+        const uint8_t* visibility_ptr = nullptr;
+        int visibility_count = 0;
+        if (transform_indices_ptr != nullptr && !node_visibility_mask.empty()) {
+            visibility_cuda = uploadBoolMask(node_visibility_mask);
+            visibility_ptr = visibility_cuda.ptr<uint8_t>();
+            visibility_count = checkedToInt(node_visibility_mask.size(), "node visibility count exceeds int range");
+        }
+
+        const int grid_size = std::min((n + kBlockSize - 1) / kBlockSize, kCountMaxBlocks);
+        const cudaStream_t stream = currentSelectionStream(&output);
+        projectScreenPositionsKernel<<<grid_size, kBlockSize, 0, stream>>>(
+            reinterpret_cast<const float3*>(means_contig.ptr<float>()),
+            reinterpret_cast<float2*>(output.ptr<float>()),
+            n,
+            width,
+            height,
+            make_float3(view_rotation_rows[0], view_rotation_rows[1], view_rotation_rows[2]),
+            make_float3(view_rotation_rows[3], view_rotation_rows[4], view_rotation_rows[5]),
+            make_float3(view_rotation_rows[6], view_rotation_rows[7], view_rotation_rows[8]),
+            make_float3(translation[0], translation[1], translation[2]),
+            pixel_focal_x,
+            pixel_focal_y,
+            orthographic,
+            ortho_scale,
+            prepared_transforms.ptr,
+            transform_indices_ptr,
+            prepared_transforms.count,
+            visibility_ptr,
+            visibility_count);
+        checkCudaLaunch("projectScreenPositionsKernel");
+        if (const cudaError_t status = cudaStreamSynchronize(stream); status != cudaSuccess) {
+            throw std::runtime_error(std::string("projectScreenPositionsKernel: ") + cudaGetErrorString(status));
+        }
+
+        return output;
+    }
+
+    int pick_projected_gaussian_tensor(
+        const Tensor& screen_positions,
+        const float x,
+        const float y,
+        const float radius) {
+        if (!screen_positions.is_valid() || screen_positions.size(0) == 0) {
+            return -1;
+        }
+        if (screen_positions.device() != lfs::core::Device::CUDA ||
+            screen_positions.dtype() != lfs::core::DataType::Float32 ||
+            screen_positions.ndim() != 2 ||
+            screen_positions.size(1) != 2) {
+            throw std::runtime_error("pick_projected_gaussian_tensor expects a CUDA Float32 [N, 2] tensor");
+        }
+
+        const int n = checkedToInt(screen_positions.size(0), "n_primitives exceeds int range");
+        const int block_count = std::min((n + kBlockSize - 1) / kBlockSize, kCountMaxBlocks);
+        Tensor block_dist_sq = Tensor::empty(
+            {static_cast<std::size_t>(block_count)}, lfs::core::Device::CUDA, lfs::core::DataType::Float32);
+        Tensor block_index = Tensor::empty(
+            {static_cast<std::size_t>(block_count)}, lfs::core::Device::CUDA, lfs::core::DataType::Int32);
+        Tensor result_index = Tensor::empty({1}, lfs::core::Device::CUDA, lfs::core::DataType::Int32);
+
+        const cudaStream_t stream = currentSelectionStream(&screen_positions);
+        pickProjectedGaussianBlocksKernel<<<block_count, kBlockSize, 0, stream>>>(
+            reinterpret_cast<const float2*>(screen_positions.ptr<float>()),
+            x,
+            y,
+            radius * radius,
+            block_dist_sq.ptr<float>(),
+            block_index.ptr<int>(),
+            n);
+        checkCudaLaunch("pickProjectedGaussianBlocksKernel");
+        reduceProjectedGaussianPickKernel<<<1, kBlockSize, 0, stream>>>(
+            block_dist_sq.ptr<float>(),
+            block_index.ptr<int>(),
+            result_index.ptr<int>(),
+            block_count);
+        checkCudaLaunch("reduceProjectedGaussianPickKernel");
+
+        const auto result_cpu = result_index.cpu().contiguous();
+        return result_cpu.ptr<int>()[0];
     }
 
     void brush_select_tensor(

@@ -223,10 +223,18 @@ namespace lfs::vis {
                 {"rasterize_forward_plain", (root / "generated/rasterize_forward_plain.spv").string()},
                 {"rasterize_forward_3dgut_plain",
                  (root / "generated/rasterize_forward_3dgut_plain.spv").string()},
+                {"rasterize_forward_light",
+                 (root / "generated/rasterize_forward_light.spv").string()},
+                {"rasterize_forward_light_plain",
+                 (root / "generated/rasterize_forward_light_plain.spv").string()},
                 {"tile_batch_counts", (root / "generated/tile_batch_counts.spv").string()},
                 {"tile_batch_descriptors", (root / "generated/tile_batch_descriptors.spv").string()},
+                {"rasterize_forward_batches",
+                 (root / "generated/rasterize_forward_batches.spv").string()},
                 {"rasterize_forward_batches_plain",
                  (root / "generated/rasterize_forward_batches_plain.spv").string()},
+                {"compose_tile_batches",
+                 (root / "generated/compose_tile_batches.spv").string()},
                 {"compose_tile_batches_plain",
                  (root / "generated/compose_tile_batches_plain.spv").string()},
                 {"cumsum_single_pass", (root / "generated/cumsum_single_pass.spv").string()},
@@ -296,6 +304,15 @@ namespace lfs::vis {
 
         [[nodiscard]] double gib(const std::size_t bytes) {
             return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0);
+        }
+
+        [[nodiscard]] std::size_t denseTileBatchCapacity(const std::size_t tile_instances,
+                                                         const std::size_t num_tiles) {
+            const std::size_t max_dense_tiles =
+                std::min(num_tiles, tile_instances / (RASTER_DENSE_TILE_THRESHOLD + 1u));
+            return std::max<std::size_t>(
+                1u,
+                _CEIL_DIV(tile_instances, static_cast<std::size_t>(RASTER_BATCH_SIZE)) + max_dense_tiles);
         }
 
         template <typename T>
@@ -1310,10 +1327,6 @@ namespace lfs::vis {
         current_input_sh_degree_ = -1;
         compose_.reset();
         buffers_ = {};
-        if (overlay_upload_stream_ != nullptr) {
-            cudaStreamDestroy(overlay_upload_stream_);
-            overlay_upload_stream_ = nullptr;
-        }
         initialized_ = false;
         context_ = nullptr;
     }
@@ -1463,6 +1476,7 @@ namespace lfs::vis {
         const auto add_count = [&](const std::size_t count, const std::size_t elem_size) {
             add(count * elem_size);
         };
+        const std::size_t dense_batch_capacity = denseTileBatchCapacity(sort_capacity, num_tiles);
 
         add_count(num_splats, sizeof(std::uint32_t));                                                            // primitive_depth_keys
         add_count(num_splats, sizeof(std::int32_t));                                                             // tiles_touched
@@ -1487,6 +1501,12 @@ namespace lfs::vis {
         add_count(1, sizeof(std::uint32_t));                                                                     // tile_sort_count
         add_count(3, sizeof(std::uint32_t));                                                                     // tile_sort_dispatch_args
         add_count(num_tiles + 1, sizeof(std::int32_t));                                                          // tile_ranges
+        add_count(num_tiles, sizeof(std::int32_t));                                                              // tile_batch_counts
+        add_count(num_tiles, sizeof(std::int32_t));                                                              // tile_batch_offsets
+        add_count(3, sizeof(std::uint32_t));                                                                     // tile_batch_dispatch_args
+        add_count(4 * dense_batch_capacity, sizeof(std::uint32_t));                                              // tile_batch_descriptors
+        add_count(4 * dense_batch_capacity * TILE_WIDTH * TILE_HEIGHT, sizeof(float));                           // tile_batch_pixel_state
+        add_count(dense_batch_capacity * TILE_WIDTH * TILE_HEIGHT, sizeof(std::int32_t));                        // tile_batch_n_contributors
         add_count(4 * num_pixels, sizeof(float));                                                                // pixel_state
         add_count(num_pixels, sizeof(float));                                                                    // pixel_depth
         add_count(num_pixels, sizeof(std::int32_t));                                                             // n_contributors
@@ -1765,6 +1785,13 @@ namespace lfs::vis {
         bind_count(buffers_.tile_sort_count, 1);
         bind_count(buffers_.tile_sort_dispatch_args, 3);
         bind_count(buffers_.tile_ranges, num_tiles + 1);
+        const std::size_t dense_batch_capacity = denseTileBatchCapacity(sort_capacity, num_tiles);
+        bind_count(buffers_.tile_batch_counts, num_tiles);
+        bind_count(buffers_.tile_batch_offsets, num_tiles);
+        bind_count(buffers_.tile_batch_dispatch_args, 3);
+        bind_count(buffers_.tile_batch_descriptors, 4 * dense_batch_capacity);
+        bind_count(buffers_.tile_batch_pixel_state, 4 * dense_batch_capacity * TILE_WIDTH * TILE_HEIGHT);
+        bind_count(buffers_.tile_batch_n_contributors, dense_batch_capacity * TILE_WIDTH * TILE_HEIGHT);
         const std::size_t tiles_end = cursor;
         bind_count(buffers_.pixel_state, 4 * num_pixels);
         bind_count(buffers_.pixel_depth, num_pixels);
@@ -1831,6 +1858,12 @@ namespace lfs::vis {
         RELEASE_PRIVATE_SCRATCH(tile_sort_count);
         RELEASE_PRIVATE_SCRATCH(tile_sort_dispatch_args);
         RELEASE_PRIVATE_SCRATCH(tile_ranges);
+        RELEASE_PRIVATE_SCRATCH(tile_batch_counts);
+        RELEASE_PRIVATE_SCRATCH(tile_batch_offsets);
+        RELEASE_PRIVATE_SCRATCH(tile_batch_dispatch_args);
+        RELEASE_PRIVATE_SCRATCH(tile_batch_descriptors);
+        RELEASE_PRIVATE_SCRATCH(tile_batch_pixel_state);
+        RELEASE_PRIVATE_SCRATCH(tile_batch_n_contributors);
         RELEASE_PRIVATE_SCRATCH(pixel_state);
         RELEASE_PRIVATE_SCRATCH(pixel_depth);
         RELEASE_PRIVATE_SCRATCH(n_contributors);
@@ -1886,6 +1919,12 @@ namespace lfs::vis {
         DETACH_SHARED(tile_sort_count);
         DETACH_SHARED(tile_sort_dispatch_args);
         DETACH_SHARED(tile_ranges);
+        DETACH_SHARED(tile_batch_counts);
+        DETACH_SHARED(tile_batch_offsets);
+        DETACH_SHARED(tile_batch_dispatch_args);
+        DETACH_SHARED(tile_batch_descriptors);
+        DETACH_SHARED(tile_batch_pixel_state);
+        DETACH_SHARED(tile_batch_n_contributors);
         DETACH_SHARED(pixel_state);
         DETACH_SHARED(pixel_depth);
         DETACH_SHARED(n_contributors);
@@ -1978,18 +2017,10 @@ namespace lfs::vis {
             return std::unexpected("VkSplat overlay bindings require CUDA/Vulkan external-memory interop");
         }
         assert(ring_slot < cuda_overlays_.size());
-        // NOTE: Tried running this whole function on a dedicated non-blocking
-        // CUDA stream (CUDAStreamGuard + overlay_upload_stream_) to escape the
-        // legacy NULL-stream implicit-sync tax that was costing ~6 ms/frame.
-        // It correctly delivered the perf win but introduced selection
-        // flicker — even with explicit event-based cross-stream sync from
-        // foreign source tensors (selection_source/preview_source/
-        // transform_indices_source) onto our stream, some race remained that
-        // wasn't tracked down. Reverted to running on the current stream
-        // (typically NULL) so legacy implicit-FIFO ordering protects us.
-        // The overlay_upload_stream_ member is still created in
-        // ensureInitialized (cheap, ~µs) and reserved for a future retry once
-        // we can compute-sanitizer racecheck the failing frames.
+        // Keep overlay uploads on the current stream. Selection/preview masks
+        // can be produced by foreign CUDA streams; the legacy default stream
+        // preserves ordering for the current interop handoff without the
+        // selection flicker seen with a detached upload stream.
         auto& slot = cuda_overlays_[ring_slot];
 
         const bool selection_enabled =
@@ -2016,19 +2047,20 @@ namespace lfs::vis {
                                       : request.overlay.emphasis.emphasized_node_mask;
 
         // Whether the forward rasterizer must run the overlay/selection path.
-        // When nothing draws an overlay, the host dispatches the *_plain shader
-        // variant, which strips that work from the per-pixel inner loop — the
-        // dominant cost when zoomed out. Conservative: any uncertainty keeps the
-        // full path (correctness over speed).
+        // Projection-only filters such as crop/use, depth hide, and split-view
+        // node visibility still run in executeProjectionForward, but they do
+        // not need the per-pixel overlay shader unless they visibly dim or draw
+        // selection/marker/color overlays.
         const auto& emphasis = request.overlay.emphasis;
-        const bool overlays_active =
+        const bool crop_dims =
+            request.filters.crop_region.has_value() && request.filters.crop_region->desaturate;
+        const bool ellipsoid_dims =
+            request.filters.ellipsoid_region.has_value() && request.filters.ellipsoid_region->desaturate;
+        const bool raster_overlays_active =
             selection_enabled ||
             preview_enabled ||
-            node_visibility_restricts ||
-            !emphasis.emphasized_node_mask.empty() ||
-            request.filters.crop_region.has_value() ||
-            request.filters.ellipsoid_region.has_value() ||
-            request.filters.view_volume.has_value() ||
+            crop_dims ||
+            ellipsoid_dims ||
             emphasis.dim_non_emphasized ||
             emphasis.flash_intensity > 0.0f ||
             emphasis.focused_gaussian_id >= 0 ||
@@ -2095,6 +2127,9 @@ namespace lfs::vis {
         if (region_storage_changed(OverlaySelectionColors)) {
             slot.color_table_uploaded = false;
         }
+        if (region_storage_changed(OverlayTransformIndices)) {
+            slot.transform_indices_uploaded = false;
+        }
         if (region_storage_changed(OverlayNodeMask)) {
             slot.node_mask_uploaded = false;
         }
@@ -2142,13 +2177,27 @@ namespace lfs::vis {
                 slot.cached_color_palette = request.overlay.selection_colors;
                 slot.color_table_uploaded = false;
             }
-            {
+            if (transform_indices_enabled) {
                 LOG_TIMER("uploadOverlayBindings.prepare_sources.transform_indices");
                 auto transform_indices = prepareTransformIndicesTensor(request.scene.transform_indices, num_splats);
                 if (!transform_indices) {
                     return std::unexpected(transform_indices.error());
                 }
+                const bool transform_indices_cache_hit =
+                    slot.transform_indices_source.is_valid() &&
+                    slot.cached_transform_indices_ptr == transform_indices->data_ptr() &&
+                    slot.cached_transform_indices_bytes == transform_indices->bytes();
                 slot.transform_indices_source = std::move(*transform_indices);
+                if (!transform_indices_cache_hit) {
+                    slot.cached_transform_indices_ptr = slot.transform_indices_source.data_ptr();
+                    slot.cached_transform_indices_bytes = slot.transform_indices_source.bytes();
+                    slot.transform_indices_uploaded = false;
+                }
+            } else {
+                slot.transform_indices_source = {};
+                slot.cached_transform_indices_ptr = nullptr;
+                slot.cached_transform_indices_bytes = 0;
+                slot.transform_indices_uploaded = true;
             }
             // Same caching pattern as color_table: the emphasized-node mask only
             // changes when the user selects a different scene-tree node. During
@@ -2253,7 +2302,7 @@ namespace lfs::vis {
                     slot.color_table_uploaded = true;
                 }
             }
-            {
+            if (transform_indices_enabled && !slot.transform_indices_uploaded) {
                 LOG_TIMER("uploadOverlayBindings.copy_to_interop.transform_indices");
                 if (!slot.interop.copyFromTensor(slot.transform_indices_source,
                                                  slot.region_bytes[OverlayTransformIndices],
@@ -2262,6 +2311,7 @@ namespace lfs::vis {
                     return std::unexpected(std::format("VkSplat transform-index upload failed: {}",
                                                        slot.interop.lastError()));
                 }
+                slot.transform_indices_uploaded = true;
             }
             {
                 LOG_TIMER("uploadOverlayBindings.copy_to_interop.node_mask");
@@ -2334,7 +2384,7 @@ namespace lfs::vis {
             .node_mask = view(OverlayNodeMask),
             .overlay_params = view(OverlayParams),
             .model_transforms = view(OverlayModelTransforms),
-            .overlays_active = overlays_active,
+            .raster_overlays_active = raster_overlays_active,
         };
     }
 
@@ -2347,20 +2397,6 @@ namespace lfs::vis {
             return {};
         }
         try {
-            // Dedicated CUDA stream for overlay H2D uploads. Non-blocking flag
-            // is essential — cudaStreamCreate (no flags) still implicitly
-            // serializes with the legacy default (NULL) stream, which would
-            // make our "isolated" stream sync with every other CUDA op in the
-            // process. cudaStreamNonBlocking opts out of that.
-            if (overlay_upload_stream_ == nullptr) {
-                const cudaError_t err = cudaStreamCreateWithFlags(
-                    &overlay_upload_stream_, cudaStreamNonBlocking);
-                if (err != cudaSuccess) {
-                    return std::unexpected(std::format(
-                        "VkSplat overlay upload stream creation failed: {}",
-                        cudaGetErrorString(err)));
-                }
-            }
             // Submit the splat dispatch chain on the dedicated async-compute queue
             // when the device exposes one (NVIDIA family 2, AMD family 1, etc.). The
             // existing per-frame timeline-semaphore wait that gates the swapchain pass
@@ -3986,19 +4022,26 @@ namespace lfs::vis {
 
         {
             LOG_TIMER("VksplatViewportRenderer::buildSelectionMask.staging");
-            auto transform_indices = prepareTransformIndicesTensor(request.scene.transform_indices, num_splats);
-            if (!transform_indices) {
-                return std::unexpected(transform_indices.error());
-            }
-            const bool transform_indices_cache_hit =
-                slot.transform_indices_source.is_valid() &&
-                slot.cached_transform_indices_ptr == transform_indices->data_ptr() &&
-                slot.cached_transform_indices_bytes == transform_indices->bytes();
-            slot.transform_indices_source = std::move(*transform_indices);
-            if (!transform_indices_cache_hit) {
-                slot.cached_transform_indices_ptr = slot.transform_indices_source.data_ptr();
-                slot.cached_transform_indices_bytes = slot.transform_indices_source.bytes();
-                slot.transform_indices_uploaded = false;
+            if (transform_indices_enabled) {
+                auto transform_indices = prepareTransformIndicesTensor(request.scene.transform_indices, num_splats);
+                if (!transform_indices) {
+                    return std::unexpected(transform_indices.error());
+                }
+                const bool transform_indices_cache_hit =
+                    slot.transform_indices_source.is_valid() &&
+                    slot.cached_transform_indices_ptr == transform_indices->data_ptr() &&
+                    slot.cached_transform_indices_bytes == transform_indices->bytes();
+                slot.transform_indices_source = std::move(*transform_indices);
+                if (!transform_indices_cache_hit) {
+                    slot.cached_transform_indices_ptr = slot.transform_indices_source.data_ptr();
+                    slot.cached_transform_indices_bytes = slot.transform_indices_source.bytes();
+                    slot.transform_indices_uploaded = false;
+                }
+            } else {
+                slot.transform_indices_source = {};
+                slot.cached_transform_indices_ptr = nullptr;
+                slot.cached_transform_indices_bytes = 0;
+                slot.transform_indices_uploaded = true;
             }
 
             const bool node_mask_cache_hit =
@@ -4047,7 +4090,7 @@ namespace lfs::vis {
         const cudaStream_t selection_query_stream = nullptr;
         {
             LOG_TIMER("VksplatViewportRenderer::buildSelectionMask.upload");
-            if (!slot.transform_indices_uploaded) {
+            if (transform_indices_enabled && !slot.transform_indices_uploaded) {
                 if (!slot.interop.copyFromTensor(slot.transform_indices_source,
                                                  slot.region_bytes[SelectionQueryTransformIndices],
                                                  slot.region_offset[SelectionQueryTransformIndices],
@@ -4352,7 +4395,7 @@ namespace lfs::vis {
                                                       overlay_bindings->transform_indices,
                                                       overlay_bindings->model_transforms,
                                                       request.gut,
-                                                      overlay_bindings->overlays_active);
+                                                      overlay_bindings->raster_overlays_active);
                 }
                 {
                     LOG_TIMER("vksplat.selection_overlay.record.composePixelState");
@@ -4699,7 +4742,7 @@ namespace lfs::vis {
                                                           overlay_bindings->transform_indices,
                                                           overlay_bindings->model_transforms,
                                                           request.gut,
-                                                          overlay_bindings->overlays_active);
+                                                          overlay_bindings->raster_overlays_active);
                     }
                 }
                 {

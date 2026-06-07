@@ -157,6 +157,13 @@ namespace lfs::vis {
             std::vector<bool> live_preview_node_mask;
             size_t preview_brush_point_count = 0;
         };
+        struct ScreenPositionCacheKey {
+            bool valid = false;
+            std::size_t signature = 0;
+
+            [[nodiscard]] friend bool operator==(const ScreenPositionCacheKey& a,
+                                                 const ScreenPositionCacheKey& b) = default;
+        };
 
         [[nodiscard]] SelectionResult commitSelection(const core::Tensor& selection, SelectionMode mode,
                                                       const std::vector<bool>& node_mask,
@@ -173,8 +180,6 @@ namespace lfs::vis {
         [[nodiscard]] std::shared_ptr<core::Tensor> resolveCommandScreenPositions(int camera_index) const;
         [[nodiscard]] std::optional<rendering::FrameView> resolveCommandFrameView(int camera_index) const;
         [[nodiscard]] std::shared_ptr<core::Tensor> renderScreenPositionsForCamera(int camera_index) const;
-        [[nodiscard]] std::shared_ptr<core::Tensor> renderScreenPositionsForViewerContext(
-            const ViewerViewportContext& context) const;
         [[nodiscard]] std::shared_ptr<core::Tensor> renderScreenPositionsForCurrentViewport() const;
         [[nodiscard]] std::optional<int> resolveCommandHoveredGaussianId(float x, float y, int camera_index,
                                                                          const SelectionFilterState& filters);
@@ -185,6 +190,10 @@ namespace lfs::vis {
         [[nodiscard]] std::optional<int> renderHoveredGaussianId(const rendering::ViewportData& viewport,
                                                                  glm::vec2 cursor_pos,
                                                                  const SelectionFilterState& filters) const;
+        [[nodiscard]] std::optional<int> pickHoveredGaussianIdFromScreenPositions(
+            const core::Tensor& screen_positions,
+            glm::vec2 cursor_pos,
+            const SelectionFilterState& filters) const;
         [[nodiscard]] std::optional<int> renderHoveredGaussianIdForCamera(float x, float y, int camera_index,
                                                                           const SelectionFilterState& filters);
         [[nodiscard]] std::optional<int> renderHoveredGaussianIdForCurrentViewport(float x, float y,
@@ -234,7 +243,7 @@ namespace lfs::vis {
         std::optional<ViewportInfo> testing_viewport_;
         std::optional<int> testing_hovered_gaussian_id_;
         mutable std::array<std::shared_ptr<core::Tensor>, 2> viewport_screen_positions_;
-        mutable std::array<uint64_t, 2> viewport_screen_positions_generation_{0, 0};
+        mutable std::array<ScreenPositionCacheKey, 2> viewport_screen_position_keys_{};
         mutable std::vector<float> polygon_vertex_host_buffer_;
         mutable core::Tensor polygon_vertex_device_buffer_;
 
