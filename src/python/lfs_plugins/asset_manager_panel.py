@@ -35,8 +35,21 @@ _logger = logging.getLogger(__name__)
 
 PRECISE_SCROLL_STEP = 32.0
 RML_PATH_SAFE_CHARS = "/:._-~"
+ASSET_LIST_VISIBLE_LIMIT = 150
+ASSET_GALLERY_VISIBLE_LIMIT = 72
+BACKGROUND_SCAN_THUMBNAIL_LIMIT = 64
+SELECTION_DETAIL_DEFER_SECONDS = 0.035
 
-# Import backend components (to be implemented)
+
+def _read_perf_log_threshold_ms() -> float:
+    try:
+        return float(os.environ.get("LFS_ASSET_MANAGER_PERF_LOG_MS", "50"))
+    except (TypeError, ValueError):
+        return 50.0
+
+
+ASSET_MANAGER_PERF_LOG_THRESHOLD_MS = _read_perf_log_threshold_ms()
+
 try:
     from .asset_index import (
         AssetIndex,
@@ -54,6 +67,7 @@ except ImportError:
     AssetIndex = None
     AssetScanner = None
     AssetThumbnails = None
+
 
 def tr(key, **kwargs):
     tr_func = getattr(getattr(lf, "ui", None), "tr", None)
@@ -81,7 +95,16 @@ class AssetManagerPanel(Panel):
     """Floating Asset Manager window for browsing splats and exports."""
 
     SORT_MODES = ("name", "size", "type")
-    LOADABLE_TYPES = {"ply_3dgs", "ply_pcl", "rad", "sog", "spz", "checkpoint", "dataset", "mesh", "usd"}
+    SPLAT_ASSET_TYPES = {"ply", "ply_3dgs", "rad", "sog", "spz"}
+    POINT_CLOUD_ASSET_TYPES = {"ply_pcl"}
+    LOADABLE_TYPES = {
+        *SPLAT_ASSET_TYPES,
+        *POINT_CLOUD_ASSET_TYPES,
+        "checkpoint",
+        "dataset",
+        "mesh",
+        "usd",
+    }
 
     id = "lfs.asset_manager"
     label = "Asset Manager"
@@ -257,6 +280,7 @@ class AssetManagerPanel(Panel):
 
     def __init__(self):
         self._handle = None
+        self._doc = None
 
         # Backend components
         self._asset_index: Optional[Any] = None
@@ -272,6 +296,24 @@ class AssetManagerPanel(Panel):
         self._sort_mode: str = "type"  # name, size, type
         self._search_query: str = ""
         self._pending_tag_name: str = ""
+        self._asset_visible_limit = ASSET_LIST_VISIBLE_LIMIT
+        self._last_asset_match_count = 0
+        self._last_asset_visible_count = 0
+        self._last_dirty_model_timing: Dict[str, Any] = {}
+        self._last_asset_rows_update_count = 0
+        self._last_asset_rows_update_ms = 0.0
+        self._catalog_assets_snapshot: Optional[Dict[str, Dict[str, Any]]] = None
+        self._catalog_folders_snapshot: Optional[Dict[str, Dict[str, Any]]] = None
+        self._catalog_scenes_snapshot: Optional[Dict[str, Dict[str, Any]]] = None
+        self._catalog_stats_snapshot: Optional[Dict[str, Any]] = None
+        self._selected_asset_tags_key: Optional[tuple[str, ...]] = None
+        self._selected_scene_assets_key: Optional[str] = None
+        self._selection_detail_timer: Optional[threading.Timer] = None
+        self._selection_detail_generation = 0
+        self._selection_detail_lock = threading.Lock()
+        self._pending_selection_detail_fields: tuple[str, ...] = ()
+        self._pending_selection_detail_asset_id = ""
+        self._pending_selection_detail_requested_at = 0.0
 
         # Track which asset has its dropdown menu open
         self._open_menu_asset_id: Optional[str] = None
@@ -312,6 +354,14 @@ class AssetManagerPanel(Panel):
         # Track assets whose rendered thumbnail generation already failed so we
         # do not keep retrying on every on_update() cycle.
         self._thumbnail_render_failed: Set[str] = set()
+
+        # Background asset scanning (metadata sync / refresh)
+        self._scan_thread: Optional[threading.Thread] = None
+        self._scan_thread_lock = threading.Lock()
+        self._scan_ui_refresh_needed = False
+        self._scan_last_refresh_time = 0.0
+        self._scan_requeue = False
+        self._scan_queued_asset_ids: List[str] = []
 
         # New folder menu state
         self._new_folder_menu_open: bool = False
@@ -407,6 +457,7 @@ class AssetManagerPanel(Panel):
         # Selected IDs for UI conditionals
         model.bind_func("selected_folder_id", self.get_selected_folder_id)
         model.bind_func("selected_scene_id", self.get_selected_scene_id)
+        model.bind_func("selected_asset_id", self.get_selected_asset_id)
 
         # Selection count and state
         model.bind_func("selected_count", self.get_selected_count)
@@ -429,6 +480,9 @@ class AssetManagerPanel(Panel):
         model.bind_func("selected_asset_duration", self.get_selected_asset_duration)
         model.bind_func("selected_asset_created", self.get_selected_asset_created)
         model.bind_func("selected_asset_modified", self.get_selected_asset_modified)
+        model.bind_func(
+            "selected_asset_has_sh_degree", self.get_selected_asset_has_sh_degree
+        )
         model.bind_func(
             "selected_asset_has_geometry_metadata",
             self.get_selected_asset_has_geometry_metadata,
@@ -516,6 +570,16 @@ class AssetManagerPanel(Panel):
         model.bind_func("filters_title", lambda: tr("asset_manager.sidebar.filters"))
         model.bind_func("gallery_title", lambda: tr("asset_manager.toolbar.view_gallery"))
         model.bind_func("list_title", lambda: tr("asset_manager.toolbar.view_list"))
+        model.bind_func("asset_results_summary", self.get_asset_results_summary)
+        model.bind_func(
+            "asset_results_summary_visible",
+            self.get_asset_results_summary_visible,
+        )
+        model.bind_func(
+            "asset_results_more_visible",
+            self.get_asset_results_more_visible,
+        )
+        model.bind_func("show_more_assets_label", self.get_show_more_assets_label)
         model.bind_func("edit_watch_dirs_label", lambda: tr("asset_manager.action.edit_watch_dirs"))
         model.bind_func("rename_folder_label", lambda: tr("asset_manager.action.rename_folder"))
         model.bind_func("delete_folder_label", lambda: tr("asset_manager.action.delete_folder"))
@@ -545,6 +609,8 @@ class AssetManagerPanel(Panel):
         model.bind_func("prop_scene_label", lambda: tr("asset_manager.property.scene"))
         model.bind_func("prop_role_label", lambda: tr("asset_manager.property.role"))
         model.bind_func("prop_points_label", lambda: tr("asset_manager.property.points"))
+        model.bind_func("selected_asset_sh_degree", self.get_selected_asset_sh_degree)
+        model.bind_func("prop_sh_degree_label", lambda: tr("asset_manager.property.sh_degree"))
 
         model.bind_func("prop_size_label", lambda: tr("asset_manager.property.size"))
         model.bind_func("prop_path_label", lambda: tr("asset_manager.property.path"))
@@ -602,6 +668,7 @@ class AssetManagerPanel(Panel):
         model.bind_event("toggle_filter", self.toggle_filter)
         model.bind_event("set_view_mode", self.set_view_mode)
         model.bind_event("cycle_sort_mode", self.cycle_sort_mode)
+        model.bind_event("show_more_assets", self.show_more_assets)
         model.bind_event("toggle_asset_selection", self.toggle_asset_selection)
         model.bind_event("on_search", self.on_search)
         model.bind_event("on_import_splat", self.on_import_splat)
@@ -647,8 +714,9 @@ class AssetManagerPanel(Panel):
 
     def set_search_query(self, value: str) -> None:
         self._search_query = value
+        self._reset_asset_visible_limit()
         # Trigger asset list refresh when search query changes
-        self._dirty_model("search_query", "assets")
+        self._dirty_model("search_query", *self._asset_result_dirty_fields())
 
     def get_sort_label(self) -> str:
         labels = {
@@ -697,7 +765,7 @@ class AssetManagerPanel(Panel):
         if not self._open_menu_asset_id or not self._asset_index:
             return []
 
-        asset = self._asset_index.assets.get(self._open_menu_asset_id)
+        asset = self._asset_index_assets().get(self._open_menu_asset_id)
         if not asset:
             return []
 
@@ -708,6 +776,11 @@ class AssetManagerPanel(Panel):
 
     def get_selected_scene_id(self) -> Optional[str]:
         return self._selected_scene_id
+
+    def get_selected_asset_id(self) -> str:
+        if len(self._selected_asset_ids) != 1:
+            return ""
+        return next(iter(self._selected_asset_ids))
 
     def get_selected_count(self) -> int:
         """Return the number of selected assets."""
@@ -778,24 +851,30 @@ class AssetManagerPanel(Panel):
         return f"{path[:keep]}...{path[-keep:]}"
 
     def _reconcile_selection(self) -> None:
-        if not self._asset_index or not hasattr(self._asset_index, "assets"):
+        assets = self._asset_index_assets()
+        folders = self._asset_index_folders()
+        scenes = self._asset_index_scenes()
+        if not assets:
             self._selected_asset_ids.clear()
-            self._selected_folder_id = None
-            self._selected_scene_id = None
+            if not folders:
+                self._selected_folder_id = None
+            if not scenes:
+                self._selected_scene_id = None
             self._update_selection_type()
-            return
+            if not folders and not scenes:
+                return
         if (
             self._selected_folder_id
             and self._selected_folder_id
-            not in getattr(self._asset_index, "folders", {})
+            not in folders
         ):
             self._selected_folder_id = None
         if (
             self._selected_scene_id
-            and self._selected_scene_id not in getattr(self._asset_index, "scenes", {})
+            and self._selected_scene_id not in scenes
         ):
             self._selected_scene_id = None
-        valid_ids = set(self._asset_index.assets.keys())
+        valid_ids = set(assets.keys())
         if not self._selected_asset_ids.issubset(valid_ids):
             self._selected_asset_ids.intersection_update(valid_ids)
             self._update_selection_type()
@@ -807,64 +886,170 @@ class AssetManagerPanel(Panel):
 
     @staticmethod
     def _asset_file_exists(asset: Dict[str, Any]) -> bool:
-        """Single source of truth for asset presence, shared by the list and
-        every count surface so sidebar badges never disagree with what renders."""
-        file_path = asset.get("absolute_path") or asset.get("path")
-        return bool(file_path) and os.path.exists(file_path)
+        """Cached source of truth for asset presence in render-time UI paths."""
+        return bool(asset.get("absolute_path") or asset.get("path")) and bool(
+            asset.get("exists", True)
+        )
+
+    def _invalidate_catalog_cache(self) -> None:
+        self._catalog_assets_snapshot = None
+        self._catalog_folders_snapshot = None
+        self._catalog_scenes_snapshot = None
+        self._catalog_stats_snapshot = None
+
+    def _asset_index_assets(self) -> Dict[str, Dict[str, Any]]:
+        if not self._asset_index:
+            return {}
+        if self._catalog_assets_snapshot is None:
+            private_assets = getattr(self._asset_index, "_assets", None)
+            if isinstance(private_assets, dict):
+                # AssetIndex.assets uses dataclasses.asdict(), which deep-copies all
+                # nested metadata. The UI hot path only reads values, so a shallow
+                # dataclass view avoids paying that cost on every list rebuild.
+                self._catalog_assets_snapshot = {
+                    asset_id: getattr(asset, "__dict__", asset)
+                    for asset_id, asset in private_assets.items()
+                }
+            else:
+                try:
+                    self._catalog_assets_snapshot = getattr(self._asset_index, "assets", {}) or {}
+                except Exception:
+                    self._catalog_assets_snapshot = {}
+        return self._catalog_assets_snapshot
+
+    def _asset_index_folders(self) -> Dict[str, Dict[str, Any]]:
+        if not self._asset_index:
+            return {}
+        if self._catalog_folders_snapshot is None:
+            private_folders = getattr(self._asset_index, "_folders", None)
+            if isinstance(private_folders, dict):
+                self._catalog_folders_snapshot = {
+                    folder_id: getattr(folder, "__dict__", folder)
+                    for folder_id, folder in private_folders.items()
+                }
+            else:
+                try:
+                    self._catalog_folders_snapshot = getattr(self._asset_index, "folders", {}) or {}
+                except Exception:
+                    self._catalog_folders_snapshot = {}
+        return self._catalog_folders_snapshot
+
+    def _asset_index_scenes(self) -> Dict[str, Dict[str, Any]]:
+        if not self._asset_index:
+            return {}
+        if self._catalog_scenes_snapshot is None:
+            private_scenes = getattr(self._asset_index, "_scenes", None)
+            if isinstance(private_scenes, dict):
+                self._catalog_scenes_snapshot = {
+                    scene_id: getattr(scene, "__dict__", scene)
+                    for scene_id, scene in private_scenes.items()
+                }
+            else:
+                try:
+                    self._catalog_scenes_snapshot = getattr(self._asset_index, "scenes", {}) or {}
+                except Exception:
+                    self._catalog_scenes_snapshot = {}
+        return self._catalog_scenes_snapshot
+
+    def _catalog_stats(self) -> Dict[str, Any]:
+        if self._catalog_stats_snapshot is not None:
+            return self._catalog_stats_snapshot
+
+        folder_asset_counts: Dict[str, int] = {}
+        scene_asset_counts: Dict[str, int] = {}
+        assets_by_folder: Dict[str, List[Dict[str, Any]]] = {}
+        filter_counts_by_folder: Dict[str, Dict[str, int]] = {}
+
+        for asset in self._asset_index_assets().values():
+            if not self._asset_file_exists(asset):
+                continue
+
+            folder_id = asset.get("folder_id")
+            if folder_id:
+                folder_asset_counts[folder_id] = folder_asset_counts.get(folder_id, 0) + 1
+                assets_by_folder.setdefault(folder_id, []).append(asset)
+                filter_counts = filter_counts_by_folder.setdefault(
+                    folder_id,
+                    {"splat": 0, "pcl": 0, "dataset": 0, "checkpoint": 0},
+                )
+                asset_type = asset.get("type")
+                if asset_type in self.SPLAT_ASSET_TYPES:
+                    filter_counts["splat"] += 1
+                if asset_type in self.POINT_CLOUD_ASSET_TYPES:
+                    filter_counts["pcl"] += 1
+                if asset_type == "dataset" or asset.get("role") == "source_dataset":
+                    filter_counts["dataset"] += 1
+                if asset_type == "checkpoint":
+                    filter_counts["checkpoint"] += 1
+
+            scene_id = asset.get("scene_id")
+            if scene_id:
+                scene_asset_counts[scene_id] = scene_asset_counts.get(scene_id, 0) + 1
+
+        self._catalog_stats_snapshot = {
+            "folder_asset_counts": folder_asset_counts,
+            "scene_asset_counts": scene_asset_counts,
+            "assets_by_folder": assets_by_folder,
+            "filter_counts_by_folder": filter_counts_by_folder,
+        }
+        return self._catalog_stats_snapshot
+
+    def _folder_asset_counts(self) -> Dict[str, int]:
+        return self._catalog_stats()["folder_asset_counts"]
+
+    def _scene_asset_counts(self) -> Dict[str, int]:
+        return self._catalog_stats()["scene_asset_counts"]
 
     def _scene_asset_count(self, scene_id: str) -> int:
-        if not self._asset_index or not hasattr(self._asset_index, "assets"):
-            return 0
-        return sum(
-            1
-            for asset in self._asset_index.assets.values()
-            if asset.get("scene_id") == scene_id and self._asset_file_exists(asset)
-        )
+        return self._scene_asset_counts().get(scene_id, 0)
 
     def _folder_asset_count(self, folder_id: str) -> int:
-        """Count assets in a folder whose backing file is present on disk."""
-        if not self._asset_index or not hasattr(self._asset_index, "assets"):
-            return 0
-        return sum(
-            1
-            for asset in self._asset_index.assets.values()
-            if asset.get("folder_id") == folder_id and self._asset_file_exists(asset)
-        )
+        """Count catalog-available assets in a folder."""
+        return self._folder_asset_counts().get(folder_id, 0)
 
     def _folder_sort_key(self, folder_id: str) -> str:
-        if not self._asset_index or not hasattr(self._asset_index, "folders"):
-            return folder_id
-        folder = self._asset_index.folders.get(folder_id, {})
+        folder = self._asset_index_folders().get(folder_id, {})
         return self._sort_text(folder.get("name") or folder_id)
+
+    def _default_folder_id(self) -> Optional[str]:
+        for folder_id, folder in self._asset_index_folders().items():
+            if self._sort_text(folder.get("name")).strip() == "default":
+                return folder_id
+        return None
 
     @staticmethod
     def _sort_text(value: Any) -> str:
         return str(value or "").lower()
 
     def _repair_selected_folder(self) -> Optional[str]:
-        if not self._asset_index or not hasattr(self._asset_index, "folders"):
+        folders = self._asset_index_folders()
+        if not folders:
             self._selected_folder_id = None
             self._selected_scene_id = None
             return None
 
-        folders = self._asset_index.folders
         candidate_id: Optional[str] = None
         if self._selected_folder_id in folders:
             candidate_id = self._selected_folder_id
 
-        if not candidate_id and self._selected_scene_id and hasattr(self._asset_index, "scenes"):
-            scene = self._asset_index.scenes.get(self._selected_scene_id)
+        scenes = self._asset_index_scenes()
+        if not candidate_id and self._selected_scene_id:
+            scene = scenes.get(self._selected_scene_id)
             scene_folder_id = scene.get("folder_id") if scene else None
             if scene_folder_id in folders:
                 candidate_id = scene_folder_id
 
-        if not candidate_id and hasattr(self._asset_index, "assets"):
+        assets = self._asset_index_assets()
+        if not candidate_id:
             for asset_id in self._selected_asset_ids:
-                asset = self._asset_index.assets.get(asset_id)
+                asset = assets.get(asset_id)
                 asset_folder_id = asset.get("folder_id") if asset else None
                 if asset_folder_id in folders:
                     candidate_id = asset_folder_id
                     break
+
+        if not candidate_id:
+            candidate_id = self._default_folder_id()
 
         if not candidate_id and folders:
             candidate_id = sorted(folders.keys(), key=self._folder_sort_key)[0]
@@ -877,17 +1062,17 @@ class AssetManagerPanel(Panel):
                 self._selection_type = "none"
             return None
 
-        if self._selected_scene_id and hasattr(self._asset_index, "scenes"):
-            scene = self._asset_index.scenes.get(self._selected_scene_id)
+        if self._selected_scene_id:
+            scene = scenes.get(self._selected_scene_id)
             if not scene or scene.get("folder_id") != candidate_id:
                 self._selected_scene_id = None
                 if self._selection_type == "scene":
                     self._selection_type = "folder"
-        if self._selected_asset_ids and hasattr(self._asset_index, "assets"):
+        if self._selected_asset_ids:
             visible_asset_ids = {
                 aid
                 for aid in self._selected_asset_ids
-                if self._asset_index.assets.get(aid, {}).get("folder_id") == candidate_id
+                if assets.get(aid, {}).get("folder_id") == candidate_id
             }
             if visible_asset_ids != self._selected_asset_ids:
                 self._selected_asset_ids = visible_asset_ids
@@ -909,14 +1094,12 @@ class AssetManagerPanel(Panel):
         folder_name = ""
         scene_name = ""
 
-        if self._asset_index and hasattr(self._asset_index, "folders"):
-            folder_name = self._asset_index.folders.get(
-                asset.get("folder_id"), {}
-            ).get("name", "")
-        if self._asset_index and hasattr(self._asset_index, "scenes"):
-            scene_name = self._asset_index.scenes.get(asset.get("scene_id"), {}).get(
-                "name", ""
-            )
+        folder_name = self._asset_index_folders().get(asset.get("folder_id"), {}).get(
+            "name", ""
+        )
+        scene_name = self._asset_index_scenes().get(asset.get("scene_id"), {}).get(
+            "name", ""
+        )
 
         return str(folder_name or ""), str(scene_name or "")
 
@@ -974,87 +1157,104 @@ class AssetManagerPanel(Panel):
             "context_label": context_label,
         }
 
-    # Missing-asset entries are pruned from the index once their catalog metadata
-    # has had time to be touched without the file reappearing — distinguishes a
-    # transient unmount from genuine cleanup.
-    _STALE_ASSET_GRACE_DAYS = 7
+    def _default_asset_visible_limit(self) -> int:
+        if self._view_mode == "gallery":
+            return ASSET_GALLERY_VISIBLE_LIMIT
+        return ASSET_LIST_VISIBLE_LIMIT
+
+    def _reset_asset_visible_limit(self) -> None:
+        self._asset_visible_limit = self._default_asset_visible_limit()
+
+    def _asset_result_dirty_fields(self) -> tuple[str, ...]:
+        return (
+            "assets",
+            "asset_results_summary",
+            "asset_results_summary_visible",
+            "asset_results_more_visible",
+            "show_more_assets_label",
+        )
+
+    def get_asset_results_summary_visible(self) -> bool:
+        return self._last_asset_match_count > 0
+
+    def get_asset_results_more_visible(self) -> bool:
+        return self._last_asset_visible_count < self._last_asset_match_count
+
+    def get_show_more_assets_label(self) -> str:
+        remaining = max(0, self._last_asset_match_count - self._last_asset_visible_count)
+        next_count = min(self._default_asset_visible_limit(), remaining)
+        if next_count <= 0:
+            return "Show more"
+        return f"Show {next_count:,} more"
+
+    def get_asset_results_summary(self) -> str:
+        total = self._last_asset_match_count
+        visible = self._last_asset_visible_count
+        if total <= 0:
+            return ""
+        if visible < total:
+            return f"Showing {visible:,} of {total:,} assets"
+        if total == 1:
+            return "Showing 1 asset"
+        return f"Showing {total:,} assets"
+
+    def _asset_matches_active_filters(self, asset: Dict[str, Any]) -> bool:
+        if not self._active_filters:
+            return True
+        asset_type = asset.get("type")
+        if "splat" in self._active_filters and asset_type in self.SPLAT_ASSET_TYPES:
+            return True
+        if "pcl" in self._active_filters and asset_type in self.POINT_CLOUD_ASSET_TYPES:
+            return True
+        if "dataset" in self._active_filters:
+            if asset_type == "dataset" or asset.get("role") == "source_dataset":
+                return True
+        if "checkpoint" in self._active_filters and asset_type == "checkpoint":
+            return True
+        return False
 
     def get_filtered_assets(self) -> List[Dict[str, Any]]:
         """Return assets filtered by search query, active filter, and selections."""
-        if not self._asset_index or not hasattr(self._asset_index, "assets"):
+        assets_by_folder = self._catalog_stats()["assets_by_folder"]
+        if not assets_by_folder:
+            self._last_asset_match_count = 0
+            self._last_asset_visible_count = 0
             return []
-
-        from datetime import datetime, timedelta
-        now = datetime.now()
-        stale_cutoff = timedelta(days=self._STALE_ASSET_GRACE_DAYS)
-        prune_ids: List[str] = []
 
         folder_id = self._repair_selected_folder()
         if not folder_id:
+            self._last_asset_match_count = 0
+            self._last_asset_visible_count = 0
             return []
 
-        assets = []
-        for asset_id, asset in self._asset_index.assets.items():
-            if not self._asset_file_exists(asset):
-                modified_at = asset.get("modified_at", "")
-                try:
-                    ts = datetime.fromisoformat(modified_at.replace("Z", "+00:00")).replace(tzinfo=None)
-                    if now - ts > stale_cutoff:
-                        prune_ids.append(asset_id)
-                except (ValueError, AttributeError):
-                    prune_ids.append(asset_id)
+        matching_assets = []
+        search_query = self._search_query
+        selected_scene_id = self._selected_scene_id
+        for asset in assets_by_folder.get(folder_id, []):
+            if selected_scene_id and asset.get("scene_id") != selected_scene_id:
+                continue
+            if not self._asset_matches_active_filters(asset):
+                continue
+            if search_query and not self._asset_matches_query(asset, search_query):
                 continue
 
-            if asset.get("folder_id") != folder_id:
-                continue
-            if (
-                self._selected_scene_id
-                and asset.get("scene_id") != self._selected_scene_id
-            ):
-                continue
+            matching_assets.append(asset)
 
-            # Multi-select filter logic: if any filters selected, asset must match at least one
-            if self._active_filters:
-                matches_filter = False
+        sorted_assets = self._sort_assets(matching_assets)
+        total_count = len(sorted_assets)
+        visible_limit = max(1, int(self._asset_visible_limit))
+        visible_assets = sorted_assets[:visible_limit]
 
-                # Splat filter: 3DGS PLY files, SOG files, and legacy PLY (Gaussian splats)
-                if "splat" in self._active_filters:
-                    if asset.get("type") in ("ply_3dgs", "sog", "ply"):
-                        matches_filter = True
-
-                # PCL filter: Regular point cloud PLY files
-                if "pcl" in self._active_filters:
-                    if asset.get("type") == "ply_pcl":
-                        matches_filter = True
-
-                # Dataset filter: source datasets
-                if "dataset" in self._active_filters:
-                    if asset.get("type") == "dataset" or asset.get("role") == "source_dataset":
-                        matches_filter = True
-
-                # Checkpoint filter: training checkpoints
-                if "checkpoint" in self._active_filters:
-                    if asset.get("type") == "checkpoint":
-                        matches_filter = True
-
-                if not matches_filter:
-                    continue
-
-            # Check search query - simple string match
-            if self._search_query and not self._asset_matches_query(
-                asset, self._search_query
-            ):
-                continue
-
-            assets.append(self._format_asset_for_ui(asset))
-
-        if prune_ids and hasattr(self._asset_index, "delete_asset"):
-            for pid in prune_ids:
-                self._asset_index.delete_asset(pid)
-            if hasattr(self._asset_index, "save"):
-                self._asset_index.save()
-
-        return self._sort_assets(assets)
+        self._last_asset_match_count = total_count
+        self._last_asset_visible_count = len(visible_assets)
+        include_thumbnail = self._view_mode == "gallery"
+        return [
+            self._format_asset_for_ui(
+                asset,
+                include_thumbnail=include_thumbnail,
+            )
+            for asset in visible_assets
+        ]
 
     def _asset_matches_query(self, asset: Dict[str, Any], query: str) -> bool:
         """Fuzzy search by asset name only.
@@ -1108,7 +1308,12 @@ class AssetManagerPanel(Panel):
         except Exception:
             return "none"
 
-    def _format_asset_for_ui(self, asset: Dict[str, Any]) -> Dict[str, Any]:
+    def _format_asset_for_ui(
+        self,
+        asset: Dict[str, Any],
+        *,
+        include_thumbnail: bool = True,
+    ) -> Dict[str, Any]:
         """Format asset data for UI display."""
         asset_id = str(asset.get("id") or "")
         asset_type = str(asset.get("type") or "")
@@ -1202,7 +1407,9 @@ class AssetManagerPanel(Panel):
             "tags_label": tags_label,
             "thumb_class": thumb_class,
             "thumb_label": asset_type.upper() if asset_type else tr("asset_manager.type.asset"),
-            "thumbnail_decorator": self._thumbnail_decorator(asset),
+            "thumbnail_decorator": self._thumbnail_decorator(asset)
+            if include_thumbnail
+            else "none",
             "pill_class": f"asset-pill-{asset_type.replace('_', '-')}" if asset_type else "",
             "is_selected": asset_id in self._selected_asset_ids,
             "exists": asset.get("exists", True),
@@ -1221,15 +1428,17 @@ class AssetManagerPanel(Panel):
 
     def get_folder_list(self) -> List[Dict[str, Any]]:
         """Return list of folders with asset counts for UI."""
-        if not self._asset_index or not hasattr(self._asset_index, "folders"):
+        folders_index = self._asset_index_folders()
+        if not folders_index:
             return []
 
         self._repair_selected_folder()
 
         folders = []
-        for folder_id, folder in self._asset_index.folders.items():
+        asset_counts = self._folder_asset_counts()
+        for folder_id, folder in folders_index.items():
             # Show all folders, even empty ones (user must manually delete)
-            asset_count = self._folder_asset_count(folder_id)
+            asset_count = asset_counts.get(folder_id, 0)
             display_name = self._format_display_name(folder.get("name", tr("asset_manager.unnamed_folder")))
             folders.append(
                 {
@@ -1248,18 +1457,20 @@ class AssetManagerPanel(Panel):
 
     def get_scene_list(self) -> List[Dict[str, Any]]:
         """Return list of scenes for selected folder."""
-        if not self._asset_index or not hasattr(self._asset_index, "scenes"):
+        scenes_index = self._asset_index_scenes()
+        if not scenes_index:
             return []
 
         if not self._selected_folder_id:
             return []
 
         scenes = []
-        for scene_id, scene in self._asset_index.scenes.items():
+        asset_counts = self._scene_asset_counts()
+        for scene_id, scene in scenes_index.items():
             if scene.get("folder_id") != self._selected_folder_id:
                 continue
             # Show all scenes, even empty ones (user must manually delete)
-            asset_count = self._scene_asset_count(scene_id)
+            asset_count = asset_counts.get(scene_id, 0)
             scenes.append(
                 {
                     "id": scene_id,
@@ -1275,53 +1486,40 @@ class AssetManagerPanel(Panel):
 
     def get_filter_list(self) -> List[Dict[str, Any]]:
         """Return list of filter categories with counts (multi-select checkboxes)."""
-        if not self._asset_index or not hasattr(self._asset_index, "assets"):
+        if not self._asset_index_assets():
             return self._get_default_filters()
         folder_id = self._repair_selected_folder()
         if not folder_id:
             return self._get_default_filters()
 
-        assets = [
-            a
-            for a in self._asset_index.assets.values()
-            if self._asset_file_exists(a) and a.get("folder_id") == folder_id
-        ]
-
-        # Count by filter (Splat, PCL, Dataset, Checkpoint)
-        # Splat: 3DGS PLY files (ply_3dgs), SOG files, and legacy PLY
-        splat_count = sum(1 for a in assets if a.get("type") in ("ply_3dgs", "sog", "ply"))
-        # PCL: Regular point cloud PLY files (ply_pcl)
-        pcl_count = sum(1 for a in assets if a.get("type") == "ply_pcl")
-        checkpoint_count = sum(1 for a in assets if a.get("type") == "checkpoint")
-        dataset_count = sum(
-            1
-            for a in assets
-            if a.get("type") == "dataset" or a.get("role") == "source_dataset"
+        counts = self._catalog_stats()["filter_counts_by_folder"].get(
+            folder_id,
+            {"splat": 0, "pcl": 0, "dataset": 0, "checkpoint": 0},
         )
 
         filters = [
             {
                 "id": "splat",
                 "label": tr("asset_manager.filter.splat"),
-                "count": splat_count,
+                "count": counts["splat"],
                 "is_selected": "splat" in self._active_filters,
             },
             {
                 "id": "pcl",
                 "label": tr("asset_manager.filter.pcl"),
-                "count": pcl_count,
+                "count": counts["pcl"],
                 "is_selected": "pcl" in self._active_filters,
             },
             {
                 "id": "dataset",
                 "label": tr("asset_manager.filter.dataset"),
-                "count": dataset_count,
+                "count": counts["dataset"],
                 "is_selected": "dataset" in self._active_filters,
             },
             {
                 "id": "checkpoint",
                 "label": tr("asset_manager.filter.checkpoints"),
-                "count": checkpoint_count,
+                "count": counts["checkpoint"],
                 "is_selected": "checkpoint" in self._active_filters,
             },
         ]
@@ -1363,10 +1561,8 @@ class AssetManagerPanel(Panel):
         """Get the currently selected single asset, if any."""
         if not self._selected_asset_ids or len(self._selected_asset_ids) != 1:
             return None
-        asset_id = list(self._selected_asset_ids)[0]
-        if not self._asset_index or not hasattr(self._asset_index, "assets"):
-            return None
-        return self._asset_index.assets.get(asset_id)
+        asset_id = next(iter(self._selected_asset_ids))
+        return self._asset_index_assets().get(asset_id)
 
     def get_selected_asset_name(self) -> str:
         asset = self._get_selected_asset()
@@ -1437,6 +1633,13 @@ class AssetManagerPanel(Panel):
             return False
         geom = asset.get("geometry_metadata", {}) or {}
         return bool(geom)
+
+    def get_selected_asset_has_sh_degree(self) -> bool:
+        asset = self._get_selected_asset()
+        if not asset:
+            return False
+        geom = asset.get("geometry_metadata", {}) or {}
+        return geom.get("sh_degree") is not None
 
     def get_selected_asset_has_dataset_metadata(self) -> bool:
         asset = self._get_selected_asset()
@@ -1527,6 +1730,17 @@ class AssetManagerPanel(Panel):
         elif gaussian_count >= 1_000:
             return f"{gaussian_count / 1_000:.1f}K"
         return str(gaussian_count) if gaussian_count > 0 else ""
+
+    def get_selected_asset_sh_degree(self) -> str:
+        """Return SH degree when saved geometry metadata includes it."""
+        asset = self._get_selected_asset()
+        if not asset:
+            return ""
+        geom = asset.get("geometry_metadata", {}) or {}
+        sh_degree = geom.get("sh_degree")
+        if sh_degree is None:
+            return "--"
+        return str(int(sh_degree))
 
     def get_selected_asset_bounding_box(self) -> str:
         asset = self._get_selected_asset()
@@ -1647,9 +1861,7 @@ class AssetManagerPanel(Panel):
         """Get the currently selected scene, if any."""
         if not self._selected_scene_id:
             return None
-        if not self._asset_index or not hasattr(self._asset_index, "scenes"):
-            return None
-        return self._asset_index.scenes.get(self._selected_scene_id)
+        return self._asset_index_scenes().get(self._selected_scene_id)
 
     def get_selected_scene_name(self) -> str:
         scene = self._get_selected_scene()
@@ -1660,9 +1872,9 @@ class AssetManagerPanel(Panel):
         if not scene:
             return ""
         folder_id = scene.get("folder_id", "")
-        if not folder_id or not self._asset_index:
+        if not folder_id:
             return ""
-        folder = getattr(self._asset_index, "folders", {}).get(folder_id)
+        folder = self._asset_index_folders().get(folder_id)
         name = folder.get("name", "") if folder else ""
         return self._format_display_name(name)
 
@@ -1671,13 +1883,9 @@ class AssetManagerPanel(Panel):
         if not scene or not self._asset_index:
             return 0
         scene_id = scene.get("id", "")
-        if not scene_id or not hasattr(self._asset_index, "assets"):
+        if not scene_id:
             return 0
-        return sum(
-            1
-            for asset in self._asset_index.assets.values()
-            if asset.get("scene_id") == scene_id and self._asset_file_exists(asset)
-        )
+        return self._scene_asset_counts().get(scene_id, 0)
 
     def get_selected_scene_created(self) -> str:
         scene = self._get_selected_scene()
@@ -1699,9 +1907,7 @@ class AssetManagerPanel(Panel):
         """Get the currently selected folder, if any."""
         if not self._selected_folder_id:
             return None
-        if not self._asset_index or not hasattr(self._asset_index, "folders"):
-            return None
-        return self._asset_index.folders.get(self._selected_folder_id)
+        return self._asset_index_folders().get(self._selected_folder_id)
 
     def get_selected_folder_name(self) -> str:
         folder = self._get_selected_folder()
@@ -2096,53 +2302,160 @@ class AssetManagerPanel(Panel):
 
         if asset_type in ("ply_3dgs", "ply_pcl", "ply", "rad", "sog", "spz", "mesh"):
             geom_meta = asset.get("geometry_metadata", {}) or {}
-            # Need sync if empty or if gaussian_count is not present
-            return not geom_meta or geom_meta.get("gaussian_count") is None
+            needs_sh_degree = asset_type in ("ply_3dgs", "ply", "rad", "sog", "spz")
+            return (
+                not geom_meta
+                or geom_meta.get("gaussian_count") is None
+                or (needs_sh_degree and "sh_degree" not in geom_meta)
+            )
         return asset.get("file_size_bytes", 0) <= 0
 
-    def _sync_existing_asset_metadata(self) -> bool:
-        if not self._asset_index or not self._asset_scanner:
-            return False
+    # ── Background Asset Scanning ───────────────────────────────
 
-        updated_any = False
-        for asset_id, asset in list(self._asset_index.assets.items()):
-            if self._asset_needs_metadata_sync(asset):
-                file_path = asset.get("absolute_path") or asset.get("path", "")
-                try:
-                    metadata = self._asset_scanner.scan_file(file_path)
-                except Exception as exc:
-                    _logger.debug(f"Failed to rescan asset metadata for {file_path}: {exc}")
-                    metadata = None
+    def _start_scan_worker(self, asset_ids: List[str], scan_type: str) -> None:
+        """Start a background thread to scan assets and update the catalog.
 
-                if metadata:
-                    update_kwargs = self._metadata_to_asset_kwargs(metadata)
-                    size_bytes = metadata.get("size_bytes")
-                    if size_bytes is not None and size_bytes != asset.get("file_size_bytes", 0):
-                        update_kwargs["file_size_bytes"] = size_bytes
+        If a scan is already running, the request is requeued so it runs
+        automatically after the current scan finishes.
+        """
+        asset_ids = list(dict.fromkeys(asset_ids))
+        if not asset_ids:
+            return
 
-                    modified_at = metadata.get("modified")
-                    if modified_at and modified_at != asset.get("modified_at"):
-                        update_kwargs["modified_at"] = modified_at
+        thread_to_start = None
+        with self._scan_thread_lock:
+            if self._scan_thread is not None and self._scan_thread.is_alive():
+                self._scan_queued_asset_ids = list(
+                    dict.fromkeys(self._scan_queued_asset_ids + asset_ids)
+                )
+                self._scan_requeue = True
+                self._scan_ui_refresh_needed = True
+                return
 
-                    created_at = metadata.get("created")
-                    if created_at and not asset.get("created_at"):
-                        update_kwargs["created_at"] = created_at
+            self._scan_requeue = False
+            self._scan_queued_asset_ids = []
+            self._scan_ui_refresh_needed = False
+            self._scan_thread = threading.Thread(
+                target=self._scan_worker,
+                args=(asset_ids, scan_type),
+                daemon=True,
+            )
+            thread_to_start = self._scan_thread
 
-                    if update_kwargs:
-                        self._asset_index.update_asset(asset_id, **update_kwargs)
+        thread_to_start.start()
+
+    def _scan_worker(self, asset_ids: List[str], scan_type: str) -> None:
+        """Run in a background thread: scan assets and update the catalog incrementally."""
+        try:
+            asset_ids = list(dict.fromkeys(asset_ids))
+            while True:
+                allow_thumbnail_refresh = (
+                    scan_type == "refresh"
+                    and len(asset_ids) <= BACKGROUND_SCAN_THUMBNAIL_LIMIT
+                )
+                updated_any = False
+                remaining_asset_ids: List[str] = []
+                for asset_index, asset_id in enumerate(asset_ids):
+                    with self._scan_thread_lock:
+                        if self._scan_requeue:
+                            # Another scan was requested; switch to the queued batch.
+                            remaining_asset_ids = asset_ids[asset_index:]
+                            break
+
+                    asset = self._asset_index.assets.get(asset_id)
+                    if asset is None:
+                        continue
+
+                    file_path = asset.get("absolute_path") or asset.get("path", "")
+                    if not file_path or not os.path.exists(file_path):
+                        continue
+
+                    try:
+                        metadata = self._asset_scanner.scan_file(file_path)
+                    except Exception as exc:
+                        _logger.debug(f"Failed to rescan asset metadata for {file_path}: {exc}")
+                        metadata = None
+
+                    if metadata:
+                        # Merge new metadata into existing asset instead of overwriting
+                        # so previously detected fields (like sh_degree) are not lost.
+                        update_kwargs = self._metadata_to_asset_kwargs(metadata)
+                        size_bytes = metadata.get("size_bytes")
+                        if size_bytes is not None and size_bytes != asset.get("file_size_bytes", 0):
+                            update_kwargs["file_size_bytes"] = size_bytes
+                        modified_at = metadata.get("modified")
+                        if modified_at and modified_at != asset.get("modified_at"):
+                            update_kwargs["modified_at"] = modified_at
+                        created_at = metadata.get("created")
+                        if created_at and not asset.get("created_at"):
+                            update_kwargs["created_at"] = created_at
+                        # Merge geometry/dataset metadata instead of replacing
+                        for meta_key in ("geometry_metadata", "dataset_metadata", "transform_metadata"):
+                            if meta_key in update_kwargs:
+                                existing = asset.get(meta_key, {}) or {}
+                                merged = dict(existing)
+                                merged.update(update_kwargs[meta_key])
+                                update_kwargs[meta_key] = merged
+                        if update_kwargs:
+                            self._asset_index.update_asset(asset_id, **update_kwargs)
+                            updated_any = True
+
+                    asset = self._asset_index.assets.get(asset_id, asset)
+                    if allow_thumbnail_refresh and self._asset_needs_thumbnail_refresh(asset):
+                        self._generate_asset_thumbnail_for_values(
+                            asset_id,
+                            str(asset.get("type") or ""),
+                            asset.get("absolute_path") or asset.get("path", ""),
+                            asset.get("dataset_metadata", {}) or {},
+                        )
                         updated_any = True
 
-            asset = self._asset_index.assets.get(asset_id, asset)
-            if self._asset_needs_thumbnail_refresh(asset):
-                self._generate_asset_thumbnail_for_values(
-                    asset_id,
-                    str(asset.get("type") or ""),
-                    asset.get("absolute_path") or asset.get("path", ""),
-                    asset.get("dataset_metadata", {}) or {},
-                )
-                updated_any = True
+                if updated_any:
+                    try:
+                        self._asset_index.save()
+                    except Exception as exc:
+                        _logger.debug(f"Failed to save catalog after background scan: {exc}")
 
-        return updated_any
+                next_asset_ids = None
+                with self._scan_thread_lock:
+                    if self._scan_requeue:
+                        next_asset_ids = list(
+                            dict.fromkeys(remaining_asset_ids + self._scan_queued_asset_ids)
+                        )
+                        self._scan_queued_asset_ids = []
+                        self._scan_requeue = False
+                        self._scan_ui_refresh_needed = True
+                    else:
+                        self._scan_ui_refresh_needed = True
+                        if self._scan_thread is threading.current_thread():
+                            self._scan_thread = None
+                if next_asset_ids is not None:
+                    asset_ids = next_asset_ids
+                    continue
+                self._request_model_update()
+                break
+        except Exception as exc:
+            _logger.error(f"Background scan worker failed: {exc}")
+            with self._scan_thread_lock:
+                self._scan_ui_refresh_needed = True
+                self._scan_requeue = False
+                self._scan_queued_asset_ids = []
+                if self._scan_thread is threading.current_thread():
+                    self._scan_thread = None
+            self._request_model_update()
+
+    def _sync_existing_asset_metadata(self) -> bool:
+        """Non-blocking launcher: queue assets that need metadata sync for background scanning."""
+        if not self._asset_index or not self._asset_scanner:
+            return False
+        asset_ids = [
+            asset_id
+            for asset_id, asset in list(self._asset_index.assets.items())
+            if self._asset_needs_metadata_sync(asset)
+        ]
+        if asset_ids:
+            self._start_scan_worker(asset_ids, "sync")
+        return False
 
     def _scan_and_register_asset(
         self,
@@ -2160,15 +2473,8 @@ class AssetManagerPanel(Panel):
 
         metadata = self._asset_scanner.scan_file(path) if self._asset_scanner else {}
         asset_kwargs = self._metadata_to_asset_kwargs(metadata)
-        # Always pop type and role from kwargs to avoid duplicate keyword argument error
-        kwargs_type = asset_kwargs.pop("type", None)
-        kwargs_role = asset_kwargs.pop("role", None)
-        asset_type = override_type or kwargs_type or "unknown"
-        role = override_role or kwargs_role or fallback_role
-
-        # Final safety: ensure type and role are not in kwargs (they're passed explicitly)
-        asset_kwargs.pop("type", None)
-        asset_kwargs.pop("role", None)
+        asset_type = override_type or asset_kwargs.pop("type", None) or "unknown"
+        role = override_role or fallback_role
 
         asset = self._asset_index.create_asset(
             folder_id=folder_id,
@@ -2257,8 +2563,11 @@ class AssetManagerPanel(Panel):
         else:
             self._active_filters.add(filter_id)
 
+        self._reset_asset_visible_limit()
         self._dirty_model(
-            "active_filters", "filters", "assets"
+            "active_filters",
+            "filters",
+            *self._asset_result_dirty_fields(),
         )
 
     def set_view_mode(self, _handle, _ev, args):
@@ -2266,8 +2575,16 @@ class AssetManagerPanel(Panel):
         if not args:
             return
         mode = str(args[0])
+        if mode not in ("gallery", "list"):
+            return
         self._view_mode = mode
-        self._dirty_model("view_mode", "is_gallery_view", "is_list_view", "assets")
+        self._reset_asset_visible_limit()
+        self._dirty_model(
+            "view_mode",
+            "is_gallery_view",
+            "is_list_view",
+            *self._asset_result_dirty_fields(),
+        )
 
     def cycle_sort_mode(self, _handle, _ev, args):
         """Cycle through supported sort modes."""
@@ -2276,7 +2593,19 @@ class AssetManagerPanel(Panel):
         except ValueError:
             current_index = 0
         self._sort_mode = self.SORT_MODES[(current_index + 1) % len(self.SORT_MODES)]
-        self._dirty_model("sort_mode", "sort_label", "assets")
+        self._reset_asset_visible_limit()
+        self._dirty_model(
+            "sort_mode",
+            "sort_label",
+            *self._asset_result_dirty_fields(),
+        )
+
+    def show_more_assets(self, _handle=None, _ev=None, _args=None):
+        """Expand the bounded asset row/card window."""
+        if not self.get_asset_results_more_visible():
+            return
+        self._asset_visible_limit += self._default_asset_visible_limit()
+        self._dirty_model(*self._asset_result_dirty_fields())
 
     def toggle_asset_selection(self, _handle, _ev, args):
         """Toggle selection state of an asset."""
@@ -2302,26 +2631,208 @@ class AssetManagerPanel(Panel):
             "has_multi_selection",
         )
 
+    @staticmethod
+    def _elapsed_ms(start: float) -> float:
+        return (time.perf_counter() - start) * 1000.0
+
+    def _log_perf(self, message: str, *args: Any, elapsed_ms: Optional[float] = None) -> None:
+        if elapsed_ms is not None and elapsed_ms < ASSET_MANAGER_PERF_LOG_THRESHOLD_MS:
+            return
+        if args:
+            try:
+                message = message % args
+            except Exception:
+                pass
+        prefixed = "[AssetManagerPerf] " + message
+        try:
+            lf.log.info(prefixed)
+        except Exception:
+            _logger.info(prefixed)
+
+    def _selection_count_fields(self) -> tuple[str, ...]:
+        return (
+            "selected_count",
+            "selected_count_text",
+            "has_selection",
+            "has_multi_selection",
+        )
+
+    def _selected_asset_detail_fields(self) -> tuple[str, ...]:
+        return (
+            "selected_asset_name",
+            "selected_asset_type",
+            "selected_asset_folder_name",
+            "selected_asset_scene_name",
+            "selected_asset_path",
+            "selected_asset_size",
+            "selected_asset_role",
+            "selected_asset_points",
+            "selected_asset_sh_degree",
+            "selected_asset_resolution",
+            "selected_asset_duration",
+            "selected_asset_created",
+            "selected_asset_modified",
+            "selected_asset_has_sh_degree",
+            "selected_asset_has_geometry_metadata",
+            "selected_asset_has_dataset_metadata",
+            "selected_asset_dataset_image_count",
+            "selected_asset_dataset_image_root",
+            "selected_asset_dataset_masks",
+            "selected_asset_dataset_camera_count",
+            "selected_asset_dataset_initial_points",
+            "selected_asset_bounding_box",
+            "selected_asset_center",
+            "selected_asset_scale",
+            "selected_asset_has_transform_metadata",
+            "selected_asset_transform_translation",
+            "selected_asset_transform_rotation",
+            "selected_asset_transform_scaling",
+            "selected_asset_file_missing",
+            "selected_asset_expected_path",
+            "selected_asset_pill_class",
+            "selected_asset_type_label",
+        )
+
+    def _selected_scene_detail_fields(self) -> tuple[str, ...]:
+        return (
+            "selected_scene_name",
+            "selected_scene_folder_name",
+            "selected_scene_asset_count",
+            "selected_scene_created",
+            "selected_scene_modified",
+            "selected_scene_assets",
+        )
+
+    def _selected_folder_detail_fields(self) -> tuple[str, ...]:
+        return (
+            "selected_folder_name",
+            "selected_folder_created",
+            "selected_folder_modified",
+        )
+
+    def _selected_asset_dirty_fields(
+        self,
+        previous_selection: Set[str],
+        current_selection: Set[str],
+    ) -> tuple[str, ...]:
+        fields = [
+            "selected_asset_id",
+            "selected_asset_tags",
+            *self._selection_count_fields(),
+            *self._selection_visibility_fields(),
+            *self._selected_asset_detail_fields(),
+        ]
+        if len(previous_selection) > 1 or len(current_selection) > 1:
+            fields.insert(0, "assets")
+        return tuple(fields)
+
+    @staticmethod
+    def _ui_thread_scheduler():
+        scheduler = getattr(lf.ui, "schedule_on_ui_thread", None)
+        if scheduler is None:
+            scheduler = getattr(lf.ui, "_run_on_ui_thread", None)
+        return scheduler if callable(scheduler) else None
+
+    def _cancel_selection_detail_timer(self) -> None:
+        timer = self._selection_detail_timer
+        self._selection_detail_timer = None
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+
+    def _schedule_selection_detail_update(
+        self,
+        fields: tuple[str, ...],
+        *,
+        asset_id: str,
+        requested_at: float,
+    ) -> bool:
+        scheduler = self._ui_thread_scheduler()
+        if scheduler is None:
+            return False
+
+        with self._selection_detail_lock:
+            self._selection_detail_generation += 1
+            generation = self._selection_detail_generation
+            self._pending_selection_detail_fields = fields
+            self._pending_selection_detail_asset_id = asset_id
+            self._pending_selection_detail_requested_at = requested_at
+            self._cancel_selection_detail_timer()
+
+            def fire() -> None:
+                def flush() -> None:
+                    self._flush_selection_detail_update(generation)
+
+                try:
+                    scheduler(flush)
+                except Exception:
+                    pass
+
+            timer = threading.Timer(SELECTION_DETAIL_DEFER_SECONDS, fire)
+            timer.daemon = True
+            self._selection_detail_timer = timer
+            timer.start()
+        return True
+
+    def _flush_selection_detail_update(self, generation: Optional[int] = None) -> bool:
+        with self._selection_detail_lock:
+            if generation is not None and generation != self._selection_detail_generation:
+                return False
+            fields = self._pending_selection_detail_fields
+            asset_id = self._pending_selection_detail_asset_id
+            requested_at = self._pending_selection_detail_requested_at
+            self._pending_selection_detail_fields = ()
+            self._pending_selection_detail_asset_id = ""
+            self._pending_selection_detail_requested_at = 0.0
+            self._selection_detail_timer = None
+
+        if not fields:
+            return False
+
+        start = time.perf_counter()
+        self._dirty_model(*fields)
+        dirty_ms = self._elapsed_ms(start)
+        wait_ms = (start - requested_at) * 1000.0 if requested_at else 0.0
+        dirty_timing = self._last_dirty_model_timing or {}
+        self._log_perf(
+            (
+                "select_details asset=%s wait=%.3fms dirty=%.3fms "
+                "fields=%d records=%.3fms/%s request=%.3fms total=%.3fms"
+            ),
+            asset_id,
+            wait_ms,
+            dirty_ms,
+            dirty_timing.get("field_count", len(fields)),
+            dirty_timing.get("record_update_ms", 0.0),
+            dirty_timing.get("record_updates", {}),
+            dirty_timing.get("request_update_ms", 0.0),
+            dirty_timing.get("total_ms", dirty_ms),
+            elapsed_ms=dirty_ms,
+        )
+        return True
+
     def _select_asset_id(
         self,
         asset_id: str,
         *,
         toggle: bool = False,
         multi_select: bool = False,
+        row_element: Any = None,
+        container: Any = None,
     ) -> bool:
+        total_start = time.perf_counter()
         if not asset_id:
             self._log_warn(
                 "Asset Manager click ignored: no asset id resolved from event/DOM"
             )
             return False
 
-        asset = None
-        if self._asset_index and hasattr(self._asset_index, "assets"):
-            asset = self._asset_index.assets.get(asset_id)
+        assets = self._asset_index_assets()
+        asset = assets.get(asset_id)
         if asset is None:
-            available = []
-            if self._asset_index and hasattr(self._asset_index, "assets"):
-                available = list(self._asset_index.assets.keys())[:10]
+            available = list(assets.keys())[:10]
             self._log_warn(
                 "Asset Manager click resolved asset_id=%s but asset is missing "
                 "from index. sample_ids=%s",
@@ -2329,6 +2840,9 @@ class AssetManagerPanel(Panel):
                 available,
             )
             return False
+
+        previous_selection = set(self._selected_asset_ids)
+        previous_type = self._selection_type
 
         if multi_select:
             if asset_id in self._selected_asset_ids:
@@ -2341,7 +2855,62 @@ class AssetManagerPanel(Panel):
             self._selected_asset_ids = {asset_id}
 
         self._update_selection_type()
-        self.refresh_catalog()
+        if (
+            self._selected_asset_ids == previous_selection
+            and self._selection_type == previous_type
+        ):
+            self._log_perf(
+                "select noop asset=%s total=%.3fms",
+                asset_id,
+                self._elapsed_ms(total_start),
+                elapsed_ms=self._elapsed_ms(total_start),
+            )
+            return False
+        dom_start = time.perf_counter()
+        dom_rows = self._sync_asset_selection_dom(
+            previous_selection,
+            self._selected_asset_ids,
+            row_element=row_element,
+            container=container,
+        )
+        dom_ms = self._elapsed_ms(dom_start)
+
+        detail_fields = self._selected_asset_dirty_fields(
+            previous_selection,
+            self._selected_asset_ids,
+        )
+        dirty_start = time.perf_counter()
+        deferred = self._schedule_selection_detail_update(
+            detail_fields,
+            asset_id=asset_id,
+            requested_at=total_start,
+        )
+        if not deferred:
+            self._dirty_model(*detail_fields)
+        dirty_ms = self._elapsed_ms(dirty_start)
+        total_ms = self._elapsed_ms(total_start)
+        dirty_timing = self._last_dirty_model_timing or {}
+        self._log_perf(
+            (
+                "select asset=%s multi=%s previous=%d current=%d "
+                "dom=%.3fms/%drows deferred=%s dirty=%.3fms fields=%d "
+                "records=%.3fms/%s request=%.3fms total=%.3fms"
+            ),
+            asset_id,
+            multi_select,
+            len(previous_selection),
+            len(self._selected_asset_ids),
+            dom_ms,
+            dom_rows,
+            deferred,
+            dirty_ms,
+            0 if deferred else dirty_timing.get("field_count", len(detail_fields)),
+            0.0 if deferred else dirty_timing.get("record_update_ms", 0.0),
+            {} if deferred else dirty_timing.get("record_updates", {}),
+            0.0 if deferred else dirty_timing.get("request_update_ms", 0.0),
+            total_ms,
+            elapsed_ms=total_ms,
+        )
         return True
 
     def _update_selection_type(self):
@@ -2353,11 +2922,57 @@ class AssetManagerPanel(Panel):
         else:
             self._selection_type = "multiple"
 
+    def _query_visible_asset_rows(self, root: Any) -> List[Any]:
+        if root is None or not hasattr(root, "query_selector_all"):
+            return []
+        rows: List[Any] = []
+        for selector in (".asset-card", ".asset-list-row", ".scene-asset-row"):
+            try:
+                rows.extend(list(root.query_selector_all(selector)))
+            except Exception:
+                continue
+        return rows
+
+    def _sync_asset_selection_dom(
+        self,
+        previous_selection: Set[str],
+        current_selection: Set[str],
+        *,
+        row_element: Any = None,
+        container: Any = None,
+    ) -> int:
+        root = container or self._doc
+        rows = self._query_visible_asset_rows(root)
+        if row_element is not None and row_element not in rows:
+            rows.append(row_element)
+        if not rows:
+            return 0
+
+        current = {str(asset_id) for asset_id in current_selection}
+        selected_class = "is-multi-selected" if len(current) > 1 else "is-selected"
+        changed = 0
+        for row in rows:
+            try:
+                asset_id = row.get_attribute("data-asset-id", "")
+            except Exception:
+                asset_id = ""
+            is_selected = asset_id in current
+            for class_name in ("is-selected", "is-multi-selected"):
+                try:
+                    should_set = is_selected and class_name == selected_class
+                    if row.is_class_set(class_name) != should_set:
+                        row.set_class(class_name, should_set)
+                        changed += 1
+                except Exception:
+                    continue
+        return changed
+
     def on_search(self, _handle, _ev, args):
         """Handle search input changes (real-time)."""
         if args and len(args) > 0:
             self._search_query = str(args[0])
-        self._dirty_model("search_query", "assets")
+        self._reset_asset_visible_limit()
+        self._dirty_model("search_query", *self._asset_result_dirty_fields())
 
     def on_pending_tag_change(self, _handle, _ev, args):
         """Update the pending tag input buffer."""
@@ -2693,24 +3308,61 @@ class AssetManagerPanel(Panel):
         self._select_folder_id(folder_id)
 
     def _select_folder_id(self, folder_id: str) -> bool:
+        total_start = time.perf_counter()
         if not folder_id:
             return False
-        self._selected_folder_id = folder_id if folder_id != "all" else None
+        next_folder_id = folder_id if folder_id != "all" else None
+        next_selection_type = "folder" if next_folder_id else "none"
+        if (
+            self._selected_folder_id == next_folder_id
+            and self._selected_scene_id is None
+            and not self._selected_asset_ids
+            and self._selection_type == next_selection_type
+        ):
+            self._log_perf(
+                "folder noop folder=%s total=%.3fms",
+                folder_id,
+                self._elapsed_ms(total_start),
+                elapsed_ms=self._elapsed_ms(total_start),
+            )
+            return False
+
+        self._selected_folder_id = next_folder_id
         self._selected_scene_id = None  # Clear scene selection when folder changes
         self._selected_asset_ids.clear()
-        self._selection_type = "folder" if self._selected_folder_id else "none"
+        self._selection_type = next_selection_type
+        self._reset_asset_visible_limit()
 
         self._dirty_model(
             "folders",
             "scenes",
-            "assets",
-            "selected_count",
-            "selected_total_size",
-            "selection_type",
-            "selected_folder_name",
-            "selected_folder_created",
-            "selected_folder_modified",
+            *self._asset_result_dirty_fields(),
+            "selected_folder_id",
+            "selected_scene_id",
+            "selected_asset_id",
+            "selected_asset_tags",
+            *self._selection_count_fields(),
             *self._selection_visibility_fields(),
+            *self._selected_asset_detail_fields(),
+            *self._selected_scene_detail_fields(),
+            *self._selected_folder_detail_fields(),
+        )
+        dirty_timing = self._last_dirty_model_timing or {}
+        total_ms = self._elapsed_ms(total_start)
+        self._log_perf(
+            (
+                "folder folder=%s rows=%d rows_ms=%.3f dirty_total=%.3fms "
+                "records=%.3fms/%s request=%.3fms total=%.3fms"
+            ),
+            folder_id,
+            self._last_asset_rows_update_count,
+            self._last_asset_rows_update_ms,
+            dirty_timing.get("total_ms", 0.0),
+            dirty_timing.get("record_update_ms", 0.0),
+            dirty_timing.get("record_updates", {}),
+            dirty_timing.get("request_update_ms", 0.0),
+            total_ms,
+            elapsed_ms=total_ms,
         )
         return True
 
@@ -2720,26 +3372,57 @@ class AssetManagerPanel(Panel):
         self._select_scene_id(scene_id)
 
     def _select_scene_id(self, scene_id: str) -> bool:
+        total_start = time.perf_counter()
         if not scene_id:
             return False
-        self._selected_scene_id = scene_id if scene_id != "all" else None
+        next_scene_id = scene_id if scene_id != "all" else None
+        next_selection_type = "scene" if next_scene_id else "none"
+        if (
+            self._selected_scene_id == next_scene_id
+            and not self._selected_asset_ids
+            and self._selection_type == next_selection_type
+        ):
+            self._log_perf(
+                "scene noop scene=%s total=%.3fms",
+                scene_id,
+                self._elapsed_ms(total_start),
+                elapsed_ms=self._elapsed_ms(total_start),
+            )
+            return False
+
+        self._selected_scene_id = next_scene_id
         self._selected_asset_ids.clear()
-        self._selection_type = "scene" if self._selected_scene_id else "none"
+        self._selection_type = next_selection_type
+        self._reset_asset_visible_limit()
 
         self._dirty_model(
             "scenes",
-            "assets",
-            "asset_count",
-            "selected_count",
-            "selected_total_size",
-            "selection_type",
-            "selected_scene_name",
-            "selected_scene_folder_name",
-            "selected_scene_asset_count",
-            "selected_scene_created",
-            "selected_scene_modified",
-            "selected_scene_assets",
+            *self._asset_result_dirty_fields(),
+            "selected_scene_id",
+            "selected_asset_id",
+            "selected_asset_tags",
+            *self._selection_count_fields(),
             *self._selection_visibility_fields(),
+            *self._selected_asset_detail_fields(),
+            *self._selected_scene_detail_fields(),
+            *self._selected_folder_detail_fields(),
+        )
+        dirty_timing = self._last_dirty_model_timing or {}
+        total_ms = self._elapsed_ms(total_start)
+        self._log_perf(
+            (
+                "scene scene=%s rows=%d rows_ms=%.3f dirty_total=%.3fms "
+                "records=%.3fms/%s request=%.3fms total=%.3fms"
+            ),
+            scene_id,
+            self._last_asset_rows_update_count,
+            self._last_asset_rows_update_ms,
+            dirty_timing.get("total_ms", 0.0),
+            dirty_timing.get("record_update_ms", 0.0),
+            dirty_timing.get("record_updates", {}),
+            dirty_timing.get("request_update_ms", 0.0),
+            total_ms,
+            elapsed_ms=total_ms,
         )
         return True
 
@@ -3692,6 +4375,7 @@ class AssetManagerPanel(Panel):
 
     def on_delete_folder(self, _handle, _ev, args):
         """Delete a folder without creating an implicit fallback folder."""
+        total_start = time.perf_counter()
         folder_id = self._resolve_event_value(args, _ev, "data-folder-id")
         if not folder_id:
             return
@@ -3703,10 +4387,11 @@ class AssetManagerPanel(Panel):
             except Exception:
                 pass
 
-        if not self._asset_index or not hasattr(self._asset_index, "folders"):
+        if not self._asset_index:
             return
 
-        folder = self._asset_index.folders.get(folder_id)
+        folders = self._asset_index_folders()
+        folder = folders.get(folder_id)
         if not folder:
             return
 
@@ -3716,76 +4401,70 @@ class AssetManagerPanel(Panel):
 
         folder_name = folder.get("name", "Unnamed Folder")
 
-        assets_to_move = [
+        scenes = self._asset_index_scenes()
+        scene_ids_to_delete = {
+            scene_id
+            for scene_id, scene in scenes.items()
+            if scene.get("folder_id") == folder_id
+        }
+        assets = self._asset_index_assets()
+        assets_to_delete = [
             asset_id
-            for asset_id, asset in getattr(self._asset_index, "assets", {}).items()
+            for asset_id, asset in assets.items()
             if asset.get("folder_id") == folder_id
+            or asset.get("scene_id") in scene_ids_to_delete
         ]
-        target_folder_id = None
-        for fid in sorted(self._asset_index.folders.keys(), key=self._folder_sort_key):
-            if fid != folder_id:
-                target_folder_id = fid
-                break
-
-        if assets_to_move and not target_folder_id:
-            self._log_warn(
-                "Cannot delete folder '%s': create another folder or remove its assets first",
-                folder_name,
-            )
-            return
-
-        # Move all assets from this folder to another explicit folder before deleting.
-        moved_count = 0
-        target_folder_name = ""
-        if target_folder_id:
-            target_folder_name = self._asset_index.folders.get(
-                target_folder_id, {}
-            ).get("name", "another folder")
-            for asset_id in assets_to_move:
-                try:
-                    self._asset_index.update_asset(
-                        asset_id,
-                        folder_id=target_folder_id,
-                        scene_id=None  # Clear scene since scenes are folder-specific
-                    )
-                    moved_count += 1
-                except Exception as e:
-                    self._log_warn(
-                        "Failed to move asset %s to folder '%s': %s",
-                        asset_id,
-                        target_folder_name,
-                        e,
-                    )
-                    return
-
+        scene_count = len(scene_ids_to_delete)
         # Delete the folder
         try:
+            delete_start = time.perf_counter()
             if hasattr(self._asset_index, "delete_folder"):
-                self._asset_index.delete_folder(folder_id)
+                deleted = self._asset_index.delete_folder(folder_id)
             elif hasattr(self._asset_index, "remove_folder"):
-                self._asset_index.remove_folder(folder_id)
+                deleted = self._asset_index.remove_folder(folder_id)
             else:
                 # Fallback: remove from folders dict directly
-                if hasattr(self._asset_index, "folders"):
-                    del self._asset_index.folders[folder_id]
-
-            self._asset_index.save()
+                deleted = False
+                mutable_folders = getattr(self._asset_index, "_folders", None)
+                if isinstance(mutable_folders, dict) and folder_id in mutable_folders:
+                    del mutable_folders[folder_id]
+                    deleted = True
+                    if hasattr(self._asset_index, "save"):
+                        deleted = bool(self._asset_index.save())
+            delete_ms = self._elapsed_ms(delete_start)
+            if not deleted:
+                self._log_warn("Failed to delete folder '%s'", folder_name)
+                return
+            self._invalidate_catalog_cache()
 
             # Clear selection if the deleted folder was selected
             if self._selected_folder_id == folder_id:
-                self._selected_folder_id = target_folder_id
                 self._selected_scene_id = None
                 self._selected_asset_ids.clear()
-                self._selection_type = "folder" if target_folder_id else "none"
+                self._selection_type = "folder"
             self._repair_selected_folder()
 
+            refresh_start = time.perf_counter()
             self.refresh_catalog()
-            if moved_count:
+            refresh_ms = self._elapsed_ms(refresh_start)
+            self._log_perf(
+                (
+                    "delete_folder folder=%s assets=%d scenes=%d "
+                    "delete=%.3fms refresh=%.3fms total=%.3fms"
+                ),
+                folder_id,
+                len(assets_to_delete),
+                scene_count,
+                delete_ms,
+                refresh_ms,
+                self._elapsed_ms(total_start),
+                elapsed_ms=self._elapsed_ms(total_start),
+            )
+            if assets_to_delete:
                 self._log_info(
-                    "Deleted folder '%s' and moved %d assets to '%s'",
+                    "Deleted folder '%s' and removed %d assets from the catalog",
                     folder_name,
-                    moved_count,
-                    target_folder_name,
+                    len(assets_to_delete),
                 )
             else:
                 self._log_info("Deleted folder '%s'", folder_name)
@@ -3811,11 +4490,7 @@ class AssetManagerPanel(Panel):
         if self._asset_index and hasattr(self._asset_index, "load"):
             try:
                 self._asset_index.load()
-                if (
-                    self._sync_existing_asset_metadata()
-                    and self._asset_index.library_path.exists()
-                ):
-                    self._library_mtime = self._asset_index.library_path.stat().st_mtime
+                self._sync_existing_asset_metadata()
                 if self._asset_index.library_path.exists():
                     self._library_mtime = self._asset_index.library_path.stat().st_mtime
             except Exception as e:
@@ -3876,24 +4551,24 @@ class AssetManagerPanel(Panel):
                 current_mtime = library_path.stat().st_mtime
                 if current_mtime > self._library_mtime:
                     self._asset_index.load()
-                    if self._sync_existing_asset_metadata() and library_path.exists():
-                        current_mtime = library_path.stat().st_mtime
+                    self._sync_existing_asset_metadata()
                     self._library_mtime = current_mtime
                     self.refresh_catalog(request_update=False)
                     changed = True
 
-            if hasattr(self._asset_index, "mark_missing_files"):
-                previous_missing = sum(
-                    1
-                    for asset in self._asset_index.assets.values()
-                    if not asset.get("exists", True)
-                )
-                current_missing, _total = self._asset_index.mark_missing_files()
-                if current_missing != previous_missing:
-                    if library_path.exists():
-                        self._library_mtime = library_path.stat().st_mtime
-                    self.refresh_catalog(request_update=False)
-                    changed = True
+            # If a background scan batch changed the catalog, refresh the UI
+            # with targeted fields instead of dirtying the entire model.
+            scan_refresh_due = False
+            with self._scan_thread_lock:
+                if self._scan_ui_refresh_needed:
+                    now = time.time()
+                    if now - self._scan_last_refresh_time > 0.2:
+                        self._scan_ui_refresh_needed = False
+                        self._scan_last_refresh_time = now
+                        scan_refresh_due = True
+            if scan_refresh_due:
+                self._dirty_catalog_view()
+                changed = True
         except Exception:
             pass
 
@@ -3914,11 +4589,17 @@ class AssetManagerPanel(Panel):
 
     def on_unmount(self, doc):
         """Save index on unmount."""
+        self._cancel_selection_detail_timer()
         self._unsubscribe_reactive_state()
         clear_active_asset_manager_panel(self)
 
         # Wait for any pending thumbnail generation threads to finish
         self._join_pending_thumbnail_threads(timeout=2.0)
+
+        # Wait for any pending background scan to finish
+        with self._scan_thread_lock:
+            if self._scan_thread is not None and self._scan_thread.is_alive():
+                self._scan_thread.join(timeout=2.0)
 
         if self._asset_index and hasattr(self._asset_index, "save"):
             try:
@@ -4110,6 +4791,8 @@ class AssetManagerPanel(Panel):
                     asset_id,
                     toggle=False,
                     multi_select=self._event_multi_select(event),
+                    row_element=action_el,
+                    container=container,
                 )
             self._stop_event(event)
             return
@@ -4422,46 +5105,66 @@ class AssetManagerPanel(Panel):
 
     # ── Helper Methods ─────────────────────────────────────────
 
+    def _dirty_catalog_view(self) -> None:
+        """Refresh catalog-facing records without dirtying unrelated model fields."""
+        self._reconcile_selection()
+        fields: List[str] = [
+            "folders",
+            "scenes",
+            "filters",
+            *self._asset_result_dirty_fields(),
+            *self._selection_count_fields(),
+            *self._selection_visibility_fields(),
+            *self._selected_asset_detail_fields(),
+            *self._selected_scene_detail_fields(),
+            *self._selected_folder_detail_fields(),
+        ]
+        self._dirty_model(*fields)
+
     def refresh_catalog(self, *, request_update: bool = True):
         """Refresh all catalog data in the UI."""
+        total_start = time.perf_counter()
+        self._invalidate_catalog_cache()
+        reconcile_start = time.perf_counter()
         self._reconcile_selection()
-        self._update_all_record_lists()
+        reconcile_ms = self._elapsed_ms(reconcile_start)
+        records_start = time.perf_counter()
+        record_summary = self._update_all_record_lists()
+        records_ms = self._elapsed_ms(records_start)
+        dirty_ms = 0.0
+        request_ms = 0.0
         if self._handle:
+            dirty_start = time.perf_counter()
             self._handle.dirty_all()
+            dirty_ms = self._elapsed_ms(dirty_start)
             if request_update:
+                request_start = time.perf_counter()
                 self._request_model_update()
+                request_ms = self._elapsed_ms(request_start)
+        self._log_perf(
+            (
+                "refresh request=%s reconcile=%.3fms records=%.3fms/%s "
+                "record_parts=%s dirty_all=%.3fms request_update=%.3fms total=%.3fms"
+            ),
+            request_update,
+            reconcile_ms,
+            records_ms,
+            record_summary.get("counts", {}) if record_summary else {},
+            record_summary.get("timings_ms", {}) if record_summary else {},
+            dirty_ms,
+            request_ms,
+            self._elapsed_ms(total_start),
+            elapsed_ms=self._elapsed_ms(total_start),
+        )
 
     def refresh_catalog_scan(self, _handle=None, _ev=None, _args=None):
-        """Rescan all known asset directories and refresh the catalog."""
+        """Non-blocking launcher: rescan all known assets in the background."""
         if not self._asset_index:
             return
-        try:
-            # Rescan all asset paths in the index
-            for asset in list(self._asset_index.assets.values()):
-                path = asset.get("absolute_path") or asset.get("path")
-                if path and os.path.exists(path):
-                    try:
-                        if self._asset_scanner:
-                            metadata = self._asset_scanner.scan_file(path)
-                            if metadata and metadata.get("type") is not None:
-                                update_kwargs = self._metadata_to_asset_kwargs(metadata)
-                                asset_type = update_kwargs.pop("type", None)
-                                role = update_kwargs.pop("role", None)
-                                if asset_type:
-                                    update_kwargs["type"] = asset_type
-                                if role and role != "unknown":
-                                    update_kwargs["role"] = role
-                                update_kwargs["name"] = metadata.get("name") or asset.get("name")
-                                update_kwargs["path"] = metadata.get("path") or asset.get("path")
-                                update_kwargs["absolute_path"] = metadata.get("path") or asset.get("absolute_path")
-                                self._asset_index.update_asset(asset["id"], **update_kwargs)
-                    except Exception as exc:
-                        _logger.debug(f"Failed to rescan {path}: {exc}")
-            self._asset_index.save()
-            self.refresh_catalog()
-            self._log_info("Refreshed asset catalog")
-        except Exception as exc:
-            self._log_error(f"Failed to refresh catalog: {exc}")
+        asset_ids = list(self._asset_index.assets.keys())
+        if asset_ids:
+            self._start_scan_worker(asset_ids, "refresh")
+        self._log_info("Queued background catalog refresh (%d assets)", len(asset_ids))
 
     def clean_missing(self, _handle=None, _ev=None, _args=None):
         """Prune every catalog entry whose backing file is no longer on disk."""
@@ -4513,116 +5216,195 @@ class AssetManagerPanel(Panel):
     def _update_all_record_lists(self):
         """Update all record lists in the data model."""
         if not self._handle:
-            return
+            return {"counts": {}, "timings_ms": {}}
 
-        self._handle.update_record_list("folders", self.get_folder_list())
-        self._handle.update_record_list("scenes", self.get_scene_list())
-        self._handle.update_record_list("filters", self.get_filter_list())
-        # Note: "tags" record list removed - not bound in on_bind_model
-        self._handle.update_record_list("assets", self.get_filtered_assets())
+        counts: Dict[str, int] = {}
+        timings_ms: Dict[str, Dict[str, float]] = {}
+
+        def update_record_list(name: str, builder) -> None:
+            build_start = time.perf_counter()
+            rows = builder()
+            build_ms = self._elapsed_ms(build_start)
+            update_start = time.perf_counter()
+            self._handle.update_record_list(name, rows)
+            update_ms = self._elapsed_ms(update_start)
+            timings_ms[name] = {
+                "build": build_ms,
+                "update": update_ms,
+                "total": build_ms + update_ms,
+            }
+            counts[name] = len(rows)
+            if name == "assets":
+                self._last_asset_rows_update_count = len(rows)
+                self._last_asset_rows_update_ms = build_ms + update_ms
+
+        update_record_list("folders", self.get_folder_list)
+        update_record_list("scenes", self.get_scene_list)
+        update_record_list("filters", self.get_filter_list)
+        update_record_list("assets", self.get_filtered_assets)
 
         # Update selection-specific record lists
-        self._update_selection_details()
+        selection_summary = self._update_selection_details()
+        if selection_summary:
+            counts.update(selection_summary.get("counts", {}))
+            timings_ms.update(selection_summary.get("timings_ms", {}))
+        return {"counts": counts, "timings_ms": timings_ms}
 
-    def _update_selection_details(self):
+    def _update_selection_details(
+        self,
+        *,
+        update_scene_assets: bool = True,
+        update_asset_tags: bool = True,
+    ) -> Dict[str, Any]:
         """Update record lists for selected scene and folder."""
         if not self._handle or self._updating_selection_details:
-            return
+            return {"counts": {}, "timings_ms": {}}
         self._updating_selection_details = True
+        counts: Dict[str, int] = {}
+        timings_ms: Dict[str, Dict[str, float]] = {}
         try:
-            scene = self._get_selected_scene()
-            if scene:
-                scene_id = scene.get("id", "")
-                scene_assets = []
-                if self._asset_index and hasattr(self._asset_index, "assets"):
-                    for asset_id, asset in self._asset_index.assets.items():
-                        if asset.get("scene_id") == scene_id:
-                            scene_assets.append(
-                                {
-                                    "id": asset_id,
-                                    "name": str(
-                                        asset.get("name")
-                                        or tr("asset_manager.unnamed")
-                                    ),
-                                    "type": str(asset.get("type") or "").upper(),
-                                }
-                            )
-                self._handle.update_record_list("selected_scene_assets", scene_assets)
-            else:
-                self._handle.update_record_list("selected_scene_assets", [])
-
-            folder = self._get_selected_folder()
-            if folder:
-                scene_ids = folder.get("scene_ids", [])
-                folder_scenes = []
-                if self._asset_index and hasattr(self._asset_index, "scenes"):
-                    for scene_id in scene_ids:
-                        scene_data = self._asset_index.scenes.get(scene_id)
-                        if not scene_data:
-                            continue
-
-                        scene_asset_count = 0
-                        if hasattr(self._asset_index, "assets"):
-                            for asset in self._asset_index.assets.values():
-                                if asset.get("scene_id") == scene_id:
-                                    scene_asset_count += 1
-                        folder_scenes.append(
-                            {
-                                "id": scene_id,
-                                "name": scene_data.get(
-                                    "name", tr("asset_manager.unnamed_scene")
-                                ),
-                                "asset_count": scene_asset_count,
-                            }
-                        )
-                # Note: selected_folder_scenes record list removed - not used in UI
-            # Note: selected_folder_scenes record list removed - not used in UI
-
-            selected_asset = self._get_selected_asset()
-            if selected_asset:
-                self._handle.update_record_list(
-                    "selected_asset_tags",
-                    [{"value": tag} for tag in selected_asset.get("tags", [])],
+            if update_scene_assets:
+                scene_key = (
+                    str(self._selected_scene_id or "")
+                    if self._selection_type == "scene"
+                    else ""
                 )
-            else:
-                self._handle.update_record_list("selected_asset_tags", [])
+                if scene_key != self._selected_scene_assets_key:
+                    build_start = time.perf_counter()
+                    rows = self._get_selected_scene_asset_rows() if scene_key else []
+                    build_ms = self._elapsed_ms(build_start)
+                    update_start = time.perf_counter()
+                    self._handle.update_record_list("selected_scene_assets", rows)
+                    update_ms = self._elapsed_ms(update_start)
+                    self._selected_scene_assets_key = scene_key
+                    counts["selected_scene_assets"] = len(rows)
+                    timings_ms["selected_scene_assets"] = {
+                        "build": build_ms,
+                        "update": update_ms,
+                        "total": build_ms + update_ms,
+                    }
+                    self._handle.dirty("selected_scene_assets")
 
-            self._handle.dirty_all()
+            if update_asset_tags:
+                selected_asset = self._get_selected_asset()
+                tags_key = tuple(
+                    str(tag)
+                    for tag in ((selected_asset or {}).get("tags", []) or [])
+                    if tag is not None
+                )
+                if tags_key != self._selected_asset_tags_key:
+                    build_start = time.perf_counter()
+                    rows = [{"value": tag} for tag in tags_key]
+                    build_ms = self._elapsed_ms(build_start)
+                    update_start = time.perf_counter()
+                    self._handle.update_record_list("selected_asset_tags", rows)
+                    update_ms = self._elapsed_ms(update_start)
+                    self._selected_asset_tags_key = tags_key
+                    counts["selected_asset_tags"] = len(rows)
+                    timings_ms["selected_asset_tags"] = {
+                        "build": build_ms,
+                        "update": update_ms,
+                        "total": build_ms + update_ms,
+                    }
+                    self._handle.dirty("selected_asset_tags")
+
+            return {"counts": counts, "timings_ms": timings_ms}
         finally:
             self._updating_selection_details = False
+
+    def _get_selected_scene_asset_rows(self) -> List[Dict[str, str]]:
+        scene = self._get_selected_scene()
+        assets = self._asset_index_assets()
+        if not scene or not assets:
+            return []
+        scene_id = scene.get("id", "")
+        if not scene_id:
+            return []
+        return [
+            {
+                "id": asset_id,
+                "name": str(asset.get("name") or tr("asset_manager.unnamed")),
+                "type": str(asset.get("type") or "").upper(),
+            }
+            for asset_id, asset in assets.items()
+            if asset.get("scene_id") == scene_id
+        ]
 
     def _dirty_model(self, *fields):
         """Mark fields as dirty to trigger UI refresh."""
         if not self._handle:
             return
 
+        total_start = time.perf_counter()
+        record_update_ms = 0.0
+        record_updates: Dict[str, int] = {}
+        request_update_ms = 0.0
         if not fields:
+            self._invalidate_catalog_cache()
             self._handle.dirty_all()
-            self._update_all_record_lists()
+            records_start = time.perf_counter()
+            record_summary = self._update_all_record_lists()
+            record_update_ms = self._elapsed_ms(records_start)
+            request_start = time.perf_counter()
+            self._request_model_update()
+            request_update_ms = self._elapsed_ms(request_start)
+            self._last_dirty_model_timing = {
+                "field_count": 0,
+                "record_update_ms": record_update_ms,
+                "record_updates": record_summary.get("counts", {})
+                if record_summary
+                else {"all": -1},
+                "record_parts": record_summary.get("timings_ms", {})
+                if record_summary
+                else {},
+                "request_update_ms": request_update_ms,
+                "total_ms": self._elapsed_ms(total_start),
+            }
+            self._log_perf(
+                "dirty_all records=%.3fms/%s record_parts=%s request=%.3fms total=%.3fms",
+                record_update_ms,
+                self._last_dirty_model_timing["record_updates"],
+                self._last_dirty_model_timing["record_parts"],
+                request_update_ms,
+                self._last_dirty_model_timing["total_ms"],
+                elapsed_ms=self._last_dirty_model_timing["total_ms"],
+            )
             return
 
-        # Check if any selection-related fields are being dirtied
-        selection_fields = {
-            "selection_type",
-            "selected_asset",
-            "selected_asset_name",
-            "selected_asset_type",
-            "selected_asset_path",
-            "selected_scene",
-            "selected_scene_name",
-            "selected_scene_folder_name",
-            "selected_scene_asset_count",
-            "selected_scene_assets",
-            "selected_folder",
-            "selected_folder_name",
-            "selected_asset_tags",
-            "show_selection_none",
-            "show_selection_asset",
-            "show_selection_scene",
-            "show_selection_folder",
-            "show_selection_multiple",
-        }
+        fields_set = set(fields)
+        if fields_set.intersection({"assets", "folders", "scenes"}):
+            self._invalidate_catalog_cache()
+
+        # Check if any selection-related fields are being dirtied.
+        selection_fields = set(self._selection_count_fields())
+        selection_fields.update(self._selection_visibility_fields())
+        selection_fields.update(self._selected_asset_detail_fields())
+        selection_fields.update(self._selected_scene_detail_fields())
+        selection_fields.update(self._selected_folder_detail_fields())
+        selection_fields.update(
+            {
+                "selected_asset",
+                "selected_asset_id",
+                "selected_asset_tags",
+                "selected_folder",
+                "selected_folder_id",
+                "selected_scene",
+                "selected_scene_id",
+            }
+        )
         needs_selection_update = any(f in selection_fields for f in fields)
+        update_scene_assets = bool(
+            fields_set.intersection(
+                set(self._selected_scene_detail_fields())
+                | {"selected_scene", "selected_scene_id", "selected_scene_assets"}
+            )
+        )
+        update_asset_tags = bool(
+            fields_set.intersection(
+                set(self._selected_asset_detail_fields())
+                | {"selected_asset", "selected_asset_id", "selected_asset_tags"}
+            )
+        )
 
         for field in fields:
             self._handle.dirty(field)
@@ -4632,24 +5414,53 @@ class AssetManagerPanel(Panel):
                 "scenes",
                 "filters",
                 "assets",
-                "selected_asset_tags",
             ):
                 list_map = {
                     "folders": self.get_folder_list,
                     "scenes": self.get_scene_list,
                     "filters": self.get_filter_list,
                     "assets": self.get_filtered_assets,
-                    "selected_asset_tags": lambda: [
-                        {"value": tag}
-                        for tag in (self._get_selected_asset() or {}).get("tags", [])
-                    ],
                 }
                 if field in list_map:
-                    self._handle.update_record_list(field, list_map[field]())
+                    records_start = time.perf_counter()
+                    rows = list_map[field]()
+                    self._handle.update_record_list(field, rows)
+                    elapsed = self._elapsed_ms(records_start)
+                    record_update_ms += elapsed
+                    record_updates[field] = len(rows)
+                    if field == "assets":
+                        self._last_asset_rows_update_count = len(rows)
+                        self._last_asset_rows_update_ms = elapsed
 
         # Update selection-specific record lists if needed
         if needs_selection_update and not self._updating_selection_details:
-            self._update_selection_details()
+            records_start = time.perf_counter()
+            selection_summary = self._update_selection_details(
+                update_scene_assets=update_scene_assets,
+                update_asset_tags=update_asset_tags,
+            )
+            record_update_ms += self._elapsed_ms(records_start)
+            record_updates.update(selection_summary.get("counts", {}))
+
+        request_start = time.perf_counter()
+        self._request_model_update()
+        request_update_ms = self._elapsed_ms(request_start)
+        self._last_dirty_model_timing = {
+            "field_count": len(fields),
+            "record_update_ms": record_update_ms,
+            "record_updates": record_updates,
+            "request_update_ms": request_update_ms,
+            "total_ms": self._elapsed_ms(total_start),
+        }
+        self._log_perf(
+            "dirty fields=%d records=%.3fms/%s request=%.3fms total=%.3fms",
+            len(fields),
+            record_update_ms,
+            record_updates,
+            request_update_ms,
+            self._last_dirty_model_timing["total_ms"],
+            elapsed_ms=self._last_dirty_model_timing["total_ms"],
+        )
 
     def _resolve_event_value(self, args, event, attr_name: str) -> str:
         if args:

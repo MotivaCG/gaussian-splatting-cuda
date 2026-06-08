@@ -727,18 +727,29 @@ namespace lfs::vis {
                     .size = vulkan_viewport_image_size_,
                     .flip_y = vulkan_viewport_image_flip_y_};
         };
-        const auto update_cached_split_position = [this]() {
+        const auto update_cached_split_position = [this]() -> bool {
             if (!split_view_service_.isActive(settings_)) {
-                return;
+                return false;
             }
 
             const float split_position = std::clamp(settings_.split_position, 0.0f, 1.0f);
             std::lock_guard lock(vulkan_mesh_frame_mutex_);
             if (!vulkan_mesh_frame_.split_view.enabled) {
-                return;
+                return false;
             }
 
             auto& split = vulkan_mesh_frame_.split_view;
+            const bool split_position_changed =
+                split.split_position != split_position ||
+                split.left.end_position != split_position ||
+                split.right.start_position != split_position ||
+                (vulkan_mesh_frame_.panels.size() == 2 &&
+                 (vulkan_mesh_frame_.panels[0].end_position != split_position ||
+                  vulkan_mesh_frame_.panels[1].start_position != split_position));
+            if (!split_position_changed) {
+                return true;
+            }
+
             split.split_position = split_position;
             split.left.start_position = 0.0f;
             split.left.end_position = split_position;
@@ -751,7 +762,18 @@ namespace lfs::vis {
                 vulkan_mesh_frame_.panels[1].start_position = split_position;
                 vulkan_mesh_frame_.panels[1].end_position = 1.0f;
             }
+            viewport_artifact_service_.invalidateCapturedImage();
+            return true;
         };
+
+        if ((frame_dirty & DirtyFlag::SPLIT_POSITION) != 0 &&
+            (frame_dirty & ~DirtyFlag::SPLIT_POSITION) == 0 &&
+            has_cached_viewport_output &&
+            update_cached_split_position()) {
+            LOG_PERF("renderVulkanFrame: split-position cache HIT (returning cached image)");
+            render_lock.reset();
+            return cached_frame_result();
+        }
 
         if (frame_lifecycle_service_.isResizeDeferring() && has_cached_viewport_output) {
             update_cached_split_position();
@@ -1752,6 +1774,12 @@ namespace lfs::vis {
                     [this, params = pending_split_view, render_size]()
                         -> std::shared_ptr<lfs::core::Tensor> {
                         VulkanSplitViewParams capture_params = params;
+                        {
+                            std::lock_guard lock(vulkan_mesh_frame_mutex_);
+                            if (vulkan_mesh_frame_.split_view.enabled) {
+                                capture_params = vulkan_mesh_frame_.split_view;
+                            }
+                        }
                         const auto read_panel = [this](const VksplatViewportRenderer::OutputSlot slot)
                             -> std::shared_ptr<lfs::core::Tensor> {
                             if (!vksplat_viewport_renderer_ || !last_vulkan_context_) {

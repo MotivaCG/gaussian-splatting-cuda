@@ -97,9 +97,13 @@ class _ElementStub:
         self._parent = parent
         self.tag_name = tag_name
         self.listeners = {}
+        self._classes = set(str(self._attrs.get("class", "")).split())
+        self._children = []
         self.scroll_height = 0.0
         self.client_height = 0.0
         self.scroll_top = 0.0
+        if parent is not None and hasattr(parent, "_children"):
+            parent._children.append(self)
 
     def get_attribute(self, name, default=""):
         return self._attrs.get(name, default)
@@ -109,6 +113,33 @@ class _ElementStub:
 
     def parent(self):
         return self._parent
+
+    def query_selector_all(self, selector):
+        result = []
+        selectors = [part.strip() for part in str(selector).split(",") if part.strip()]
+
+        def _matches(element, item):
+            if not item.startswith("."):
+                return False
+            return item[1:] in element._classes
+
+        def _visit(element):
+            for child in element._children:
+                if any(_matches(child, item) for item in selectors):
+                    result.append(child)
+                _visit(child)
+
+        _visit(self)
+        return result
+
+    def set_class(self, name, active):
+        if active:
+            self._classes.add(name)
+        else:
+            self._classes.discard(name)
+
+    def is_class_set(self, name):
+        return name in self._classes
 
     def add_event_listener(self, event, callback):
         self.listeners[event] = callback
@@ -303,6 +334,7 @@ def test_asset_manager_rml_uses_text_interpolation_for_display_values():
     assert "{{asset.display_name}}" in rml
     assert "{{selected_asset_name}}" in rml
     assert "{{selected_asset_dataset_image_count}}" in rml
+    assert "data-if=\"selected_asset_has_sh_degree\"" in rml
     assert 'data-style-decorator="asset.thumbnail_decorator"' in rml
 
 
@@ -591,6 +623,27 @@ def test_asset_selection_dirties_info_fields(asset_manager_panel_module):
     assert "show_selection_asset" in dirty or "__all__" in dirty
 
 
+def test_selected_asset_sh_degree_is_visible_for_any_geometry_asset_type(
+    asset_manager_panel_module,
+):
+    panel = asset_manager_panel_module.AssetManagerPanel()
+    asset = _make_asset()
+    asset["type"] = "mesh"
+    asset["geometry_metadata"] = {"sh_degree": 0}
+    panel._asset_index = SimpleNamespace(
+        assets={"a1": asset},
+        folders={"p1": {"id": "p1", "name": "Imported Datasets", "scene_ids": ["s1"]}},
+        scenes={"s1": {"id": "s1", "name": "bicycle", "folder_id": "p1"}},
+        tags={},
+        collections={},
+    )
+    panel._selected_asset_ids = {"a1"}
+    panel._selection_type = "asset"
+
+    assert panel.get_selected_asset_has_sh_degree() is True
+    assert panel.get_selected_asset_sh_degree() == "0"
+
+
 def test_asset_selection_resolves_asset_id_from_clicked_element(asset_manager_panel_module):
     panel = asset_manager_panel_module.AssetManagerPanel()
     panel._handle = _HandleStub()
@@ -695,6 +748,47 @@ def test_dom_card_click_selects_asset_from_stable_parent(asset_manager_panel_mod
     assert panel.get_selected_asset_name() == "bicycle"
     assert panel.get_selected_count() == 1
     assert event.stopped is True
+
+
+def test_dom_card_click_updates_visible_row_class(asset_manager_panel_module):
+    panel = asset_manager_panel_module.AssetManagerPanel()
+    panel._handle = _HandleStub()
+    first = _make_asset()
+    second = _make_asset()
+    second["id"] = "a2"
+    second["name"] = "garden"
+    panel._asset_index = SimpleNamespace(
+        assets={"a1": first, "a2": second},
+        folders={"p1": {"id": "p1", "name": "Imported Datasets", "scene_ids": ["s1"]}},
+        scenes={"s1": {"id": "s1", "name": "bicycle", "folder_id": "p1"}},
+        tags={},
+        collections={},
+    )
+
+    container = _ElementStub({"id": "asset-popup-content"})
+    card_a1 = _ElementStub(
+        {
+            "class": "asset-list-row",
+            "data-asset-id": "a1",
+            "data-asset-action": "select",
+        },
+        parent=container,
+    )
+    card_a2 = _ElementStub(
+        {
+            "class": "asset-list-row",
+            "data-asset-id": "a2",
+            "data-asset-action": "select",
+        },
+        parent=container,
+    )
+
+    panel._on_asset_manager_click(_EventStub(current_target=container, target=card_a1))
+    panel._on_asset_manager_click(_EventStub(current_target=container, target=card_a2))
+
+    assert card_a1.is_class_set("is-selected") is False
+    assert card_a2.is_class_set("is-selected") is True
+    assert "assets" not in panel._handle.records
 
 
 def test_dom_card_ctrl_click_adds_to_multi_selection(asset_manager_panel_module):
@@ -918,6 +1012,27 @@ def test_edit_watch_dirs_uses_clicked_folder_without_selecting_it(
     assert opened == ["target"]
 
 
+def test_repair_selected_folder_prefers_default_name_when_selection_is_stale(
+    asset_manager_panel_module,
+):
+    panel = asset_manager_panel_module.AssetManagerPanel()
+    panel._asset_index = SimpleNamespace(
+        assets={},
+        folders={
+            "zeta": {"id": "zeta", "name": "Zeta", "scene_ids": []},
+            "default": {"id": "default", "name": "Default", "scene_ids": []},
+        },
+        scenes={},
+        tags={},
+        collections={},
+    )
+    panel._selected_folder_id = "missing"
+    panel._selection_type = "folder"
+
+    assert panel._repair_selected_folder() == "default"
+    assert panel._selected_folder_id == "default"
+
+
 def test_bind_dom_event_listeners_registers_gallery_wheel_handler(
     asset_manager_panel_module,
 ):
@@ -959,11 +1074,12 @@ def test_folder_count_matches_visible_list(asset_manager_panel_module, tmp_path)
     present_file = tmp_path / "present.ply"
     present_file.write_bytes(b"ply")
 
-    def _asset(asset_id, path):
+    def _asset(asset_id, path, *, exists=True):
         asset = dict(_make_asset())
         asset["id"] = asset_id
         asset["absolute_path"] = str(path)
         asset["path"] = str(path)
+        asset["exists"] = exists
         asset["folder_id"] = "p1"
         asset["scene_id"] = "s1"
         return asset
@@ -973,7 +1089,7 @@ def test_folder_count_matches_visible_list(asset_manager_panel_module, tmp_path)
     panel._asset_index = SimpleNamespace(
         assets={
             "present": _asset("present", present_file),
-            "missing": _asset("missing", tmp_path / "deleted.ply"),
+            "missing": _asset("missing", tmp_path / "deleted.ply", exists=False),
         },
         folders={"p1": {"id": "p1", "name": "Default", "scene_ids": ["s1"]}},
         scenes={"s1": {"id": "s1", "name": "scene", "folder_id": "p1"}},

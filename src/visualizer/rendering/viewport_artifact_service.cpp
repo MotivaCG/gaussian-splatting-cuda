@@ -81,6 +81,10 @@ namespace lfs::vis {
         invalidateCapture();
     }
 
+    void ViewportArtifactService::invalidateCapturedImage() {
+        invalidateCapture();
+    }
+
     void ViewportArtifactService::updateFromFrameResources(const FrameResources& resources,
                                                            const bool viewport_output_updated) {
         metadata_ = resources.cached_metadata;

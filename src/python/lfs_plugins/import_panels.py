@@ -7,17 +7,90 @@ import logging
 import os
 import shutil
 import threading
+import time
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import lichtfeld as lf
 
 _logger = logging.getLogger(__name__)
 
 THREAD_JOIN_TIMEOUT_SEC = 5.0
+WATCH_DISCOVERY_PROGRESS_INTERVAL = 128
+WATCH_REGISTER_PROGRESS_INTERVAL = 64
+WATCH_UI_UPDATE_INTERVAL_SEC = 0.2
+WATCH_ASSET_EXTENSIONS = {
+    ".ply": "ply",
+    ".rad": "rad",
+    ".sog": "sog",
+    ".spz": "spz",
+    ".obj": "mesh",
+    ".fbx": "mesh",
+    ".gltf": "mesh",
+    ".glb": "mesh",
+    ".stl": "mesh",
+    ".dae": "mesh",
+    ".3ds": "mesh",
+    ".mesh": "mesh",
+    ".ckpt": "checkpoint",
+    ".resume": "checkpoint",
+    ".usd": "usd",
+    ".usda": "usd",
+    ".usdc": "usd",
+    ".usdz": "usd",
+}
+WATCH_IMAGE_EXTENSIONS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".tiff",
+    ".tif",
+    ".bmp",
+    ".webp",
+    ".exr",
+}
+WATCH_SKIP_DIRS = {
+    "$recycle.bin",
+    ".appledouble",
+    ".cache",
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".spotlight-v100",
+    ".svn",
+    ".temporaryitems",
+    ".tox",
+    ".trashes",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "system volume information",
+    "venv",
+}
+WATCH_DATASET_SKIP_DIRS = WATCH_SKIP_DIRS | {
+    "dense",
+    "depth",
+    "depths",
+    "images",
+    "images_reconstruction",
+    "mask",
+    "masks",
+    "reconstruction",
+    "sparse",
+    "stereo",
+}
 
 
-def _watch_log(level: str, message: str, *args, exc_info: bool = False) -> None:
+def _watch_log(
+    level: str,
+    message: str,
+    *args,
+    exc_info: bool = False,
+    ui_log: bool = True,
+) -> None:
     if args:
         try:
             message = message % args
@@ -33,14 +106,15 @@ def _watch_log(level: str, message: str, *args, exc_info: bool = False) -> None:
     }.get(level, _logger.info)
     logger_fn(prefixed, exc_info=exc_info)
 
-    try:
-        lf_log = getattr(lf, "log", None)
-        lf_level = "warn" if level == "warn" else level
-        lf_fn = getattr(lf_log, lf_level, None) if lf_log is not None else None
-        if callable(lf_fn):
-            lf_fn(prefixed)
-    except Exception:
-        pass
+    if ui_log:
+        try:
+            lf_log = getattr(lf, "log", None)
+            lf_level = "warn" if level == "warn" else level
+            lf_fn = getattr(lf_log, lf_level, None) if lf_log is not None else None
+            if callable(lf_fn):
+                lf_fn(prefixed)
+        except Exception:
+            pass
 
 
 def _join_thread(thread: Optional[threading.Thread], name: str, timeout: float = THREAD_JOIN_TIMEOUT_SEC) -> None:
@@ -146,12 +220,6 @@ def open_watch_dirs_dialog(folder_id: str) -> bool:
         except Exception:
             pass
     try:
-        _watch_log(
-            "info",
-            "open dialog requested folder_id=%s panel_object_id=%s",
-            folder_id,
-            id(_watch_dirs_dialog_panel) if _watch_dirs_dialog_panel is not None else "None",
-        )
         if not _load_watch_dirs_dialog_state(folder_id):
             return False
         lf.ui.set_panel_enabled(WatchDirsDialogPanel.id, True)
@@ -229,18 +297,250 @@ def _library_mtime(index) -> str:
     return "missing"
 
 
-def _discover_asset_metadata(scanner, path: str) -> list[dict[str, Any]]:
+def _asset_role_for_type(asset_type: Optional[str]) -> str:
+    if asset_type == "dataset":
+        return "source_dataset"
+    if asset_type == "checkpoint":
+        return "training_checkpoint"
+    if asset_type in {"ply", "rad", "sog", "spz", "mesh", "usd"}:
+        return "trained_output"
+    return "unknown"
+
+
+def _lightweight_asset_metadata(path: str, asset_type: str) -> dict[str, Any]:
+    """Return cheap metadata for watch discovery; detailed metadata is synced later."""
+    path_obj = Path(path)
+    metadata = {
+        "path": str(path_obj.resolve()),
+        "name": path_obj.name,
+        "type": asset_type,
+        "role": _asset_role_for_type(asset_type),
+        "size_bytes": 0,
+        "created": None,
+        "modified": None,
+        "format_specific": {},
+    }
+    try:
+        stat = path_obj.stat()
+        metadata["size_bytes"] = 0 if path_obj.is_dir() else stat.st_size
+        metadata["created"] = datetime.fromtimestamp(stat.st_ctime).isoformat()
+        metadata["modified"] = datetime.fromtimestamp(stat.st_mtime).isoformat()
+    except (OSError, PermissionError):
+        pass
+    return metadata
+
+
+def _entry_name_lower(entry) -> str:
+    try:
+        return entry.name.lower()
+    except Exception:
+        return ""
+
+
+def _safe_is_file(entry) -> bool:
+    try:
+        return entry.is_file(follow_symlinks=False)
+    except (OSError, PermissionError):
+        return False
+
+
+def _safe_is_dir(entry) -> bool:
+    try:
+        return entry.is_dir(follow_symlinks=False)
+    except (OSError, PermissionError):
+        return False
+
+
+def _directory_has_image_file(path: str) -> bool:
+    try:
+        with os.scandir(path) as entries:
+            for entry in entries:
+                if not _safe_is_file(entry):
+                    continue
+                if os.path.splitext(entry.name)[1].lower() in WATCH_IMAGE_EXTENSIONS:
+                    return True
+    except (OSError, PermissionError):
+        return False
+    return False
+
+
+def _directory_has_colmap_file(path: str) -> bool:
+    colmap_files = {
+        "cameras.bin",
+        "images.bin",
+        "points3d.bin",
+        "cameras.txt",
+        "images.txt",
+        "points3d.txt",
+    }
+    try:
+        with os.scandir(path) as entries:
+            for entry in entries:
+                name = _entry_name_lower(entry)
+                if _safe_is_file(entry) and name in colmap_files:
+                    return True
+                if name == "0" and _safe_is_dir(entry):
+                    try:
+                        with os.scandir(entry.path) as nested_entries:
+                            for nested in nested_entries:
+                                if (
+                                    _safe_is_file(nested)
+                                    and _entry_name_lower(nested) in colmap_files
+                                ):
+                                    return True
+                    except (OSError, PermissionError):
+                        continue
+    except (OSError, PermissionError):
+        return False
+    return False
+
+
+def _looks_like_dataset_from_entries(dirs: list[Any], files: list[Any]) -> bool:
+    dir_by_name = {_entry_name_lower(entry): entry for entry in dirs}
+    file_names = {_entry_name_lower(entry) for entry in files}
+
+    if "database.db" in file_names:
+        return True
+    if "cameras.txt" in file_names and "images.txt" in file_names:
+        return True
+
+    images_dir = dir_by_name.get("images")
+    if images_dir is not None and _directory_has_image_file(images_dir.path):
+        return True
+
+    sparse_dir = dir_by_name.get("sparse")
+    if sparse_dir is not None and _directory_has_colmap_file(sparse_dir.path):
+        return True
+
+    return False
+
+
+def _discover_asset_metadata_fast(
+    path: str,
+    *,
+    should_cancel: Optional[Callable[[], bool]] = None,
+    on_progress: Optional[Callable[[str, int, int, int], None]] = None,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    visited_dirs = 0
+    visited_files = 0
+
+    def _cancelled() -> bool:
+        return bool(should_cancel is not None and should_cancel())
+
+    def _report(current_path: str, *, force: bool = False) -> None:
+        if on_progress is None:
+            return
+        if not force and visited_dirs % WATCH_DISCOVERY_PROGRESS_INTERVAL != 0:
+            return
+        on_progress(current_path, visited_dirs, visited_files, len(results))
+
+    def _append_metadata(candidate_path: str, asset_type: str) -> None:
+        if _cancelled():
+            raise InterruptedError("Scan cancelled")
+        try:
+            metadata = _lightweight_asset_metadata(candidate_path, asset_type)
+        except Exception as exc:
+            _watch_log("debug", "metadata skipped path=%s error=%s", candidate_path, exc)
+            return
+        metadata_path = metadata.get("path")
+        if not metadata_path or metadata_path in seen_paths:
+            return
+        results.append(metadata)
+        seen_paths.add(metadata_path)
+
+    root = Path(path)
+    if not root.exists():
+        return results
+
+    if root.is_file():
+        asset_type = WATCH_ASSET_EXTENSIONS.get(root.suffix.lower())
+        if asset_type:
+            _append_metadata(str(root), asset_type)
+        return results
+
+    stack = [str(root)]
+    while stack:
+        if _cancelled():
+            raise InterruptedError("Scan cancelled")
+
+        current_path = stack.pop()
+        visited_dirs += 1
+        _report(current_path)
+
+        try:
+            with os.scandir(current_path) as entries:
+                dir_entries = []
+                file_entries = []
+                for entry in entries:
+                    if _safe_is_dir(entry):
+                        dir_entries.append(entry)
+                    elif _safe_is_file(entry):
+                        file_entries.append(entry)
+        except (OSError, PermissionError) as exc:
+            _watch_log("debug", "walk skipped path=%s error=%s", current_path, exc)
+            continue
+
+        is_dataset = _looks_like_dataset_from_entries(dir_entries, file_entries)
+        if is_dataset:
+            _append_metadata(current_path, "dataset")
+            _report(current_path, force=True)
+
+        for entry in file_entries:
+            if _cancelled():
+                raise InterruptedError("Scan cancelled")
+            visited_files += 1
+            asset_type = WATCH_ASSET_EXTENSIONS.get(
+                os.path.splitext(entry.name)[1].lower()
+            )
+            if asset_type is None:
+                continue
+            _append_metadata(entry.path, asset_type)
+            _report(entry.path, force=True)
+
+        skip_dirs = WATCH_DATASET_SKIP_DIRS if is_dataset else WATCH_SKIP_DIRS
+        for entry in reversed(dir_entries):
+            if _entry_name_lower(entry) in skip_dirs:
+                continue
+            stack.append(entry.path)
+
+    _report(str(root), force=True)
+    return results
+
+
+def _discover_asset_metadata(
+    scanner,
+    path: str,
+    *,
+    fast_walk: bool = False,
+    should_cancel: Optional[Callable[[], bool]] = None,
+    on_progress: Optional[Callable[[str, int, int, int], None]] = None,
+) -> list[dict[str, Any]]:
     """Discover assets under a path using the shared scanner contract."""
-    _watch_log("info", "discover start path=%s exists=%s", path, os.path.exists(path))
     if scanner is None:
         _watch_log("error", "discover skipped because scanner is None")
         return []
 
+    if fast_walk:
+        metadata_list = _discover_asset_metadata_fast(
+            path,
+            should_cancel=should_cancel,
+            on_progress=on_progress,
+        )
+        _watch_log(
+            "debug",
+            "discover complete path=%s count=%d",
+            path,
+            len(metadata_list),
+        )
+        return metadata_list
+
     if hasattr(scanner, "scan_directory_deep"):
         metadata_list = scanner.scan_directory_deep(path)
         _watch_log(
-            "info",
-            "discover complete path=%s method=scan_directory_deep count=%d",
+            "debug",
+            "discover complete path=%s count=%d",
             path,
             len(metadata_list),
         )
@@ -264,8 +564,8 @@ def _discover_asset_metadata(scanner, path: str) -> list[dict[str, Any]]:
         seen_paths.add(metadata_path)
 
     _watch_log(
-        "info",
-        "discover complete path=%s method=scan_directory count=%d",
+        "debug",
+        "discover complete path=%s count=%d",
         path,
         len(metadata_list),
     )
@@ -280,18 +580,15 @@ def _register_discovered_assets(
     folder_id: Optional[str],
     scene_id: Optional[str] = None,
     name_override: Optional[str] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
+    on_progress: Optional[Callable[[int, int, int, int], None]] = None,
+    log_each_asset: bool = True,
+    save_immediately: bool = True,
 ) -> list[Any]:
     """Create catalog assets from discovered metadata using shared logic."""
     created_assets = []
+    skipped_count = 0
     single_asset_override = name_override if len(metadata_list) == 1 else None
-    _watch_log(
-        "info",
-        "register start library=%s folder_id=%s scene_id=%s metadata_count=%d",
-        _index_library_path(index),
-        folder_id,
-        scene_id,
-        len(metadata_list),
-    )
     if not folder_id:
         _watch_log(
             "warn",
@@ -301,26 +598,58 @@ def _register_discovered_assets(
         )
         return []
 
-    for metadata in metadata_list:
+    existing_paths: set[str] = set()
+    try:
+        for asset in index.assets.values():
+            if folder_id is not None and asset.get("folder_id") != folder_id:
+                continue
+            asset_path = asset.get("absolute_path") or asset.get("path")
+            if asset_path:
+                existing_paths.add(os.path.abspath(str(asset_path)))
+    except Exception:
+        existing_paths = set()
+
+    total_count = len(metadata_list)
+    for processed_count, metadata in enumerate(metadata_list, start=1):
+        if should_cancel is not None and should_cancel():
+            raise InterruptedError("Scan cancelled")
+
         file_path = metadata.get("path")
         if not file_path or not os.path.exists(file_path):
-            _watch_log(
-                "warn",
-                "register skipped missing path metadata_path=%s name=%s type=%s",
-                file_path,
-                metadata.get("name"),
-                metadata.get("type"),
-            )
+            skipped_count += 1
+            if log_each_asset:
+                _watch_log(
+                    "warn",
+                    "register skipped missing path metadata_path=%s name=%s type=%s",
+                    file_path,
+                    metadata.get("name"),
+                    metadata.get("type"),
+                )
+            if on_progress is not None:
+                on_progress(
+                    processed_count,
+                    total_count,
+                    len(created_assets),
+                    skipped_count,
+                )
             continue
-        existing = index.find_asset_by_path(file_path, folder_id=folder_id)
-        if existing is not None:
-            _watch_log(
-                "info",
-                "register skipped existing folder asset path=%s folder_id=%s asset_id=%s",
-                file_path,
-                folder_id,
-                getattr(existing, "id", "<unknown>"),
-            )
+        normalized_path = os.path.abspath(str(file_path))
+        if normalized_path in existing_paths:
+            skipped_count += 1
+            if log_each_asset:
+                _watch_log(
+                    "info",
+                    "register skipped existing folder asset path=%s folder_id=%s",
+                    file_path,
+                    folder_id,
+                )
+            if on_progress is not None:
+                on_progress(
+                    processed_count,
+                    total_count,
+                    len(created_assets),
+                    skipped_count,
+                )
             continue
 
         asset_name = (
@@ -336,9 +665,13 @@ def _register_discovered_assets(
             absolute_path=file_path,
             scene_id=scene_id,
             role=metadata.get("role", "reference"),
+            save=save_immediately,
+            check_existing=save_immediately,
+            rebuild_tags=save_immediately,
             **metadata_to_asset_kwargs(metadata),
         )
         if asset is None:
+            skipped_count += 1
             _watch_log(
                 "error",
                 "register create_asset returned None path=%s type=%s role=%s library=%s",
@@ -349,14 +682,16 @@ def _register_discovered_assets(
             )
             continue
         created_assets.append(asset)
-        _watch_log(
-            "info",
-            "register created asset_id=%s name=%s type=%s path=%s",
-            asset.id,
-            asset.name,
-            asset.type,
-            file_path,
-        )
+        existing_paths.add(normalized_path)
+        if log_each_asset:
+            _watch_log(
+                "info",
+                "register created asset_id=%s name=%s type=%s path=%s",
+                asset.id,
+                asset.name,
+                asset.type,
+                file_path,
+            )
         if thumbnails is not None:
             def _maybe_await(coro_or_result):
                 if asyncio.iscoroutine(coro_or_result):
@@ -394,7 +729,39 @@ def _register_discovered_assets(
                     exc_info=True,
                 )
 
-    _watch_log("info", "register complete created_count=%d", len(created_assets))
+        if (
+            on_progress is not None
+            and (
+                processed_count == total_count
+                or processed_count % WATCH_REGISTER_PROGRESS_INTERVAL == 0
+            )
+        ):
+            on_progress(
+                processed_count,
+                total_count,
+                len(created_assets),
+                skipped_count,
+            )
+        if processed_count % WATCH_REGISTER_PROGRESS_INTERVAL == 0:
+            time.sleep(0)
+
+    if created_assets and not save_immediately:
+        try:
+            index.rebuild_tag_index(save=False)
+        except Exception:
+            _watch_log(
+                "debug",
+                "tag index rebuild after bulk register failed",
+                exc_info=True,
+            )
+
+    _watch_log(
+        "debug",
+        "register complete created_count=%d skipped_count=%d metadata_count=%d",
+        len(created_assets),
+        skipped_count,
+        len(metadata_list),
+    )
     return created_assets
 
 
@@ -1431,6 +1798,13 @@ class WatchDirsDialogPanel(Panel):
         self._last_lang: str = ""
         self._scan_thread: Optional[threading.Thread] = None
         self._scan_cancel_event = threading.Event()
+        self._scan_state_lock = threading.Lock()
+        self._scan_active = False
+        self._scan_progress = 0.0
+        self._scan_status = ""
+        self._scan_log: list[dict[str, str]] = []
+        self._scan_terminal = False
+        self._scan_model_update_scheduled = False
 
     def _sync_from_shared_state(self) -> None:
         self._folder_id = _watch_dirs_dialog_state.get("folder_id")
@@ -1483,7 +1857,15 @@ class WatchDirsDialogPanel(Panel):
 
         model.bind_func("panel_label", self._panel_label)
         model.bind_record_list("watch_dirs_list")
+        model.bind_record_list("scan_log_list")
         model.bind_func("no_watch_dirs", lambda: len(self._watch_dirs) == 0)
+        model.bind_func("scan_active", self._get_scan_active)
+        model.bind_func("scan_status_visible", self._get_scan_status_visible)
+        model.bind_func("scan_status_text", self._get_scan_status_text)
+        model.bind_func("scan_progress_value", self._get_scan_progress_value)
+        model.bind_func("scan_progress_pct", self._get_scan_progress_pct)
+        model.bind_func("scan_save_enabled", self._get_scan_save_enabled)
+        model.bind_func("scan_save_label", self._get_scan_save_label)
         model.bind_event("on_browse_add", self._on_browse_add)
         model.bind_event("on_remove_dir", self._on_remove_dir)
         model.bind_event("on_cancel", self._on_cancel)
@@ -1494,6 +1876,7 @@ class WatchDirsDialogPanel(Panel):
             self._handle.update_record_list(
                 "watch_dirs_list", [{"path": p} for p in self._watch_dirs]
             )
+            self._handle.update_record_list("scan_log_list", self._get_scan_log())
             self._handle.dirty_all()
 
     def on_update(self, doc):
@@ -1515,27 +1898,17 @@ class WatchDirsDialogPanel(Panel):
             _watch_log("error", "catalog load failed")
             return None
 
-        _watch_log(
-            "info",
-            "using fresh AssetIndex object_id=%s library=%s folders=%d assets=%d",
-            id(index),
-            _index_library_path(index),
-            _safe_count(getattr(index, "folders", {})),
-            _safe_count(getattr(index, "assets", {})),
-        )
         return index
 
     def _scanner(self):
         panel = get_asset_manager_panel()
         scanner = getattr(panel, "_asset_scanner", None) if panel is not None else None
         if scanner is not None:
-            _watch_log("info", "using active panel scanner object_id=%s", id(scanner))
             return scanner
         scanner = load_scanner()
         _watch_log(
             "warn" if scanner is not None else "error",
-            "using fallback scanner object_id=%s",
-            id(scanner) if scanner is not None else "None",
+            "using fallback scanner" if scanner is not None else "scanner unavailable",
         )
         return scanner
 
@@ -1545,30 +1918,29 @@ class WatchDirsDialogPanel(Panel):
             getattr(panel, "_asset_thumbnails", None) if panel is not None else None
         )
         if thumbnails is not None:
-            _watch_log("info", "using active panel thumbnails object_id=%s", id(thumbnails))
             return thumbnails
         thumbnails = load_thumbnails()
         _watch_log(
             "warn" if thumbnails is not None else "error",
-            "using fallback thumbnails object_id=%s",
-            id(thumbnails) if thumbnails is not None else "None",
+            "using fallback thumbnails"
+            if thumbnails is not None
+            else "thumbnail backend unavailable",
         )
         return thumbnails
 
     def show(self, folder_id: str) -> bool:
         try:
-            _watch_log("info", "show requested folder_id=%s", folder_id)
             if not _load_watch_dirs_dialog_state(folder_id):
                 return False
             self._sync_from_shared_state()
-            _watch_log(
-                "info",
-                "show synced object_id=%s folder_id=%s folder_name=%s watch_dirs=%s",
-                id(self),
-                self._folder_id,
-                self._folder_name,
-                self._watch_dirs,
-            )
+            if not self._get_scan_active():
+                self._set_scan_state(
+                    active=False,
+                    progress=0.0,
+                    status="",
+                    terminal=False,
+                    reset_log=True,
+                )
             lf.ui.set_panel_enabled(self.id, True)
             self._dirty_model()
             return True
@@ -1579,6 +1951,46 @@ class WatchDirsDialogPanel(Panel):
     def _panel_label(self) -> str:
         return f"Watched Directories — {self._folder_name}"
 
+    def _get_scan_active(self) -> bool:
+        with self._scan_state_lock:
+            return self._scan_active
+
+    def _get_scan_status_visible(self) -> bool:
+        with self._scan_state_lock:
+            return self._scan_active or bool(self._scan_status)
+
+    def _get_scan_status_text(self) -> str:
+        with self._scan_state_lock:
+            return self._scan_status
+
+    def _get_scan_progress_value(self) -> str:
+        with self._scan_state_lock:
+            return f"{self._scan_progress:.4f}".rstrip("0").rstrip(".") or "0"
+
+    def _get_scan_progress_pct(self) -> str:
+        with self._scan_state_lock:
+            return f"{int(round(self._scan_progress * 100.0))}%"
+
+    def _get_scan_save_enabled(self) -> bool:
+        with self._scan_state_lock:
+            return self._scan_terminal or ((not self._scan_active) and bool(self._watch_dirs))
+
+    def _get_scan_save_label(self) -> str:
+        with self._scan_state_lock:
+            if self._scan_active:
+                return "Scanning..."
+            if self._scan_terminal:
+                return "Done"
+            return "Save & Scan"
+
+    def _get_scan_terminal(self) -> bool:
+        with self._scan_state_lock:
+            return self._scan_terminal
+
+    def _get_scan_log(self) -> list[dict[str, str]]:
+        with self._scan_state_lock:
+            return [dict(entry) for entry in self._scan_log]
+
     def _dirty_model(self, *fields):
         if not self._handle:
             return
@@ -1586,30 +1998,119 @@ class WatchDirsDialogPanel(Panel):
             self._handle.update_record_list(
                 "watch_dirs_list", [{"path": p} for p in self._watch_dirs]
             )
+            self._handle.update_record_list("scan_log_list", self._get_scan_log())
             self._handle.dirty_all()
             return
         if "watch_dirs_list" in fields or not fields:
             self._handle.update_record_list(
                 "watch_dirs_list", [{"path": p} for p in self._watch_dirs]
             )
+        if "scan_log_list" in fields or not fields:
+            self._handle.update_record_list("scan_log_list", self._get_scan_log())
         for field in fields:
             self._handle.dirty(field)
 
+    def _dirty_scan_model(self) -> None:
+        self._dirty_model(
+            "scan_active",
+            "scan_status_visible",
+            "scan_status_text",
+            "scan_progress_value",
+            "scan_progress_pct",
+            "scan_save_enabled",
+            "scan_save_label",
+            "scan_log_list",
+        )
+
+    def _queue_dirty_scan_model(self) -> None:
+        if not self._handle:
+            return
+        with self._scan_state_lock:
+            if self._scan_model_update_scheduled:
+                return
+            self._scan_model_update_scheduled = True
+
+        def _run_update() -> None:
+            with self._scan_state_lock:
+                self._scan_model_update_scheduled = False
+            self._dirty_scan_model()
+
+        scheduler = getattr(lf.ui, "schedule_on_ui_thread", None)
+        if not callable(scheduler):
+            scheduler = getattr(lf.ui, "_run_on_ui_thread", None)
+
+        if callable(scheduler):
+            try:
+                scheduler(_run_update)
+                return
+            except Exception:
+                pass
+
+        if threading.current_thread() is threading.main_thread():
+            _run_update()
+            return
+
+        # Older hosts may not expose a UI-thread scheduler; progress callbacks
+        # are throttled before reaching this fallback.
+        _run_update()
+
+    def _set_scan_state(
+        self,
+        *,
+        active: Optional[bool] = None,
+        progress: Optional[float] = None,
+        status: Optional[str] = None,
+        terminal: Optional[bool] = None,
+        reset_log: bool = False,
+    ) -> None:
+        with self._scan_state_lock:
+            if active is not None:
+                self._scan_active = active
+            if progress is not None:
+                self._scan_progress = max(0.0, min(1.0, float(progress)))
+            if status is not None:
+                self._scan_status = status
+            if terminal is not None:
+                self._scan_terminal = terminal
+            if reset_log:
+                self._scan_log = []
+        self._queue_dirty_scan_model()
+
+    def _set_scan_log_entry(self, index: int, path: str, status: str) -> None:
+        with self._scan_state_lock:
+            while len(self._scan_log) <= index:
+                self._scan_log.append({"status": "Queued", "path": ""})
+            self._scan_log[index] = {"status": status, "path": path}
+        self._queue_dirty_scan_model()
+
+    def _clear_scan_thread(self) -> None:
+        if self._scan_thread is threading.current_thread():
+            self._scan_thread = None
+
     def _on_browse_add(self, _handle=None, _ev=None, _args=None):
+        if self._get_scan_active():
+            return
         self._sync_from_shared_state()
         path = lf.ui.open_dataset_folder_dialog()
         if not path:
-            _watch_log("info", "browse add cancelled")
             return
         if path in self._watch_dirs:
             _watch_log("info", "browse add ignored duplicate path=%s", path)
             return
-        _watch_log("info", "browse add path=%s exists=%s", path, os.path.exists(path))
         self._watch_dirs.append(path)
         self._publish_shared_state()
-        self._dirty_model("watch_dirs_list", "no_watch_dirs")
+        self._set_scan_state(
+            active=False,
+            progress=0.0,
+            status="",
+            terminal=False,
+            reset_log=True,
+        )
+        self._dirty_model("watch_dirs_list", "no_watch_dirs", "scan_save_enabled")
 
     def _on_remove_dir(self, _handle=None, _ev=None, args=None):
+        if self._get_scan_active():
+            return
         self._sync_from_shared_state()
         if not args:
             return
@@ -1620,20 +2121,38 @@ class WatchDirsDialogPanel(Panel):
         if 0 <= idx < len(self._watch_dirs):
             self._watch_dirs.pop(idx)
             self._publish_shared_state()
-            self._dirty_model("watch_dirs_list", "no_watch_dirs")
+            self._set_scan_state(
+                active=False,
+                progress=0.0,
+                status="",
+                terminal=False,
+                reset_log=True,
+            )
+            self._dirty_model("watch_dirs_list", "no_watch_dirs", "scan_save_enabled")
 
     def _on_cancel(self, _handle=None, _ev=None, _args=None):
+        if self._get_scan_active():
+            self._scan_cancel_event.set()
+            self._set_scan_state(status="Cancelling scan...")
+            return
         lf.ui.set_panel_enabled(self.id, False)
 
     def _on_save(self, _handle=None, _ev=None, _args=None):
+        if self._get_scan_terminal():
+            lf.ui.set_panel_enabled(self.id, False)
+            return
+        if self._get_scan_active():
+            return
         self._sync_from_shared_state()
-        _watch_log(
-            "info",
-            "save clicked object_id=%s folder_id=%s watch_dirs=%s",
-            id(self),
-            self._folder_id,
-            self._watch_dirs,
-        )
+        if not self._watch_dirs:
+            self._set_scan_state(
+                active=False,
+                progress=0.0,
+                status="No watched directories to scan.",
+                terminal=False,
+                reset_log=True,
+            )
+            return
         index = self._catalog_index()
         if index is None or self._folder_id is None:
             _watch_log(
@@ -1656,17 +2175,6 @@ class WatchDirsDialogPanel(Panel):
             )
             return
 
-        _watch_log(
-            "info",
-            "persist start object_id=%s library=%s mtime=%s folder_id=%s dirs=%s",
-            id(index),
-            _index_library_path(index),
-            _library_mtime(index),
-            self._folder_id,
-            self._watch_dirs,
-        )
-
-        # Persist watch directories
         if not index.set_watch_dirs(self._folder_id, self._watch_dirs):
             _watch_log(
                 "error",
@@ -1677,31 +2185,28 @@ class WatchDirsDialogPanel(Panel):
             )
             return
 
-        _watch_log(
-            "info",
-            "persist complete object_id=%s library=%s mtime=%s dirs=%s",
-            id(index),
-            _index_library_path(index),
-            _library_mtime(index),
-            index.get_watch_dirs(self._folder_id),
-        )
         refresh_active_panel()
-        _watch_log("info", "active panel refresh requested after watch-dir save")
-
-        # Close dialog immediately and run scan in background thread
-        lf.ui.set_panel_enabled(self.id, False)
 
         scanner = self._scanner()
-        thumbnails = self._thumbnails()
         self._scan_cancel_event = threading.Event()
+        watch_dirs = list(self._watch_dirs)
+        total_dirs = len(watch_dirs)
+        self._set_scan_state(
+            active=True,
+            progress=0.0,
+            status=f"Preparing scan for {total_dirs} folder{'s' if total_dirs != 1 else ''}...",
+            terminal=False,
+            reset_log=True,
+        )
+        for idx, path in enumerate(watch_dirs):
+            self._set_scan_log_entry(idx, path, "Queued")
         thread = threading.Thread(
             target=self._scan_worker,
             args=(
                 index,
                 scanner,
-                thumbnails,
                 self._folder_id,
-                list(self._watch_dirs),
+                watch_dirs,
                 self._scan_cancel_event,
             ),
             daemon=True,
@@ -1709,34 +2214,16 @@ class WatchDirsDialogPanel(Panel):
         )
         self._scan_thread = thread
         thread.start()
-        _watch_log(
-            "info",
-            "scan thread started name=%s ident=%s index_object_id=%s",
-            thread.name,
-            thread.ident,
-            id(index),
-        )
 
     def _scan_worker(
         self,
         index,
         scanner,
-        thumbnails,
         folder_id: str,
         watch_dirs: list[str],
         cancel_event: Optional[threading.Event] = None,
     ):
         """Background thread: scan watched directories and import new assets."""
-        _watch_log(
-            "info",
-            "scan worker start index_object_id=%s library=%s scanner=%s thumbnails=%s folder_id=%s dirs=%s",
-            id(index) if index is not None else "None",
-            _index_library_path(index) if index is not None else "<none>",
-            id(scanner) if scanner is not None else "None",
-            id(thumbnails) if thumbnails is not None else "None",
-            folder_id,
-            watch_dirs,
-        )
         if index is None:
             index = load_asset_index()
         if index is None or scanner is None:
@@ -1746,11 +2233,19 @@ class WatchDirsDialogPanel(Panel):
                 index is None,
                 scanner is None,
             )
+            self._set_scan_state(
+                active=False,
+                progress=0.0,
+                status="Scan failed: Asset Manager backend is unavailable.",
+                terminal=True,
+            )
+            self._clear_scan_thread()
             return
 
         added = 0
         discovered = 0
-        for path in watch_dirs:
+        total_dirs = max(1, len(watch_dirs))
+        for path_index, path in enumerate(watch_dirs):
             if cancel_event is not None and cancel_event.is_set():
                 _watch_log(
                     "info",
@@ -1758,20 +2253,156 @@ class WatchDirsDialogPanel(Panel):
                     path,
                     folder_id,
                 )
+                self._set_scan_log_entry(path_index, path, "Cancelled")
+                self._set_scan_state(
+                    active=False,
+                    progress=path_index / total_dirs,
+                    status="Scan cancelled.",
+                    terminal=True,
+                )
+                self._clear_scan_thread()
                 return
             try:
-                metadata_list = _discover_asset_metadata(scanner, path)
+                self._set_scan_log_entry(path_index, path, "Scanning")
+                self._set_scan_state(
+                    active=True,
+                    progress=path_index / total_dirs,
+                    status=f"Scanning {path}",
+                )
+                progress_base = path_index / total_dirs
+                progress_span = 1.0 / total_dirs
+                last_progress_update = 0.0
+
+                def _can_update_progress(*, force: bool = False) -> bool:
+                    nonlocal last_progress_update
+                    now = time.monotonic()
+                    if not force and now - last_progress_update < WATCH_UI_UPDATE_INTERVAL_SEC:
+                        return False
+                    last_progress_update = now
+                    return True
+
+                def _on_discovery_progress(
+                    current_path: str,
+                    scanned_dirs: int,
+                    scanned_files: int,
+                    found_count: int,
+                ) -> None:
+                    if not _can_update_progress():
+                        return
+                    walk_units = scanned_dirs + (scanned_files // 64)
+                    inner_progress = min(0.95, walk_units / (walk_units + 256.0))
+                    self._set_scan_log_entry(
+                        path_index,
+                        path,
+                        f"Scanning ({found_count} found)",
+                    )
+                    self._set_scan_state(
+                        active=True,
+                        progress=progress_base + progress_span * inner_progress,
+                        status=(
+                            f"Scanning {current_path} "
+                            f"({scanned_dirs:,} folders, {found_count:,} assets found)"
+                        ),
+                    )
+
+                metadata_list = _discover_asset_metadata(
+                    scanner,
+                    path,
+                    fast_walk=True,
+                    should_cancel=(
+                        lambda: cancel_event is not None and cancel_event.is_set()
+                    ),
+                    on_progress=_on_discovery_progress,
+                )
                 discovered += len(metadata_list)
                 if not metadata_list:
                     _watch_log("info", "no importable assets found path=%s", path)
+                    self._set_scan_log_entry(path_index, path, "No assets")
+                    self._set_scan_state(
+                        active=True,
+                        progress=(path_index + 1) / total_dirs,
+                        status=f"No importable assets found in {path}",
+                    )
                     continue
+                self._set_scan_log_entry(
+                    path_index,
+                    path,
+                    f"Registering ({len(metadata_list)} found)",
+                )
+                self._set_scan_state(
+                    active=True,
+                    progress=progress_base + progress_span * 0.95,
+                    status=f"Registering {len(metadata_list):,} assets from {path}",
+                )
+
+                def _on_register_progress(
+                    processed_count: int,
+                    total_count: int,
+                    created_count: int,
+                    skipped_count: int,
+                ) -> None:
+                    if not _can_update_progress(
+                        force=processed_count >= total_count
+                    ):
+                        return
+                    total = max(1, total_count)
+                    register_progress = min(1.0, processed_count / total)
+                    self._set_scan_log_entry(
+                        path_index,
+                        path,
+                        f"Registering ({created_count} new, {skipped_count} skipped)",
+                    )
+                    self._set_scan_state(
+                        active=True,
+                        progress=(
+                            progress_base
+                            + progress_span * (0.95 + 0.05 * register_progress)
+                        ),
+                        status=(
+                            f"Registering {processed_count:,}/{total_count:,} "
+                            f"assets from {path}"
+                        ),
+                    )
+
                 created_assets = _register_discovered_assets(
                     index,
-                    thumbnails,
+                    None,
                     metadata_list,
                     folder_id=folder_id,
+                    should_cancel=(
+                        lambda: cancel_event is not None and cancel_event.is_set()
+                    ),
+                    on_progress=_on_register_progress,
+                    log_each_asset=False,
+                    save_immediately=False,
                 )
                 added += len(created_assets)
+                if created_assets:
+                    status = f"Added {len(created_assets)} of {len(metadata_list)}"
+                else:
+                    status = f"Found {len(metadata_list)}, already cataloged"
+                self._set_scan_log_entry(path_index, path, status)
+                self._set_scan_state(
+                    active=True,
+                    progress=(path_index + 1) / total_dirs,
+                    status=f"{status}: {path}",
+                )
+            except InterruptedError:
+                _watch_log(
+                    "info",
+                    "scan worker cancelled while scanning path=%s folder_id=%s",
+                    path,
+                    folder_id,
+                )
+                self._set_scan_log_entry(path_index, path, "Cancelled")
+                self._set_scan_state(
+                    active=False,
+                    progress=path_index / total_dirs,
+                    status="Scan cancelled.",
+                    terminal=True,
+                )
+                self._clear_scan_thread()
+                return
             except Exception as e:
                 _watch_log(
                     "warn",
@@ -1779,6 +2410,12 @@ class WatchDirsDialogPanel(Panel):
                     path,
                     e,
                     exc_info=True,
+                )
+                self._set_scan_log_entry(path_index, path, "Failed")
+                self._set_scan_state(
+                    active=True,
+                    progress=(path_index + 1) / total_dirs,
+                    status=f"Failed to scan {path}: {e}",
                 )
 
         try:
@@ -1789,6 +2426,12 @@ class WatchDirsDialogPanel(Panel):
                     folder_id,
                     discovered,
                     added,
+                )
+                self._set_scan_state(
+                    active=False,
+                    progress=1.0,
+                    status=f"Scan cancelled. Found {discovered}, added {added}.",
+                    terminal=True,
                 )
                 return
             if added > 0:
@@ -1801,6 +2444,12 @@ class WatchDirsDialogPanel(Panel):
                         _index_library_path(index),
                         _library_mtime(index),
                     )
+                    self._set_scan_state(
+                        active=False,
+                        progress=1.0,
+                        status=f"Scan complete. Found {discovered}, added {added}.",
+                        terminal=True,
+                    )
                 else:
                     _watch_log(
                         "error",
@@ -1810,6 +2459,12 @@ class WatchDirsDialogPanel(Panel):
                         _index_library_path(index),
                         _library_mtime(index),
                     )
+                    self._set_scan_state(
+                        active=False,
+                        progress=1.0,
+                        status=f"Scan finished, but saving failed. Found {discovered}, added {added}.",
+                        terminal=True,
+                    )
             else:
                 _watch_log(
                     "info",
@@ -1818,10 +2473,20 @@ class WatchDirsDialogPanel(Panel):
                     added,
                     _index_library_path(index),
                 )
+                self._set_scan_state(
+                    active=False,
+                    progress=1.0,
+                    status=f"Scan complete. Found {discovered}, no new assets added.",
+                    terminal=True,
+                )
             refresh_active_panel()
-            _watch_log("info", "active panel refresh requested after scan")
         except Exception as e:
             _watch_log("error", "failed to finalize watch-dir scan: %s", e, exc_info=True)
+            self._set_scan_state(
+                active=False,
+                progress=1.0,
+                status=f"Failed to finish scan: {e}",
+                terminal=True,
+            )
         finally:
-            if self._scan_thread is threading.current_thread():
-                self._scan_thread = None
+            self._clear_scan_thread()

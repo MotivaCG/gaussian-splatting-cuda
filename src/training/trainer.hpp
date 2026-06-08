@@ -445,6 +445,7 @@ namespace lfs::training {
 
         // Pre-loaded mask from pipelined dataloader (used in train_step)
         lfs::core::Tensor pipelined_mask_;
+        lfs::core::Tensor pipelined_depth_;
 
         // Bilateral grid for appearance modeling (optional)
         std::unique_ptr<BilateralGrid> bilateral_grid_;
@@ -463,6 +464,9 @@ namespace lfs::training {
 
         // Cached GPU scalar to avoid per-iteration allocation
         core::Tensor loss_accumulator_;
+        core::Tensor depth_loss_scalar_;
+        core::Tensor depth_loss_grad_;
+        core::Tensor depth_loss_partials_;
 
         // Pre-allocated SSIM-map workspace for densification error maps.
         lfs::training::kernels::SSIMMapWorkspace densification_ssim_workspace_;

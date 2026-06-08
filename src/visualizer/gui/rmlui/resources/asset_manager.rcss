@@ -423,6 +423,18 @@
     margin-top: 2dp;
 }
 
+.asset-results-footer {
+    display: flex;
+    justify-content: center;
+    padding: 10dp 0 4dp;
+}
+
+.asset-show-more-button {
+    min-width: 140dp;
+    font-size: 12dp;
+    padding: 6dp 12dp;
+}
+
 .asset-gallery-scroll {
     flex: 1;
     overflow-y: auto;
@@ -452,7 +464,9 @@
 }
 
 .asset-card.is-selected,
-.asset-list-row.is-selected {
+.asset-card.is-multi-selected,
+.asset-list-row.is-selected,
+.asset-list-row.is-multi-selected {
     border-color: #7fb9a5;
     background-color: #34302c;
 }

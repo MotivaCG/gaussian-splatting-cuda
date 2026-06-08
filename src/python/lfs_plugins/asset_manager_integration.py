@@ -348,6 +348,9 @@ def refresh_active_panel() -> None:
     if hasattr(panel, "_asset_index") and panel._asset_index is not None:
         try:
             panel._asset_index.load()
+            library_path = getattr(panel._asset_index, "library_path", None)
+            if library_path is not None and library_path.exists():
+                panel._library_mtime = library_path.stat().st_mtime
         except Exception:
             pass
     try:
