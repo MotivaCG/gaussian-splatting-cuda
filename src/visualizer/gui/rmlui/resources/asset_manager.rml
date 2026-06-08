@@ -92,7 +92,6 @@
             </div>
           </div>
         </div>
-00
         <div class="asset-sidebar-actions">
           <button class="asset-action-button" data-event-click="refresh_catalog" data-tooltip="asset_manager.tooltip.refresh">{{refresh_label}}</button>
           <button class="asset-action-button" data-event-click="clean_missing" data-tooltip="asset_manager.tooltip.clean_missing">{{clean_missing_label}}</button>
@@ -106,6 +105,7 @@
         <div class="asset-gallery-header">
           <span class="asset-gallery-title" data-if="is_gallery_view">{{gallery_title}}</span>
           <span class="asset-gallery-title" data-if="is_list_view">{{list_title}}</span>
+          <span class="asset-gallery-subtitle" data-if="asset_results_summary_visible">{{asset_results_summary}}</span>
         </div>
 
         <div id="asset-gallery-scroll" class="asset-gallery-scroll">
@@ -189,6 +189,10 @@
               </div>
             </div>
           </div>
+
+          <div class="asset-results-footer" data-if="asset_results_more_visible">
+            <button class="asset-show-more-button" data-event-click="show_more_assets">{{show_more_assets_label}}</button>
+          </div>
         </div>
       </div>
 
@@ -235,6 +239,10 @@
               <div class="parameter-row">
                 <span class="parameter-label">{{prop_points_label}}</span>
                 <span class="parameter-value">{{selected_asset_points}}</span>
+              </div>
+              <div class="parameter-row" data-if="selected_asset_has_sh_degree">
+                <span class="parameter-label">{{prop_sh_degree_label}}</span>
+                <span class="parameter-value">{{selected_asset_sh_degree}}</span>
               </div>
               <div class="parameter-row">
                 <span class="parameter-label">{{prop_size_label}}</span>

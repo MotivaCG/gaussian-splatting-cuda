@@ -7,6 +7,7 @@
 #include "core/export.hpp"
 #include "core/scene.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <optional>
@@ -126,6 +127,10 @@ namespace lfs::vis::cap {
         const std::vector<std::string>& targets,
         const glm::vec3& value,
         std::string_view undo_label = "transform.scale");
+    [[nodiscard]] LFS_VIS_API std::expected<size_t, std::string> bakeNodeTransforms(
+        SceneManager& scene_manager,
+        const std::vector<std::string>& targets,
+        std::string_view undo_label = "transform.bake");
 
     [[nodiscard]] LFS_VIS_API std::expected<void, std::string> writeGaussianField(
         SceneManager& scene_manager,

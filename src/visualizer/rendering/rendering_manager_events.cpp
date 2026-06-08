@@ -127,7 +127,7 @@ namespace lfs::vis {
         std::lock_guard<std::mutex> lock(settings_mutex_);
         settings_.split_position = std::clamp(position, 0.0f, 1.0f);
         LOG_TRACE("Split position changed to: {}", position);
-        markDirty(DirtyFlag::SPLIT_VIEW | frame_lifecycle_service_.deferViewportRefresh());
+        markDirty(DirtyFlag::SPLIT_POSITION);
     }
 
     void RenderingManager::handleRenderSettingsChanged(const ui::RenderSettingsChanged& event) {

@@ -501,7 +501,6 @@ namespace lfs::vis::gui {
     bool NativeScenePanel::drawDirectCached(const float x, const float y,
                                             const float w, const float h,
                                             const PanelDrawContext& ctx) {
-        (void)ctx;
         if (!ensureInitialized())
             return false;
 
@@ -517,12 +516,16 @@ namespace lfs::vis::gui {
             const std::string action = gui->globalContextMenu().pollResult();
             if (!action.empty() && tree_el_ && tree_el_->executeContextMenuAction(action)) {
                 host_.markContentDirty();
-                return false; // fall back to a live draw so the panel reflects the change
+                host_.drawDirect(x, y, w, h);
+                return true;
             }
         }
 
-        if (shouldSyncPanel(nullptr))
-            return false;
+        if (shouldSyncPanel(nullptr)) {
+            syncPanel(ctx);
+            host_.drawDirect(x, y, w, h);
+            return true;
+        }
 
         return host_.drawDirectCached(x, y, w, h);
     }

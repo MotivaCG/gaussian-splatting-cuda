@@ -83,6 +83,17 @@ def _same_rotation(a: List[float], b: List[float]) -> bool:
     return abs(abs(dot) - 1.0) < QUAT_EQUIV_EPSILON
 
 
+# Local node transforms are stored in data axes; the overlay displays visualizer axes.
+def _flip_yz_rows(transform):
+    if transform is None or len(transform) != 16:
+        return transform
+    result = list(transform)
+    for col in range(4):
+        result[col * 4 + 1] = -result[col * 4 + 1]
+        result[col * 4 + 2] = -result[col * 4 + 2]
+    return result
+
+
 class TransformPanelState:
     def __init__(self):
         self.editing_active = False
@@ -351,13 +362,13 @@ class TransformControlsController:
     def _single_display_transform(self, node_name: str):
         if self._single_uses_world_space():
             return lf.get_node_visualizer_world_transform(node_name)
-        return lf.get_node_transform(node_name)
+        return _flip_yz_rows(lf.get_node_transform(node_name))
 
     def _set_single_display_transform(self, node_name: str, transform):
         if self._single_uses_world_space():
             lf.set_node_visualizer_world_transform(node_name, transform)
         else:
-            lf.set_node_transform(node_name, transform)
+            lf.set_node_transform(node_name, _flip_yz_rows(transform))
 
     def _update_single_node(self):
         node_name = self._selected[0]
@@ -690,6 +701,18 @@ class TransformControlsController:
             self._force_dirty = True
         elif action == "bake":
             self._commit_active_edit()
+            bake = getattr(lf, "bake_selected_node_transforms", None)
+            if callable(bake):
+                try:
+                    if bake():
+                        self._last_state_key = None
+                        self._force_dirty = True
+                        if len(self._selected) == 1:
+                            self._update_single_node()
+                        elif self._selected:
+                            self._update_multi_selection()
+                except Exception as exc:
+                    print(f"Transform bake failed: {exc}")
 
     def _on_input_focus(self, event):
         if self._focus_active:

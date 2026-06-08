@@ -7,6 +7,8 @@
 #include "visualizer/gui_capabilities.hpp"
 
 #include "core/events.hpp"
+#include "core/mesh_data.hpp"
+#include "core/point_cloud.hpp"
 #include "core/splat_data_transform.hpp"
 #include "operation/undo_entry.hpp"
 #include "operation/undo_history.hpp"
@@ -14,7 +16,10 @@
 #include "scene/scene_manager.hpp"
 #include "visualizer/scene_coordinate_utils.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <glm/gtx/euler_angles.hpp>
 #include <limits>
 #include <memory>
@@ -24,6 +29,7 @@ namespace lfs::vis::cap {
     bool isTransformableNodeType(const core::NodeType type) {
         return type == core::NodeType::DATASET ||
                type == core::NodeType::SPLAT ||
+               type == core::NodeType::POINTCLOUD ||
                type == core::NodeType::CROPBOX ||
                type == core::NodeType::ELLIPSOID ||
                type == core::NodeType::MESH;
@@ -39,6 +45,169 @@ namespace lfs::vis::cap {
         };
 
         constexpr float kTransformEpsilon = 1e-6f;
+
+        [[nodiscard]] bool is_identity_transform(const glm::mat4& transform) {
+            const glm::mat4 identity(1.0f);
+            for (int col = 0; col < 4; ++col) {
+                for (int row = 0; row < 4; ++row) {
+                    if (std::abs(transform[col][row] - identity[col][row]) > kTransformEpsilon)
+                        return false;
+                }
+            }
+            return true;
+        }
+
+        bool normalize_rotation_basis(glm::vec3& col0,
+                                      glm::vec3& col1,
+                                      glm::vec3& col2,
+                                      glm::vec3& scale);
+
+        [[nodiscard]] bool has_significant_rotation(const glm::mat4& transform) {
+            glm::mat3 rotation(transform);
+            glm::vec3 scale;
+            if (!normalize_rotation_basis(rotation[0], rotation[1], rotation[2], scale))
+                return true;
+
+            const glm::quat q = glm::quat_cast(rotation);
+            return std::abs(std::abs(q.w) - 1.0f) > kTransformEpsilon ||
+                   std::abs(q.x) > kTransformEpsilon ||
+                   std::abs(q.y) > kTransformEpsilon ||
+                   std::abs(q.z) > kTransformEpsilon;
+        }
+
+        [[nodiscard]] bool is_float_nx3(const core::Tensor& tensor) {
+            return tensor.is_valid() &&
+                   tensor.ndim() == 2 &&
+                   tensor.size(0) > 0 &&
+                   tensor.shape()[1] == 3 &&
+                   tensor.dtype() == core::DataType::Float32;
+        }
+
+        [[nodiscard]] std::vector<float> matrix4_tensor_data(const glm::mat4& matrix) {
+            return {
+                matrix[0][0], matrix[1][0], matrix[2][0], matrix[3][0],
+                matrix[0][1], matrix[1][1], matrix[2][1], matrix[3][1],
+                matrix[0][2], matrix[1][2], matrix[2][2], matrix[3][2],
+                matrix[0][3], matrix[1][3], matrix[2][3], matrix[3][3]};
+        }
+
+        [[nodiscard]] std::vector<float> matrix3_tensor_data(const glm::mat3& matrix) {
+            return {
+                matrix[0][0], matrix[1][0], matrix[2][0],
+                matrix[0][1], matrix[1][1], matrix[2][1],
+                matrix[0][2], matrix[1][2], matrix[2][2]};
+        }
+
+        void transform_position_tensor(core::Tensor& positions, const glm::mat4& transform) {
+            if (!is_float_nx3(positions))
+                return;
+
+            const auto point_count = static_cast<size_t>(positions.size(0));
+            const auto device = positions.device();
+            const auto transform_tensor =
+                core::Tensor::from_vector(matrix4_tensor_data(transform), core::TensorShape({4, 4}), device);
+            const auto ones = core::Tensor::ones({point_count, 1}, device);
+            const auto transformed = transform_tensor.mm(positions.cat(ones, 1).t()).t();
+            positions = transformed.slice(1, 0, 3).contiguous();
+        }
+
+        void transform_direction_tensor(core::Tensor& directions, const glm::mat3& transform) {
+            if (!is_float_nx3(directions))
+                return;
+
+            const auto device = directions.device();
+            const auto transform_tensor =
+                core::Tensor::from_vector(matrix3_tensor_data(transform), core::TensorShape({3, 3}), device);
+            directions = transform_tensor.mm(directions.t()).t().contiguous();
+        }
+
+        [[nodiscard]] bool has_bakeable_payload(const core::SceneNode& node) {
+            return (node.type == core::NodeType::SPLAT && node.model) ||
+                   (node.type == core::NodeType::POINTCLOUD && node.point_cloud) ||
+                   (node.type == core::NodeType::MESH && node.mesh);
+        }
+
+        void bake_point_cloud_transform(core::PointCloud& point_cloud, const glm::mat4& transform) {
+            transform_position_tensor(point_cloud.means, transform);
+
+            if (point_cloud.normals.is_valid()) {
+                const glm::mat3 normal_transform = glm::transpose(glm::inverse(glm::mat3(transform)));
+                transform_direction_tensor(point_cloud.normals, normal_transform);
+            }
+        }
+
+        void bake_mesh_transform(core::MeshData& mesh, const glm::mat4& transform) {
+            transform_position_tensor(mesh.vertices, transform);
+
+            if (mesh.normals.is_valid()) {
+                const glm::mat3 normal_transform = glm::transpose(glm::inverse(glm::mat3(transform)));
+                transform_direction_tensor(mesh.normals, normal_transform);
+            }
+
+            mesh.mark_dirty();
+        }
+
+        [[nodiscard]] std::expected<void, std::string> copy_tensor_preserving_storage(core::Tensor& dst,
+                                                                                      const core::Tensor& src,
+                                                                                      const std::string_view name) {
+            if (dst.shape() != src.shape()) {
+                return std::unexpected("Bake produced incompatible " + std::string(name) + " tensor shape");
+            }
+
+            dst.copy_from(src);
+            return {};
+        }
+
+        [[nodiscard]] std::expected<void, std::string> bake_splat_transform_preserving_storage(
+            core::SplatData& model,
+            const glm::mat4& transform) {
+            try {
+                core::SplatData transformed(
+                    model.get_max_sh_degree(),
+                    model.means_raw().clone(),
+                    model.sh0_raw().clone(),
+                    model.shN_raw().is_valid() ? model.shN_raw().clone() : core::Tensor{},
+                    model.scaling_raw().clone(),
+                    model.rotation_raw().clone(),
+                    model.opacity_raw().clone(),
+                    model.get_scene_scale(),
+                    core::SplatData::ShNLayout::Swizzled);
+                transformed.set_active_sh_degree(model.get_active_sh_degree());
+
+                core::transform(transformed, transform);
+
+                if (auto result = copy_tensor_preserving_storage(model.means_raw(), transformed.means_raw(), "means"); !result)
+                    return result;
+                if (auto result = copy_tensor_preserving_storage(model.scaling_raw(), transformed.scaling_raw(), "scaling"); !result)
+                    return result;
+                if (auto result = copy_tensor_preserving_storage(model.rotation_raw(), transformed.rotation_raw(), "rotation"); !result)
+                    return result;
+                if (model.shN_raw().is_valid() && transformed.shN_raw().is_valid()) {
+                    if (auto result = copy_tensor_preserving_storage(model.shN_raw(), transformed.shN_raw(), "shN"); !result)
+                        return result;
+                }
+
+                model.set_scene_scale(transformed.get_scene_scale());
+            } catch (const std::exception& exc) {
+                return std::unexpected(std::string("Failed to bake splat transform: ") + exc.what());
+            }
+
+            return {};
+        }
+
+        void preserve_child_world_transforms(SceneManager& scene_manager,
+                                             const core::SceneNode& node,
+                                             const glm::mat4& parent_local_transform) {
+            auto& scene = scene_manager.getScene();
+            const auto child_ids = node.children;
+            for (const core::NodeId child_id : child_ids) {
+                const auto* const child = scene.getNodeById(child_id);
+                if (!child)
+                    continue;
+
+                scene_manager.setNodeTransform(child->name, parent_local_transform * child->local_transform.get());
+            }
+        }
 
         std::string canonical_gaussian_field_name(std::string_view field_name) {
             if (field_name == "means")
@@ -542,6 +711,78 @@ namespace lfs::vis::cap {
         entry->captureAfter();
         vis::op::pushSceneSnapshotIfChanged(std::move(entry));
         return {};
+    }
+
+    std::expected<size_t, std::string> bakeNodeTransforms(SceneManager& scene_manager,
+                                                          const std::vector<std::string>& targets,
+                                                          const std::string_view undo_label) {
+        if (targets.empty())
+            return std::unexpected("No transform targets provided");
+
+        auto& scene = scene_manager.getScene();
+        std::vector<std::string> bake_names;
+        bake_names.reserve(targets.size());
+
+        for (const auto& name : targets) {
+            const auto* const node = scene.getNode(name);
+            if (!node)
+                return std::unexpected("Node not found: " + name);
+            if (!isTransformableNodeType(node->type) || static_cast<bool>(node->locked) || !has_bakeable_payload(*node))
+                continue;
+
+            const glm::mat4 local_transform = node->local_transform.get();
+            if (is_identity_transform(local_transform))
+                continue;
+
+            if (node->model && node->model->get_max_sh_degree() > 3 && has_significant_rotation(local_transform)) {
+                return std::unexpected("Cannot bake rotated SH degree > 3 splat node: " + name);
+            }
+
+            if (std::ranges::find(bake_names, name) == bake_names.end())
+                bake_names.push_back(name);
+        }
+
+        if (bake_names.empty())
+            return std::unexpected("No bakeable node transforms selected");
+
+        const op::SceneGraphCaptureOptions history_options{
+            .mode = op::SceneGraphCaptureMode::FULL,
+            .include_selected_nodes = true,
+            .include_scene_context = false,
+        };
+        auto before = op::SceneGraphPatchEntry::captureState(scene_manager, bake_names, history_options);
+
+        for (const auto& name : bake_names) {
+            auto* const node = scene.getMutableNode(name);
+            if (!node)
+                continue;
+
+            const glm::mat4 local_transform = node->local_transform.get();
+            if (node->model) {
+                if (auto result = bake_splat_transform_preserving_storage(*node->model, local_transform); !result)
+                    return std::unexpected(result.error());
+            } else if (node->point_cloud) {
+                bake_point_cloud_transform(*node->point_cloud, local_transform);
+            } else if (node->mesh) {
+                bake_mesh_transform(*node->mesh, local_transform);
+            } else {
+                continue;
+            }
+
+            preserve_child_world_transforms(scene_manager, *node, local_transform);
+            scene_manager.setNodeTransform(name, glm::mat4(1.0f));
+        }
+
+        scene.notifyMutation(core::Scene::MutationType::MODEL_CHANGED);
+
+        auto after = op::SceneGraphPatchEntry::captureState(scene_manager, bake_names, history_options);
+        op::undoHistory().push(std::make_unique<op::SceneGraphPatchEntry>(
+            scene_manager,
+            std::string(undo_label),
+            std::move(before),
+            std::move(after)));
+
+        return bake_names.size();
     }
 
     std::expected<void, std::string> writeGaussianField(SceneManager& scene_manager,

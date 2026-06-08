@@ -501,6 +501,7 @@ namespace lfs::vis::gui {
 
     void SceneGraphElement::OnUpdate() {
         ensureDom();
+        bool rebuilt_tree = false;
         if (tree_rebuild_needed_) {
             if (auto* scene_manager = services().sceneOrNull()) {
                 const core::Scene& scene = scene_manager->getScene();
@@ -511,12 +512,14 @@ namespace lfs::vis::gui {
                     rebuildFlatRows(scene);
                     syncCameraLossIconColors(scene, true);
                     markStateDirty();
+                    rebuilt_tree = true;
                 } else if (scene_has_nodes_ || !node_snapshots_.empty()) {
                     clear();
+                    rebuilt_tree = true;
                 }
             }
         }
-        syncVisibleRows(false);
+        syncVisibleRows(rebuilt_tree);
     }
 
     void SceneGraphElement::RenameInputListener::ProcessEvent(Rml::Event& event) {

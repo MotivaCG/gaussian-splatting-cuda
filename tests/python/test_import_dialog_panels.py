@@ -449,6 +449,48 @@ def test_watch_dialog_does_not_mutate_active_panel_selection(import_dialog_modul
     assert active_panel._selected_folder_id == default_folder.id
 
 
+def test_watch_dialog_done_state_closes_instead_of_rescanning(import_dialog_module):
+    module, state = import_dialog_module
+    panel = module.WatchDirsDialogPanel()
+    panel._watch_dirs = ["/tmp/watched"]
+
+    panel._set_scan_state(
+        active=False,
+        progress=1.0,
+        status="Scan complete. Found 1, added 1.",
+        terminal=True,
+    )
+
+    assert panel._get_scan_status_visible() is True
+    assert panel._get_scan_progress_pct() == "100%"
+    assert panel._get_scan_save_enabled() is True
+    assert panel._get_scan_save_label() == "Done"
+
+    panel._on_save()
+
+    assert state.panel_enabled_calls[-1] == ("lfs.watch_dirs_dialog", False)
+
+
+def test_watch_dialog_edit_resets_done_state(import_dialog_module):
+    module, state = import_dialog_module
+    panel = module.WatchDirsDialogPanel()
+    panel._watch_dirs = ["/tmp/watched"]
+    panel._set_scan_state(
+        active=False,
+        progress=1.0,
+        status="Scan complete. Found 1, added 1.",
+        terminal=True,
+    )
+    state.output_browse_path = "/tmp/other"
+
+    panel._on_browse_add()
+
+    assert panel._get_scan_status_visible() is False
+    assert panel._get_scan_progress_pct() == "0%"
+    assert panel._get_scan_save_enabled() is True
+    assert panel._get_scan_save_label() == "Save & Scan"
+
+
 def test_asset_scanner_rejects_html_assets(import_dialog_module):
     scanner_module = import_module("lfs_plugins.asset_scanner")
     scanner = scanner_module.AssetScanner()
