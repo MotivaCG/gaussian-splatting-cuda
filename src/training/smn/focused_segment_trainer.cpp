@@ -41,7 +41,7 @@ namespace lfs::training {
 
         constexpr bool FOCUSED_ENABLE_GRAD_ALPHA         = true; // master switch
         constexpr bool FOCUSED_ENABLE_GRAD_ALPHA_FG      = true && FOCUSED_ENABLE_GRAD_ALPHA;  // push FG alpha->1 (force opacity inside; fills holes)
-        constexpr bool FOCUSED_ENABLE_GRAD_ALPHA_BG      = false && FOCUSED_ENABLE_GRAD_ALPHA; // push BG alpha->0. OFF: it kills the BG splats
+        constexpr bool FOCUSED_ENABLE_GRAD_ALPHA_BG      = true && FOCUSED_ENABLE_GRAD_ALPHA; // push BG alpha->0. OFF: it kills the BG splats
         
         // Densification (focused_segment_apply_densification_mask).
         // FOCUSED_DENSIFY_DILATE_RADIUS below still controls the dilation size.
