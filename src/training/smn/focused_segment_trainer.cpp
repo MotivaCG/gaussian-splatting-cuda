@@ -37,10 +37,12 @@ namespace lfs::training {
 
         // Pixel-level loss shaping (focused_segment_compute_loss).
         constexpr bool FOCUSED_ENABLE_SPATIAL_WEIGHT_MAP = true; // FG=1, BG=focused_bg_weight on grad_image
-        constexpr bool FOCUSED_ENABLE_DARKNESS_BOOST     = true; // GT-luminance darkness boost on FG region
-        constexpr bool FOCUSED_ENABLE_GRAD_ALPHA_FG      = true; // push FG alpha->1 (force opacity inside; fills holes)
-        constexpr bool FOCUSED_ENABLE_GRAD_ALPHA_BG      = true; // push BG alpha->0 (force transparency outside; removes halos)
+        constexpr bool FOCUSED_ENABLE_DARKNESS_BOOST     = true;// GT-luminance darkness boost on FG region
 
+        constexpr bool FOCUSED_ENABLE_GRAD_ALPHA         = true; // master switch
+        constexpr bool FOCUSED_ENABLE_GRAD_ALPHA_FG      = true && FOCUSED_ENABLE_GRAD_ALPHA;  // push FG alpha->1 (force opacity inside; fills holes)
+        constexpr bool FOCUSED_ENABLE_GRAD_ALPHA_BG      = false && FOCUSED_ENABLE_GRAD_ALPHA; // push BG alpha->0. OFF: it kills the BG splats
+        
         // Densification (focused_segment_apply_densification_mask).
         // FOCUSED_DENSIFY_DILATE_RADIUS below still controls the dilation size.
         constexpr bool FOCUSED_ENABLE_DENSIFY_DILATION = true; // dilate the mask before applying it to the densification error map
