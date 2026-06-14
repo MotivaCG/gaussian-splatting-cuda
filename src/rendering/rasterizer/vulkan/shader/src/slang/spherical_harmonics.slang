@@ -373,3 +373,96 @@ float3 compute_color_from_sh_coeffs(SpherHarmCoeffs sh, float3 dir, uint32_t act
 // share approximate directions), algorithm change, not a shader edit.
 // The basis split above (compute_sh_basis_16) is the precondition for that
 // future rewrite.
+
+// ---------------------------------------------------------------------------
+// Canonical quantized LOD pool reads (lod_pool_quant.hpp): sh0 is f16x3
+// packed in a uint2; each shN float4 slot is four s8 components in one uint,
+// scaled by the page's per-band |max| from the dequant frame. The s8 formula
+// (q/127)*max matches the CPU/CUDA dequantS8 exactly.
+// ---------------------------------------------------------------------------
+
+[ForceInline]
+float4 unpack_shn_slot_s8(uint packed, uint slot_idx, float3 band_max) {
+    int4 q = int4(int(packed << 24) >> 24,
+                  int(packed << 16) >> 24,
+                  int(packed << 8) >> 24,
+                  int(packed) >> 24);
+    // Canonical float index k = 4*slot + comp; band1 covers k<9, band2 k<24,
+    // band3 the rest — slot 2 is the only band-mixed slot.
+    float4 scale = slot_idx < 2u   ? band_max.xxxx
+                   : slot_idx == 2u ? float4(band_max.x, band_max.y, band_max.y, band_max.y)
+                   : slot_idx < 6u  ? band_max.yyyy
+                                    : band_max.zzzz;
+    return float4(q) / 127.0 * scale;
+}
+
+SpherHarmCoeffs read_spherical_harmonics_coeffs_split_quant(
+    uint32_t g_idx,
+    StructuredBuffer<uint2> sh0_q,
+    StructuredBuffer<uint> shN_q,
+    float3 sh_band_max,
+    uint32_t active_sh,
+    uint32_t shN_slots_per_primitive)
+{
+    float3 z = float3(0.0);
+    SpherHarmCoeffs g_sh_coeffs = { z, z,z,z, z,z,z,z,z, z,z,z,z,z,z,z };
+
+    const uint2 h0 = sh0_q[g_idx];
+    g_sh_coeffs.coeff0 = float3(f16tof32(h0.x & 0xFFFFu),
+                                f16tof32(h0.x >> 16),
+                                f16tof32(h0.y & 0xFFFFu));
+
+    if (active_sh == 0)
+        return g_sh_coeffs;
+
+    if (shN_slots_per_primitive == 0)
+        return g_sh_coeffs;
+
+  #if SH_REORDER_SIZE <= 1
+    uint32_t base = shN_slots_per_primitive*g_idx;
+    #define _SHNQ_COEFF(idx) unpack_shn_slot_s8(shN_q[base+idx], idx, sh_band_max)
+  #else
+    uint32_t base = (g_idx/SH_REORDER_SIZE) * (shN_slots_per_primitive*SH_REORDER_SIZE);
+    uint32_t offset = g_idx%SH_REORDER_SIZE;
+    #define _SHNQ_COEFF(idx) unpack_shn_slot_s8(shN_q[base+SH_REORDER_SIZE*idx+offset], idx, sh_band_max)
+  #endif
+
+    float4 temp0, temp1;
+
+    temp0 = _SHNQ_COEFF(0);
+    g_sh_coeffs.coeff1 = temp0.xyz;
+    temp1 = _SHNQ_COEFF(1);
+    g_sh_coeffs.coeff2 = float3(temp0.w, temp1.xy);
+    temp0 = _SHNQ_COEFF(2);
+    g_sh_coeffs.coeff3 = float3(temp1.zw, temp0.x);
+    g_sh_coeffs.coeff4 = temp0.yzw;
+
+    if (active_sh > 1) {
+        temp0 = _SHNQ_COEFF(3);
+        g_sh_coeffs.coeff5 = temp0.xyz;
+        temp1 = _SHNQ_COEFF(4);
+        g_sh_coeffs.coeff6 = float3(temp0.w, temp1.xy);
+        temp0 = _SHNQ_COEFF(5);
+        g_sh_coeffs.coeff7 = float3(temp1.zw, temp0.x);
+        g_sh_coeffs.coeff8 = temp0.yzw;
+    }
+
+    if (active_sh > 2) {
+        temp0 = _SHNQ_COEFF(6);
+        g_sh_coeffs.coeff9 = temp0.xyz;
+        temp1 = _SHNQ_COEFF(7);
+        g_sh_coeffs.coeff10 = float3(temp0.w, temp1.xy);
+        temp0 = _SHNQ_COEFF(8);
+        g_sh_coeffs.coeff11 = float3(temp1.zw, temp0.x);
+        g_sh_coeffs.coeff12 = temp0.yzw;
+        temp1 = _SHNQ_COEFF(9);
+        g_sh_coeffs.coeff13 = temp1.xyz;
+        temp0 = _SHNQ_COEFF(10);
+        g_sh_coeffs.coeff14 = float3(temp1.w, temp0.xy);
+        temp1 = _SHNQ_COEFF(11);
+        g_sh_coeffs.coeff15 = float3(temp0.zw, temp1.x);
+    }
+    #undef _SHNQ_COEFF
+
+    return g_sh_coeffs;
+}

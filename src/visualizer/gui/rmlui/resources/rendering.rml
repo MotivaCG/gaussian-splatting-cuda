@@ -198,6 +198,84 @@
     </div>
   </div>
 
+  <!-- LOD -->
+  <div class="section-header text-accent" id="hdr-lod" data-event-click="toggle_section('lod')">
+    <span class="section-arrow text-accent is-expanded" id="arrow-lod">&#x25B6;</span>
+    <span class="text-accent">{{label_hdr_lod}}</span>
+  </div>
+  <div class="section-content collapsed" id="sec-lod">
+    <div class="setting-row setting-row--aligned" data-tooltip="tooltip.lod_enabled">
+      <span class="setting-row__label-col">{{label_lod_enabled}}</span>
+      <label class="setting-row__control-col setting-row__control-col--checkbox">
+        <input type="checkbox" data-checked="lod_enabled" />
+      </label>
+    </div>
+    <div data-if="lod_enabled">
+      <div class="setting-row setting-row--aligned" data-tooltip="tooltip.lod_max_splats">
+        <span class="setting-row__label-col">{{label_lod_max_splats}}</span>
+        <div class="setting-row__control-col setting-row__control-col--slider">
+          <input type="range" class="setting-slider" data-value="lod_max_splats" min="1" max="5000000" step="10000" />
+          <span class="slider-value">{{lod_max_splats | format_int}}</span>
+        </div>
+      </div>
+      <div class="setting-row setting-row--aligned" data-tooltip="tooltip.lod_page_pool_splats">
+        <span class="setting-row__label-col">{{label_lod_page_pool_splats}}</span>
+        <div class="setting-row__control-col setting-row__control-col--slider">
+          <input type="range" class="setting-slider" data-value="lod_page_pool_splats" min="0" max="100000000" step="1000000" />
+          <span class="slider-value">{{lod_page_pool_splats | format_int}}</span>
+        </div>
+      </div>
+      <div class="setting-row setting-row--aligned" data-tooltip="tooltip.lod_pool_vram_fraction">
+        <span class="setting-row__label-col">{{label_lod_pool_vram_fraction}}</span>
+        <div class="setting-row__control-col setting-row__control-col--slider">
+          <input type="range" class="setting-slider" data-value="lod_pool_vram_fraction" min="0.05" max="0.9" step="0.05" />
+          <span class="slider-value">{{lod_pool_vram_fraction | format_float(2)}}</span>
+        </div>
+      </div>
+      <div class="setting-row setting-row--aligned" data-tooltip="tooltip.lod_fade_frames">
+        <span class="setting-row__label-col">{{label_lod_fade_frames}}</span>
+        <div class="setting-row__control-col setting-row__control-col--slider">
+          <input type="range" class="setting-slider" data-value="lod_fade_frames" min="0" max="60" step="1" />
+          <span class="slider-value">{{lod_fade_frames | format_int}}</span>
+        </div>
+      </div>
+      <div class="setting-row setting-row--aligned" data-tooltip="tooltip.lod_render_scale">
+        <span class="setting-row__label-col">{{label_lod_render_scale}}</span>
+        <div class="setting-row__control-col setting-row__control-col--slider">
+          <input type="range" class="setting-slider" data-value="lod_render_scale" min="0.1" max="5.0" step="0.1" />
+          <span class="slider-value">{{lod_render_scale | format_float(1)}}</span>
+        </div>
+      </div>
+      <div class="setting-row setting-row--aligned" data-tooltip="tooltip.lod_cone_foveation">
+        <span class="setting-row__label-col">{{label_lod_cone_foveation}}</span>
+        <div class="setting-row__control-col setting-row__control-col--slider">
+          <input type="range" class="setting-slider" data-value="lod_cone_foveation" min="0.1" max="2.0" step="0.1" />
+          <span class="slider-value">{{lod_cone_foveation | format_float(1)}}</span>
+        </div>
+      </div>
+      <div class="setting-row setting-row--aligned" data-tooltip="tooltip.lod_cone_inner_degrees">
+        <span class="setting-row__label-col">{{label_lod_cone_inner_degrees}}</span>
+        <div class="setting-row__control-col setting-row__control-col--slider">
+          <input type="range" class="setting-slider" data-value="lod_cone_inner_degrees" min="0" max="180" step="1" />
+          <span class="slider-value">{{lod_cone_inner_degrees | format_float(0)}}</span>
+        </div>
+      </div>
+      <div class="setting-row setting-row--aligned" data-tooltip="tooltip.lod_cone_outer_degrees">
+        <span class="setting-row__label-col">{{label_lod_cone_outer_degrees}}</span>
+        <div class="setting-row__control-col setting-row__control-col--slider">
+          <input type="range" class="setting-slider" data-value="lod_cone_outer_degrees" min="0" max="180" step="1" />
+          <span class="slider-value">{{lod_cone_outer_degrees | format_float(0)}}</span>
+        </div>
+      </div>
+      <div class="setting-row setting-row--aligned" data-tooltip="tooltip.lod_debug_mode">
+        <span class="setting-row__label-col">{{label_lod_debug_mode}}</span>
+        <label class="setting-row__control-col setting-row__control-col--checkbox">
+          <input type="checkbox" data-checked="lod_debug_mode" />
+        </label>
+      </div>
+    </div>
+  </div>
+
   <!-- Splat Simplify -->
   <div class="section-header text-accent" id="hdr-simplify" data-event-click="toggle_section('simplify')">
     <span class="section-arrow text-accent is-expanded" id="arrow-simplify">&#x25B6;</span>
@@ -219,18 +297,11 @@
           <span class="slider-value">{{simplify_target_count}}</span>
         </div>
       </div>
-      <div class="setting-row setting-row--aligned" data-tooltip="tooltip.simplify_knn_k">
-        <span class="setting-row__label-col">{{label_simplify_knn_k}}</span>
+      <div class="setting-row setting-row--aligned" data-tooltip="tooltip.simplify_lod_base">
+        <span class="setting-row__label-col">{{label_simplify_lod_base}}</span>
         <div class="setting-row__control-col setting-row__control-col--slider">
-          <input type="range" class="setting-slider" data-value="simplify_knn_k" min="1" max="64" step="1" />
-          <span class="slider-value">{{simplify_knn_k}}</span>
-        </div>
-      </div>
-      <div class="setting-row setting-row--aligned" data-tooltip="tooltip.simplify_merge_cap">
-        <span class="setting-row__label-col">{{label_simplify_merge_cap}}</span>
-        <div class="setting-row__control-col setting-row__control-col--slider">
-          <input type="range" class="setting-slider" data-value="simplify_merge_cap" min="0.01" max="0.5" step="0.01" />
-          <span class="slider-value">{{simplify_merge_cap}}</span>
+          <input type="range" class="setting-slider" data-value="simplify_lod_base" min="0.1" max="10" step="0.1" />
+          <span class="slider-value">{{simplify_lod_base}}</span>
         </div>
       </div>
       <div class="setting-row setting-row--aligned" data-tooltip="tooltip.simplify_opacity_prune">

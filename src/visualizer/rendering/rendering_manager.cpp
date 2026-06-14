@@ -36,6 +36,30 @@ namespace lfs::vis {
                    !ppispOverridesEqual(old_settings.ppisp_overrides, new_settings.ppisp_overrides);
         }
 
+        [[nodiscard]] bool applySparkLodViewerDefaults(RenderSettings& settings) {
+            bool changed = false;
+
+            if (settings.lod_max_splats == 1'500'000) {
+                settings.lod_max_splats = DEFAULT_LOD_MAX_SPLATS;
+                changed = true;
+            }
+
+            if (settings.lod_behind_camera_penalty == 2.0f) {
+                settings.lod_behind_camera_penalty = DEFAULT_LOD_BEHIND_CAMERA_FOVEATION;
+                changed = true;
+            }
+
+            if (settings.lod_cone_inner_degrees == 0.0f &&
+                settings.lod_cone_outer_degrees == 0.0f) {
+                settings.lod_cone_foveation = DEFAULT_LOD_CONE_FOVEATION;
+                settings.lod_cone_inner_degrees = DEFAULT_LOD_CONE_INNER_DEGREES;
+                settings.lod_cone_outer_degrees = DEFAULT_LOD_CONE_OUTER_DEGREES;
+                changed = true;
+            }
+
+            return changed;
+        }
+
         [[nodiscard]] std::expected<RenderingManager::CameraMetricsOverlayState, std::string>
         computeCameraMetricsForCurrentView(TrainerManager& trainer_mgr,
                                            const int camera_id,
@@ -91,8 +115,16 @@ namespace lfs::vis {
     }
 
     RenderingManager::~RenderingManager() {
+        if (lod_controller_) {
+            lod_controller_->setReadyCallback(nullptr);
+        }
         camera_metrics_worker_.request_stop();
         camera_metrics_cv_.notify_all();
+    }
+
+    void RenderingManager::setWakeCallback(std::function<void()> callback) {
+        std::scoped_lock lock(wake_callback_mutex_);
+        wake_callback_ = std::move(callback);
     }
 
     void RenderingManager::initialize() {
@@ -125,10 +157,128 @@ namespace lfs::vis {
         LOG_TRACE("Render marked dirty (flags: 0x{:x})", flags);
     }
 
+    bool RenderingManager::pollDirtyState() {
+        if (const DirtyMask animation_dirty = animation_state_.pollDirtyState(); animation_dirty) {
+            dirty_mask_.fetch_or(animation_dirty, std::memory_order_relaxed);
+            return true;
+        }
+        if (lod_controller_ && lod_controller_->hasReadyResults()) {
+            dirty_mask_.fetch_or(DirtyFlag::CAMERA, std::memory_order_relaxed);
+            return true;
+        }
+        return dirty_mask_.load(std::memory_order_relaxed) != 0;
+    }
+
+    void RenderingManager::notifyAsyncLodResultsReady() {
+        dirty_mask_.fetch_or(DirtyFlag::CAMERA, std::memory_order_relaxed);
+
+        std::function<void()> wake_callback;
+        {
+            std::scoped_lock lock(wake_callback_mutex_);
+            wake_callback = wake_callback_;
+        }
+        if (wake_callback) {
+            wake_callback();
+        }
+    }
+
     void RenderingManager::setViewportResizeActive(bool active) {
         if (const DirtyMask dirty = frame_lifecycle_service_.setViewportResizeActive(active); dirty) {
             markDirty(dirty);
         }
+    }
+
+    void RenderingManager::setLodAvailable(bool available) {
+        lod_available_ = available;
+        if (available) {
+            auto settings = getSettings();
+            if (applySparkLodViewerDefaults(settings)) {
+                updateSettings(settings, DirtyFlag::ALL);
+            }
+        }
+    }
+
+    void RenderingManager::setLodEnabled(bool enabled) {
+        auto settings = getSettings();
+        settings.lod_enabled = enabled;
+        const bool changed = enabled && applySparkLodViewerDefaults(settings);
+        updateSettings(settings, changed ? DirtyFlag::ALL : DirtyFlag::SPLATS);
+    }
+
+    bool RenderingManager::isLodEnabled() const {
+        std::lock_guard<std::mutex> lock(settings_mutex_);
+        return settings_.lod_enabled;
+    }
+
+    SparkLodController::Stats RenderingManager::getLodStats() const {
+        SparkLodController::Stats stats;
+        if (lod_controller_) {
+            stats = lod_controller_->stats();
+        }
+
+        bool gpu_selection_eligible = false;
+        float render_scale_setting = 1.0f;
+        {
+            std::lock_guard<std::mutex> lock(settings_mutex_);
+            stats.enabled = settings_.lod_enabled;
+            stats.requested_max_splats = settings_.lod_max_splats;
+            if (stats.max_splats == 0) {
+                stats.max_splats = settings_.lod_max_splats;
+            }
+            if (stats.lod_render_scale == 0.0f) {
+                stats.lod_render_scale = settings_.lod_render_scale;
+            }
+            stats.behind_camera_penalty = settings_.lod_behind_camera_penalty;
+            stats.cone_foveation = settings_.lod_cone_foveation;
+            stats.cone_inner_degrees = settings_.lod_cone_inner_degrees;
+            stats.cone_outer_degrees = settings_.lod_cone_outer_degrees;
+            gpu_selection_eligible = settings_.lod_enabled;
+            render_scale_setting = settings_.lod_render_scale;
+        }
+
+        if (gpu_selection_eligible && vksplat_viewport_renderer_) {
+            const auto gpu = vksplat_viewport_renderer_->gpuLodSelectionStatus();
+            if (gpu.active) {
+                // The CPU controller is frozen at its bootstrap cut in GPU
+                // mode; report the selector's live numbers instead.
+                stats.gpu_selection = true;
+                stats.selected_splats = gpu.selected;
+                stats.output_size = gpu.selected;
+                // Effective target = LOD Budget x Render Scale (Spark-style
+                // quality scaler); the overlay shows both when they differ.
+                stats.max_splats = std::max<size_t>(
+                    1,
+                    static_cast<size_t>(
+                        std::llround(static_cast<double>(stats.requested_max_splats) *
+                                     std::max(render_scale_setting, 0.1f))));
+                stats.budget_repair_active = false;
+                stats.budget_fill_active = false;
+                stats.budget_limited = gpu.overflow > 0;
+                stats.threshold_limited = gpu.overflow == 0;
+                stats.output_limited = false;
+                if (stats.pixel_scale_limit > 0.0f) {
+                    stats.pixel_scale_limit *= gpu.pixel_scale_feedback;
+                }
+                if (gpu.chunk_count > 0) {
+                    stats.chunk_count = gpu.chunk_count;
+                    stats.resident_chunks = gpu.resident_chunks;
+                    stats.touched_chunks = gpu.touched_chunks;
+                }
+                stats.gpu_output_capacity = gpu.capacity;
+                stats.gpu_overflow = gpu.overflow;
+                stats.gpu_pixel_scale_feedback = gpu.pixel_scale_feedback;
+                stats.pool_pages = gpu.pool_pages;
+                stats.streaming_jobs = gpu.streaming_jobs;
+                stats.miss_chunks = gpu.miss_chunks;
+                stats.deferred_requests = gpu.deferred_requests;
+                stats.admission_frozen = gpu.admission_frozen;
+            }
+        }
+
+        stats.available = lod_available_ || stats.has_tree;
+        stats.active = stats.has_tree && lod_controller_ != nullptr &&
+                       (stats.enabled || stats.full_quality_reference);
+        return stats;
     }
 
     void RenderingManager::releaseSceneModelResources() {
@@ -186,11 +336,22 @@ namespace lfs::vis {
     void RenderingManager::updateSettings(const RenderSettings& new_settings,
                                           const DirtyMask dirty_flags) {
         bool clear_metrics = false;
+        bool lod_request_changed = false;
+        bool lod_enabled_turned_on = false;
         {
             std::lock_guard<std::mutex> lock(settings_mutex_);
             const int focused_panel_index =
                 static_cast<int>(splitViewPanelIndex(split_view_service_.focusedPanel()));
             const bool grid_plane_changed = settings_.grid_plane != new_settings.grid_plane;
+            lod_enabled_turned_on = !settings_.lod_enabled && new_settings.lod_enabled;
+            lod_request_changed =
+                settings_.lod_enabled != new_settings.lod_enabled ||
+                settings_.lod_max_splats != new_settings.lod_max_splats ||
+                settings_.lod_render_scale != new_settings.lod_render_scale ||
+                settings_.lod_behind_camera_penalty != new_settings.lod_behind_camera_penalty ||
+                settings_.lod_cone_foveation != new_settings.lod_cone_foveation ||
+                settings_.lod_cone_inner_degrees != new_settings.lod_cone_inner_degrees ||
+                settings_.lod_cone_outer_degrees != new_settings.lod_cone_outer_degrees;
 
             // Update preview color if changed
             if (settings_.selection_color_preview != new_settings.selection_color_preview) {
@@ -232,6 +393,13 @@ namespace lfs::vis {
                 syncGridPlanesLocked(settings_.grid_plane);
             }
             markDirty(dirty_flags);
+        }
+
+        if (lod_request_changed && lod_controller_) {
+            lod_controller_->invalidatePendingWork();
+        }
+        if (lod_enabled_turned_on) {
+            lod_controller_needs_sync_traversal_ = true;
         }
 
         auto& render_settings_generation = app_store().render_settings_generation;

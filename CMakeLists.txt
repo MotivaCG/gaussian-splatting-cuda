@@ -479,6 +479,7 @@ find_package(spdlog REQUIRED)
 find_package(Freetype REQUIRED)
 find_package(WebP REQUIRED)
 find_package(LibArchive REQUIRED)
+find_package(libdeflate CONFIG REQUIRED)
 find_package(OpenImageIO REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(pxr CONFIG REQUIRED)
@@ -838,14 +839,20 @@ if(TARGET lfs_vulkan_rasterizer)
         lfs_vulkan_rasterizer
         LFS_VULKAN_RASTERIZER_SPV_DIR)
     if(_LFS_VULKAN_RASTERIZER_SPV_DIR)
-        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        # The runtime loads SPIR-V from the resource dir first, so staging must
+        # follow every shader rebuild. A POST_BUILD on the executable misses
+        # shader-only edits (no relink → stale staged shaders); an always-run
+        # staging target costs one timestamp compare per build.
+        add_custom_target(lfs_stage_vulkan_shaders ALL
             COMMAND ${CMAKE_COMMAND} -E make_directory
                 "${RESOURCE_DIR}/shaders/vulkan_rasterizer"
             COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
                 "${_LFS_VULKAN_RASTERIZER_SPV_DIR}"
                 "${RESOURCE_DIR}/shaders/vulkan_rasterizer"
-            COMMENT "Copying Vulkan rasterizer shaders"
+            COMMENT "Staging Vulkan rasterizer shaders"
         )
+        add_dependencies(lfs_stage_vulkan_shaders lfs_vulkan_rasterizer_shaders)
+        add_dependencies(${PROJECT_NAME} lfs_stage_vulkan_shaders)
     endif()
 endif()
 
@@ -1001,6 +1008,9 @@ if(UNIX)
                 "$ORIGIN/lib"
                 "${CUDAToolkit_LIBRARY_DIR}"
         )
+        if(TARGET OpenMeshCore)
+            list(APPEND _lichtfeld_runtime_rpath_common "$<TARGET_FILE_DIR:OpenMeshCore>")
+        endif()
         set(_lichtfeld_runtime_rpath_release "${_lichtfeld_runtime_rpath_common}")
         set(_lichtfeld_runtime_rpath_debug "${_lichtfeld_runtime_rpath_common}")
         if(DEFINED VCPKG_TARGET_TRIPLET)

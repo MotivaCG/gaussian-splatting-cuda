@@ -263,8 +263,8 @@ endif()
 
 target_link_libraries(lfs_py PRIVATE
     ${LFS_PY_INTERNAL_LINK_LIBS}
-    $<IF:$<PLATFORM_ID:Windows>,OpenMeshCore,OpenMeshCoreStatic>
-    $<IF:$<PLATFORM_ID:Windows>,OpenMeshTools,OpenMeshToolsStatic>
+    OpenMeshCore
+    OpenMeshTools
     OpenImageIO::OpenImageIO
     CUDA::cudart
     CUDA::curand

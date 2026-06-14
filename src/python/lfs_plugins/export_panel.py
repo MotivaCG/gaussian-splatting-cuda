@@ -105,10 +105,6 @@ class ExportPanel(Panel):
         )
         # RAD export settings
         self._rad_flip_y = False  # Y-flip checkbox (off by default)
-        self._rad_customize_lod = False
-        self._rad_lod_list: list[int] = [100]  # Default to 100%
-        self._rad_new_lod_str = "100"
-        self._rad_lod_collapsed = True  # Whether LOD levels section is collapsed
         self._doc = None  # Document reference for DOM access
         self._last_export_path = None  # Track last export path for Asset Manager
         self._last_export_format = None  # Track last export format for Asset Manager
@@ -146,19 +142,6 @@ class ExportPanel(Panel):
         model.bind_func("show_rad_settings", lambda: self._format == ExportFormat.RAD)
         model.bind_func("rad_flip_y", lambda: self._rad_flip_y)
         model.bind_event("toggle_rad_flip_y", self._on_toggle_rad_flip_y)
-        model.bind_func("rad_customize_lod", lambda: self._rad_customize_lod)
-        model.bind_record_list("rad_lod_list")  # Record list for editable values
-        model.bind(
-            "rad_new_lod_str",
-            lambda: self._rad_new_lod_str,
-            self._set_rad_new_lod_str,
-        )
-        model.bind_event("toggle_rad_customize_lod", self._on_toggle_rad_customize_lod)
-        model.bind_event("add_rad_lod", self._on_add_rad_lod)
-        model.bind_event("remove_rad_lod", self._on_remove_rad_lod)
-        model.bind_event("num_step_rad_lod", self._on_num_step_rad_lod)
-        model.bind_event("update_lod_value", self._on_update_lod_value)
-        model.bind_event("toggle_section", self._on_toggle_section)
 
         model.bind_event("do_cancel", self._on_cancel)
         model.bind_event("do_cancel_export", self._on_cancel_export)
@@ -223,146 +206,9 @@ class ExportPanel(Panel):
             self._export_sh_degree = new_value
             self._dirty_model("sh_degree")
 
-    def _set_rad_new_lod_str(self, v):
-        self._rad_new_lod_str = v if v else ""
-
-    def _update_rad_lod_list(self):
-        """Update the RAD LOD record list in the data model."""
-        if self._handle:
-            self._handle.update_record_list(
-                "rad_lod_list", [{"value": str(lod)} for lod in self._rad_lod_list]
-            )
-
     def _on_toggle_rad_flip_y(self, _handle, _ev, _args):
         self._rad_flip_y = not self._rad_flip_y
         self._dirty_model("rad_flip_y")
-
-    def _on_toggle_rad_customize_lod(self, _handle, _ev, _args):
-        self._rad_customize_lod = not self._rad_customize_lod
-        self._update_rad_lod_list()
-        self._dirty_model("rad_customize_lod")
-
-    def _on_toggle_section(self, _handle, _event, args):
-        """Toggle collapsible section visibility."""
-        if not args:
-            return
-        section = str(args[0])
-        if section != "rad_lod":
-            return
-
-        if not self._doc:
-            return
-
-        # Find the arrow and content elements
-        arrow = self._doc.get_element_by_id("arrow-rad-lod")
-        content = self._doc.get_element_by_id("sec-rad-lod")
-        header = self._doc.get_element_by_id("hdr-rad-lod")
-
-        if content is None:
-            return
-
-        # Toggle the collapsed state
-        expanding = self._rad_lod_collapsed
-        self._rad_lod_collapsed = not expanding
-
-        # Animate the section toggle
-        rml_widgets.animate_section_toggle(
-            content, expanding, arrow, header_element=header
-        )
-
-    def _sync_rad_lod_section_state(self):
-        """Initialize the RAD LOD section visual state."""
-        if not self._doc:
-            return
-        header = self._doc.get_element_by_id("hdr-rad-lod")
-        arrow = self._doc.get_element_by_id("arrow-rad-lod")
-        content = self._doc.get_element_by_id("sec-rad-lod")
-        if content:
-            rml_widgets.sync_section_state(
-                content, not self._rad_lod_collapsed, header, arrow
-            )
-
-    def _on_add_rad_lod(self, _handle, _ev, _args):
-        try:
-            value = int(self._rad_new_lod_str)
-        except (ValueError, TypeError):
-            return
-        # Clamp to 1-100 range
-        value = max(1, min(100, value))
-        # Avoid duplicates
-        if value not in self._rad_lod_list:
-            self._rad_lod_list.append(value)
-            self._rad_lod_list.sort()
-            self._update_rad_lod_list()
-
-    def _on_remove_rad_lod(self, _handle, _ev, args):
-        try:
-            index = int(args[0]) if args else -1
-        except (ValueError, TypeError):
-            return
-        if 0 <= index < len(self._rad_lod_list):
-            self._rad_lod_list.pop(index)
-            # Ensure at least one LOD remains (default to 100 if empty)
-            if not self._rad_lod_list:
-                self._rad_lod_list = [100]
-            self._update_rad_lod_list()
-
-    def _on_update_lod_value(self, _handle, event, _args):
-        """Update a specific LOD value when edited."""
-        # Get the index from the parent row element
-        target = event.current_target()
-        if target is None:
-            return
-
-        # Find the parent row element with data-lod-index
-        parent = target.parent_node()
-        if parent is None:
-            return
-
-        try:
-            index = int(parent.get_attribute("data-lod-index", "-1"))
-        except (ValueError, TypeError):
-            return
-
-        if index < 0 or index >= len(self._rad_lod_list):
-            return
-
-        # Get the new value from the input
-        try:
-            new_value_str = target.get_attribute("value", "")
-            new_value = int(new_value_str)
-        except (ValueError, TypeError):
-            return
-
-        # Clamp to 1-100 range (values outside this range are not allowed)
-        original_value = self._rad_lod_list[index]
-        clamped_value = max(1, min(100, new_value))
-
-        # Check for duplicates (excluding the current index)
-        if (
-            clamped_value in self._rad_lod_list
-            and self._rad_lod_list.index(clamped_value) != index
-        ):
-            # Duplicate found - revert to original value
-            self._update_rad_lod_list()
-            return
-
-        self._rad_lod_list[index] = clamped_value
-        self._rad_lod_list.sort()
-        self._update_rad_lod_list()
-
-    def _on_num_step_rad_lod(self, _handle, _ev, args):
-        try:
-            delta = int(args[0]) if args else 0
-        except (ValueError, TypeError):
-            return
-        try:
-            current = int(self._rad_new_lod_str)
-        except (ValueError, TypeError):
-            current = 100
-        new_value = max(1, min(100, current + delta))
-        self._rad_new_lod_str = str(new_value)
-        self._dirty_model("rad_new_lod_str")
 
     def _get_scrub_value(self, prop):
         del prop
@@ -408,8 +254,6 @@ class ExportPanel(Panel):
 
         self._rebuild_format_records()
         self._rebuild_model_records(self._get_splat_nodes())
-        self._update_rad_lod_list()
-        self._sync_rad_lod_section_state()
         self._scrub_fields.mount(doc)
         self._subscribe_reactive_state()
 
@@ -685,8 +529,6 @@ class ExportPanel(Panel):
             "show_sh_degree",
             "export_error_text",
             "rad_flip_y",
-            "rad_customize_lod",
-            "no_rad_lod",
             "can_export",
             "export_label",
         )
@@ -842,12 +684,6 @@ class ExportPanel(Panel):
             self._last_export_path = path
             self._last_export_format = self._format
 
-            # Prepare RAD LOD settings if applicable
-            rad_lod_ratios = None
-            if self._format == ExportFormat.RAD and self._rad_customize_lod:
-                # Convert percentages to ratios (e.g., 100 -> 1.0, 50 -> 0.5)
-                rad_lod_ratios = [lod / 100.0 for lod in self._rad_lod_list]
-
             self._exporting = True
             self._last_progress = -1.0
             self._progress_value = "0"
@@ -872,7 +708,6 @@ class ExportPanel(Panel):
                     path,
                     selected_nodes,
                     self._export_sh_degree,
-                    rad_lod_ratios=rad_lod_ratios,
                     rad_flip_y=self._rad_flip_y,
                 )
             finally:

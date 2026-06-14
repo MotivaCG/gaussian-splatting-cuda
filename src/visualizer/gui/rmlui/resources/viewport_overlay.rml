@@ -86,27 +86,6 @@
             </div>
             <div class="toolbar-separator"></div>
             <div class="icon-btn"
-                 data-for="button : render_group_buttons"
-                 data-attr-id="button.button_id"
-                 data-class-selected="button.selected"
-                 data-attr-data-action="button.action_id"
-                 data-attr-title="button.tooltip_text"
-                 data-attrif-disabled="!button.enabled"
-                 data-event-click="toolbar_action(button.action, button.value)">
-                <img data-attr-src="button.icon_src" />
-            </div>
-            <div class="icon-btn"
-                 data-for="button : projection_buttons"
-                 data-attr-id="button.button_id"
-                 data-class-selected="button.selected"
-                 data-attr-data-action="button.action_id"
-                 data-attr-title="button.tooltip_text"
-                 data-attrif-disabled="!button.enabled"
-                 data-event-click="toolbar_action(button.action, button.value)">
-                <img data-attr-src="button.icon_src" />
-            </div>
-            <div class="toolbar-separator" data-if="show_render_controls"></div>
-            <div class="icon-btn"
                  data-for="button : utility_extra_buttons"
                  data-attr-id="button.button_id"
                  data-class-selected="button.selected"
@@ -186,20 +165,6 @@
                 <div class="icon-btn"
                      data-for="button : crop_action_buttons"
                      data-attr-id="button.button_id"
-                     data-attr-data-action="button.action_id"
-                     data-attr-data-shortcut="button.shortcut_text"
-                     data-attr-title="button.tooltip_text"
-                     data-attrif-disabled="!button.enabled"
-                     data-event-click="toolbar_action(button.action, button.value)">
-                    <img data-attr-src="button.icon_src" />
-                </div>
-            </div>
-            <div id="primary-render-toolbar" class="toolbar-container hidden"
-                 data-class-hidden="!show_render_toolbar">
-                <div class="icon-btn"
-                     data-for="button : render_mode_buttons"
-                     data-attr-id="button.button_id"
-                     data-class-selected="button.selected"
                      data-attr-data-action="button.action_id"
                      data-attr-data-shortcut="button.shortcut_text"
                      data-attr-title="button.tooltip_text"
@@ -293,27 +258,6 @@
             </div>
             <div class="toolbar-separator"></div>
             <div class="icon-btn"
-                 data-for="button : render_group_buttons"
-                 data-attr-id="button.button_id"
-                 data-class-selected="button.selected"
-                 data-attr-data-action="button.action_id"
-                 data-attr-title="button.tooltip_text"
-                 data-attrif-disabled="!button.enabled"
-                 data-event-click="toolbar_action(button.action, button.value)">
-                <img data-attr-src="button.icon_src" />
-            </div>
-            <div class="icon-btn"
-                 data-for="button : projection_buttons"
-                 data-attr-id="button.button_id"
-                 data-class-selected="button.selected"
-                 data-attr-data-action="button.action_id"
-                 data-attr-title="button.tooltip_text"
-                 data-attrif-disabled="!button.enabled"
-                 data-event-click="toolbar_action(button.action, button.value)">
-                <img data-attr-src="button.icon_src" />
-            </div>
-            <div class="toolbar-separator" data-if="show_render_controls"></div>
-            <div class="icon-btn"
                  data-for="button : utility_extra_buttons"
                  data-attr-id="button.button_id"
                  data-class-selected="button.selected"
@@ -401,22 +345,70 @@
                     <img data-attr-src="button.icon_src" />
                 </div>
             </div>
-            <div id="secondary-render-toolbar" class="toolbar-container hidden"
-                 data-class-hidden="!show_render_toolbar">
-                <div class="icon-btn"
-                     data-for="button : render_mode_buttons"
-                     data-attr-id="button.button_id"
-                     data-class-selected="button.selected"
-                     data-attr-data-action="button.action_id"
-                     data-attr-data-shortcut="button.shortcut_text"
-                     data-attr-title="button.tooltip_text"
-                     data-attrif-disabled="!button.enabled"
-                     data-event-click="toolbar_action(button.action, button.value)">
-                    <img data-attr-src="button.icon_src" />
-                </div>
-            </div>
         </div>
 
+    </div>
+
+    <div id="lod-stats-overlay" class="viewport-lod-stats-overlay hidden">
+        <div class="viewport-lod-stats-card">
+            <div class="viewport-lod-stats-title">RAD LOD</div>
+            <div class="viewport-lod-stats-row">
+                <span class="viewport-lod-stats-label">Status</span>
+                <span id="lod-stats-status" class="viewport-lod-stats-value">--</span>
+            </div>
+            <div class="viewport-lod-stats-row">
+                <span class="viewport-lod-stats-label">Selected</span>
+                <span id="lod-stats-selected" class="viewport-lod-stats-value">--</span>
+            </div>
+            <div class="viewport-lod-stats-row">
+                <span class="viewport-lod-stats-label">Budget</span>
+                <span id="lod-stats-budget" class="viewport-lod-stats-value">--</span>
+            </div>
+            <div class="viewport-lod-stats-row">
+                <span class="viewport-lod-stats-label">Model</span>
+                <span id="lod-stats-model" class="viewport-lod-stats-value">--</span>
+            </div>
+            <div class="viewport-lod-stats-row">
+                <span class="viewport-lod-stats-label">Tree</span>
+                <span id="lod-stats-tree" class="viewport-lod-stats-value">--</span>
+            </div>
+            <div class="viewport-lod-stats-row">
+                <span class="viewport-lod-stats-label">Traversal</span>
+                <span id="lod-stats-traversal" class="viewport-lod-stats-value">--</span>
+            </div>
+            <div class="viewport-lod-stats-row">
+                <span class="viewport-lod-stats-label">Stop</span>
+                <span id="lod-stats-stop" class="viewport-lod-stats-value">--</span>
+            </div>
+            <div class="viewport-lod-stats-row">
+                <span class="viewport-lod-stats-label">Chunks</span>
+                <span id="lod-stats-chunks" class="viewport-lod-stats-value">--</span>
+            </div>
+            <div class="viewport-lod-stats-row">
+                <span class="viewport-lod-stats-label">Cache</span>
+                <span id="lod-stats-cache" class="viewport-lod-stats-value">--</span>
+            </div>
+            <div class="viewport-lod-stats-row">
+                <span class="viewport-lod-stats-label">Selector</span>
+                <span id="lod-stats-selector" class="viewport-lod-stats-value">--</span>
+            </div>
+            <div class="viewport-lod-stats-row">
+                <span class="viewport-lod-stats-label">Pixel</span>
+                <span id="lod-stats-pixel" class="viewport-lod-stats-value">--</span>
+            </div>
+            <div class="viewport-lod-stats-row">
+                <span class="viewport-lod-stats-label">Render</span>
+                <span id="lod-stats-render" class="viewport-lod-stats-value">--</span>
+            </div>
+            <div class="viewport-lod-stats-row">
+                <span class="viewport-lod-stats-label">Foveation</span>
+                <span id="lod-stats-foveation" class="viewport-lod-stats-value">--</span>
+            </div>
+            <div class="viewport-lod-stats-row">
+                <span class="viewport-lod-stats-label">Source</span>
+                <span id="lod-stats-hash" class="viewport-lod-stats-value">--</span>
+            </div>
+        </div>
     </div>
 
     <div id="selection-block" class="viewport-selection-overlay hidden">
@@ -564,11 +556,6 @@
                                step="0.05"
                                data-value="depth_view_near_value"
                                data-attrif-disabled="!depth_view_has_scene" />
-                        <input type="text"
-                               class="number-input viewport-selection-depth-input viewport-depth-input"
-                               id="depth-view-near"
-                               data-value="depth_view_near_str"
-                               data-attrif-disabled="!depth_view_has_scene" />
                     </div>
                     <div class="viewport-transform-axis viewport-selection-depth-axis viewport-depth-axis" data-tooltip="tooltip.depth_view_far">
                         <span class="viewport-transform-axis-label">Far</span>
@@ -580,11 +567,6 @@
                                data-attr-max="depth_view_far_slider_max"
                                step="0.05"
                                data-value="depth_view_far_value"
-                               data-attrif-disabled="!depth_view_has_scene" />
-                        <input type="text"
-                               class="number-input viewport-selection-depth-input viewport-depth-input"
-                               id="depth-view-far"
-                               data-value="depth_view_far_str"
                                data-attrif-disabled="!depth_view_has_scene" />
                     </div>
                 </div>

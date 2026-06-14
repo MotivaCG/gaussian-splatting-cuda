@@ -70,6 +70,7 @@ public:
         VkFormat color_format = VK_FORMAT_UNDEFINED;
         VkFormat depth_stencil_format = VK_FORMAT_UNDEFINED;
         VkExtent2D extent{};
+        bool host_image_copy = false;
     };
 
     bool Initialize(Rml::Vector<const char*> required_extensions, CreateSurfaceCallback create_surface_callback);

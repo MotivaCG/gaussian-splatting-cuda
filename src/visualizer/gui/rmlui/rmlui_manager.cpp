@@ -87,6 +87,7 @@ namespace lfs::vis::gui {
         context.color_format = vulkan_context.swapchainFormat();
         context.depth_stencil_format = vulkan_context.depthStencilFormat();
         context.extent = vulkan_context.swapchainExtent();
+        context.host_image_copy = vulkan_context.hasHostImageCopy();
 
         auto* vulkan_render_interface = render_interface.get();
         if (!vulkan_render_interface->InitializeExternal(context)) {

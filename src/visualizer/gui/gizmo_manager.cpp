@@ -1465,7 +1465,7 @@ namespace lfs::vis::gui {
             return;
 
         cropbox_node = scene_manager->getScene().getNodeById(cropbox_id);
-        if (!cropbox_node || !cropbox_node->visible || !cropbox_node->cropbox)
+        if (!cropbox_node || !cropbox_node->cropbox)
             return;
         if (!scene_manager->getScene().isNodeEffectivelyVisible(cropbox_id))
             return;
@@ -1908,7 +1908,7 @@ namespace lfs::vis::gui {
             return;
 
         ellipsoid_node = scene_manager->getScene().getNodeById(ellipsoid_id);
-        if (!ellipsoid_node || !ellipsoid_node->visible || !ellipsoid_node->ellipsoid)
+        if (!ellipsoid_node || !ellipsoid_node->ellipsoid)
             return;
         if (!scene_manager->getScene().isNodeEffectivelyVisible(ellipsoid_id))
             return;

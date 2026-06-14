@@ -22,6 +22,7 @@
 #include <utility>
 
 #include <SDL3/SDL_vulkan.h>
+#include <cuda_runtime.h>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -70,6 +71,24 @@ namespace lfs::vis {
             if (existing == extensions.end()) {
                 extensions.push_back(extension_name);
             }
+        }
+
+        [[nodiscard]] bool isPreVoltaCudaDevice(const std::array<std::uint8_t, VK_UUID_SIZE>& vk_device_uuid) {
+            int device_count = 0;
+            if (cudaGetDeviceCount(&device_count) != cudaSuccess) {
+                return false;
+            }
+            for (int device = 0; device < device_count; ++device) {
+                cudaDeviceProp props{};
+                if (cudaGetDeviceProperties(&props, device) != cudaSuccess) {
+                    continue;
+                }
+                static_assert(sizeof(props.uuid.bytes) == VK_UUID_SIZE);
+                if (std::memcmp(props.uuid.bytes, vk_device_uuid.data(), VK_UUID_SIZE) == 0) {
+                    return props.major < 7;
+                }
+            }
+            return false;
         }
 
         [[nodiscard]] std::string vulkanApiVersionString(const uint32_t api_version) {
@@ -1401,9 +1420,13 @@ namespace lfs::vis {
             opt_supported_head = &supported_host_image_copy;
         }
 
+        VkPhysicalDeviceVulkan11Features supported_features11{};
+        supported_features11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+        supported_features11.pNext = &supported_features12;
+
         VkPhysicalDeviceFeatures2 supported_features2{};
         supported_features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-        supported_features2.pNext = &supported_features12;
+        supported_features2.pNext = &supported_features11;
         vkGetPhysicalDeviceFeatures2(physical_device_, &supported_features2);
 
         if (opt_supported_head != nullptr) {
@@ -1519,15 +1542,30 @@ namespace lfs::vis {
 
         VkPhysicalDeviceHostImageCopyFeaturesEXT host_image_copy_features{};
         host_image_copy_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES_EXT;
-        const bool enable_host_image_copy_feature =
+        bool enable_host_image_copy_feature =
             enable_host_image_copy && supported_host_image_copy.hostImageCopy == VK_TRUE;
+        // Pascal drivers advertise hostImageCopy but crash inside
+        // vkTransitionImageLayoutEXT (#1298).
+        if (enable_host_image_copy_feature && isPreVoltaCudaDevice(device_uuid_)) {
+            LOG_INFO("Vulkan: disabling VK_EXT_host_image_copy on pre-Volta GPU (driver bug)");
+            enable_host_image_copy_feature = false;
+        }
         if (enable_host_image_copy_feature) {
             host_image_copy_features.hostImageCopy = VK_TRUE;
             host_image_copy_features.pNext = enabled_chain_head;
             enabled_chain_head = &host_image_copy_features;
         }
 
-        features12.pNext = enabled_chain_head;
+        // 16-bit storage for the fp16 splat raster path (half4 partials,
+        // half-packed staging). Mirrors device support; consumers must check
+        // hasFloat16Storage() and fall back to fp32 shader variants.
+        VkPhysicalDeviceVulkan11Features features11{};
+        features11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+        features11.storageBuffer16BitAccess = supported_features11.storageBuffer16BitAccess;
+        features11.uniformAndStorageBuffer16BitAccess =
+            supported_features11.uniformAndStorageBuffer16BitAccess;
+        features11.pNext = enabled_chain_head;
+        features12.pNext = &features11;
 
         VkPhysicalDeviceFeatures2 features2{};
         features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
@@ -1581,6 +1619,8 @@ namespace lfs::vis {
         external_memory_dedicated_allocation_enabled_ = enable_dedicated_allocation;
         has_push_descriptor_ = enable_push_descriptor;
         has_shader_object_ = enable_shader_object_feature;
+        has_float16_storage_ = features12.shaderFloat16 == VK_TRUE &&
+                               features11.storageBuffer16BitAccess == VK_TRUE;
         has_extended_dynamic_state3_ = enable_eds3_feature;
         has_cooperative_matrix_ = enable_coop_matrix_feature;
         has_host_image_copy_ = enable_host_image_copy_feature;

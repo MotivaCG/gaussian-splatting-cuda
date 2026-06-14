@@ -83,6 +83,7 @@ message(STATUS "Tests: LibTorch ${Torch_VERSION} found for tensor comparison tes
 # Benchmark sources (performance measurement focused)
 set(BENCHMARK_FILES
     benchmark_background_blend.cpp
+    benchmark_rad_io.cpp
     benchmark_grad_alpha_layout.cpp
     benchmark_pipelined_loader.cpp
     benchmark_slice_assignment.cpp
@@ -296,6 +297,14 @@ set(TEST_FILES
     test_vram_profiler_metrics.cpp
 )
 list(APPEND TEST_FILES test_vksplat_input_packer.cpp)
+list(APPEND TEST_FILES test_lod_page_cache.cpp)
+list(APPEND TEST_FILES test_lod_page_dequant.cpp)
+list(APPEND TEST_FILES test_lod_upload_engine.cpp)
+list(APPEND TEST_FILES test_lod_builder_bench.cpp)
+list(APPEND TEST_FILES test_octree_lod.cpp)
+list(APPEND TEST_FILES test_ply_to_rad_lod.cpp)
+list(APPEND TEST_FILES test_rad_gpu_encode.cpp)
+list(APPEND TEST_FILES test_rad_meta_sidecar.cpp)
 
 # Build test sources list
 set(TEST_SOURCES test_main.cpp)

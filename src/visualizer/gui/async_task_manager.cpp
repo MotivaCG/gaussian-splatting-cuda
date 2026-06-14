@@ -742,7 +742,6 @@ namespace lfs::vis::gui {
 
     void AsyncTaskManager::performExport(ExportFormat format, const std::filesystem::path& path,
                                          const std::vector<std::string>& node_names, int sh_degree,
-                                         const std::vector<float>& rad_lod_ratios,
                                          bool rad_flip_y) {
         if (isExporting())
             return;
@@ -785,7 +784,6 @@ namespace lfs::vis::gui {
                          sh_degree,
                          borrow_plan.storage_mode == core::Scene::MergeStorageMode::BorrowSingleIdentity,
                          borrow_plan.model_mutex,
-                         rad_lod_ratios,
                          rad_flip_y);
     }
 
@@ -914,7 +912,6 @@ namespace lfs::vis::gui {
                                             int sh_degree,
                                             bool borrow_single_identity,
                                             std::shared_mutex* model_mutex,
-                                            std::vector<float> rad_lod_ratios,
                                             bool rad_flip_y) {
         if (splats.empty()) {
             LOG_ERROR("No splat data to export");
@@ -944,7 +941,6 @@ namespace lfs::vis::gui {
              sh_degree,
              borrow_single_identity,
              model_mutex,
-             rad_lod_ratios = std::move(rad_lod_ratios),
              rad_flip_y](
                 std::stop_token stop_token) mutable {
                 bool cancellation_logged = false;
@@ -1112,7 +1108,6 @@ namespace lfs::vis::gui {
                             const lfs::io::RadSaveOptions options{
                                 .output_path = path,
                                 .compression_level = 6,
-                                .lod_ratios = rad_lod_ratios,
                                 .flip_y = rad_flip_y,
                                 .progress_callback = update_progress};
                             if (auto result = lfs::io::save_rad(*splat_data, options); result) {

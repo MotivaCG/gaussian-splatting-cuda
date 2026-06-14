@@ -412,10 +412,37 @@ scene-graph,
 .tree-row.drop-target {
     border-width: 1dp;
     border-color: #89b4fa;
+    background-color: rgba(137, 180, 250, 48);
 }
 
-.tree-row:drag {
-    opacity: 0.5;
+.tree-row.dragging {
+    opacity: 0.45;
+}
+
+.tree-drag-ghost {
+    display: none;
+    position: absolute;
+    z-index: 9999;
+    pointer-events: none;
+    padding: 3dp 10dp;
+    background-color: rgba(49, 50, 68, 242);
+    border-width: 1dp;
+    border-color: #89b4fa;
+    border-radius: 4dp;
+    color: #cdd6f4;
+    font-size: 12dp;
+    white-space: nowrap;
+}
+
+.tree-insert-line {
+    display: none;
+    position: absolute;
+    right: 4dp;
+    height: 3dp;
+    background-color: #89b4fa;
+    border-radius: 2dp;
+    z-index: 50;
+    pointer-events: none;
 }
 
 .row-content {

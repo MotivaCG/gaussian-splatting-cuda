@@ -397,9 +397,14 @@ namespace lfs::python {
 
         const size_t gaussian_count = splat->size();
         const int32_t node_id = scene_->addSplat(name, std::move(splat), parent);
+        if (node_id == core::NULL_NODE) {
+            return core::NULL_NODE;
+        }
+        const auto* const added = scene_->getNodeById(node_id);
+        const std::string added_name = added ? added->name : name;
 
         lfs::core::events::state::PLYAdded{
-            .name = name,
+            .name = added_name,
             .node_gaussians = gaussian_count,
             .total_gaussians = scene_->getTotalGaussianCount(),
             .is_visible = true,
@@ -414,7 +419,7 @@ namespace lfs::python {
                 *scene_manager,
                 "Add Splat",
                 std::move(*history_before),
-                vis::op::SceneGraphPatchEntry::captureState(*scene_manager, {name})));
+                vis::op::SceneGraphPatchEntry::captureState(*scene_manager, {added_name})));
         }
 
         return node_id;
@@ -437,6 +442,11 @@ namespace lfs::python {
 
         auto pc = std::make_shared<core::PointCloud>(pts.to(core::Device::CUDA), cols.to(core::Device::CUDA));
         const int32_t node_id = scene_->addPointCloud(name, std::move(pc), parent);
+        if (node_id == core::NULL_NODE) {
+            return core::NULL_NODE;
+        }
+        const auto* const added = scene_->getNodeById(node_id);
+        const std::string added_name = added ? added->name : name;
 
         if (auto* const scene_manager = get_scene_manager()) {
             ensure_scene_manager_content_type(*scene_manager, vis::SceneManager::ContentType::SplatFiles);
@@ -444,7 +454,7 @@ namespace lfs::python {
                 *scene_manager,
                 "Add Point Cloud",
                 std::move(*history_before),
-                vis::op::SceneGraphPatchEntry::captureState(*scene_manager, {name})));
+                vis::op::SceneGraphPatchEntry::captureState(*scene_manager, {added_name})));
         }
 
         return node_id;
@@ -485,16 +495,19 @@ namespace lfs::python {
         }
 
         const int32_t node_id = scene_->addMesh(name, std::move(mesh), parent);
+        if (node_id == core::NULL_NODE) {
+            return core::NULL_NODE;
+        }
 
         if (auto* const scene_manager = get_scene_manager()) {
             ensure_scene_manager_content_type(*scene_manager, vis::SceneManager::ContentType::SplatFiles);
-            if (const auto* node = scene_->getNodeById(node_id)) {
-                vis::op::undoHistory().push(std::make_unique<vis::op::SceneGraphPatchEntry>(
-                    *scene_manager,
-                    "Add Mesh",
-                    std::move(*history_before),
-                    vis::op::SceneGraphPatchEntry::captureState(*scene_manager, {node->name})));
-            }
+            const auto* const added = scene_->getNodeById(node_id);
+            const std::string added_name = added ? added->name : name;
+            vis::op::undoHistory().push(std::make_unique<vis::op::SceneGraphPatchEntry>(
+                *scene_manager,
+                "Add Mesh",
+                std::move(*history_before),
+                vis::op::SceneGraphPatchEntry::captureState(*scene_manager, {added_name})));
         }
 
         return node_id;
@@ -507,13 +520,19 @@ namespace lfs::python {
         }
 
         const int32_t node_id = scene_->addCameraGroup(name, parent, camera_count);
+        if (node_id == core::NULL_NODE) {
+            return core::NULL_NODE;
+        }
+        const auto* const added = scene_->getNodeById(node_id);
+        const std::string added_name = added ? added->name : name;
+
         if (auto* const scene_manager = get_scene_manager()) {
             ensure_scene_manager_content_type(*scene_manager, vis::SceneManager::ContentType::Dataset);
             vis::op::undoHistory().push(std::make_unique<vis::op::SceneGraphPatchEntry>(
                 *scene_manager,
                 "Add Camera Group",
                 std::move(*history_before),
-                vis::op::SceneGraphPatchEntry::captureState(*scene_manager, {name})));
+                vis::op::SceneGraphPatchEntry::captureState(*scene_manager, {added_name})));
         }
         return node_id;
     }
@@ -562,13 +581,19 @@ namespace lfs::python {
         }
 
         const int32_t node_id = scene_->addCamera(name, parent, std::move(camera));
+        if (node_id == core::NULL_NODE) {
+            return core::NULL_NODE;
+        }
+
         if (auto* const scene_manager = get_scene_manager()) {
+            const auto* added = scene_->getNodeById(node_id);
+            const std::string added_name = added ? added->name : name;
             ensure_scene_manager_content_type(*scene_manager, vis::SceneManager::ContentType::Dataset);
             vis::op::undoHistory().push(std::make_unique<vis::op::SceneGraphPatchEntry>(
                 *scene_manager,
                 "Add Camera",
                 std::move(*history_before),
-                vis::op::SceneGraphPatchEntry::captureState(*scene_manager, {name})));
+                vis::op::SceneGraphPatchEntry::captureState(*scene_manager, {added_name})));
         }
         return node_id;
     }
@@ -608,25 +633,11 @@ namespace lfs::python {
         scene_->clear();
     }
 
-    void PyScene::reparent(int32_t node_id, int32_t new_parent_id) {
+    bool PyScene::reparent(int32_t node_id, int32_t new_parent_id) {
         if (auto* const scene_manager = get_scene_manager()) {
-            const auto* node = scene_->getNodeById(node_id);
-            if (!node) {
-                return;
-            }
-
-            std::string new_parent_name;
-            if (new_parent_id != core::NULL_NODE) {
-                const auto* parent = scene_->getNodeById(new_parent_id);
-                if (!parent) {
-                    return;
-                }
-                new_parent_name = parent->name;
-            }
-            scene_manager->reparentNode(node->name, new_parent_name);
-            return;
+            return scene_manager->reparentNode(node_id, new_parent_id);
         }
-        scene_->reparent(node_id, new_parent_id);
+        return scene_->reparent(node_id, new_parent_id);
     }
 
     std::optional<PySceneNode> PyScene::get_node_by_id(int32_t id) {
@@ -1280,7 +1291,7 @@ Returns:
             // Hierarchy
             .def("reparent", &PyScene::reparent,
                  nb::arg("node_id"), nb::arg("new_parent_id"),
-                 "Move a node under a new parent")
+                 "Move a node under a new parent, returns true on success")
             .def("root_nodes", &PyScene::root_nodes,
                  "Get all root-level nodes")
             // Queries

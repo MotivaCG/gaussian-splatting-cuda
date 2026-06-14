@@ -82,6 +82,9 @@ namespace lfs::vis {
 
         // Create rendering manager with initial antialiasing setting
         rendering_manager_ = std::make_unique<RenderingManager>();
+        rendering_manager_->setWakeCallback([this] {
+            wakeMainLoop();
+        });
 
         // Set initial antialiasing
         RenderSettings initial_settings;
@@ -530,24 +533,16 @@ namespace lfs::vis {
         callback_cleanup_.add([] { python::set_scene_manager(nullptr); });
 
         python::set_export_callback([](int format, const char* path, const char** node_names,
-                                       int node_count, int sh_degree, const float* rad_lod_ratios,
-                                       int rad_lod_count, bool rad_flip_y) {
+                                       int node_count, int sh_degree, bool rad_flip_y) {
             if (auto* gm = python::get_gui_manager()) {
                 std::vector<std::string> names;
                 names.reserve(node_count);
                 for (int i = 0; i < node_count; ++i) {
                     names.emplace_back(node_names[i]);
                 }
-                std::vector<float> lod_ratios;
-                if (rad_lod_ratios && rad_lod_count > 0) {
-                    lod_ratios.reserve(rad_lod_count);
-                    for (int i = 0; i < rad_lod_count; ++i) {
-                        lod_ratios.push_back(rad_lod_ratios[i]);
-                    }
-                }
                 gm->asyncTasks().performExport(static_cast<lfs::core::ExportFormat>(format),
                                                lfs::core::utf8_to_path(path), names, sh_degree,
-                                               lod_ratios, rad_flip_y);
+                                               rad_flip_y);
             }
         });
         callback_cleanup_.add([] { python::set_export_callback(nullptr); });
@@ -632,8 +627,7 @@ namespace lfs::vis {
                 return;
             }
 
-            viewport_.camera.R = *rotation;
-            viewport_.camera.t = eye;
+            viewport_.setViewMatrix(*rotation, eye);
             viewport_.camera.setPivot(target);
 
             if (rendering_manager_)
@@ -657,8 +651,7 @@ namespace lfs::vis {
             }
 
             Viewport& vp = rendering_manager_->resolvePanelViewport(viewport_, panel);
-            vp.camera.R = *rotation;
-            vp.camera.t = eye;
+            vp.setViewMatrix(*rotation, eye);
             vp.camera.setPivot(target);
 
             rendering_manager_->markDirty(DirtyFlag::CAMERA);
@@ -959,6 +952,14 @@ namespace lfs::vis {
         // Asset Manager save event handler
         cmd::SaveAsset::when([this](const auto& cmd) {
             python::invoke_save_asset(cmd.node_name);
+        });
+
+        cmd::SaveAssetById::when([this](const auto& cmd) {
+            if (!scene_manager_)
+                return;
+            const auto* node = scene_manager_->getScene().getNodeById(static_cast<core::NodeId>(cmd.node_id));
+            if (node)
+                python::invoke_save_asset(node->name);
         });
     }
 

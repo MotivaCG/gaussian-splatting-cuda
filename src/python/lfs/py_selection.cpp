@@ -456,7 +456,12 @@ namespace lfs::python {
                     view_info->translation[2]);
 
                 const glm::vec3 world_pos = vp.unprojectPixel(
-                    local_x, local_y, depth, rm->getFocalLengthMm());
+                    local_x,
+                    local_y,
+                    depth,
+                    rm->getFocalLengthMm(),
+                    view_info->orthographic,
+                    view_info->ortho_scale);
 
                 constexpr float INVALID = -1e10f;
                 if (world_pos.x <= INVALID)

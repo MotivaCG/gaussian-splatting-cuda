@@ -98,6 +98,14 @@ struct VulkanGSPipelineBuffers {
     Buffer<float> scaling_raw; // (N, 3), log-scale
     Buffer<float> opacity_raw; // (N, 1), logits
 
+    // Canonical quantized LOD pool (lod_pool_quant.hpp). When quant_pool is
+    // set, sh0/shN/rotations/scaling_raw/opacity_raw hold the packed formats
+    // (f16 / s8 slots) and projection uses the *_quant pipeline with the
+    // per-page dequant frames bound last.
+    Buffer<float> page_frames; // (pages, 16) floats
+    bool quant_pool = false;
+    uint32_t pool_page_splats = 0;
+
     // projection outputs
     Buffer<int32_t> tiles_touched;    // (N,)
     Buffer<int64_t> rect_tile_space;  // (N,)
@@ -121,6 +129,23 @@ struct VulkanGSPipelineBuffers {
     Buffer<int32_t> visible_prefix;              // (N,) inclusive scan of visible_flags
     Buffer<uint32_t> visible_count;              // (1,) visible primitive count
     Buffer<uint32_t> visible_sort_dispatch_args; // VkDispatchIndirectCommand for visible primitive radix sort
+
+    // HiGS viewer chain: position-only cull prepass emits a compact survivor
+    // list; the survivor projection writes all per-splat outputs at
+    // wave-appended compact slots, so sorted ids ARE slots and orig_ids maps a
+    // slot back to its model splat index for selection masks.
+    Buffer<int32_t> survivors;           // (N,) surviving render indices
+    Buffer<uint32_t> survivor_state;     // [0]=count, [1..3]=survivor projection dispatch args
+    Buffer<uint32_t> visible_emit_count; // [0]=compact-slot appends (unclamped, for overflow detection)
+    Buffer<int32_t> orig_ids;            // (visible,) model splat index per compact slot
+    Buffer<int32_t> cumsum_counts;       // [4] indirect cumsum element counts per level
+    Buffer<uint32_t> visible_dispatch;   // [12] radix / 64-thread / cumsum L0 / cumsum L1 args
+
+    // HiGS macro raster: half4 partials per (pool batch, render tile, pixel),
+    // per-batch active-tile mask, and per-wave raster+compose indirect args.
+    Buffer<uint16_t> macro_partials;    // (pool_batches, 32, 256, 4) halfs
+    Buffer<uint32_t> macro_active_mask; // (total batches,)
+    Buffer<uint32_t> macro_wave_args;   // [2 * HIGS_RASTER_MAX_WAVES * 3]
 
     // tiles
     Buffer<int32_t> index_buffer_offset;       // N
@@ -158,6 +183,26 @@ struct VulkanGSPipelineBuffers {
     // Driven by the deferred (1-frame-stale) num_indices readback so generate_keys
     // can size buffers without a synchronous cumsum readback.
     size_t num_indices_high_water = 0;
+
+    // LOD index indirection buffer
+    Buffer<uint32_t> lod_indices;             // [M] selected physical splat indices
+    Buffer<uint32_t> lod_logical_indices;     // [M] selected logical/model splat indices
+    Buffer<uint32_t> lod_levels;              // [M] selected splat LOD levels
+    Buffer<float> lod_weights;                // [M] selected splat transition opacity weights
+    Buffer<uint32_t> lod_gpu_indices;         // [M] GPU-produced physical splat indices
+    Buffer<uint32_t> lod_gpu_logical_indices; // [M] GPU-produced logical/model splat indices
+    Buffer<float> lod_gpu_weights;            // [M] GPU-produced transition opacity weights
+    Buffer<uint32_t> lod_gpu_counts;          // [0]=selected, [1]=overflow
+    Buffer<uint32_t> lod_chunk_touch;         // [C] per-chunk traversal priority (0xffffffff = in use)
+    // GPU-compacted chunk_touch (Phase D): counts[4], protected ids, miss pairs.
+    Buffer<uint32_t> lod_compact_counts;
+    Buffer<uint32_t> lod_compact_protected;
+    Buffer<uint32_t> lod_compact_misses;
+    Buffer<uint32_t> lod_gpu_levels; // [M] GPU-produced splat LOD levels
+    bool has_lod_indices = false;
+    bool has_lod_logical_indices = false;
+    bool has_lod_levels = false;
+    bool has_lod_weights = false;
 
     [[nodiscard]] size_t getTotalOwnedAllocSize() const;
     [[nodiscard]] std::map<std::string, size_t> getOwnedVramBreakdown() const;

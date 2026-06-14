@@ -333,8 +333,7 @@ namespace lfs::vis::gui {
 
     void SequencerUIManager::restoreViewportCameraState(const sequencer::CameraState& state) const {
         auto& vp = viewer_->getViewport();
-        vp.camera.R = glm::mat3_cast(state.rotation);
-        vp.camera.t = state.position;
+        vp.setViewMatrix(glm::mat3_cast(state.rotation), state.position);
 
         if (auto* const rm = viewer_->getRenderingManager()) {
             rm->setFocalLength(state.focal_length_mm);
@@ -1094,8 +1093,7 @@ namespace lfs::vis::gui {
             rm->markDirty(DirtyFlag::CAMERA);
             const auto state = controller_.currentCameraState();
             auto& vp = viewer_->getViewport();
-            vp.camera.R = glm::mat3_cast(state.rotation);
-            vp.camera.t = state.position;
+            vp.setViewMatrix(glm::mat3_cast(state.rotation), state.position);
             rm->setFocalLength(state.focal_length_mm);
         }
     }

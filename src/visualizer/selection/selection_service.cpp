@@ -2563,17 +2563,23 @@ namespace lfs::vis {
             return std::nullopt;
         }
 
+        const auto settings = rendering_manager_->getSettings();
         const auto& info = session.viewport_context->info;
         Viewport projection_viewport = *session.viewport_context->viewport;
         projection_viewport.windowSize = {info.render_width, info.render_height};
         const auto render_point = screenToRender(screen_point, info);
-        const float focal_length_mm = rendering_manager_->getFocalLengthMm();
         const float depth = rendering_manager_->getDepthAtPixel(
             static_cast<int>(render_point.x), static_cast<int>(render_point.y), session.viewport_context->panel);
+        const float ortho_scale = projection_viewport.ortho_scale_override.value_or(settings.ortho_scale);
 
         if (depth > 0.0f) {
             const glm::vec3 world = projection_viewport.unprojectPixel(
-                render_point.x, render_point.y, depth, focal_length_mm);
+                render_point.x,
+                render_point.y,
+                depth,
+                settings.focal_length_mm,
+                settings.orthographic,
+                ortho_scale);
             if (Viewport::isValidWorldPosition(world)) {
                 return world;
             }
@@ -2582,7 +2588,13 @@ namespace lfs::vis {
         const float pivot_distance = glm::length(projection_viewport.camera.pivot - projection_viewport.camera.t);
         const float fallback_distance = pivot_distance > 0.1f ? pivot_distance : 10.0f;
         const glm::vec3 fallback_world =
-            projection_viewport.unprojectPixel(render_point.x, render_point.y, fallback_distance, focal_length_mm);
+            projection_viewport.unprojectPixel(
+                render_point.x,
+                render_point.y,
+                fallback_distance,
+                settings.focal_length_mm,
+                settings.orthographic,
+                ortho_scale);
         if (Viewport::isValidWorldPosition(fallback_world)) {
             return fallback_world;
         }
@@ -2602,6 +2614,7 @@ namespace lfs::vis {
         Viewport projection_viewport = *session.viewport_context->viewport;
         projection_viewport.windowSize = {info.render_width, info.render_height};
         const auto settings = rendering_manager_->getSettings();
+        const float ortho_scale = projection_viewport.ortho_scale_override.value_or(settings.ortho_scale);
         const auto projected = rendering::projectWorldPoint(
             projection_viewport.camera.R,
             projection_viewport.camera.t,
@@ -2609,7 +2622,7 @@ namespace lfs::vis {
             world_point,
             settings.focal_length_mm,
             settings.orthographic,
-            settings.ortho_scale);
+            ortho_scale);
         if (!projected) {
             return std::nullopt;
         }

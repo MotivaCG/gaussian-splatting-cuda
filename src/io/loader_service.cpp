@@ -7,15 +7,21 @@
 #include "core/path_utils.hpp"
 #include "core/splat_data.hpp"
 #include "io/error.hpp"
+#include "io/formats/rad.hpp"
 #include "io/loaders/blender_loader.hpp"
 #include "io/loaders/checkpoint_loader.hpp"
 #include "io/loaders/colmap_loader.hpp"
 #include "io/loaders/mesh_loader.hpp"
 #include "io/loaders/ply_loader.hpp"
+#include "io/loaders/rad_loader.hpp"
 #include "io/loaders/sogs_loader.hpp"
 #include "io/loaders/spz_loader.hpp"
 #include "io/loaders/usd_loader.hpp"
+
+#include <algorithm>
+#include <cstdlib>
 #include <format>
+#include <string>
 
 namespace lfs::io {
 
@@ -27,6 +33,7 @@ namespace lfs::io {
         registry_->registerLoader(std::make_unique<SogLoader>());
         registry_->registerLoader(std::make_unique<SpzLoader>());
         registry_->registerLoader(std::make_unique<USDLoader>());
+        registry_->registerLoader(std::make_unique<RadLoader>());
         registry_->registerLoader(std::make_unique<CheckpointLoader>());
         registry_->registerLoader(std::make_unique<ColmapLoader>());
         registry_->registerLoader(std::make_unique<BlenderLoader>());
@@ -44,11 +51,24 @@ namespace lfs::io {
             return tensor.is_external_storage() &&
                    tensor.external_storage_kind() == "vulkan_external_buffer";
         }
+
+        [[nodiscard]] bool pagedRadGpuResidencyRequested(const lfs::core::SplatData& model) {
+            return lfs::io::rad_paged_load_recommended(model);
+        }
     } // namespace
 
     Result<void> migrateSplatTensorsToAllocator(lfs::core::SplatData& model,
                                                 const SplatTensorAllocator& allocator) {
         if (!allocator) {
+            return {};
+        }
+        if (pagedRadGpuResidencyRequested(model)) {
+            model.set_tensor_allocator(allocator);
+            const char* const page_capacity_env = std::getenv("LFS_LOD_PAGE_CAPACITY");
+            LOG_INFO("RAD paged LOD active: skipping full renderer-storage migration "
+                     "(chunks={}, requested_pages={})",
+                     model.lod_tree->chunk_count(),
+                     page_capacity_env != nullptr ? page_capacity_env : "auto");
             return {};
         }
         if (splat_tensor_renderer_ready(model.means_raw()) &&
@@ -64,16 +84,22 @@ namespace lfs::io {
         try {
             const auto copy_to_allocator =
                 [&](const lfs::core::Tensor& source, const std::string_view name) -> lfs::core::Tensor {
-                lfs::core::Tensor source_cuda =
-                    source.device() == lfs::core::Device::CUDA ? source : source.cuda();
-                if (!source_cuda.is_contiguous()) {
-                    source_cuda = source_cuda.contiguous();
-                }
-                const auto& shape = source_cuda.shape();
-                const size_t capacity = shape.rank() > 0 ? shape[0] : source_cuda.numel();
-                lfs::core::Tensor dst = allocator(shape, capacity, source_cuda.dtype(), name);
+                lfs::core::Tensor source_contiguous = source.is_contiguous() ? source : source.contiguous();
+                const auto& shape = source_contiguous.shape();
+                const size_t capacity = shape.rank() > 0 ? shape[0] : source_contiguous.numel();
+                lfs::core::Tensor dst = allocator(shape, capacity, source_contiguous.dtype(), name);
                 dst.set_name(std::string{name});
-                dst.copy_from(source_cuda);
+
+                // Viewer splat tensors are read directly by Vulkan. Match the PLY
+                // loader's known-good host-to-external upload path instead of
+                // relying on CUDA device-to-device copies into imported Vk memory.
+                if (dst.is_external_storage() &&
+                    dst.external_storage_kind() == "vulkan_external_buffer" &&
+                    source_contiguous.device() == lfs::core::Device::CUDA) {
+                    dst.copy_from(source_contiguous.cpu());
+                } else {
+                    dst.copy_from(source_contiguous);
+                }
                 return dst;
             };
 
@@ -99,7 +125,9 @@ namespace lfs::io {
             if (deleted.is_valid()) {
                 migrated.deleted() = std::move(deleted);
             }
+            auto lod_tree = std::move(model.lod_tree);
             model = std::move(migrated);
+            model.lod_tree = std::move(lod_tree);
             model.set_tensor_allocator(allocator);
             lfs::core::Tensor::trim_memory_pool();
         } catch (const std::exception& e) {
@@ -143,7 +171,7 @@ namespace lfs::io {
                 message = std::format(
                     "Cannot open '{}' - unsupported file format.\n\n"
                     "Supported formats:\n"
-                    "  - Gaussian Splat files: .ply, .sog, .spz, .usd, .usda, .usdc, .usdz\n"
+                    "  - Gaussian Splat files: .ply, .sog, .spz, .rad, .usd, .usda, .usdc, .usdz\n"
                     "  - Mesh files: .obj, .fbx, .gltf, .glb, .stl, .dae\n"
                     "  - Training checkpoints: .resume\n"
                     "  - NeRF transforms: .json",

@@ -445,7 +445,7 @@ namespace lfs::python {
         void clear();
 
         // Hierarchy
-        void reparent(int32_t node_id, int32_t new_parent_id);
+        bool reparent(int32_t node_id, int32_t new_parent_id);
         std::vector<int32_t> root_nodes() const { return scene_->getRootNodes(); }
 
         // Queries

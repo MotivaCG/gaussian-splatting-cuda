@@ -184,7 +184,6 @@ namespace lfs::core {
         Scene(Scene&&) = default;
         Scene& operator=(Scene&&) = default;
 
-        void addNode(const std::string& name, std::unique_ptr<lfs::core::SplatData> model);
         void removeNode(const std::string& name, bool keep_children = false);
         [[nodiscard]] std::vector<std::unique_ptr<lfs::core::SplatData>> detachSplatModelsForRemoval(
             const std::string& name,
@@ -196,9 +195,11 @@ namespace lfs::core {
         [[nodiscard]] std::unique_ptr<lfs::core::SplatData> swapNodeModel(
             const std::string& name, std::unique_ptr<lfs::core::SplatData> model);
         void setNodeVisibility(const std::string& name, bool visible);
+        void setNodeVisibility(NodeId id, bool visible);
         void setNodeLocked(const std::string& name, bool locked);
         void setNodeTransform(const std::string& name, const glm::mat4& transform);
         glm::mat4 getNodeTransform(const std::string& name) const;
+        bool renameNode(NodeId id, const std::string& new_name);
         bool renameNode(const std::string& old_name, const std::string& new_name);
         void clear();
         std::pair<std::string, std::string> cycleVisibilityWithNames();
@@ -217,7 +218,8 @@ namespace lfs::core {
         NodeId addKeyframeGroup(const std::string& name, NodeId parent = NULL_NODE);
         NodeId addKeyframe(const std::string& name, NodeId parent, std::unique_ptr<KeyframeData> data);
         void removeKeyframeNodes();
-        void reparent(NodeId node, NodeId new_parent);
+        [[nodiscard]] bool reparent(NodeId node, NodeId new_parent);
+        [[nodiscard]] bool moveNode(NodeId node, NodeId new_parent, int index);
         [[nodiscard]] std::string duplicateNode(const std::string& name);
         [[nodiscard]] std::string mergeGroup(const std::string& group_name);
         [[nodiscard]] const glm::mat4& getWorldTransform(NodeId node) const;
@@ -374,6 +376,7 @@ namespace lfs::core {
         [[nodiscard]] std::vector<std::shared_ptr<lfs::core::Camera>> getActiveCameras() const;
         [[nodiscard]] size_t getActiveCameraCount() const;
         void setCameraTrainingEnabled(const std::string& name, bool enabled);
+        void setCameraTrainingEnabled(NodeId id, bool enabled);
 
         [[nodiscard]] std::unordered_set<int> getTrainingDisabledCameraUids() const;
 
@@ -433,6 +436,7 @@ namespace lfs::core {
         void flushMutations();
         void removeConsolidatedNodeData(NodeId id);
         void rebuildConsolidatedTransformIndices() const;
+        [[nodiscard]] NodeId insertNode(std::unique_ptr<SceneNode> node);
         mutable std::atomic<int> export_pin_count_{0};
         mutable std::shared_ptr<lfs::core::SplatData> cached_combined_;
         mutable std::shared_ptr<lfs::core::Tensor> cached_transform_indices_;
@@ -460,10 +464,10 @@ namespace lfs::core {
 
         void rebuildCacheIfNeeded() const;
         void rebuildModelCacheIfNeeded() const;
+        void rebuildModelCacheIfNeeded(bool include_hidden_splats) const;
         void rebuildTransformCacheIfNeeded() const;
         void updateWorldTransform(const SceneNode& node) const;
         void removeNodeInternal(const std::string& name, bool keep_children, bool force);
-        void setNodeVisibilityById(NodeId id, bool visible);
         [[nodiscard]] size_t currentSelectionCapacity() const;
         void resizeSelectionIfSizeMismatch(size_t expected_size);
 

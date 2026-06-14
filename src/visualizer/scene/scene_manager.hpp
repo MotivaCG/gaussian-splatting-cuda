@@ -121,12 +121,18 @@ namespace lfs::vis {
 
         void removePLY(const std::string& name, bool keep_children = false);
         void setPLYVisibility(const std::string& name, bool visible);
+        void removeNode(core::NodeId id, bool keep_children = false);
+        void setNodeVisibility(core::NodeId id, bool visible);
 
         // Node selection
         void selectNode(const std::string& name);
+        void selectNode(core::NodeId id);
         void selectNodes(const std::vector<std::string>& names);
+        void selectNodesById(const std::vector<core::NodeId>& ids);
         void addToSelection(const std::string& name);
+        void addToSelection(core::NodeId id);
         void removeFromSelection(const std::string& name);
+        void removeFromSelection(core::NodeId id);
         void clearSelection();
         [[nodiscard]] std::string getSelectedNodeName() const;
         [[nodiscard]] std::vector<std::string> getSelectedNodeNames() const;
@@ -217,9 +223,13 @@ namespace lfs::vis {
         SceneInfo getSceneInfo() const;
 
         bool renamePLY(const std::string& old_name, const std::string& new_name);
+        bool renameNode(core::NodeId id, const std::string& new_name);
         void updatePlyPath(const std::string& ply_name, const std::filesystem::path& ply_path);
         bool reparentNode(const std::string& node_name, const std::string& new_parent_name);
+        bool reparentNode(core::NodeId node_id, core::NodeId new_parent_id);
+        bool moveNode(core::NodeId node_id, core::NodeId new_parent_id, int index);
         std::string addGroupNode(const std::string& name, const std::string& parent_name = "");
+        std::string addGroupNode(const std::string& name, core::NodeId parent_id);
         std::string addPlySequenceNode(const std::string& name, const std::string& parent_name = "", size_t frame_count = 0);
 
         // Allocator that backs splat tensors with Vulkan-external interop storage (the
@@ -297,7 +307,9 @@ namespace lfs::vis {
         void handleCropByEllipsoid(const glm::mat4& world_transform, const glm::vec3& radii, bool inverse);
         void handleRenamePly(const lfs::core::events::cmd::RenamePLY& event);
         void handleAddCropBox(const std::string& node_name);
+        void handleAddCropBox(core::NodeId node_id);
         void handleAddCropEllipsoid(const std::string& node_name);
+        void handleAddCropEllipsoid(core::NodeId node_id);
         void handleResetCropBox();
         void handleResetEllipsoid();
         void updateCropBoxToFitScene(bool use_percentile);

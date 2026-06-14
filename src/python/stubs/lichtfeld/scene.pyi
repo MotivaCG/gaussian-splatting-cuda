@@ -519,8 +519,8 @@ class Scene:
     def clear(self) -> None:
         """Remove all nodes from the scene"""
 
-    def reparent(self, node_id: int, new_parent_id: int) -> None:
-        """Move a node under a new parent"""
+    def reparent(self, node_id: int, new_parent_id: int) -> bool:
+        """Move a node under a new parent, returns true on success"""
 
     def root_nodes(self) -> list[int]:
         """Get all root-level nodes"""

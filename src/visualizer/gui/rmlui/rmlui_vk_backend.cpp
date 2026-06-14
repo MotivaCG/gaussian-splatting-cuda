@@ -1640,10 +1640,15 @@ bool RenderInterface_VK::InitializeExternal(const ExternalContext& context) {
     m_p_device = context.device;
     m_p_pipeline_cache = context.pipeline_cache;
 
-    m_pfn_copy_memory_to_image = reinterpret_cast<PFN_vkCopyMemoryToImageEXT>(
-        vkGetDeviceProcAddr(m_p_device, "vkCopyMemoryToImageEXT"));
-    m_pfn_transition_image_layout = reinterpret_cast<PFN_vkTransitionImageLayoutEXT>(
-        vkGetDeviceProcAddr(m_p_device, "vkTransitionImageLayoutEXT"));
+    // On Vulkan 1.4 drivers these core-promoted entry points resolve even when
+    // the hostImageCopy feature was not enabled on the device; calling them then
+    // is UB. Only look them up when the owning context enabled the feature.
+    if (context.host_image_copy) {
+        m_pfn_copy_memory_to_image = reinterpret_cast<PFN_vkCopyMemoryToImageEXT>(
+            vkGetDeviceProcAddr(m_p_device, "vkCopyMemoryToImageEXT"));
+        m_pfn_transition_image_layout = reinterpret_cast<PFN_vkTransitionImageLayoutEXT>(
+            vkGetDeviceProcAddr(m_p_device, "vkTransitionImageLayoutEXT"));
+    }
     m_p_queue_graphics = context.graphics_queue;
     m_p_queue_present = context.graphics_queue;
     m_p_queue_compute = context.graphics_queue;
