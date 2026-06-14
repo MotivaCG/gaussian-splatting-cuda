@@ -137,6 +137,17 @@ namespace lfs::vis {
         std::array<float, 3> depth_filter_max{50.0f, 10000.0f, 100.0f};
         std::array<float, 4> depth_filter_rotation{1.0f, 0.0f, 0.0f, 0.0f};
         std::array<float, 3> depth_filter_translation{0.0f, 0.0f, 0.0f};
+
+        bool lod_enabled = false;
+        bool lod_debug_colors = false;
+        float lod_max_splats = static_cast<float>(DEFAULT_LOD_MAX_SPLATS);
+        float lod_page_pool_splats = static_cast<float>(DEFAULT_LOD_PAGE_POOL_SPLATS);
+        float lod_pool_vram_fraction = DEFAULT_LOD_POOL_VRAM_FRACTION;
+        float lod_fade_frames = static_cast<float>(DEFAULT_LOD_FADE_FRAMES);
+        float lod_render_scale = DEFAULT_LOD_RENDER_SCALE;
+        float lod_cone_foveation = DEFAULT_LOD_CONE_FOVEATION;
+        float lod_cone_inner_degrees = DEFAULT_LOD_CONE_INNER_DEGREES;
+        float lod_cone_outer_degrees = DEFAULT_LOD_CONE_OUTER_DEGREES;
     };
 
     using GetRenderSettingsCallback = std::function<std::optional<RenderSettingsProxy>()>;

@@ -126,11 +126,16 @@ jobs:
             -DBUILD_PYTHON_STUBS=OFF \
             -DLFS_DEV_IMPORT_SOURCE_PYTHON=OFF \
             -DLFS_DEV_IMPORT_SOURCE_RESOURCES=OFF \
-            -DCUDA_DEVICE_DEBUG=OFF
+            -DCUDA_DEVICE_DEBUG=OFF \
+            -DCMAKE_C_FLAGS="-pipe -gz" \
+            -DCMAKE_CXX_FLAGS="-pipe -gz" \
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,--compress-debug-sections=zlib" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--compress-debug-sections=zlib"
 
       - name: Clean vcpkg buildtrees
         run: |
-          rm -rf build/vcpkg_installed/vcpkg/blds
+          rm -rf build/vcpkg_installed/vcpkg/blds build/vcpkg_installed/vcpkg/pkgs
+          rm -rf "$VCPKG_ROOT"/buildtrees "$VCPKG_ROOT"/downloads "$VCPKG_ROOT"/packages
           df -h
 
       - name: Build

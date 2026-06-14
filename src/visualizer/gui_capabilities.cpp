@@ -28,6 +28,7 @@ namespace lfs::vis::cap {
 
     bool isTransformableNodeType(const core::NodeType type) {
         return type == core::NodeType::DATASET ||
+               type == core::NodeType::GROUP ||
                type == core::NodeType::SPLAT ||
                type == core::NodeType::POINTCLOUD ||
                type == core::NodeType::CROPBOX ||
@@ -963,6 +964,8 @@ namespace lfs::vis::cap {
         const core::NodeId cropbox_id = scene.addCropBox(cropbox_name, parent_id);
         if (cropbox_id == core::NULL_NODE)
             return std::unexpected("Failed to create crop box for node: " + parent->name);
+        const auto* const cropbox_node = scene.getNodeById(cropbox_id);
+        const std::string created_cropbox_name = cropbox_node ? cropbox_node->name : cropbox_name;
 
         core::CropBoxData data;
         glm::vec3 min_bounds, max_bounds;
@@ -973,7 +976,7 @@ namespace lfs::vis::cap {
         data.enabled = true;
         scene.setCropBoxData(cropbox_id, data);
 
-        if (const auto* const cropbox_node = scene.getNodeById(cropbox_id)) {
+        if (cropbox_node) {
             core::events::state::PLYAdded{
                 .name = cropbox_node->name,
                 .node_gaussians = 0,
@@ -995,7 +998,7 @@ namespace lfs::vis::cap {
             scene_manager,
             "Add Crop Box",
             std::move(history_before),
-            vis::op::SceneGraphPatchEntry::captureState(scene_manager, {cropbox_name}, history_options)));
+            vis::op::SceneGraphPatchEntry::captureState(scene_manager, {created_cropbox_name}, history_options)));
 
         return cropbox_id;
     }
@@ -1264,6 +1267,8 @@ namespace lfs::vis::cap {
         const core::NodeId ellipsoid_id = scene.addEllipsoid(ellipsoid_name, parent_id);
         if (ellipsoid_id == core::NULL_NODE)
             return std::unexpected("Failed to create ellipsoid for node: " + parent->name);
+        const auto* const ellipsoid_node = scene.getNodeById(ellipsoid_id);
+        const std::string created_ellipsoid_name = ellipsoid_node ? ellipsoid_node->name : ellipsoid_name;
 
         core::EllipsoidData data;
         glm::vec3 min_bounds, max_bounds;
@@ -1271,12 +1276,12 @@ namespace lfs::vis::cap {
             const glm::vec3 center = (min_bounds + max_bounds) * 0.5f;
             const glm::vec3 half_size = (max_bounds - min_bounds) * 0.5f;
             data.radii = half_size * CIRCUMSCRIBE_FACTOR;
-            scene.setNodeTransform(ellipsoid_name, glm::translate(glm::mat4(1.0f), center));
+            scene.setNodeTransform(created_ellipsoid_name, glm::translate(glm::mat4(1.0f), center));
         }
         data.enabled = true;
         scene.setEllipsoidData(ellipsoid_id, data);
 
-        if (const auto* const ellipsoid_node = scene.getNodeById(ellipsoid_id)) {
+        if (ellipsoid_node) {
             core::events::state::PLYAdded{
                 .name = ellipsoid_node->name,
                 .node_gaussians = 0,
@@ -1299,7 +1304,7 @@ namespace lfs::vis::cap {
             scene_manager,
             "Add Ellipsoid",
             std::move(history_before),
-            vis::op::SceneGraphPatchEntry::captureState(scene_manager, {ellipsoid_name}, history_options)));
+            vis::op::SceneGraphPatchEntry::captureState(scene_manager, {created_ellipsoid_name}, history_options)));
         return ellipsoid_id;
     }
 

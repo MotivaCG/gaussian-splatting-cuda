@@ -1037,21 +1037,21 @@ TEST_F(PythonIntegrationTest, DecoratorHookContextUsesLiveHookSnapshot) {
 
     const auto result = runPythonHookContextSnippet(
         R"PY(
-	import lichtfeld as lf
-	records = []
-	
-	@lf.on_post_step
-	def _hook(hook):
-	    ctx = lf.context()
-	    records.append((
-	        hook["iter"],
-	        hook["iteration"],
-	        hook["num_splats"],
-	        hook["num_gaussians"],
-	        ctx.iteration,
-	        ctx.num_gaussians,
-	    ))
-	)PY",
+import lichtfeld as lf
+records = []
+
+@lf.on_post_step
+def _hook(hook):
+    ctx = lf.context()
+    records.append((
+        hook["iter"],
+        hook["iteration"],
+        hook["num_splats"],
+        hook["num_gaussians"],
+        ctx.iteration,
+        ctx.num_gaussians,
+    ))
+)PY",
         stale_snapshot,
         live_callback);
 
@@ -1082,23 +1082,23 @@ TEST_F(PythonIntegrationTest, ScopedHandlerHookContextUsesLiveHookSnapshot) {
 
     const auto result = runPythonHookContextSnippet(
         R"PY(
-	import lichtfeld as lf
-	records = []
-	handler = lf.ScopedHandler()
-	
-	def _hook(hook):
-	    ctx = lf.context()
-	    records.append((
-	        hook["iter"],
-	        hook["iteration"],
-	        hook["num_splats"],
-	        hook["num_gaussians"],
-	        ctx.iteration,
-	        ctx.num_gaussians,
-	    ))
-	
-	handler.on_post_step(_hook)
-	)PY",
+import lichtfeld as lf
+records = []
+handler = lf.ScopedHandler()
+
+def _hook(hook):
+    ctx = lf.context()
+    records.append((
+        hook["iter"],
+        hook["iteration"],
+        hook["num_splats"],
+        hook["num_gaussians"],
+        ctx.iteration,
+        ctx.num_gaussians,
+    ))
+
+handler.on_post_step(_hook)
+)PY",
         stale_snapshot,
         live_callback);
 

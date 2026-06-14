@@ -317,6 +317,12 @@ namespace lfs::core {
                                   USDC,
                                   RAD };
 
+        // PLY -> RAD only: per-bucket LOD tree builder for the out-of-core
+        // converter. BHATT is the quality-validated default; OCTREE trades
+        // unvalidated quality for a much faster parallel build.
+        enum class LodBuilder { BHATT,
+                                OCTREE };
+
         // Parameters for the convert command
         struct LFS_CORE_API ConvertParameters {
             std::filesystem::path input_path;
@@ -325,8 +331,12 @@ namespace lfs::core {
             OutputFormat format = OutputFormat::PLY;
             int sh_degree = 3; // 0-3, -1 = keep original
             int sog_iterations = 10;
-            bool overwrite = false;            // Skip overwrite prompts
-            std::vector<float> rad_lod_levels; // LOD levels for RAD format (as ratios, e.g., 0.5f = 50%)
+            // PLY -> RAD only: replicate the source across an AxB ground-plane
+            // grid instead of pre-tiling the input file.
+            std::uint32_t tiles_x = 1;
+            std::uint32_t tiles_y = 1;
+            LodBuilder lod_builder = LodBuilder::BHATT;
+            bool overwrite = false; // Skip overwrite prompts
         };
 
         // Parameters for the mesh2splat command
@@ -338,7 +348,6 @@ namespace lfs::core {
             Mesh2SplatOptions options;
             int sog_iterations = 10;
             bool overwrite = false;
-            std::vector<float> rad_lod_levels;
         };
 
         // Modern C++23 functions returning expected values

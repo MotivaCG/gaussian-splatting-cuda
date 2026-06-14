@@ -53,11 +53,14 @@ set(CORE_SOURCES
         image_loader.cpp
         cuda_version.cpp
         image_io.cpp
+        mapped_file.cpp
         parameters.cpp
         property_registry.cpp
         reactive_store.cpp
         scene.cpp
         splat_simplify.cpp
+        bhatt_lod.cpp
+        octree_lod.cpp
         splat_data.cpp
         splat_data_mirror.cpp
         splat_data_transform.cpp
@@ -102,7 +105,7 @@ target_link_libraries(lfs_core
         lfs_tensor_kernels
         taywee::args
         OpenImageIO::OpenImageIO
-        $<IF:$<PLATFORM_ID:Windows>,OpenMeshCore,OpenMeshCoreStatic>
+        OpenMeshCore
 )
 
 # OpenMP for tensor multi-threaded operations

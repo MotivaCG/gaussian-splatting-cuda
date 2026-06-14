@@ -616,6 +616,92 @@ namespace lfs::python {
             nb::gil_scoped_release release;
             return future.get();
         }
+
+        [[nodiscard]] std::optional<std::pair<core::Tensor, core::Tensor>> renderViewAndDepthOnViewerThread(
+            const glm::mat3& rotation,
+            const glm::vec3& translation,
+            const int width,
+            const int height,
+            const float fov_degrees,
+            const bool expected_depth) {
+            if (width <= 0 || height <= 0 || !std::isfinite(fov_degrees) || fov_degrees <= 0.0f) {
+                return std::nullopt;
+            }
+            auto* const viewer = get_visualizer();
+            auto* const rendering_manager = viewer ? viewer->getRenderingManager() : nullptr;
+            auto* const scene_manager = viewer ? viewer->getSceneManager() : nullptr;
+            if (!rendering_manager || !scene_manager) {
+                return std::nullopt;
+            }
+            auto rgbd = rendering_manager->renderPreviewImageAndDepth(
+                scene_manager,
+                rotation,
+                translation,
+                lfs::rendering::vFovToFocalLength(fov_degrees),
+                width,
+                height,
+                expected_depth,
+                std::nullopt);
+            if (!rgbd.image || !rgbd.depth || !rgbd.image->is_valid() || !rgbd.depth->is_valid()) {
+                return std::nullopt;
+            }
+            auto image = *rgbd.image;
+            auto depth = *rgbd.depth;
+            if (image.device() != core::Device::CPU) {
+                image = image.cpu();
+            }
+            if (depth.device() != core::Device::CPU) {
+                depth = depth.cpu();
+            }
+            return std::make_pair(image.contiguous(), depth.contiguous());
+        }
+
+        [[nodiscard]] std::optional<std::pair<core::Tensor, core::Tensor>> renderViewAndDepthThreadSafe(
+            const glm::mat3& rotation,
+            const glm::vec3& translation,
+            const int width,
+            const int height,
+            const float fov_degrees,
+            const bool expected_depth) {
+            auto invoke_render = [&]() {
+                return renderViewAndDepthOnViewerThread(rotation, translation, width, height, fov_degrees, expected_depth);
+            };
+
+            auto* const viewer = get_visualizer();
+            if (!viewer || viewer->isOnViewerThread()) {
+                return invoke_render();
+            }
+            if (!viewer->acceptsPostedWork()) {
+                return std::nullopt;
+            }
+
+            auto promise =
+                std::make_shared<std::promise<std::optional<std::pair<core::Tensor, core::Tensor>>>>();
+            auto future = promise->get_future();
+            auto completed = std::make_shared<std::atomic_bool>(false);
+            auto finish =
+                [promise, completed](std::optional<std::pair<core::Tensor, core::Tensor>> result) mutable {
+                    if (!completed->exchange(true)) {
+                        promise->set_value(std::move(result));
+                    }
+                };
+
+            const bool posted = viewer->postWork(vis::Visualizer::WorkItem{
+                .run =
+                    [rotation, translation, width, height, fov_degrees, expected_depth, finish]() mutable {
+                        finish(renderViewAndDepthOnViewerThread(rotation, translation, width, height, fov_degrees, expected_depth));
+                    },
+                .cancel =
+                    [finish]() mutable {
+                        finish(std::nullopt);
+                    }});
+            if (!posted) {
+                return std::nullopt;
+            }
+
+            nb::gil_scoped_release release;
+            return future.get();
+        }
     } // namespace
 
     void set_render_scene_context(core::Scene* scene) {
@@ -820,6 +906,31 @@ namespace lfs::python {
         add_int_enum(&Proxy::camera_metrics_mode, "camera_metrics_mode", "Camera Metrics",
                      "Compute metrics when jumping to a source camera",
                      {{"Off", "OFF", 0}, {"PSNR", "PSNR", 1}, {"PSNR + SSIM", "PSNR_SSIM", 2}}, 0);
+
+        add_bool(&Proxy::lod_enabled, "lod_enabled", "Enable LOD",
+                 "Enable hierarchical level-of-detail rendering", false);
+        add_bool(&Proxy::lod_debug_colors, "lod_debug_colors", "Debug Colors",
+                 "Color splats by their LOD level for debugging", false);
+        add_float(&Proxy::lod_max_splats, "lod_max_splats", "LOD Budget",
+                  "Maximum number of splats in the dynamic LOD cut",
+                  static_cast<double>(vis::DEFAULT_LOD_MAX_SPLATS), 1.0, 10000000.0);
+        add_float(&Proxy::lod_page_pool_splats, "lod_page_pool_splats", "LOD Cache Budget",
+                  "VRAM page-pool budget in splats for streamed RAD scenes (0 = auto)",
+                  static_cast<double>(vis::DEFAULT_LOD_PAGE_POOL_SPLATS), 0.0, 100000000.0);
+        add_float(&Proxy::lod_pool_vram_fraction, "lod_pool_vram_fraction", "LOD Pool VRAM Fraction",
+                  "Share of free VRAM granted to the out-of-core LOD page pool",
+                  static_cast<double>(vis::DEFAULT_LOD_POOL_VRAM_FRACTION), 0.05, 0.9);
+        add_float(&Proxy::lod_fade_frames, "lod_fade_frames", "LOD Fade Frames",
+                  "Frames a newly streamed LOD page fades in over (0 = instant)",
+                  static_cast<double>(vis::DEFAULT_LOD_FADE_FRAMES), 0.0, 240.0);
+        add_float(&Proxy::lod_render_scale, "lod_render_scale", "Render Scale",
+                  "Quality multiplier: effective splat target = LOD Budget x Render Scale", vis::DEFAULT_LOD_RENDER_SCALE, 0.1, 5.0);
+        add_float(&Proxy::lod_cone_foveation, "lod_cone_foveation", "Cone Foveation",
+                  "Peripheral LOD penalty factor (1.0 = no penalty)", vis::DEFAULT_LOD_CONE_FOVEATION, 0.1, 2.0);
+        add_float(&Proxy::lod_cone_inner_degrees, "lod_cone_inner_degrees", "Cone Inner",
+                  "Inner cone angle in degrees (no penalty inside this angle)", vis::DEFAULT_LOD_CONE_INNER_DEGREES, 0.0, 180.0);
+        add_float(&Proxy::lod_cone_outer_degrees, "lod_cone_outer_degrees", "Cone Outer",
+                  "Outer cone angle in degrees (full penalty beyond this angle)", vis::DEFAULT_LOD_CONE_OUTER_DEGREES, 0.0, 180.0);
 
         add_bool(&Proxy::apply_appearance_correction, "apply_appearance_correction", "Appearance Correction",
                  "Enable PPISP appearance correction", false);
@@ -1257,6 +1368,58 @@ namespace lfs::python {
         return PyRenderSettings(std::move(*settings));
     }
 
+    nb::dict get_lod_stats() {
+        nb::dict result;
+        auto* rm = get_rendering_manager();
+        if (!rm) {
+            result["enabled"] = false;
+            result["selected"] = 0;
+            result["budget"] = 0;
+            result["requested_budget"] = 0;
+            result["levels"] = nb::list();
+            return result;
+        }
+        const auto stats = rm->getLodStats();
+        result["enabled"] = stats.enabled && stats.has_tree;
+        result["active"] = stats.active;
+        result["async_ready"] = stats.async_result_ready;
+        result["selected"] = stats.selected_splats;
+        result["budget"] = stats.max_splats;
+        result["requested_budget"] = stats.requested_max_splats;
+        result["budget_repair_limit"] = stats.budget_repair_limit;
+        result["generation"] = stats.generation;
+        result["selection_hash"] = stats.selection_hash;
+        result["model_splats"] = stats.model_splats;
+        result["full_quality_splats"] = stats.full_quality_splats;
+        result["output_size"] = stats.output_size;
+        result["frontier_size"] = stats.frontier_size;
+        result["leaf_count"] = stats.leaf_count;
+        result["budget_limited"] = stats.budget_limited;
+        result["threshold_limited"] = stats.threshold_limited;
+        result["output_limited"] = stats.output_limited;
+        result["budget_fill_active"] = stats.budget_fill_active;
+        result["budget_repair_active"] = stats.budget_repair_active;
+        result["full_quality_reference"] = stats.full_quality_reference;
+        result["transition_active"] = stats.transition_active;
+        result["outside_view_nodes"] = stats.outside_view_nodes;
+        result["behind_view_nodes"] = stats.behind_view_nodes;
+        result["viewport_throttled_nodes"] = stats.viewport_throttled_nodes;
+        result["touched_chunks"] = stats.touched_chunks;
+        result["resident_chunks"] = stats.resident_chunks;
+        result["pixel_scale_limit"] = stats.pixel_scale_limit;
+        result["budget_fill_pixel_scale_limit"] = stats.budget_fill_pixel_scale_limit;
+        result["min_pixel_scale"] = stats.min_pixel_scale;
+        nb::list levels;
+        for (const auto& [level, count] : stats.level_histogram) {
+            nb::dict item;
+            item["level"] = level;
+            item["count"] = count;
+            levels.append(item);
+        }
+        result["levels"] = levels;
+        return result;
+    }
+
 } // namespace lfs::python
 
 namespace {
@@ -1618,9 +1781,37 @@ Returns:
     Dict with path, width, height, channels, format, and transparent.
 )doc");
 
-        m.def("render_view", &render_view, nb::arg("rotation"), nb::arg("translation"), nb::arg("width"), nb::arg("height"),
-              nb::arg("fov") = DEFAULT_FOV, nb::arg("bg_color") = nb::none(),
-              R"doc(
+        m.def(
+            "render_view",
+            [](const PyTensor& rotation, const PyTensor& translation, int width, int height,
+               float fov_degrees, const PyTensor* bg_color, bool with_depth,
+               const std::string& depth_mode) -> nb::object {
+                if (!with_depth) {
+                    auto image = render_view(rotation, translation, width, height, fov_degrees, bg_color);
+                    if (!image) {
+                        return nb::none();
+                    }
+                    return nb::cast(std::move(*image));
+                }
+                const auto rotation_matrix = tensorToVisualizerRotation(rotation);
+                const auto translation_vector = tensorToVisualizerTranslation(translation);
+                if (!rotation_matrix || !translation_vector) {
+                    return nb::none();
+                }
+                const bool expected_depth = depth_mode == "expected";
+                auto rgbd = renderViewAndDepthThreadSafe(
+                    *rotation_matrix, *translation_vector, width, height, fov_degrees, expected_depth);
+                if (!rgbd) {
+                    return nb::none();
+                }
+                return nb::make_tuple(
+                    PyTensor(std::move(rgbd->first), true),
+                    PyTensor(std::move(rgbd->second), true));
+            },
+            nb::arg("rotation"), nb::arg("translation"), nb::arg("width"), nb::arg("height"),
+            nb::arg("fov") = DEFAULT_FOV, nb::arg("bg_color") = nb::none(), nb::arg("with_depth") = false,
+            nb::arg("depth_mode") = std::string("median"),
+            R"doc(
 Render scene from arbitrary camera parameters.
 
 Args:
@@ -1630,9 +1821,14 @@ Args:
     height: Render height in pixels
     fov: Vertical field of view in degrees (default: 60)
     bg_color: Accepted for compatibility; the Vulkan preview path uses current render settings
+    with_depth: If True, also return the per-pixel linear depth from the same render
+    depth_mode: "median" (default) = depth at 50% transmittance (sharp, undefined where
+        coverage < 50%); "expected" = alpha-weighted depth (dense/hole-free, softer at edges)
 
 Returns:
-    CPU Tensor [H, W, 3] RGB image, or None if no active visualizer scene is available
+    with_depth=False: CPU Tensor [H, W, 3] RGB image
+    with_depth=True: tuple (image [H, W, 3], depth [H, W]) of CPU float tensors
+    or None if no active visualizer scene is available
 )doc");
 
         m.def("render_view_u8", &render_view_u8, nb::arg("rotation"), nb::arg("translation"), nb::arg("width"), nb::arg("height"),
@@ -1773,6 +1969,8 @@ Args:
             .def("__dir__", &PyRenderSettings::python_dir);
 
         m.def("get_render_settings", &get_render_settings);
+        m.def("get_lod_stats", &get_lod_stats,
+              "Get LOD statistics: {enabled, selected, budget, levels:[{level, count}, ...]}");
     }
 
 } // namespace lfs::python

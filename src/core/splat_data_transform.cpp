@@ -809,6 +809,12 @@ namespace lfs::core {
             splat_data._opacity.index_select(0, indices).contiguous(),
             splat_data._scene_scale);
         result.set_active_sh_degree(splat_data._active_sh_degree);
+
+        // If the mask keeps every gaussian, preserve the LOD tree unchanged.
+        if (count == static_cast<int>(splat_data.size()) && splat_data.lod_tree) {
+            result.lod_tree = std::make_unique<lfs::core::SplatLodTree>(*splat_data.lod_tree);
+        }
+
         return result;
     }
 

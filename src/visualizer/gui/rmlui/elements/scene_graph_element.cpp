@@ -10,6 +10,7 @@
 #include "core/path_utils.hpp"
 #include "core/tensor.hpp"
 #include "gui/global_context_menu.hpp"
+#include "gui/gui_focus_state.hpp"
 #include "gui/gui_manager.hpp"
 #include "gui/panel_registry.hpp"
 #include "gui/string_keys.hpp"
@@ -500,6 +501,7 @@ namespace lfs::vis::gui {
     void SceneGraphElement::OnResize() { dom_dirty_ = true; }
 
     void SceneGraphElement::OnUpdate() {
+        claimRenameTextInputFocus();
         ensureDom();
         bool rebuilt_tree = false;
         if (tree_rebuild_needed_) {
@@ -530,7 +532,10 @@ namespace lfs::vis::gui {
             return;
 
         const auto type = event.GetType();
-        if (type == "escapecancel") {
+        if (type == "input" || type == "change") {
+            owner->captureRenameBuffer();
+            event.StopPropagation();
+        } else if (type == "escapecancel") {
             owner->cancelRename();
             event.StopPropagation();
         } else if (type == "keydown") {
@@ -555,6 +560,12 @@ namespace lfs::vis::gui {
         AddEventListener("escapecancel", &rename_input_listener_);
         AddEventListener("keydown", &rename_input_listener_, true);
 
+        drag_listener_.owner = this;
+        AddEventListener("dragstart", &drag_listener_);
+        AddEventListener("dragover", &drag_listener_);
+        AddEventListener("dragdrop", &drag_listener_);
+        AddEventListener("dragend", &drag_listener_);
+
         auto content = doc->CreateElement("div");
         content->SetClass("scene-graph-content", true);
         content_el_ = AppendChild(std::move(content));
@@ -571,6 +582,16 @@ namespace lfs::vis::gui {
 
         auto label = doc->CreateElement("span");
         header_label_el_ = header_el_->AppendChild(std::move(label));
+
+        auto insert_line = doc->CreateElement("div");
+        insert_line->SetClass("tree-insert-line", true);
+        insert_line->SetProperty("display", "none");
+        insertion_line_ = content_el_->AppendChild(std::move(insert_line));
+
+        auto ghost = doc->CreateElement("div");
+        ghost->SetClass("tree-drag-ghost", true);
+        ghost->SetProperty("display", "none");
+        drag_ghost_ = content_el_->AppendChild(std::move(ghost));
 
         dom_dirty_ = true;
     }
@@ -630,6 +651,8 @@ namespace lfs::vis::gui {
             auto rename_input = doc->CreateElement("input");
             rename_input->SetAttribute("type", "text");
             rename_input->SetClass("rename-input", true);
+            rename_input->AddEventListener("input", &rename_input_listener_);
+            rename_input->AddEventListener("change", &rename_input_listener_);
             slot.rename_input = slot.content->AppendChild(std::move(rename_input));
 
             auto node_name = doc->CreateElement("span");
@@ -652,7 +675,10 @@ namespace lfs::vis::gui {
         rename_buffer_.clear();
         context_menu_node_id_ = core::NULL_NODE;
         drag_source_id_ = core::NULL_NODE;
-        drop_target_id_ = core::NULL_NODE;
+        drop_into_group_id_ = core::NULL_NODE;
+        drop_parent_id_ = core::NULL_NODE;
+        drop_index_ = -1;
+        drop_valid_ = false;
         pending_reveal_node_id_ = core::NULL_NODE;
         scene_has_nodes_ = false;
         root_count_ = 0;
@@ -670,6 +696,15 @@ namespace lfs::vis::gui {
     void SceneGraphElement::markStateDirty() {
         ++state_revision_;
         dom_dirty_ = true;
+    }
+
+    void SceneGraphElement::claimRenameTextInputFocus() const {
+        if (rename_node_id_ == core::NULL_NODE)
+            return;
+        auto& focus = guiFocusState();
+        focus.want_capture_keyboard = true;
+        focus.want_text_input = true;
+        focus.any_item_active = true;
     }
 
     void SceneGraphElement::captureRenameBuffer() {
@@ -933,8 +968,8 @@ namespace lfs::vis::gui {
             context_menu_node_id_ = core::NULL_NODE;
         if (drag_source_id_ != core::NULL_NODE && !node_snapshots_.contains(drag_source_id_))
             drag_source_id_ = core::NULL_NODE;
-        if (drop_target_id_ != core::NULL_NODE && !node_snapshots_.contains(drop_target_id_))
-            drop_target_id_ = core::NULL_NODE;
+        if (drop_into_group_id_ != core::NULL_NODE && !node_snapshots_.contains(drop_into_group_id_))
+            drop_into_group_id_ = core::NULL_NODE;
     }
 
     bool SceneGraphElement::syncTrainingTopologyLabel(const core::Scene& scene,
@@ -1044,6 +1079,8 @@ namespace lfs::vis::gui {
     }
 
     bool SceneGraphElement::syncFromScene(const PanelDrawContext& ctx) {
+        claimRenameTextInputFocus();
+
         const auto* scene = ctx.scene;
         auto* scene_manager = services().sceneOrNull();
         const bool invert_masks =
@@ -1209,7 +1246,9 @@ namespace lfs::vis::gui {
         setCachedClass(slot.root, "even", absolute_index % 2 == 0);
         setCachedClass(slot.root, "odd", absolute_index % 2 == 1);
         setCachedClass(slot.root, "selected", selected_ids_.contains(row.id));
-        setCachedClass(slot.root, "drop-target", drop_target_id_ == row.id);
+        setCachedClass(slot.root, "drop-target", drop_into_group_id_ == row.id);
+        setCachedClass(slot.root, "dragging",
+                       drag_source_id_ != core::NULL_NODE && drag_source_id_ == row.id);
 
         setCachedAttribute(slot.vis_icon, "data-node-id", row.node_id_text);
         setCachedAttribute(slot.vis_icon, "sprite", row.visible ? "icon-visible" : "icon-hidden");
@@ -1277,6 +1316,7 @@ namespace lfs::vis::gui {
         if (!content_el_)
             return;
 
+        claimRenameTextInputFocus();
         captureRenameBuffer();
         updateHeader();
         updateContentHeight();
@@ -1446,9 +1486,14 @@ namespace lfs::vis::gui {
 
         const std::string next_name = rename_buffer_.empty() ? it->second.name : rename_buffer_;
         if (next_name != it->second.name) {
-            // Emit RenamePLY event to ensure proper handling including source path tracking
-            using namespace lfs::core::events;
-            cmd::RenamePLY{.old_name = it->second.name, .new_name = next_name}.emit();
+            const core::NodeId existing_id = scene->getNodeIdByName(next_name);
+            if (existing_id != core::NULL_NODE && existing_id != rename_node_id_) {
+                rename_focus_pending_ = true;
+                markStateDirty();
+                syncVisibleRows(true);
+                return;
+            }
+            cmd::RenameNodeById{.node_id = static_cast<int32_t>(rename_node_id_), .new_name = next_name}.emit();
         }
 
         rename_node_id_ = core::NULL_NODE;
@@ -1480,9 +1525,12 @@ namespace lfs::vis::gui {
                 it->second.visible = !static_cast<bool>(node->visible);
                 markStateDirty();
             }
-            scene->setNodeVisibility(node->name, !static_cast<bool>(node->visible));
+            cmd::SetNodeVisibilityById{
+                .node_id = static_cast<int32_t>(node_id),
+                .visible = !static_cast<bool>(node->visible)}
+                .emit();
         } else if (action == "delete") {
-            scene_manager->removePLY(node->name, false);
+            cmd::RemoveNodeById{.node_id = static_cast<int32_t>(node_id), .keep_children = false}.emit();
             tree_rebuild_needed_ = true;
             markStateDirty();
         }
@@ -1500,20 +1548,14 @@ namespace lfs::vis::gui {
         if (ctrl) {
             if (selected_ids_.contains(node_id)) {
                 selected_ids_.erase(node_id);
-                std::vector<std::string> names;
-                names.reserve(selected_ids_.size());
-                for (const core::NodeId id : selected_ids_) {
-                    if (const auto it = node_snapshots_.find(id); it != node_snapshots_.end())
-                        names.push_back(it->second.name);
-                }
-                scene_manager->selectNodes(names);
+                scene_manager->selectNodesById(std::vector<core::NodeId>(selected_ids_.begin(), selected_ids_.end()));
             } else {
-                scene_manager->addToSelection(node_snapshots_[node_id].name);
+                scene_manager->addToSelection(node_id);
                 selected_ids_.insert(node_id);
             }
             click_anchor_id_ = node_id;
         } else if (shift && click_anchor_id_ != core::NULL_NODE) {
-            scene_manager->selectNodes(rangeSelectionNames(click_anchor_id_, node_id));
+            scene_manager->selectNodesById(rangeSelectionIds(click_anchor_id_, node_id));
             selected_ids_.clear();
             const auto lo = flat_index_by_id_.find(click_anchor_id_);
             const auto hi = flat_index_by_id_.find(node_id);
@@ -1528,7 +1570,7 @@ namespace lfs::vis::gui {
         } else {
             if (selected_ids_.size() == 1 && selected_ids_.contains(node_id))
                 return;
-            scene_manager->selectNode(node_snapshots_[node_id].name);
+            scene_manager->selectNode(node_id);
             selected_ids_.clear();
             selected_ids_.insert(node_id);
             click_anchor_id_ = node_id;
@@ -1545,7 +1587,7 @@ namespace lfs::vis::gui {
 
         focusTree();
         if (!selected_ids_.contains(node_id)) {
-            scene_manager->selectNode(node_snapshots_[node_id].name);
+            scene_manager->selectNode(node_id);
             selected_ids_.clear();
             selected_ids_.insert(node_id);
             click_anchor_id_ = node_id;
@@ -1575,25 +1617,25 @@ namespace lfs::vis::gui {
         return false;
     }
 
-    std::vector<std::string> SceneGraphElement::rangeSelectionNames(const core::NodeId a,
-                                                                    const core::NodeId b) const {
+    std::vector<core::NodeId> SceneGraphElement::rangeSelectionIds(const core::NodeId a,
+                                                                   const core::NodeId b) const {
         const auto ita = flat_index_by_id_.find(a);
         const auto itb = flat_index_by_id_.find(b);
         if (ita == flat_index_by_id_.end() || itb == flat_index_by_id_.end()) {
-            const auto it = node_snapshots_.find(b);
-            return it != node_snapshots_.end() ? std::vector<std::string>{it->second.name}
-                                               : std::vector<std::string>{};
+            return node_snapshots_.contains(b) ? std::vector<core::NodeId>{b}
+                                               : std::vector<core::NodeId>{};
         }
 
         const size_t lo = std::min(ita->second, itb->second);
         const size_t hi = std::max(ita->second, itb->second);
-        std::vector<std::string> names;
-        names.reserve(hi - lo + 1);
+        std::vector<core::NodeId> ids;
+        ids.reserve(hi - lo + 1);
         for (size_t i = lo; i <= hi; ++i) {
-            if (const auto it = node_snapshots_.find(flat_rows_[i].id); it != node_snapshots_.end())
-                names.push_back(it->second.name);
+            const core::NodeId id = flat_rows_[i].id;
+            if (node_snapshots_.contains(id))
+                ids.push_back(id);
         }
-        return names;
+        return ids;
     }
 
     core::NodeId SceneGraphElement::selectionCursor() const {
@@ -1626,7 +1668,7 @@ namespace lfs::vis::gui {
 
         if (extend) {
             const core::NodeId anchor = click_anchor_id_ != core::NULL_NODE ? click_anchor_id_ : target;
-            scene_manager->selectNodes(rangeSelectionNames(anchor, target));
+            scene_manager->selectNodesById(rangeSelectionIds(anchor, target));
             selected_ids_.clear();
             const auto lo = flat_index_by_id_.find(anchor);
             const auto hi = flat_index_by_id_.find(target);
@@ -1639,7 +1681,7 @@ namespace lfs::vis::gui {
                 selected_ids_.insert(target);
             }
         } else {
-            scene_manager->selectNode(node_snapshots_.at(target).name);
+            scene_manager->selectNode(target);
             selected_ids_.clear();
             selected_ids_.insert(target);
             click_anchor_id_ = target;
@@ -1705,31 +1747,180 @@ namespace lfs::vis::gui {
         syncVisibleRows(true);
     }
 
-    bool SceneGraphElement::setDropTarget(const core::NodeId node_id) {
-        if (drop_target_id_ == node_id)
+    bool SceneGraphElement::isValidDropContainer(const core::NodeId container_id) const {
+        if (drag_source_id_ == core::NULL_NODE)
             return false;
-        drop_target_id_ = node_id;
-        markStateDirty();
+        if (container_id != core::NULL_NODE) {
+            const auto it = node_snapshots_.find(container_id);
+            if (it == node_snapshots_.end() || it->second.type != core::NodeType::GROUP)
+                return false;
+        }
+        core::NodeId walk = container_id;
+        while (walk != core::NULL_NODE) {
+            if (walk == drag_source_id_)
+                return false;
+            const auto it = node_snapshots_.find(walk);
+            if (it == node_snapshots_.end())
+                break;
+            walk = it->second.parent_id;
+        }
         return true;
     }
 
-    std::vector<std::string> SceneGraphElement::deletableSelectedNodeNames() const {
-        std::vector<std::string> names;
-        names.reserve(selected_ids_.size());
+    int SceneGraphElement::siblingIndexOf(const core::NodeId node_id) const {
+        const auto snap_it = node_snapshots_.find(node_id);
+        if (snap_it == node_snapshots_.end())
+            return 0;
+        if (snap_it->second.parent_id == core::NULL_NODE) {
+            const auto it = std::find(root_ids_.begin(), root_ids_.end(), node_id);
+            return it != root_ids_.end() ? static_cast<int>(std::distance(root_ids_.begin(), it)) : 0;
+        }
+        const auto parent_it = node_snapshots_.find(snap_it->second.parent_id);
+        if (parent_it == node_snapshots_.end())
+            return 0;
+        const auto& siblings = parent_it->second.children;
+        const auto it = std::find(siblings.begin(), siblings.end(), node_id);
+        return it != siblings.end() ? static_cast<int>(std::distance(siblings.begin(), it)) : 0;
+    }
+
+    void SceneGraphElement::clearDropState() {
+        drop_parent_id_ = core::NULL_NODE;
+        drop_index_ = -1;
+        drop_valid_ = false;
+        if (drop_into_group_id_ != core::NULL_NODE) {
+            drop_into_group_id_ = core::NULL_NODE;
+            markStateDirty();
+        }
+        if (insertion_line_)
+            setCachedProperty(insertion_line_, "display", "none");
+    }
+
+    void SceneGraphElement::updateDropTarget(RowSlot* const hovered_slot,
+                                             const core::NodeId hovered_id,
+                                             const float mouse_y) {
+        if (drag_source_id_ == core::NULL_NODE || hovered_id == drag_source_id_) {
+            clearDropState();
+            return;
+        }
+
+        core::NodeId parent = core::NULL_NODE;
+        int index = -1;
+        core::NodeId into_group = core::NULL_NODE;
+        bool show_line = false;
+        int line_top_dp = kHeaderHeightDpInt;
+        int line_left_dp = 4;
+
+        if (hovered_id == core::NULL_NODE || !hovered_slot) {
+            show_line = true;
+            line_top_dp = kHeaderHeightDpInt + static_cast<int>(flat_rows_.size()) * kRowHeightDpInt;
+        } else {
+            const auto snap_it = node_snapshots_.find(hovered_id);
+            const auto flat_it = flat_index_by_id_.find(hovered_id);
+            if (snap_it == node_snapshots_.end() || flat_it == flat_index_by_id_.end()) {
+                clearDropState();
+                return;
+            }
+            const size_t fidx = flat_it->second;
+            const int depth = fidx < flat_rows_.size() ? flat_rows_[fidx].depth : 0;
+            const float row_h = kRowHeightDp * currentDpRatio(this);
+            const float top = hovered_slot->root->GetAbsoluteOffset(Rml::BoxArea::Border).y;
+            const float rel = row_h > 0.0f ? (mouse_y - top) / row_h : 0.5f;
+            const bool is_group = snap_it->second.type == core::NodeType::GROUP;
+
+            if (is_group && rel > 0.2f && rel < 0.8f) {
+                into_group = hovered_id;
+                parent = hovered_id;
+            } else {
+                const bool after = rel >= 0.5f;
+                parent = snap_it->second.parent_id;
+                index = siblingIndexOf(hovered_id) + (after ? 1 : 0);
+                show_line = true;
+                line_top_dp = kHeaderHeightDpInt + static_cast<int>(fidx) * kRowHeightDpInt +
+                              (after ? kRowHeightDpInt : 0);
+                line_left_dp = 4 + depth * 16;
+            }
+        }
+
+        const core::NodeId container = into_group != core::NULL_NODE ? into_group : parent;
+        if (!isValidDropContainer(container)) {
+            clearDropState();
+            return;
+        }
+
+        drop_parent_id_ = parent;
+        drop_index_ = index;
+        drop_valid_ = true;
+
+        if (drop_into_group_id_ != into_group) {
+            drop_into_group_id_ = into_group;
+            markStateDirty();
+        }
+
+        if (insertion_line_) {
+            if (show_line) {
+                setCachedProperty(insertion_line_, "display", "block");
+                setCachedProperty(insertion_line_, "top", formatDp(line_top_dp - 1));
+                setCachedProperty(insertion_line_, "left", formatDp(line_left_dp));
+            } else {
+                setCachedProperty(insertion_line_, "display", "none");
+            }
+        }
+    }
+
+    void SceneGraphElement::commitDrop() {
+        if (drop_valid_ && drag_source_id_ != core::NULL_NODE) {
+            cmd::MoveNodeById{
+                .node_id = static_cast<int32_t>(drag_source_id_),
+                .new_parent_id = static_cast<int32_t>(drop_parent_id_),
+                .index = drop_index_}
+                .emit();
+        }
+        drag_source_id_ = core::NULL_NODE;
+        clearDropState();
+        markStateDirty();
+    }
+
+    void SceneGraphElement::showDragGhost(const core::NodeId node_id, const float mouse_x, const float mouse_y) {
+        if (!drag_ghost_ || node_id == core::NULL_NODE)
+            return;
+        const auto it = node_snapshots_.find(node_id);
+        if (it == node_snapshots_.end())
+            return;
+        drag_ghost_->SetInnerRML(encode(it->second.name));
+        drag_ghost_->SetProperty("display", "block");
+        moveDragGhost(mouse_x, mouse_y);
+    }
+
+    void SceneGraphElement::moveDragGhost(const float mouse_x, const float mouse_y) {
+        if (!drag_ghost_ || !content_el_)
+            return;
+        const Rml::Vector2f base = content_el_->GetAbsoluteOffset(Rml::BoxArea::Border);
+        drag_ghost_->SetProperty("left", std::format("{:.0f}px", mouse_x - base.x + 14.0f));
+        drag_ghost_->SetProperty("top", std::format("{:.0f}px", mouse_y - base.y + 10.0f));
+    }
+
+    void SceneGraphElement::hideDragGhost() {
+        if (drag_ghost_)
+            drag_ghost_->SetProperty("display", "none");
+    }
+
+    std::vector<core::NodeId> SceneGraphElement::deletableSelectedNodeIds() const {
+        std::vector<core::NodeId> ids;
+        ids.reserve(selected_ids_.size());
         for (const core::NodeId id : selected_ids_) {
             const auto it = node_snapshots_.find(id);
             if (it != node_snapshots_.end() && it->second.deletable)
-                names.push_back(it->second.name);
+                ids.push_back(id);
         }
-        return names;
+        return ids;
     }
 
     void SceneGraphElement::deleteSelectedNodes() {
         auto* scene_manager = services().sceneOrNull();
         if (!scene_manager)
             return;
-        for (const std::string& name : deletableSelectedNodeNames())
-            scene_manager->removePLY(name, false);
+        for (const core::NodeId id : deletableSelectedNodeIds())
+            cmd::RemoveNodeById{.node_id = static_cast<int32_t>(id), .keep_children = false}.emit();
     }
 
     void SceneGraphElement::toggleChildrenTraining(const core::NodeId group_id, const bool enabled) {
@@ -1743,7 +1934,7 @@ namespace lfs::vis::gui {
         for (const core::NodeId child_id : group->children) {
             const auto* child = scene->getNodeById(child_id);
             if (child && child->type == core::NodeType::CAMERA)
-                scene->setCameraTrainingEnabled(child->name, enabled);
+                scene->setCameraTrainingEnabled(child_id, enabled);
         }
     }
 
@@ -1757,12 +1948,12 @@ namespace lfs::vis::gui {
             if (!node)
                 continue;
             if (node->type == core::NodeType::CAMERA) {
-                scene->setCameraTrainingEnabled(node->name, enabled);
+                scene->setCameraTrainingEnabled(id, enabled);
             } else if (node->type == core::NodeType::CAMERA_GROUP) {
                 for (const core::NodeId child_id : node->children) {
                     const auto* child = scene->getNodeById(child_id);
                     if (child && child->type == core::NodeType::CAMERA)
-                        scene->setCameraTrainingEnabled(child->name, enabled);
+                        scene->setCameraTrainingEnabled(child_id, enabled);
                 }
             }
         }
@@ -1801,7 +1992,7 @@ namespace lfs::vis::gui {
                                            prefixedAction("disable_all_selected_train")));
             }
 
-            const auto deletable = deletableSelectedNodeNames();
+            const auto deletable = deletableSelectedNodeIds();
             if (!deletable.empty()) {
                 items.push_back(makeAction(
                     std::format("{} ({})", tr(string_keys::Scene::DELETE_ITEM), deletable.size()),
@@ -2056,10 +2247,8 @@ namespace lfs::vis::gui {
             }
         } else if ((kind == "enable_train" || kind == "disable_train") && parts.size() >= 2) {
             core::NodeId node_id = core::NULL_NODE;
-            if (parseNodeId(parts[1], node_id)) {
-                if (const auto* node = scene->getNodeById(node_id))
-                    scene->setCameraTrainingEnabled(node->name, kind == "enable_train");
-            }
+            if (parseNodeId(parts[1], node_id))
+                scene->setCameraTrainingEnabled(node_id, kind == "enable_train");
         } else if (kind == "go_to_kf" && parts.size() >= 2) {
             cmd::SequencerGoToKeyframe{.keyframe_index = static_cast<size_t>(std::stoul(parts[1]))}.emit();
         } else if (kind == "update_kf" && parts.size() >= 2) {
@@ -2078,40 +2267,37 @@ namespace lfs::vis::gui {
                 toggleChildrenTraining(group_id, kind == "enable_all_train");
         } else if (kind == "delete" && parts.size() >= 2) {
             core::NodeId node_id = core::NULL_NODE;
-            if (parseNodeId(parts[1], node_id)) {
-                if (const auto* node = scene->getNodeById(node_id))
-                    scene_manager->removePLY(node->name, false);
-            }
+            if (parseNodeId(parts[1], node_id))
+                cmd::RemoveNodeById{.node_id = static_cast<int32_t>(node_id), .keep_children = false}.emit();
         } else if (kind == "rename" && parts.size() >= 2) {
             core::NodeId node_id = core::NULL_NODE;
             if (parseNodeId(parts[1], node_id))
                 beginRename(node_id);
         } else if (kind == "duplicate" && parts.size() >= 2) {
             core::NodeId node_id = core::NULL_NODE;
-            if (parseNodeId(parts[1], node_id)) {
-                if (const auto* node = scene->getNodeById(node_id))
-                    cmd::DuplicateNode{.name = node->name}.emit();
-            }
+            if (parseNodeId(parts[1], node_id))
+                cmd::DuplicateNodeById{.node_id = static_cast<int32_t>(node_id)}.emit();
         } else if (kind == "add_group" && parts.size() >= 2) {
             core::NodeId parent_id = core::NULL_NODE;
-            if (parseNodeId(parts[1], parent_id)) {
-                const std::string parent_name =
-                    parent_id == core::NULL_NODE ? std::string{} : (scene->getNodeById(parent_id) ? scene->getNodeById(parent_id)->name : std::string{});
-                cmd::AddGroup{.name = tr("scene.new_group_name"), .parent_name = parent_name}.emit();
-            }
+            if (parseNodeId(parts[1], parent_id))
+                cmd::AddGroupByParentId{
+                    .name = tr("scene.new_group_name"),
+                    .parent_id = static_cast<int32_t>(parent_id)}
+                    .emit();
         } else if (kind == "merge_group" && parts.size() >= 2) {
             core::NodeId node_id = core::NULL_NODE;
-            if (parseNodeId(parts[1], node_id)) {
-                if (const auto* node = scene->getNodeById(node_id))
-                    cmd::MergeGroup{.name = node->name}.emit();
-            }
+            if (parseNodeId(parts[1], node_id))
+                cmd::MergeGroupById{.node_id = static_cast<int32_t>(node_id)}.emit();
         } else if (kind == "add_ply_root") {
             const auto path = OpenPointCloudFileDialog();
             if (!path.empty()) {
                 cmd::LoadFile{.path = path, .is_dataset = false}.emit();
             }
         } else if (kind == "add_group_root") {
-            cmd::AddGroup{.name = tr("scene.new_group_name"), .parent_name = ""}.emit();
+            cmd::AddGroupByParentId{
+                .name = tr("scene.new_group_name"),
+                .parent_id = static_cast<int32_t>(core::NULL_NODE)}
+                .emit();
         } else if (kind == "export_colmap") {
             auto* gui = services().guiOrNull();
             if (!gui)
@@ -2174,14 +2360,12 @@ namespace lfs::vis::gui {
             core::NodeId node_id = core::NULL_NODE;
             if (!parseNodeId(parts[1], node_id))
                 return;
-            if (const auto* node = scene->getNodeById(node_id)) {
-                if (kind == "add_cropbox")
-                    cmd::AddCropBox{.node_name = node->name}.emit();
-                else if (kind == "add_ellipsoid")
-                    cmd::AddCropEllipsoid{.node_name = node->name}.emit();
-                else
-                    saveNodeToDisk(*scene, node_id);
-            }
+            if (kind == "add_cropbox")
+                cmd::AddCropBoxById{.node_id = static_cast<int32_t>(node_id)}.emit();
+            else if (kind == "add_ellipsoid")
+                cmd::AddCropEllipsoidById{.node_id = static_cast<int32_t>(node_id)}.emit();
+            else if (scene->getNodeById(node_id))
+                saveNodeToDisk(*scene, node_id);
         } else if (kind == "apply_cropbox") {
             cmd::ApplyCropBox{}.emit();
         } else if (kind == "fit_cropbox" && parts.size() >= 2) {
@@ -2211,16 +2395,14 @@ namespace lfs::vis::gui {
             core::NodeId parent_id = core::NULL_NODE;
             if (!parseNodeId(parts[1], node_id) || !parseNodeId(parts[2], parent_id))
                 return;
-            const auto* node = scene->getNodeById(node_id);
-            const auto* parent = parent_id == core::NULL_NODE ? nullptr : scene->getNodeById(parent_id);
-            if (node)
-                cmd::ReparentNode{.node_name = node->name, .new_parent_name = parent ? parent->name : std::string{}}.emit();
+            cmd::ReparentNodeById{
+                .node_id = static_cast<int32_t>(node_id),
+                .new_parent_id = static_cast<int32_t>(parent_id)}
+                .emit();
         } else if (kind == "save_asset" && parts.size() >= 2) {
             core::NodeId node_id = core::NULL_NODE;
-            if (parseNodeId(parts[1], node_id)) {
-                if (const auto* node = scene->getNodeById(node_id))
-                    cmd::SaveAsset{.node_name = node->name}.emit();
-            }
+            if (parseNodeId(parts[1], node_id))
+                cmd::SaveAssetById{.node_id = static_cast<int32_t>(node_id)}.emit();
         }
     }
 
@@ -2345,32 +2527,56 @@ namespace lfs::vis::gui {
         } else if (type == "blur") {
             if (rename_node_id_ != core::NULL_NODE && target->GetTagName() == "input")
                 confirmRename();
-        } else if (type == "dragstart") {
+        }
+    }
+
+    void SceneGraphElement::DragListener::ProcessEvent(Rml::Event& event) {
+        if (owner)
+            owner->handleDragEvent(event);
+    }
+
+    void SceneGraphElement::handleDragEvent(Rml::Event& event) {
+        ensureDom();
+
+        const std::string type = event.GetType();
+        Rml::Element* const target = event.GetTargetElement();
+        if (!target)
+            return;
+
+        if (type == "dragstart") {
             drag_source_id_ = nodeIdFromTarget(target);
-            setDropTarget(core::NULL_NODE);
+            LOG_DEBUG("[scene-graph] dragstart source={}", drag_source_id_);
+            clearDropState();
+            showDragGhost(drag_source_id_,
+                          event.GetParameter("mouse_x", 0.0f),
+                          event.GetParameter("mouse_y", 0.0f));
+            markStateDirty();
         } else if (type == "dragend") {
             drag_source_id_ = core::NULL_NODE;
-            setDropTarget(core::NULL_NODE);
+            clearDropState();
+            hideDragGhost();
+            markStateDirty();
         } else if (type == "dragover") {
-            const core::NodeId target_id = nodeIdFromTarget(target);
-            if (drag_source_id_ != core::NULL_NODE && target_id != drag_source_id_ && target_id != core::NULL_NODE) {
-                setDropTarget(target_id);
-                event.StopPropagation();
+            if (drag_source_id_ != core::NULL_NODE) {
+                moveDragGhost(event.GetParameter("mouse_x", 0.0f),
+                              event.GetParameter("mouse_y", 0.0f));
+                RowSlot* const slot = rowSlotFromTarget(target);
+                const core::NodeId hovered = slot ? slot->bound_id : core::NULL_NODE;
+                updateDropTarget(slot, hovered, event.GetParameter("mouse_y", 0.0f));
             }
         } else if (type == "dragdrop") {
-            const core::NodeId target_id = nodeIdFromTarget(target);
-            auto* scene_manager = services().sceneOrNull();
-            auto* scene = scene_manager ? &scene_manager->getScene() : nullptr;
-            if (scene && drag_source_id_ != core::NULL_NODE && target_id != core::NULL_NODE &&
-                drag_source_id_ != target_id) {
-                const auto* src = scene->getNodeById(drag_source_id_);
-                const auto* dst = scene->getNodeById(target_id);
-                if (src && dst)
-                    cmd::ReparentNode{.node_name = src->name, .new_parent_name = dst->name}.emit();
+            if (services().sceneOrNull() && drag_source_id_ != core::NULL_NODE) {
+                RowSlot* const slot = rowSlotFromTarget(target);
+                const core::NodeId hovered = slot ? slot->bound_id : core::NULL_NODE;
+                updateDropTarget(slot, hovered, event.GetParameter("mouse_y", 0.0f));
+                LOG_DEBUG("[scene-graph] dragdrop source={} hovered={} valid={} parent={} index={}",
+                          drag_source_id_, hovered, drop_valid_, drop_parent_id_, drop_index_);
+                commitDrop();
+            } else {
                 drag_source_id_ = core::NULL_NODE;
-                setDropTarget(core::NULL_NODE);
-                event.StopPropagation();
+                clearDropState();
             }
+            hideDragGhost();
         }
     }
 

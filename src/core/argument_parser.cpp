@@ -195,7 +195,7 @@ namespace {
             ::args::Group mode_group(parser, "MODE SELECTION:");
             ::args::HelpFlag help(mode_group, "help", "Display help menu", {'h', "help"});
             ::args::Flag version(mode_group, "version", "Display version information", {'V', "version"});
-            ::args::ValueFlag<std::string> view_ply(mode_group, "path", "View file(s). Supports splat (.ply, .sog, .spz, .usd, .usda, .usdc, .usdz) and mesh (.obj, .fbx, .gltf, .glb, .stl) formats. If directory, loads all.", {'v', "view"});
+            ::args::ValueFlag<std::string> view_ply(mode_group, "path", "View file(s). Supports splat (.ply, .sog, .spz, .rad, .usd, .usda, .usdc, .usdz) and mesh (.obj, .fbx, .gltf, .glb, .stl) formats. If directory, loads all.", {'v', "view"});
             ::args::ValueFlag<std::string> resume_checkpoint(mode_group, "checkpoint", "Resume training from checkpoint file", {"resume"});
             ::args::CompletionFlag completion(parser, {"complete"});
 
@@ -446,8 +446,8 @@ namespace {
                         return std::unexpected(std::format("Path does not exist: {}", lfs::core::path_to_utf8(view_path)));
                     }
 
-                    constexpr std::array<std::string_view, 12> SUPPORTED_EXTENSIONS = {
-                        ".ply", ".sog", ".spz", ".resume",
+                    constexpr std::array<std::string_view, 13> SUPPORTED_EXTENSIONS = {
+                        ".ply", ".sog", ".spz", ".rad", ".resume",
                         ".obj", ".fbx", ".gltf", ".glb", ".stl", ".dae", ".3ds", ".blend"};
                     const auto is_supported = [&](const std::filesystem::path& p) {
                         auto ext = p.extension().string();
@@ -1093,32 +1093,6 @@ namespace {
         return formats;
     }
 
-    std::expected<std::vector<float>, std::string> parseLodLevels(const std::string& levels_str) {
-        std::vector<float> levels;
-        size_t start = 0;
-        while (start < levels_str.size()) {
-            size_t end = levels_str.find(',', start);
-            if (end == std::string::npos)
-                end = levels_str.size();
-            std::string token = levels_str.substr(start, end - start);
-            const size_t first = token.find_first_not_of(" \t");
-            const size_t last = token.find_last_not_of(" \t");
-            if (first != std::string::npos && last != std::string::npos) {
-                token = token.substr(first, last - first + 1);
-            }
-            if (!token.empty()) {
-                try {
-                    const float percentage = std::stof(token);
-                    levels.push_back(percentage / 100.0f);
-                } catch (...) {
-                    return std::unexpected(std::format("Invalid LOD level value: '{}'", token));
-                }
-            }
-            start = end + 1;
-        }
-        return levels;
-    }
-
     std::expected<lfs::core::args::ParsedArgs, std::string> parseConvertArgs(const int argc, const char* const argv[]) {
         namespace core_args = lfs::core::args;
         namespace param = lfs::core::param;
@@ -1130,7 +1104,8 @@ namespace {
         ::args::ValueFlag<int> sh_degree(parser, "degree", "SH degree [0-3], -1 to keep original (default: -1)", {"sh-degree"});
         ::args::ValueFlag<std::string> format(parser, "format", "Output format: ply, sog, spz, html, usd, usda, usdc, rad", {'f', "format"});
         ::args::ValueFlag<int> sog_iter(parser, "iterations", "K-means iterations for SOG (default: 10)", {"sog-iterations"});
-        ::args::ValueFlag<std::string> lod_levels(parser, "levels", "LOD levels for RAD format as comma-separated percentages (default: 100)", {"lod-levels"});
+        ::args::ValueFlag<std::string> tiles(parser, "AxB", "Replicate a PLY source across an AxB ground-plane grid (RAD output only)", {"tiles"});
+        ::args::ValueFlag<std::string> lod_builder(parser, "builder", "PLY->RAD LOD tree builder: bhatt (default) or octree (hybrid: octree fine levels + similarity-ordered bhatt top, much faster)", {"lod-builder"});
         ::args::Flag overwrite(parser, "overwrite", "Overwrite existing files without prompting", {'y', "overwrite"});
 
         std::vector<std::string> args_vec(argv + 1, argv + argc);
@@ -1166,12 +1141,6 @@ namespace {
             params.output_path = lfs::core::utf8_to_path(::args::get(output));
         if (sog_iter)
             params.sog_iterations = ::args::get(sog_iter);
-        if (lod_levels) {
-            auto levels = parseLodLevels(::args::get(lod_levels));
-            if (!levels)
-                return std::unexpected(levels.error());
-            params.rad_lod_levels = std::move(*levels);
-        }
         params.overwrite = overwrite;
 
         if (format) {
@@ -1185,6 +1154,43 @@ namespace {
                 params.format = *fmt;
             } else {
                 return std::unexpected(std::format("Unknown extension '{}'. Use --format", params.output_path.extension().string()));
+            }
+        }
+
+        if (tiles) {
+            const std::string& spec = ::args::get(tiles);
+            const std::size_t sep = spec.find_first_of("xX");
+            std::uint32_t a = 0;
+            std::uint32_t b = 0;
+            bool ok = sep != std::string::npos && sep > 0 && sep + 1 < spec.size();
+            if (ok) {
+                const auto [pa, ea] = std::from_chars(spec.data(), spec.data() + sep, a);
+                const auto [pb, eb] = std::from_chars(spec.data() + sep + 1, spec.data() + spec.size(), b);
+                ok = ea == std::errc{} && eb == std::errc{} &&
+                     pa == spec.data() + sep && pb == spec.data() + spec.size() &&
+                     a > 0 && b > 0;
+            }
+            if (!ok) {
+                return std::unexpected(std::format("Invalid --tiles '{}'. Use AxB, e.g. 3x2", spec));
+            }
+            if (params.format != param::OutputFormat::RAD) {
+                return std::unexpected("--tiles requires RAD output (--format rad)");
+            }
+            params.tiles_x = a;
+            params.tiles_y = b;
+        }
+
+        if (lod_builder) {
+            const std::string& name = ::args::get(lod_builder);
+            if (name == "bhatt") {
+                params.lod_builder = param::LodBuilder::BHATT;
+            } else if (name == "octree") {
+                params.lod_builder = param::LodBuilder::OCTREE;
+            } else {
+                return std::unexpected(std::format("Invalid --lod-builder '{}'. Use: bhatt, octree", name));
+            }
+            if (params.format != param::OutputFormat::RAD) {
+                return std::unexpected("--lod-builder requires RAD output (--format rad)");
             }
         }
 
@@ -1204,7 +1210,6 @@ namespace {
         ::args::ValueFlag<int> resolution(parser, "pixels", "Mesh2Splat raster resolution target (default: 1024)", {"resolution"});
         ::args::ValueFlag<float> sigma(parser, "scale", "Gaussian scale sigma (default: 0.65)", {"sigma"});
         ::args::ValueFlag<int> sog_iter(parser, "iterations", "K-means iterations for SOG/HTML output (default: 10)", {"sog-iterations"});
-        ::args::ValueFlag<std::string> lod_levels(parser, "levels", "LOD levels for RAD format as comma-separated percentages (default: 100)", {"lod-levels"});
         ::args::Flag overwrite(parser, "overwrite", "Overwrite existing files without prompting", {'y', "overwrite"});
 
         std::vector<std::string> args_vec(argv + 1, argv + argc);
@@ -1245,12 +1250,6 @@ namespace {
             params.options.sigma = ::args::get(sigma);
         if (sog_iter)
             params.sog_iterations = ::args::get(sog_iter);
-        if (lod_levels) {
-            auto levels = parseLodLevels(::args::get(lod_levels));
-            if (!levels)
-                return std::unexpected(levels.error());
-            params.rad_lod_levels = std::move(*levels);
-        }
         params.overwrite = overwrite;
 
         if (params.options.resolution_target < lfs::core::Mesh2SplatOptions::kMinResolution) {

@@ -3096,7 +3096,7 @@ class AssetManagerPanel(Panel):
                         if 'point_cloud' in path_lower or 'initial' in path_lower
                         else "trained_output"
                     )
-                elif path_lower.endswith(('.sog', '.spz')):
+                elif path_lower.endswith(('.sog', '.spz', '.rad')):
                     asset_type = path_lower.split('.')[-1]
                     fallback_role = (
                         "initial_point_cloud"

@@ -87,7 +87,7 @@ protected:
         lfs::vis::services().set(rendering_manager_.get());
         lfs::vis::services().set(scene_manager_.get());
 
-        scene_manager_->getScene().addNode(
+        scene_manager_->getScene().addSplat(
             "test",
             make_test_splat({
                 0.0f,
