@@ -21,7 +21,7 @@ class Viewport {
     class CameraMotion {
     public:
         glm::vec2 prePos;
-        float zoomSpeed = 5.0f;
+        float zoomSpeed = 11.0f;
         float maxZoomSpeed = 100.0f;
         float rotateSpeed = 0.001f;
         float rotateCenterSpeed = 0.002f;
@@ -41,7 +41,7 @@ class Viewport {
         float getMaxWasdSpeed() const { return maxWasdSpeed; }
 
         void increaseZoomSpeed() { zoomSpeed = std::min(zoomSpeed * kSpeedStepFactor, maxZoomSpeed); }
-        void decreaseZoomSpeed() { zoomSpeed = std::max(zoomSpeed / kSpeedStepFactor, 0.1f); }
+        void decreaseZoomSpeed() { zoomSpeed = std::max(zoomSpeed / kSpeedStepFactor, 1.0f); }
         float getZoomSpeed() const { return zoomSpeed; }
         float getMaxZoomSpeed() const { return maxZoomSpeed; }
 
@@ -167,7 +167,11 @@ class Viewport {
         void zoom(float delta, bool carry_pivot = false) {
             const glm::vec3 forward = lfs::rendering::cameraForward(R);
             const float distToPivot = glm::length(pivot - t);
-            const float adaptiveSpeed = zoomSpeed * 0.01f * distToPivot;
+            // zoomSpeed is a 0..100 level (default 11) mapped linearly to the
+            // fraction of the camera-to-pivot distance covered per scroll unit;
+            // level 100 matches the previous fastest setting (full distance).
+            constexpr float kZoomFractionPerLevel = 0.01f;
+            const float adaptiveSpeed = zoomSpeed * kZoomFractionPerLevel * distToPivot;
             const glm::vec3 movement = delta * adaptiveSpeed * forward;
 
             t += movement;

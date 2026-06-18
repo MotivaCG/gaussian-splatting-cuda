@@ -186,6 +186,7 @@ LOCALE_KEYS = {
     "mask_none": "training.options.mask.none",
     "mask_segment": "training.options.mask.segment",
     "mask_ignore": "training.options.mask.ignore",
+    "mask_segment_and_ignore": "training.options.mask.segment_and_ignore",
     "mask_alpha_consistent": "training.options.mask.alpha_consistent",
     "mask_focused_segment": "training.options.mask.focused_segment",
     "depth_loss_pearson": "training.options.depth_loss.pearson",
@@ -561,7 +562,11 @@ class TrainingPanel(Panel):
         )
         model.bind_func(
             "dep_mask_segment",
-            lambda: p() is not None and p().has_params() and p().mask_mode.value == 1,
+            lambda: p() is not None and p().has_params() and (p().mask_mode.value == 1 or p().mask_mode.value == 3),
+        )
+        model.bind_func(
+            "dep_mask_threshold",
+            lambda: p() is not None and p().has_params() and p().mask_mode.value != 3,
         )
         model.bind_func(
             "dep_depth_loss",
@@ -2414,6 +2419,7 @@ class TrainingPanel(Panel):
                 tr("training.options.mask.none"),
                 tr("training.options.mask.segment"),
                 tr("training.options.mask.ignore"),
+                tr("training.options.mask.segment_and_ignore"),
                 tr("training.options.mask.alpha_consistent"),
             ]
             changed, new_idx = layout.combo("##py_mask_mode", mask_idx, mask_mode_items)

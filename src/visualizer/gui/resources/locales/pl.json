@@ -329,7 +329,6 @@
     "tooltip.iterations": "Łączna liczba iteracji treningu",
     "tooltip.max_gaussians": "Maksymalna liczba Gaussowskich",
     "tooltip.sh_degree": "Stopień harmonik sferycznych (0-3)",
-    "tooltip.tile_mode": "Kafelkowe renderowanie dla dużych obrazów",
     "tooltip.steps_scaler": "Skaluj kroki treningowe. Automatycznie obliczane z liczby obrazów (1.0 dla <=300, obrazy/300 dla więcej)",
     "tooltip.bilateral_grid": "Osadzenie wyglądu dla korekcji ekspozycji/koloru",
     "tooltip.sparsity": "Włącz przycinanie dla kompresji modelu",
@@ -437,6 +436,7 @@
     "options.mask.none": "Brak",
     "options.mask.segment": "Segment",
     "options.mask.ignore": "Ignoruj",
+    "options.mask.segment_and_ignore": "Segment + Ignoruj",
     "options.mask.alpha_consistent": "Spojne z alfa",
     "options.bg.color": "Kolor",
     "options.bg.modulation": "Modulacja",
@@ -483,15 +483,11 @@
           "2": "SH drugiego rzędu — lepszy kolor zależny od widoku",
           "3": "SH trzeciego rzędu — najlepsza jakość, najwięcej VRAM"
         },
-        "tile_mode": {
-          "full": "Rasteryzacja w pełnej rozdzielczości",
-          "half": "Rasteryzacja w połowicznej rozdzielczości (~4× szybciej)",
-          "quarter": "Rasteryzacja w ćwierć rozdzielczości (~16× szybciej)"
-        },
         "mask_mode": {
           "none": "Trenuj na całym obrazie, bez maskowania",
           "segment": "Użyj maski segmentacji dla pierwszego planu",
           "ignore": "Ignoruj zamaskowane piksele w stracie",
+          "segment_and_ignore": "Kombinacja Segmentu i Ignorowania",
           "alpha_consistent": "Wymuś spójność alfa z maską"
         },
         "bg_mode": {
@@ -1239,7 +1235,6 @@
     "iterations": "Iterations:",
     "max_gaussians": "Max Gaussians:",
     "sh_degree": "SH Degree:",
-    "tile_mode": "Tile Mode:",
     "steps_scaler": "Steps Scaler:",
     "bilateral_grid": "Bilateral Grid:",
     "mask_mode": "Mask Mode:",

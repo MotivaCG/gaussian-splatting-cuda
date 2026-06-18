@@ -1033,6 +1033,17 @@ namespace lfs::vis {
             });
     }
 
+    void SceneManager::drainGpuForTensorRelease() {
+        if (auto* const gui_mgr = services().guiOrNull()) {
+            gui_mgr->setVulkanSceneImage(nullptr, glm::ivec2(0, 0), false, 0);
+        }
+        if (auto* const window_mgr = services().windowOrNull()) {
+            if (auto* const vulkan_ctx = window_mgr->getVulkanContext()) {
+                (void)vulkan_ctx->deviceWaitIdle();
+            }
+        }
+    }
+
     void SceneManager::resetToEmptyState(const bool trainer_already_cleared) {
         if (!trainer_already_cleared) {
             if (auto* trainer = services().trainerOrNull()) {
@@ -1044,18 +1055,10 @@ namespace lfs::vis {
         selection_.invalidateNodeMask();
         clearAppearanceModel();
         // Scene clear can fire from a synchronous menu callback inside the current
-        // GUI render iteration. Drop the GUI's tensor pointer and drain the GPU
-        // before scene_.clear() frees the backing memory — otherwise this same
-        // iteration's prepareVulkanSceneInterop dispatches a CUDA copy from
-        // freed memory and the device faults asynchronously.
-        if (auto* const gui_mgr = services().guiOrNull()) {
-            gui_mgr->setVulkanSceneImage(nullptr, glm::ivec2(0, 0), false, 0);
-        }
-        if (auto* const window_mgr = services().windowOrNull()) {
-            if (auto* const vulkan_ctx = window_mgr->getVulkanContext()) {
-                (void)vulkan_ctx->deviceWaitIdle();
-            }
-        }
+        // GUI render iteration; drain before scene_.clear() frees the backing memory,
+        // otherwise this same iteration's prepareVulkanSceneInterop dispatches a CUDA
+        // copy from freed memory and the device faults asynchronously.
+        drainGpuForTensorRelease();
         scene_.clear();
         python::set_application_scene(&scene_);
 
@@ -1158,6 +1161,7 @@ namespace lfs::vis {
             names_to_remove.push_back(name);
         }
 
+        drainGpuForTensorRelease();
         if (auto* rendering = services().renderingOrNull()) {
             rendering->releaseSceneModelResources();
         }

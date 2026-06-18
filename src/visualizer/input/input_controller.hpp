@@ -148,8 +148,10 @@ namespace lfs::vis {
 
         void handleGoToCamView(const lfs::core::events::cmd::GoToCamView& event);
         bool handleFocusSelection(Viewport& target_viewport);
-        bool computeWholeSceneBounds(glm::vec3& out_min, glm::vec3& out_max) const;
+        bool computeWholeSceneBounds(glm::vec3& out_min, glm::vec3& out_max,
+                                     bool use_percentile = false) const;
         float sceneExtent();
+        void maybeInitializeDepthViewRange();
 
         // WASD processing with proper frame timing
         void processWASDMovement();
@@ -232,6 +234,10 @@ namespace lfs::vis {
         // speed and pan distance with splat size; 0 means "recompute" (after scene
         // load/clear).
         float scene_extent_ = 0.0f;
+        // One-shot guard: the depth-view range is seeded from the trimmed scene
+        // radius the first frame the extent is known after a load, then left to
+        // the user. Reset on scene load/clear.
+        bool depth_range_initialized_ = false;
         SplitViewPanelId drag_split_panel_ = SplitViewPanelId::Left;
         SplitViewPanelId node_rect_panel_ = SplitViewPanelId::Left;
         int node_rect_button_ = -1;

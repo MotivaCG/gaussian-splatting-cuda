@@ -22,10 +22,11 @@ namespace lfs::core {
     namespace param {
         // Mask mode for attention mask behavior during training
         enum class MaskMode {
-            None,            // No masking applied
-            Segment,         // Soft penalty to enforce alpha→0 in masked areas
-            Ignore,          // Completely ignore masked regions in loss
-            AlphaConsistent, // Enforce exact alpha values from mask
+            None,             // No masking applied
+            Segment,          // Soft penalty to enforce alpha→0 in masked areas
+            Ignore,           // Completely ignore masked regions in loss
+            SegmentAndIgnore, // 3-band mask (0-255): value<128 ignore, 128<=value<=250 segment, value>250 keep
+            AlphaConsistent,   // Enforce exact alpha values from mask
             FocusedSegment   // SMN mode
         };
 
@@ -200,9 +201,6 @@ namespace lfs::core {
             bool random = false;        // Use random initialization instead of SfM
             int init_num_pts = 100'000; // Number of random points to initialize
             float init_extent = 3.0f;   // Extent of random point cloud
-
-            // Tile mode for memory-efficient 3DGUT training (ignored for 3DGS/FastGS)
-            int tile_mode = 1;
 
             // Sparsity optimization parameters
             bool enable_sparsity = false;
