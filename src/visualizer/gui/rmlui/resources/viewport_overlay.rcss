@@ -109,11 +109,11 @@ body {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 22dp;
-    height: 22dp;
-    min-width: 22dp;
-    min-height: 22dp;
-    padding: 2dp;
+    width: 30dp;
+    height: 30dp;
+    min-width: 30dp;
+    min-height: 30dp;
+    padding: 3dp;
     border-width: 1dp;
     border-color: transparent;
     border-radius: 6dp;
@@ -123,8 +123,8 @@ body {
 }
 
 .toolbar-hcenter .icon-btn img {
-    width: 17dp;
-    height: 17dp;
+    width: 20dp;
+    height: 20dp;
 }
 
 .toolbar-layer-primary {
@@ -540,11 +540,11 @@ body {
 #selection-block .viewport-transform-option,
 #selection-block .viewport-transform-action,
 #depth-view-block .viewport-transform-action {
-    width: 22dp;
-    height: 22dp;
-    min-width: 22dp;
-    min-height: 22dp;
-    padding: 2dp;
+    width: 30dp;
+    height: 30dp;
+    min-width: 30dp;
+    min-height: 30dp;
+    padding: 3dp;
 }
 
 #transform-block .viewport-transform-option img,
@@ -552,8 +552,8 @@ body {
 #selection-block .viewport-transform-option img,
 #selection-block .viewport-transform-action img,
 #depth-view-block .viewport-transform-action img {
-    width: 17dp;
-    height: 17dp;
+    width: 20dp;
+    height: 20dp;
 }
 
 .viewport-export-fields {

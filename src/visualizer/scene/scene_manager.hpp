@@ -294,6 +294,12 @@ namespace lfs::vis {
 
     private:
         void resetToEmptyState(bool trainer_already_cleared = false);
+        // Drop the GUI's borrowed scene-image tensor and drain the GPU so no in-flight
+        // Vulkan work references model tensors that are about to be freed. Must run
+        // before releasing splat models, especially when their tensors are backed by
+        // Vulkan-external storage (freeing imported memory under the GPU faults the
+        // device with VK_ERROR_DEVICE_LOST).
+        void drainGpuForTensorRelease();
         void setupEventHandlers();
         void finalizeDatasetSceneLoad(const std::filesystem::path& dataset_path,
                                       const std::filesystem::path& scene_path,

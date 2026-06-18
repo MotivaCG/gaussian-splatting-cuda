@@ -334,7 +334,6 @@
     "tooltip.iterations": "Total training iterations",
     "tooltip.max_gaussians": "Maximum number of Gaussians",
     "tooltip.sh_degree": "Spherical harmonics degree (0-3)",
-    "tooltip.tile_mode": "Use tiled rendering for large images in 3DGUT training.",
     "tooltip.steps_scaler": "Scale training steps. Auto-set from image count (1.0 for <=300 images, images/300 for more)",
     "tooltip.bilateral_grid": "Appearance embedding for exposure/color correction",
     "tooltip.sparsity": "Enable pruning for model compression",
@@ -434,6 +433,7 @@
     "options.mask.none": "None",
     "options.mask.segment": "Segment",
     "options.mask.ignore": "Ignore",
+    "options.mask.segment_and_ignore": "Segment + Ignore",
     "options.mask.alpha_consistent": "Alpha Consistent",
     "options.mask.focused_segment": "Focused Segment",
     "options.depth_loss.pearson": "Pearson Correlation",
@@ -493,15 +493,11 @@
           "2": "Second-order SH — better view-dependent color",
           "3": "Third-order SH — best quality, most VRAM"
         },
-        "tile_mode": {
-          "full": "Full image (1 tile)",
-          "half": "2 tiles (3DGUT only)",
-          "quarter": "4 tiles (3DGUT only)"
-        },
         "mask_mode": {
           "none": "Train on the entire image, no masking",
           "segment": "Use the segmentation mask for foreground",
           "ignore": "Ignore masked pixels in the loss",
+          "segment_and_ignore": "Combination of Segment and Ignore",
           "alpha_consistent": "Enforce alpha consistency with the mask"
         },
         "bg_mode": {
@@ -1266,7 +1262,6 @@
     "iterations": "Iterations:",
     "max_gaussians": "Max Gaussians:",
     "sh_degree": "SH Degree:",
-    "tile_mode": "Tile Mode:",
     "steps_scaler": "Steps Scaler:",
     "bilateral_grid": "Bilateral Grid:",
     "mask_mode": "Mask Mode:",

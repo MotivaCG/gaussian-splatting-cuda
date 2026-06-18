@@ -329,7 +329,6 @@
     "tooltip.iterations": "Gesamte Trainingsiterationen",
     "tooltip.max_gaussians": "Maximale Anzahl Gaussians",
     "tooltip.sh_degree": "Spherical Harmonics Grad (0-3)",
-    "tooltip.tile_mode": "Gekacheltes Rendering für große Bilder",
     "tooltip.steps_scaler": "Trainingsschritte skalieren. Automatisch aus Bildanzahl berechnet (1.0 für <=300 Bilder, Bilder/300 für mehr)",
     "tooltip.bilateral_grid": "Erscheinungsembedding für Belichtungs-/Farbkorrektur",
     "tooltip.sparsity": "Pruning für Modellkompression aktivieren",
@@ -437,6 +436,7 @@
     "options.mask.none": "Keine",
     "options.mask.segment": "Segment",
     "options.mask.ignore": "Ignorieren",
+    "options.mask.segment_and_ignore": "Segment + Ignorieren",
     "options.mask.alpha_consistent": "Alpha-konsistent",
     "options.bg.color": "Farbe",
     "options.bg.modulation": "Modulation",
@@ -483,15 +483,11 @@
           "2": "SH zweiter Ordnung — bessere blickrichtungsabhängige Farbe",
           "3": "SH dritter Ordnung — beste Qualität, höchster VRAM-Verbrauch"
         },
-        "tile_mode": {
-          "full": "Rasterung mit voller Auflösung",
-          "half": "Halbe Auflösung der Rasterung (~4× schneller)",
-          "quarter": "Viertel Auflösung der Rasterung (~16× schneller)"
-        },
         "mask_mode": {
           "none": "Auf dem gesamten Bild trainieren, keine Maskierung",
           "segment": "Segmentierungsmaske für den Vordergrund verwenden",
           "ignore": "Maskierte Pixel im Verlust ignorieren",
+          "segment_and_ignore": "Kombination aus Segmentierung und Ignorieren",
           "alpha_consistent": "Alpha-Konsistenz mit der Maske erzwingen"
         },
         "bg_mode": {
@@ -1239,7 +1235,6 @@
     "iterations": "Iterationen:",
     "max_gaussians": "Max Gaussians:",
     "sh_degree": "SH Grad:",
-    "tile_mode": "Kachel-Modus:",
     "steps_scaler": "Schritte-Skalierer:",
     "bilateral_grid": "Bilaterales Gitter:",
     "mask_mode": "Masken-Modus:",

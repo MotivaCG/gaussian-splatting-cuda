@@ -60,7 +60,7 @@ namespace lfs::core {
 
         // Load mask from disk, process it, and return it (cached)
         Tensor load_and_get_mask(int resize_factor = -1, int max_width = 0,
-                                 bool invert_mask = false, float mask_threshold = 0.5f);
+                                 bool invert_mask = false, float mask_threshold = 0.5f, bool binarize = true);
 
         // Load the attention mask and return a conservative foreground
         Tensor load_and_get_mask_fg_core(int resize_factor = -1, int max_width = 3840,
