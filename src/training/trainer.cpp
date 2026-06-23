@@ -4081,7 +4081,7 @@ namespace lfs::training {
 
                 // FocusedSegment post-backward hook (center penalty, etc.)
                 // Implementation in training/smn/focused_segment_trainer.cpp
-                focused_segment_post_backward(pipelined_mask_, *cam, iter, num_tiles);
+                focused_segment_post_backward(pipelined_mask_, *cam, iter);
 
                 if (params_.optimization.scale_reg > 0.0f) {
                     nvtxRangePush("compute_scale_reg_loss");

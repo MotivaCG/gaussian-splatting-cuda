@@ -48,12 +48,12 @@ namespace lfs::training {
         constexpr bool FOCUSED_ENABLE_DENSIFY_DILATION = true; // dilate the mask before applying it to the densification error map
 
         // Splat-level center penalty (focused_segment_apply_center_penalty).
-        constexpr bool FOCUSED_ENABLE_CENTER_PENALTY         = true; // master switch (skips hook entirely)
+        constexpr bool FOCUSED_ENABLE_CENTER_PENALTY = false;        // master switch (skips hook entirely)
         constexpr bool FOCUSED_ENABLE_CENTER_PENALTY_FG_FILL = true; // push opacity UP inside mask
         constexpr bool FOCUSED_ENABLE_CENTER_PENALTY_BG      = true; // push opacity DOWN outside mask
 
         // Post-training mask-based pruning pipeline.
-        constexpr bool FOCUSED_ENABLE_POST_TRAINING_PRUNE    = true;
+        constexpr bool FOCUSED_ENABLE_POST_TRAINING_PRUNE    = false;// master switch (skips prune entirely)
 
         // Per-pass switches for the post-training prune. Each can be disabled
         // independently to A/B test the impact of that specific pass. Only
@@ -93,7 +93,7 @@ namespace lfs::training {
         /// when some masks are buggy near the silhouette ("this border pixel
         /// is BG" votes from bad masks do not destroy opacity on the rest of
         /// the body). Cost of being generous: low.
-        constexpr int FOCUSED_ALPHA_UP_INSET_PX = 3;
+        constexpr int FOCUSED_ALPHA_UP_INSET_PX = 1;
 
         /// SIGNED. How far from the annotated mask the photometric FG region
         /// reaches. Built as:
@@ -511,8 +511,8 @@ namespace lfs::training {
             return; // skip the time-varying ramp; params stay at CLI-provided values
         }
 
-        constexpr float kNoneEnd = 0.15f; // End of warm-up with masking disabled.
-        constexpr float kBgSpatialRampEnd = 0.25f; // End of BG spatial weighting ramp.
+        constexpr float kNoneEnd = 0.05f; // End of warm-up with masking disabled.
+        constexpr float kBgSpatialRampEnd = 0.0f; // End of BG spatial weighting ramp.
         constexpr float kBgTarget = 0.05f; // Active-phase BG gradient weight (FG focused)
         constexpr float kBgTargetFree = 0.1f; // Free-refinement BG weight - slightly higher
                                                // than kBgTarget to allow gentle BG refinement
@@ -520,8 +520,8 @@ namespace lfs::training {
                                                // fine silhouettes (hair) stay sharp.
         step_params.focused_bg_weight = kBgTarget;
 
-        constexpr float kFgAlphaRampStart = 0.30f; // Start ramping FG alpha pressure up.
-        constexpr float kFgAlphaRampEnd = 0.40f;   // FG alpha pressure reaches full strength.
+        constexpr float kFgAlphaRampStart = 0.0f; // Start ramping FG alpha pressure up.
+        constexpr float kFgAlphaRampEnd = 0.0f;   // FG alpha pressure reaches full strength.
 
         constexpr float kBgAlphaRampStart = 0.50f; // Start ramping BG alpha pressure up.
         constexpr float kBgAlphaRampEnd = 0.60f;   // BG alpha pressure reaches full strength; both FG+BG fully active.
@@ -529,14 +529,14 @@ namespace lfs::training {
         constexpr float kAlphaDecayStart = 0.75f;  // Start relaxing alpha pressure toward residual floors.
         constexpr float kAlphaDecayEnd = 0.85f;    // End of decay; residual floors remain until training ends.
 
-        constexpr float kAlphaPenaltyMult = 0.0066;
+        constexpr float kAlphaPenaltyMult = 0.025;
         constexpr float kFgAlphaFloorValue = 1.0f * kAlphaPenaltyMult; // FG residual alpha penalty after decay.
         constexpr float kBgAlphaFloorValue = 3.0f * kAlphaPenaltyMult; // BG residual alpha penalty after decay.
                                                                        // Prevents BG opacity from creeping back
                                                                        // in concave regions (between legs, armpits)
                                                                        // during the free refinement phase.
 
-        static_assert(kBgSpatialRampEnd < kFgAlphaRampStart, "BG spatial ramp must finish before FG alpha penalty starts");
+        static_assert(kBgSpatialRampEnd <= kFgAlphaRampStart, "BG spatial ramp must finish before FG alpha penalty starts");
         static_assert(kFgAlphaRampEnd <= kBgAlphaRampStart, "FG alpha penalty must reach full before BG joins");
         static_assert(kBgAlphaRampEnd <= kAlphaDecayStart, "Both at full before decay starts");
         
@@ -1027,8 +1027,7 @@ namespace lfs::training {
     void Trainer::focused_segment_post_backward(
         const lfs::core::Tensor& pipelined_mask,
         lfs::core::Camera& cam,
-        int iter,
-        int num_tiles) {
+        int iter) {
 
         if (params_.optimization.mask_mode != lfs::core::param::MaskMode::FocusedSegment)
             return;
@@ -1037,10 +1036,6 @@ namespace lfs::training {
             fs_timings_, lfs::training::smn::FsTimerSlot::PostBackward);
 
         if constexpr (!FOCUSED_ENABLE_CENTER_PENALTY)
-            return;
-
-        // Center penalty only makes sense with full image (single tile)
-        if (num_tiles != 1)
             return;
 
         // Build step_params with schedule applied for this iteration before

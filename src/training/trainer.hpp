@@ -576,8 +576,7 @@ namespace lfs::training {
         void focused_segment_post_backward(
             const lfs::core::Tensor& pipelined_mask,
             lfs::core::Camera& cam,
-            int iter,
-            int num_tiles);
+            int iter);
 
         /// Per-splat opacity penalty based on projected center vs mask.
         /// Directly penalizes gaussians whose center projects outside the mask,
