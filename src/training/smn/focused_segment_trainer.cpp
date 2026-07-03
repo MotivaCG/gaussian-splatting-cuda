@@ -10,8 +10,10 @@
 #include "smn/focused_segment_bg.hpp"
 #include "smn/focused_segment_profiling.hpp"
 #include "smn/mask_pruning.hpp"
+#include "training/kernels/grad_alpha.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -21,40 +23,39 @@ namespace lfs::training {
     namespace {
 
         // =====================================================================
-        // FocusedSegment compile-time feature switches.
+        // FocusedSegment - "reconstruct everything" strategy.
         //
-        // All flags default to true (current production behavior). Setting one
-        // to false compiles out that piece via `if constexpr` or via a zero
-        // multiplier on a weight constant. Grouped so that alpha pressure
-        // inside the mask (transparency penalty) and opacity pressure outside
-        // the mask (opacity penalty) can be toggled independently at BOTH the
-        // pixel level (grad_alpha) and the splat level (center penalty),
-        // giving 4 fully independent knobs.
+        // Training never fights the background:
+        //   - Full-image photometric loss with a spatial weight map (FG = 1.0
+        //     + darkness boost, BG = focused_bg_weight): the real backdrop is
+        //     reconstructed as low-priority "compositing backing". Hair/edge
+        //     pixels are then explained PHYSICALLY - true hair color with
+        //     fractional alpha over the real backdrop via transmittance -
+        //     instead of baking backdrop-tinted splats into the subject.
+        //   - FG-up grad_alpha inside the (eroded) mask: the only mask force.
+        //     It acts in the photometric loss's null space (alpha is
+        //     underdetermined on textureless dark cloth, and bg modulation
+        //     cannot see intra-subject transparency), so a weak push wins
+        //     without fighting evidence. Kills fake transparencies.
+        //   - NO BG-down force of any kind. Every mechanism that fought the
+        //     background during training (BG-down grad_alpha, masked loss,
+        //     synthetic matting, boundary rings) failed the same way: edge
+        //     pixels NEED the backdrop to explain their blend, and the
+        //     optimizer answers its removal with halo splats.
+        //   - Background removal is a per-splat multi-view LABELING problem,
+        //     solved at export time by focused_segment_run_post_training_prune
+        //     (below), outside the optimizer, where nothing can compensate.
         // =====================================================================
 
-        // Time-varying weight schedule. When false the 7-phase ramp is skipped
+        // Time-varying weight schedule. When false the phase ramp is skipped
         // entirely: FocusedSegment is active from iter 0 and weights stay at
         // their CLI-provided values for the whole training.
         constexpr bool FOCUSED_ENABLE_SCHEDULE = true;
 
         // Pixel-level loss shaping (focused_segment_compute_loss).
         constexpr bool FOCUSED_ENABLE_SPATIAL_WEIGHT_MAP = true; // FG=1, BG=focused_bg_weight on grad_image
-        constexpr bool FOCUSED_ENABLE_DARKNESS_BOOST     = true;// GT-luminance darkness boost on FG region
-
-        constexpr bool FOCUSED_ENABLE_GRAD_ALPHA         = true; // master switch
-        constexpr bool FOCUSED_ENABLE_GRAD_ALPHA_FG      = true && FOCUSED_ENABLE_GRAD_ALPHA;  // push FG alpha->1 (force opacity inside; fills holes)
-
-        // BG-down: permanently OFF in the "reconstruct-everything" strategy
-        // (2026-07-03). Every mechanism that fights the background during
-        // training (this one, masked loss, matting, boundary rings) ended in
-        // the same place: edge pixels NEED the real backdrop to explain their
-        // blend, and killing it forces the optimizer to bake backdrop-tinted
-        // halo splats into the subject. The empirically clean quadrant is
-        // FG-up ONLY (user datum: FG-up-only + manual bg deletion = clean
-        // subject). Background removal is a per-splat multi-view LABELING
-        // problem solved at export time, outside the optimizer, where nothing
-        // can compensate.
-        constexpr bool FOCUSED_ENABLE_GRAD_ALPHA_BG      = false && FOCUSED_ENABLE_GRAD_ALPHA; // push BG alpha->0. OFF: it kills the BG splats
+        constexpr bool FOCUSED_ENABLE_DARKNESS_BOOST     = true; // GT-luminance darkness boost on FG region
+        constexpr bool FOCUSED_ENABLE_GRAD_ALPHA_FG      = true; // push FG alpha->1 (fills fake transparencies)
 
         // Convergence diagnostics: every N iters log mean rendered alpha
         // inside/outside the mask. In this strategy FG should approach 1 and
@@ -71,17 +72,10 @@ namespace lfs::training {
         constexpr bool FOCUSED_ENABLE_CENTER_PENALTY_FG_FILL = true; // push opacity UP inside mask
         constexpr bool FOCUSED_ENABLE_CENTER_PENALTY_BG      = true; // push opacity DOWN outside mask
 
-        // Post-training export classification (the "reconstruct-everything"
-        // strategy, 2026-07-03): training keeps the full scene alive (the
-        // backdrop is the compositing backing that prevents halos); at the
-        // end the model is CLASSIFIED subject/background per splat via the
-        // multi-view passes below and the background is dropped. Two PLYs
-        // result: "<name>-full" (saved by this hook BEFORE classification,
-        // nothing is ever lost) and "<name>" (subject only, via the normal
-        // final save). Deletion happens outside the optimizer, after
-        // convergence - nothing can compensate, unlike every training-time
-        // BG-force that ended in halos.
-        constexpr bool FOCUSED_ENABLE_POST_TRAINING_PRUNE    = true; // master switch (skips classification + dual export)
+        // Post-training export classification: at the end of training the
+        // model is classified subject/background per splat via the multi-view
+        // passes below and the background is dropped before the final save.
+        constexpr bool FOCUSED_ENABLE_POST_TRAINING_PRUNE    = true; // master switch (skips classification)
 
         // Per-pass switches for the post-training prune. Each can be disabled
         // independently to A/B test the impact of that specific pass. Only
@@ -151,57 +145,14 @@ namespace lfs::training {
         ///           photo gradient that wants to keep the fuzz. Pairs well
         ///           with negative ALPHA_DOWN_OUTSET for cleanest silhouette
         ///           on over-generous mattings.
-        constexpr int FOCUSED_PHOTO_OUTSET_PX = 0;
+        constexpr int FOCUSED_PHOTO_OUTSET_PX = 3;
 
-        /// SIGNED. How far from the annotated mask the alpha-DOWN zone starts.
-        /// Built as:
-        ///     N > 0  -> BG_strict = NOT dilate(mask,  N)
-        ///     N = 0  -> BG_strict = NOT mask
-        ///     N < 0  -> BG_strict = NOT erode (mask, |N|)
-        /// Consumed by:
-        ///   - per-pixel grad_alpha BG term (pushes alpha -> 0)
-        ///   - center penalty BG push (kills opacity for splats with center
-        ///     clearly in BG)
-        ///
-        /// THIS IS THE ANTI-HALO KNOB.
-        ///
-        ///   N > 0  : alpha-down starts N px OUTSIDE the silhouette. Opens a
-        ///            ring just outside the mask where splats are protected -
-        ///            this is where bright "halo" splats nucleate. Use only
-        ///            when you need to recover fine border features at the
-        ///            cost of some halos.
-        ///
-        ///   N = 0  : alpha-down starts exactly at the silhouette (matches
-        ///            the old trainer_oldmode.cpp). Kills any splat with
-        ///            center outside the matting cut.
-        ///
-        ///   N < 0  : alpha-down extends |N| px INSIDE the silhouette. Kills
-        ///            "fuzz" / halo splats whose center sits in the outer
-        ///            ring of the matting (typical when the matting is over-
-        ///            generous and includes a few px of background around
-        ///            fine hair). The rendered silhouette contracts to
-        ///            roughly (mask - |N|).
-        ///
-        /// Note: very negative values also DILUTE per-pixel BG pressure
-        /// (the global mean_bg_strict grows -> grad_alpha_BG / mean_bg
-        /// shrinks). Keep |N| moderate (0 to 3) for the best tradeoff.
-        ///
-        /// Constraint when negative: |N| must be < FOCUSED_ALPHA_UP_INSET_PX,
-        /// otherwise alpha-up and alpha-down overlap in the same ring and
-        /// their gradients fight each other.
+        /// SIGNED. How far from the annotated mask the BG_strict zone starts
+        /// (positive dilates the mask first, negative erodes). Only consumer
+        /// left is the center penalty's BG push (off by default) - there is
+        /// no per-pixel BG-down force in this strategy. 0 = the annotated
+        /// silhouette itself.
         constexpr int FOCUSED_ALPHA_DOWN_OUTSET_PX = 0;
-
-        // Sanity: when the alpha-down outset is negative it eats INTO the FG
-        // side of the band; if it eats as far as (or past) the alpha-up
-        // inset, the two zones overlap and their gradients pull a single
-        // ring in opposite directions every iteration. Forbid that at
-        // compile time.
-        static_assert(
-            FOCUSED_ALPHA_DOWN_OUTSET_PX >= 0 ||
-                (-FOCUSED_ALPHA_DOWN_OUTSET_PX) < FOCUSED_ALPHA_UP_INSET_PX,
-            "FOCUSED_ALPHA_DOWN_OUTSET_PX is negative AND its magnitude reaches "
-            "the alpha-up zone. Pick |OUTSET| < FOCUSED_ALPHA_UP_INSET_PX so the "
-            "two rings do not overlap.");
 
         // FocusedSegment densification mask dilation radius (in pixels).
         //
@@ -503,23 +454,18 @@ namespace lfs::training {
     // this block to match main's new names.
     // =========================================================================
 
-    // Apply the 7-phase FocusedSegment schedule to a local OptimizationParameters
+    // Apply the FocusedSegment schedule to a local OptimizationParameters
     // copy for the current iteration. Called from both the PPISP and non-PPISP
     // paths in train_step. Mutates step_params in place.
     //
-    // Spatial L1 weighting (FG=1.0, BG=kBgTarget) is always active from Phase 2
-    // onward. Only the alpha penalty is scheduled.
+    //  Progress  | Phase                     | FG alpha-up      | Weight map BG
+    // -----------+---------------------------+------------------+--------------
+    //   0 -  5%  | Unmasked warmup (None)    | none             | 1.0
+    //   5 - 75%  | FocusedSegment active     | full (CLI value) | 0.05
+    //  75 - 85%  | Decay                     | 1 -> 0.025       | 0.05 -> 0.10
+    //  85 - 100% | Free refinement           | floor 0.025      | 0.10
     //
-    //  Progress  | Phase              | Alpha penalty
-    // -----------+--------------------+--------------------------------------
-    //   0 - 15%  | None               | none
-    //  15 - 25%  | BG spatial ramp    | none
-    //  25 - 40%  | Spatial active     | none (growth still active)
-    //  40 - 50%  | FG ramp 0->full    | FG only (fill holes)
-    //  50 - 60%  | FG at full         | FG only (consolidate before BG presses)
-    //  60 - 70%  | FG full + BG ramp  | FG + BG (trim silhouette)
-    //  70 - 85%  | Decay to 0         | both ramp down to 0
-    //  85 - 100% | Free refinement    | none (natural border alpha)
+    // Darkness boost: 0 during warmup, then linear 3.0 -> 1.0 over training.
     void Trainer::focused_segment_apply_schedule(
         lfs::core::param::OptimizationParameters& step_params,
         const float progress) {
@@ -539,88 +485,47 @@ namespace lfs::training {
             return; // skip the time-varying ramp; params stay at CLI-provided values
         }
 
-        constexpr float kNoneEnd = 0.05f; // End of warm-up with masking disabled.
-        constexpr float kBgSpatialRampEnd = 0.0f; // End of BG spatial weighting ramp.
-        constexpr float kBgTarget = 0.05f; // Active-phase BG gradient weight (FG focused)
+        constexpr float kNoneEnd = 0.05f;     // End of warm-up with masking disabled.
+        constexpr float kBgTarget = 0.05f;    // Active-phase weight-map BG weight (FG focused)
         constexpr float kBgTargetFree = 0.1f; // Free-refinement BG weight - slightly higher
-                                               // than kBgTarget to allow gentle BG refinement
-                                               // without reintroducing detail. Kept low to help
-                                               // fine silhouettes (hair) stay sharp.
+                                              // than kBgTarget to allow gentle BG refinement
+                                              // without reintroducing detail. Kept low to help
+                                              // fine silhouettes (hair) stay sharp.
+
+        constexpr float kAlphaDecayStart = 0.75f;    // Start relaxing FG alpha-up toward the floor.
+        constexpr float kAlphaDecayEnd = 0.85f;      // End of decay; floor remains until training ends.
+        constexpr float kFgAlphaFloorValue = 0.025f; // FG residual alpha-up after decay.
+
         step_params.focused_bg_weight = kBgTarget;
 
-        constexpr float kFgAlphaRampStart = 0.0f; // Start ramping FG alpha pressure up.
-        constexpr float kFgAlphaRampEnd = 0.0f;   // FG alpha pressure reaches full strength.
-
-        constexpr float kBgAlphaRampStart = 0.50f; // Start ramping BG alpha pressure up.
-        constexpr float kBgAlphaRampEnd = 0.60f;   // BG alpha pressure reaches full strength; both FG+BG fully active.
-
-        constexpr float kAlphaDecayStart = 0.75f;  // Start relaxing alpha pressure toward residual floors.
-        constexpr float kAlphaDecayEnd = 0.85f;    // End of decay; residual floors remain until training ends.
-
-        constexpr float kAlphaPenaltyMult = 0.025;
-        constexpr float kFgAlphaFloorValue = 1.0f * kAlphaPenaltyMult; // FG residual alpha penalty after decay.
-        constexpr float kBgAlphaFloorValue = 3.0f * kAlphaPenaltyMult; // BG residual alpha penalty after decay.
-                                                                       // Prevents BG opacity from creeping back
-                                                                       // in concave regions (between legs, armpits)
-                                                                       // during the free refinement phase.
-
-        static_assert(kBgSpatialRampEnd <= kFgAlphaRampStart, "BG spatial ramp must finish before FG alpha penalty starts");
-        static_assert(kFgAlphaRampEnd <= kBgAlphaRampStart, "FG alpha penalty must reach full before BG joins");
-        static_assert(kBgAlphaRampEnd <= kAlphaDecayStart, "Both at full before decay starts");
-        
         if (progress < kNoneEnd) {
             step_params.mask_mode = lfs::core::param::MaskMode::None;
             step_params.focused_bg_weight = 1.0f;
-        } else if (progress < kBgSpatialRampEnd) {
-            step_params.mask_opacity_penalty_weight = 0.0f;
-            step_params.mask_opacity_penalty_weight_bg = 0.0f;
-        } else if (progress < kFgAlphaRampStart) {
-            step_params.mask_opacity_penalty_weight = 0.0f;
-            step_params.mask_opacity_penalty_weight_bg = 0.0f;
-        } else if (progress < kFgAlphaRampEnd) {
-            const float t = (progress - kFgAlphaRampStart) / (kFgAlphaRampEnd - kFgAlphaRampStart);
-            step_params.mask_opacity_penalty_weight *= t;
-            step_params.mask_opacity_penalty_weight_bg = 0.0f;
-        } else if (progress < kBgAlphaRampEnd) {
-            const float t_bg = (progress - kBgAlphaRampStart) / (kBgAlphaRampEnd - kBgAlphaRampStart);
-            step_params.mask_opacity_penalty_weight_bg *= std::clamp(t_bg, 0.0f, 1.0f);
         } else if (progress < kAlphaDecayEnd) {
             const float t_decay = std::clamp(
                 (progress - kAlphaDecayStart) / (kAlphaDecayEnd - kAlphaDecayStart),
                 0.0f,
                 1.0f);
-            const float fg_factor = 1.0f + (kFgAlphaFloorValue - 1.0f) * t_decay;
-            const float bg_factor = 1.0f + (kBgAlphaFloorValue - 1.0f) * t_decay;
-            step_params.mask_opacity_penalty_weight *= fg_factor;
-            step_params.mask_opacity_penalty_weight_bg *= bg_factor;
+            step_params.mask_opacity_penalty_weight *= 1.0f + (kFgAlphaFloorValue - 1.0f) * t_decay;
             step_params.focused_bg_weight = kBgTarget * (1.0f - t_decay) + kBgTargetFree * t_decay;
         } else {
             step_params.mask_opacity_penalty_weight *= kFgAlphaFloorValue;
-            step_params.mask_opacity_penalty_weight_bg *= kBgAlphaFloorValue;
             step_params.focused_bg_weight = kBgTargetFree;
         }
 
-        // Darkness boost schedule: 0 during warmup, ramp up to Max while BG spatial ramp
-        // activates, then decay linearly to Min for the rest of training.
+        // Darkness boost: 0 during warmup, then linear Max -> Min over training.
         constexpr float kDarknessBoostMax = 3.0f;
         constexpr float kDarknessBoostMin = 1.0f;
-        if (progress < kNoneEnd) {
-            step_params.darkness_boost = 0.0f;
-        } else if (progress < kBgSpatialRampEnd) {
-            const float t = (progress - kNoneEnd) / (kBgSpatialRampEnd - kNoneEnd);
-            step_params.darkness_boost = kDarknessBoostMax * t;
-        } else {
-            const float t = (progress - kBgSpatialRampEnd) / (1.0f - kBgSpatialRampEnd);
-            step_params.darkness_boost = kDarknessBoostMax - (kDarknessBoostMax - kDarknessBoostMin) * t;
-        }
-
-
+        step_params.darkness_boost = (progress < kNoneEnd)
+                                         ? 0.0f
+                                         : kDarknessBoostMax - (kDarknessBoostMax - kDarknessBoostMin) * progress;
     }
 
     // FocusedSegment photometric loss: full-image L1+SSIM forward (same quality as
     // None mode) with a post-hoc spatial weight map (FG=1.0, BG=focused_bg_weight)
-    // applied to grad_corrected, plus an independent grad_alpha pressure pushing FG
-    // alpha -> 1 and BG alpha -> 0. The scalar loss is rescaled to reflect the
+    // applied to grad_corrected, plus an FG-up grad_alpha pressure pushing FG
+    // alpha -> 1 (there is deliberately no BG-down - see the strategy comment at
+    // the top of this file). The scalar loss is rescaled to reflect the
     // FG-focused weighting so that logged values track FG reconstruction quality.
     //
     // photometric_loss_ is a Trainer member because it holds a persistent
@@ -646,7 +551,6 @@ namespace lfs::training {
 
         const float kBgWeight = opt_params.focused_bg_weight; // BG gradient weight relative to FG (1.0)
         constexpr float kAlphaFgWeight = 1.5f; // grad_alpha pressure to push FG alpha -> 1
-        constexpr float kAlphaBgWeight = 1.0f; // grad_alpha pressure to push BG alpha -> 0
 
         // SMN per-camera memoization: on first hit builds mask_bool, the eroded
         // and dilated band masks, fg/bg pixel counts (per-band) and, when
@@ -656,20 +560,16 @@ namespace lfs::training {
         const bool want_lightness = FOCUSED_ENABLE_DARKNESS_BOOST && opt_params.darkness_boost > 0.0f;
         const auto& fs_cache = focused_segment_get_cache(cam, mask_2d, gt_image, want_lightness);
 
-        // Three masks pulled from the cache, each with its own radius:
-        //   - fg_photo   (mask dilated by N for photometric focus, captures
-        //                 fine border features like hair)
-        //   - fg_strict  (mask eroded by X for alpha-UP, safe FG zone)
-        //   - bg_strict  (complement of mask dilated by Y for alpha-DOWN,
-        //                 safe BG zone)
-        // The free band between fg_strict and the complement of bg_strict
-        // receives no alpha pressure - the rasterizer is free to set alpha
-        // however the photometric loss dictates there.
-        const Tensor fg_photo   = fs_cache.mask_photo_dilated_bool.to(DataType::Float32); // photometric FG
-        const Tensor fg_strict  = fs_cache.mask_eroded_bool.to(DataType::Float32);        // alpha-up zone
-        const Tensor fg_bg_dil  = fs_cache.mask_bg_dilated_bool.to(DataType::Float32);    // for BG_strict complement
-        const Tensor bg_photo   = Tensor::full(fg_photo.shape(), 1.0f, fg_photo.device()) - fg_photo;   // photometric BG
-        const Tensor bg_strict  = Tensor::full(fg_bg_dil.shape(), 1.0f, fg_bg_dil.device()) - fg_bg_dil; // alpha-down zone
+        // Two masks pulled from the cache, each with its own radius:
+        //   - fg_photo  (mask dilated/eroded by FOCUSED_PHOTO_OUTSET_PX for
+        //                the photometric weight map's FG region)
+        //   - fg_strict (mask eroded by FOCUSED_ALPHA_UP_INSET_PX: the
+        //                alpha-up zone; the outer ring is left to the
+        //                photometric loss so buggy mask borders cannot force
+        //                opacity in the wrong place)
+        const Tensor fg_photo  = fs_cache.mask_photo_dilated_bool.to(DataType::Float32); // photometric FG
+        const Tensor fg_strict = fs_cache.mask_eroded_bool.to(DataType::Float32);        // alpha-up zone
+        const Tensor bg_photo  = Tensor::full(fg_photo.shape(), 1.0f, fg_photo.device()) - fg_photo; // photometric BG
 
         // Step 1: full-image L1+SSIM forward - identical to None mode, with
         // decoupled appearance gradients when raw_rendered is available.
@@ -774,89 +674,50 @@ namespace lfs::training {
             loss = loss * (fg_photo_count / std::max(total_pixels * weight_mean, 1e-6f));
         }
 
-        // Step 4: pixel-based alpha pressure via grad_alpha, applied only on
-        // the SAFE bands of the 3-band scheme.
-        //   - FG_strict (eroded by FOCUSED_ALPHA_UP_INSET_PX): push alpha UP
-        //   - BG_strict (complement of dilated):            push alpha DOWN
-        //   - free band (between them):                     no pressure
+        // Step 4: FG-up alpha pressure via grad_alpha, applied only on
+        // FG_strict (mask eroded by FOCUSED_ALPHA_UP_INSET_PX). The eroded
+        // ring absorbs mask-annotation errors (overwhelmingly border errors),
+        // so a single bad mask cannot force opacity in the wrong place. This
+        // is the ONLY mask force in the loss - there is deliberately no
+        // BG-down counterpart (see the strategy comment at the top).
         //
-        // The free band absorbs almost all mask-annotation errors (which are
-        // overwhelmingly border errors), so a single bad mask cannot push a
-        // splat in the wrong direction in the strict regions: those regions
-        // are unambiguous even in noisy annotations.
-        //
-        // Normalization (CHANGED from per-camera 1/fg_pixels to dataset-wide
-        // 1/mean_fg_eroded): each pixel contributes a constant amount across
-        // ALL cameras of the dataset. With per-camera normalization, a bad
-        // mask labelling almost everything as FG (tiny per-pixel push, but
-        // huge area) would still dominate the BG term of OTHER cameras
-        // through its mirror behavior in BG; conversely a mask with tiny FG
-        // would have enormous per-pixel push and one such outlier could
-        // overwhelm many correct votes. Normalizing by the dataset mean makes
-        // each camera contribute pressure proportional to its area, so bad
-        // outliers (extreme area on either side) cannot dominate the natural
-        // multi-view majority vote.
-        //
-        // The accumulators live in fs_camera_cache_.stats and update lazily as
-        // cameras are visited. During the very first epoch some cameras may
-        // not have contributed yet, in which case the running mean is
-        // already representative after a few iterations (one camera per iter).
+        // Normalization is dataset-wide (1/mean_fg_eroded) instead of
+        // per-camera 1/fg_pixels: each pixel contributes a constant amount
+        // across ALL cameras, so a bad-mask outlier with an extreme FG area
+        // cannot dominate the natural multi-view majority vote. The
+        // accumulators live in fs_camera_cache_.stats (complete before iter 1
+        // when focused_segment_prewarm_cache ran).
         //
         // Sign convention (gradient descent: param -= lr * grad):
-        //   FG_strict: negative grad_alpha -> alpha_raw increases -> alpha -> 1
-        //   BG_strict: positive grad_alpha -> alpha_raw decreases -> alpha -> 0
+        //   negative grad_alpha -> alpha_raw increases -> alpha -> 1
         Tensor grad_alpha;
         const float w_fg = opt_params.mask_opacity_penalty_weight;
-        const float w_bg = opt_params.mask_opacity_penalty_weight_bg;
-        const bool apply_fg = FOCUSED_ENABLE_GRAD_ALPHA_FG && w_fg > 0.0f;
-        const bool apply_bg = FOCUSED_ENABLE_GRAD_ALPHA_BG && w_bg > 0.0f;
-        if (alpha.is_valid() && (apply_fg || apply_bg)) {
+        if (FOCUSED_ENABLE_GRAD_ALPHA_FG && alpha.is_valid() && w_fg > 0.0f) {
             const lfs::training::smn::ScopedFsTimer _t_ga(
                 fs_timings_, lfs::training::smn::FsTimerSlot::ComputeLossGradAlpha);
 
             const float mean_fg = std::max(fs_camera_cache_.stats.mean_fg_eroded(), 1.0f);
-            const float mean_bg = std::max(fs_camera_cache_.stats.mean_bg_strict(), 1.0f);
 
+            // Modulate alpha-up by GT darkness when available: full pressure
+            // on dark FG pixels (where photo alone cannot disambiguate FG
+            // from BG - dark hair, shadowed concave zones), low pressure on
+            // bright FG pixels (where photo already provides decisive signal,
+            // and forcing opacity would lock SH to wrong colors from per-view
+            // contamination - e.g. backlight bleed visible through fine
+            // hair). The darkness map is the same one already cached for the
+            // spatial weight map's darkness boost - zero extra GPU work.
+            //
+            // NOTE: total alpha-up magnitude drops by ~mean(darkness)
+            // (typically 0.4-0.6). If dark hair loses protection, raise
+            // mask_opacity_penalty_weight 2x from the CLI to compensate.
             Tensor fg_term;
-            if (apply_fg) {
-                // Modulate alpha-up by GT darkness when available: full pressure
-                // on dark FG pixels (where photo alone cannot disambiguate FG
-                // from BG - dark hair, shadowed concave zones), low pressure on
-                // bright FG pixels (where photo already provides decisive
-                // signal, and forcing opacity would lock SH to wrong colors
-                // from per-view contamination - e.g. backlight bleed visible
-                // through fine hair).
-                //
-                // The darkness map is the same one already cached and used by
-                // the spatial weight map's darkness boost - zero extra GPU
-                // work, zero extra memory.
-                //
-                // NOTE: total alpha-up magnitude drops by ~mean(darkness)
-                // (typically 0.4-0.6). If pelo oscuro pierde proteccion, sube
-                // mask_opacity_penalty_weight 2x desde CLI para compensar.
-                //
-                // Falls back to flat (un-modulated) alpha-up if darkness is not
-                // cached (e.g. darkness_boost disabled in the current phase).
-                if (fs_cache.has_darkness()) {
-                    const Tensor darkness = fs_cache.darkness_fp16.to(DataType::Float32);
-                    fg_term = fg_strict * darkness * (w_fg * kAlphaFgWeight / mean_fg);
-                } else {
-                    fg_term = fg_strict * (w_fg * kAlphaFgWeight / mean_fg);
-                }
-            }
-
-            Tensor bg_term;
-            if (apply_bg) {
-                bg_term = bg_strict * (w_bg * kAlphaBgWeight / mean_bg);
-            }
-
-            if (bg_term.is_valid() && fg_term.is_valid()) {
-                grad_alpha = bg_term - fg_term;
-            } else if (bg_term.is_valid()) {
-                grad_alpha = bg_term;
+            if (fs_cache.has_darkness()) {
+                const Tensor darkness = fs_cache.darkness_fp16.to(DataType::Float32);
+                fg_term = fg_strict * darkness * (w_fg * kAlphaFgWeight / mean_fg);
             } else {
-                grad_alpha = fg_term * (-1.0f);
+                fg_term = fg_strict * (w_fg * kAlphaFgWeight / mean_fg);
             }
+            grad_alpha = fg_term * (-1.0f);
         }
 
         // Convergence diagnostics (two GPU syncs, only every
@@ -1131,16 +992,15 @@ namespace lfs::training {
         focused_segment_apply_center_penalty(full_mask, cam, step_params);
     }
 
-    // Post-training mask-based pruning for FocusedSegment mode.
+    // Post-training export classification for FocusedSegment mode.
     //
-    // Runs the full pruning pipeline (geometric dome -> center vote -> leakage ->
-    // cluster/extreme -> ellipse boundary -> isolation) using thresholds tuned for
-    // the FocusedSegment use case: relaxed vote/leak thresholds that protect
-    // legitimate border splats (feet, arms, fine hair) while still removing
-    // halos and floaters.
-    //
-    // The commented-out call at the end of Trainer::train() is intentional -
-    // re-enable when the post-training prune phase is desired.
+    // Training keeps the full scene alive (see the strategy comment at the top
+    // of this file); this hook runs at the end of Trainer::train(), BEFORE the
+    // final save, and drops the background so the saved PLY is subject-only.
+    // Passes: geometric dome -> center vote -> leakage -> isolation -> ellipse
+    // boundary (-> cluster/extremes, off by default), with thresholds tuned
+    // protective-first: on a healthy model the failure mode that matters is
+    // amputating extremities (feet, arms, fine hair), not leftover floaters.
     void Trainer::focused_segment_run_post_training_prune(
         const lfs::core::param::MaskMode mask_mode,
         const bool invert_masks,
@@ -1153,27 +1013,6 @@ namespace lfs::training {
 
         if (mask_mode != lfs::core::param::MaskMode::FocusedSegment) {
             return;
-        }
-
-        // Export step 1/2: save the FULL scene (subject + backdrop) before
-        // any classification pass mutates the model. join=true so the write
-        // completes first. This PLY is the safety net: classification
-        // thresholds can be re-evaluated against it without retraining.
-        const std::string full_name =
-            (params_.dataset.output_name.empty() ? std::string("splat") : params_.dataset.output_name) + "-full";
-        if (auto full_save = save_ply(params_.dataset.output_path,
-                                      full_name,
-                                      get_total_iterations(),
-                                      /*join=*/true,
-                                      /*save_checkpoint=*/false);
-            !full_save) {
-            LOG_WARN("[SMN] FocusedSegment export: full-scene PLY save failed ({}); "
-                     "continuing with classification anyway",
-                     full_save.error());
-        } else {
-            LOG_INFO("[SMN] FocusedSegment export: full scene saved as '{}', "
-                     "classifying subject vs background...",
-                     full_name);
         }
 
         // NOTE (2026-07-03): these configs now classify a HEALTHY model (the
@@ -1251,7 +1090,7 @@ namespace lfs::training {
         cluster_cfg.enabled = true;
         // default values are ok for dome scenes
 
-        LOG_INFO("Running post-training mask-based pruning...");
+        LOG_INFO("[SMN] FocusedSegment export: classifying subject vs background...");
 
         // SMN: pasadas individuales en vez de prune_after_training() para poder
         // medir el tiempo de cada una por separado en fs_timings_. Si una
@@ -1359,42 +1198,168 @@ namespace lfs::training {
     }
 
     // =========================================================================
-    // SMN: old-mode extreme binary background modulation color.
-    //
-    // DISABLED (kEnabled = false) in the reconstruct-everything strategy: the
-    // clean FG-up-only reference runs used the stock sinusoidal modulation,
-    // and with the full backdrop reconstructed the rasterizer bg color barely
-    // shows anyway. The function stays defined because trainer.cpp's
-    // background_for_step hook links against it; flip kEnabled to experiment.
-    // Declared in smn/focused_segment_bg.hpp.
+    // SMN: FocusedSegment bg_noise with a correct alpha gradient.
+    // Rationale and call-site contract in smn/focused_segment_bg.hpp.
     // =========================================================================
     namespace smn {
 
-        void focused_segment_extreme_bg_color(const int iter, const float w, float rgb[3]) {
-            constexpr bool kEnabled = false;
-            if constexpr (!kEnabled) {
-                return; // keep the caller's sinusoidal color
+        namespace {
+
+            // Noise intensity schedule - mirror of trainer.cpp's
+            // inv_weight_piecewise(isNoise=true). Kept in sync manually
+            // (that function lives in trainer.cpp's anonymous namespace).
+            float bg_noise_weight(const int iter, const int total_iters) {
+                if (total_iters <= 0)
+                    return 0.0f;
+                const float phase = std::clamp(
+                    static_cast<float>(iter) / static_cast<float>(total_iters), 0.0f, 1.0f);
+
+                constexpr float kGraceEnd = 0.10f;
+                constexpr float kRampEnd = 0.30f;
+                constexpr float kHoldEnd = 0.45f;
+                constexpr float kDecayEnd = 0.80f;
+                constexpr float kMax = 0.98f;
+                constexpr float kMin = 0.01f;
+
+                if (phase < kGraceEnd)
+                    return 0.0f;
+                if (phase < kRampEnd)
+                    return kMax * (phase - kGraceEnd) / (kRampEnd - kGraceEnd);
+                if (phase < kHoldEnd)
+                    return kMax;
+                if (phase < kDecayEnd)
+                    return kMax + (kMin - kMax) * (phase - kHoldEnd) / (kDecayEnd - kHoldEnd);
+                return kMin;
             }
 
-            constexpr float kEps = 1e-4f;
-            auto next = [](uint32_t& s) {
-                s = s * 1664525u + 1013904223u; // LCG, same constants as trainer_oldmode.cpp
-                return s;
-            };
-            uint32_t s = static_cast<uint32_t>(iter) ^ 0x9E3779B9u;
+            // Per-iteration state: apply() arms it, alpha_grad() consumes it.
+            // thread_local mirrors upstream apply_background_noise's buffers
+            // (safe if several trainers run on different threads).
+            thread_local lfs::core::Tensor g_noise_raw;      // [3,H,W] uniform noise
+            thread_local lfs::core::Tensor g_noise_weighted; // [3,H,W] noise * w
+            thread_local lfs::core::Tensor g_alpha_inv;      // [1,H,W] 1 - alpha
+            thread_local lfs::core::Tensor g_alpha_scratch;  // [H,W] backward scratch
+            thread_local bool g_noise_armed = false;
 
-            const int i_max = static_cast<int>(next(s) % 3u);
-            const int i_min = (i_max + 1 + static_cast<int>(next(s) % 2u)) % 3; // distinct from i_max
-            const int i_third = 3 - i_max - i_min;
-            const bool third_is_max = (next(s) & 1u) != 0;
+        } // namespace
 
-            float v[3] = {0.0f, 0.0f, 0.0f};
-            v[i_max] = 1.0f;
-            v[i_min] = 0.0f;
-            v[i_third] = third_is_max ? 1.0f : 0.0f;
+        lfs::core::Tensor focused_segment_bg_noise_apply(
+            const lfs::core::Tensor& rendered,
+            const lfs::core::Tensor& alpha,
+            const int iter,
+            const int total_iters) {
+            using namespace lfs::core;
 
-            for (int c = 0; c < 3; ++c) {
-                rgb[c] = std::clamp(v[c] * w, kEps, 1.0f - kEps);
+            g_noise_armed = false;
+
+            const float w = bg_noise_weight(iter, total_iters);
+            if (w <= 1e-4f) {
+                return rendered;
+            }
+
+            if (rendered.ndim() != 3 || rendered.shape()[0] != 3 || !alpha.is_valid()) {
+                static std::atomic<bool> s_warned{false};
+                if (!s_warned.exchange(true)) {
+                    LOG_WARN("[SMN] FocusedSegment bg_noise: unexpected render/alpha layout, "
+                             "noise pass skipped (this message will not repeat)");
+                }
+                return rendered;
+            }
+
+            const size_t H = rendered.shape()[1];
+            const size_t W = rendered.shape()[2];
+            const TensorShape noise_shape({3, H, W});
+            const auto dev = rendered.device();
+
+            bool fresh_noise = false;
+            if (g_noise_raw.is_empty() || g_noise_raw.shape() != noise_shape || g_noise_raw.device() != dev) {
+                g_noise_raw = Tensor::empty(noise_shape, dev, DataType::Float32);
+                fresh_noise = true;
+            }
+            if (g_noise_weighted.is_empty() || g_noise_weighted.shape() != noise_shape || g_noise_weighted.device() != dev) {
+                g_noise_weighted = Tensor::empty(noise_shape, dev, DataType::Float32);
+            }
+
+            // Same generation scheme as upstream: expensive full regen every
+            // 100 iters, cheap golden-ratio value drift (fract) in between.
+            constexpr int kNoiseResetInterval = 100;
+            constexpr float kGoldenRatio = 0.61803398875f;
+            if (fresh_noise || (iter % kNoiseResetInterval) == 0) {
+                g_noise_raw.uniform_(0.0f, 1.0f);
+            } else {
+                g_noise_raw.add_(kGoldenRatio);
+                g_noise_raw.sub_(g_noise_raw.floor());
+            }
+
+            g_noise_weighted.copy_(g_noise_raw);
+            g_noise_weighted.mul_(w);
+
+            const Tensor alpha_3d = alpha.ndim() == 2 ? alpha.unsqueeze(0) : alpha; // [1,H,W]
+            const TensorShape alpha_shape({1, H, W});
+            if (g_alpha_inv.is_empty() || g_alpha_inv.shape() != alpha_shape || g_alpha_inv.device() != dev) {
+                g_alpha_inv = Tensor::empty(alpha_shape, dev, DataType::Float32);
+            }
+            g_alpha_inv.copy_(alpha_3d);
+            g_alpha_inv.mul_(-1.0f);
+            g_alpha_inv.add_(1.0f);
+
+            // out = rendered + (1 - alpha) * noise * w
+            Tensor out = g_alpha_inv * g_noise_weighted;
+            out.add_(rendered);
+
+            g_noise_armed = true;
+            return out;
+        }
+
+        void focused_segment_bg_noise_alpha_grad(
+            const lfs::core::Tensor& raster_grad,
+            lfs::core::Tensor& grad_alpha_extra) {
+            using namespace lfs::core;
+
+            if (!g_noise_armed) {
+                return;
+            }
+            g_noise_armed = false; // consume: one backward per apply
+
+            if (raster_grad.ndim() != 3 || raster_grad.shape()[0] != 3) {
+                static std::atomic<bool> s_warned{false};
+                if (!s_warned.exchange(true)) {
+                    LOG_WARN("[SMN] FocusedSegment bg_noise: raster_grad is not [3,H,W], "
+                             "noise alpha gradient skipped (this message will not repeat)");
+                }
+                return;
+            }
+
+            const size_t H = raster_grad.shape()[1];
+            const size_t W = raster_grad.shape()[2];
+            const TensorShape hw_shape({H, W});
+            if (g_alpha_scratch.is_empty() || g_alpha_scratch.shape() != hw_shape ||
+                g_alpha_scratch.device() != raster_grad.device()) {
+                g_alpha_scratch = Tensor::empty(hw_shape, raster_grad.device(), DataType::Float32);
+            }
+
+            const Tensor grad_c = raster_grad.is_contiguous() ? raster_grad : raster_grad.contiguous();
+            const cudaStream_t stream = grad_c.stream();
+            g_alpha_scratch.set_stream(stream);
+
+            // scratch = -sum_c(grad[c] * (noise[c]*w))  - exactly the compose
+            // node's d(loss)/d(alpha). Reuses the rasterizer's fused kernel.
+            kernels::launch_fused_grad_alpha_with_image(
+                grad_c.ptr<float>(),
+                g_noise_weighted.ptr<float>(),
+                g_alpha_scratch.ptr<float>(),
+                static_cast<int>(H),
+                static_cast<int>(W),
+                stream);
+
+            if (grad_alpha_extra.is_valid() && grad_alpha_extra.numel() > 0) {
+                if (grad_alpha_extra.ndim() == 3 && grad_alpha_extra.shape()[0] == 1) {
+                    grad_alpha_extra = grad_alpha_extra.squeeze(0);
+                }
+                grad_alpha_extra.add_(g_alpha_scratch);
+            } else {
+                // Materialize a copy: the scratch buffer is reused next iter.
+                grad_alpha_extra = g_alpha_scratch * 1.0f;
             }
         }
 

@@ -4,33 +4,54 @@
 #pragma once
 
 // =============================================================================
-// SMN / FocusedSegment background-modulation override.
+// SMN / FocusedSegment bg_noise with a CORRECT alpha gradient.
 //
 // THIS HEADER BELONGS TO THE SMN FORK (training/smn/).
 //
-// Old-mode extreme binary background colors for bg_modulation, ported from
-// trainer_oldmode.cpp binary_extreme_background_for_step(): each iteration
-// picks an extreme corner of the RGB cube (at least one channel at max and
-// one at min), deterministically from the iteration index via a small LCG.
+// Upstream Trainer::apply_background_noise composes
+//     out = rendered + (1 - alpha) * noise * w
+// BEFORE PPISP, but the backward never accounts for this node's
+// d(out)/d(alpha) = -noise*w: the generic fast_rasterize_backward only
+// derives grad_alpha from the RASTERIZER's background. Result: the loss
+// punishes the transparency flicker, but alpha never receives the direct
+// "become opaque" gradient - colors/positions churn instead.
 //
-// Rationale: the implicit alpha gradient the rasterizer backward derives from
-// the background compose term is grad_alpha = -sum_c(grad_image[c] * bg[c]).
-// Extreme, rapidly changing colors maximize that signal, forcing alpha -> 1
-// wherever the (masked) photometric loss is alive - upstream's smooth sinusoid
-// is a weaker version of the same trick.
+// This pair fixes that for FocusedSegment mode (gated at the trainer.cpp
+// call sites by mask_mode + the --bg-noise CLI flag):
+//  - focused_segment_bg_noise_apply(): same composite + noise schedule as
+//    upstream (uniform per-pixel noise, full regen every 100 iters,
+//    golden-ratio value drift in between, grace/ramp/hold/decay weight
+//    curve), but it RETAINS this iteration's weighted noise buffer.
+//  - focused_segment_bg_noise_alpha_grad(): called in the backward with
+//    the post-PPISP/bilateral gradient (exact chain rule - the noise node
+//    sits between the rasterizer and PPISP), accumulates
+//    grad_alpha += -sum_c(grad[c] * noise[c]*w) into the loss's
+//    grad_alpha via the existing fused kernel. Consumes the stored state.
 //
-// Called from Trainer::background_for_step (single-line SMN hook) only when
-// mask_mode == FocusedSegment. Implementation lives in
-// focused_segment_trainer.cpp next to the FOCUSED_BG_EXTREME_COLORS switch;
-// when that switch is false this function leaves rgb untouched and the caller
-// keeps its sinusoidal color.
+// Per-pixel noise is the strongest anti-fake-transparency background:
+// spatially smooth splats cannot match white noise with ANY color in any
+// frame, and neighboring-pixel decorrelation makes SSIM see it too.
 // =============================================================================
+
+#include "core/tensor.hpp"
 
 namespace lfs::training::smn {
 
-    /// Overwrite rgb[3] with this iteration's extreme binary modulation color,
-    /// scaled by the modulation weight w (same inv_weight_piecewise weight the
-    /// sinusoidal path uses). No-op when FOCUSED_BG_EXTREME_COLORS is false.
-    void focused_segment_extreme_bg_color(int iter, float w, float rgb[3]);
+    /// Forward: composite per-pixel noise over the uncovered ray fraction and
+    /// retain the weighted noise for the backward. Returns `rendered`
+    /// untouched (and arms nothing) when the schedule weight is ~0 or shapes
+    /// are unexpected.
+    lfs::core::Tensor focused_segment_bg_noise_apply(
+        const lfs::core::Tensor& rendered, // [3, H, W] raw rasterizer output
+        const lfs::core::Tensor& alpha,    // [1, H, W] or [H, W]
+        int iter,
+        int total_iters);
+
+    /// Backward: accumulate the noise-compose alpha gradient into
+    /// grad_alpha_extra ([H, W]; created if invalid). No-op unless the
+    /// matching apply() armed state this iteration. Consumes the state.
+    void focused_segment_bg_noise_alpha_grad(
+        const lfs::core::Tensor& raster_grad, // [3, H, W] grad after PPISP/bilateral backward
+        lfs::core::Tensor& grad_alpha_extra);
 
 } // namespace lfs::training::smn

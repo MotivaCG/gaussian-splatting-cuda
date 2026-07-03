@@ -2794,16 +2794,10 @@ namespace lfs::training {
         const float pg = TWO_PI * static_cast<float>(iter % BG_PERIOD_G) / BG_PERIOD_G;
         const float pb = TWO_PI * static_cast<float>(iter % BG_PERIOD_B) / BG_PERIOD_B;
 
-        float result[3] = {
+        const float result[3] = {
             std::clamp(0.5f * (1.0f + std::sin(pr)) * w, CLAMP_EPS, 1.0f - CLAMP_EPS),
             std::clamp(0.5f * (1.0f + std::sin(pg + PHASE_OFFSET_G)) * w, CLAMP_EPS, 1.0f - CLAMP_EPS),
             std::clamp(0.5f * (1.0f + std::sin(pb + PHASE_OFFSET_B)) * w, CLAMP_EPS, 1.0f - CLAMP_EPS)};
-
-        // SMN FocusedSegment hook: old-mode extreme binary modulation colors
-        // (implementation in training/smn/focused_segment_trainer.cpp).
-        if (params_.optimization.mask_mode == lfs::core::param::MaskMode::FocusedSegment) {
-            lfs::training::smn::focused_segment_extreme_bg_color(iter, w, result);
-        }
 
         if (bg_mix_buffer_.is_empty()) {
             bg_mix_buffer_ = lfs::core::Tensor::empty({3}, lfs::core::Device::CUDA, lfs::core::DataType::Float32);
@@ -3567,7 +3561,15 @@ namespace lfs::training {
 
                     lfs::core::Tensor corrected_image = output.image;
                     if (params_.optimization.bg_noise && output.alpha.is_valid()) {
-                        corrected_image = apply_background_noise(corrected_image, output.alpha, iter);
+                        // SMN FocusedSegment hook: same noise composite, but the smn
+                        // variant retains the noise so the backward can add the
+                        // (1-alpha)*noise term's alpha gradient, which the generic
+                        // path drops. See smn/focused_segment_bg.hpp.
+                        corrected_image =
+                            (params_.optimization.mask_mode == lfs::core::param::MaskMode::FocusedSegment)
+                                ? lfs::training::smn::focused_segment_bg_noise_apply(
+                                      corrected_image, output.alpha, iter, get_total_iterations())
+                                : apply_background_noise(corrected_image, output.alpha, iter);
                     }
                     if (bilateral_grid_ && params_.optimization.use_bilateral_grid) {
                         nvtxRangePush("bilateral_grid_forward");
@@ -4017,6 +4019,16 @@ namespace lfs::training {
                         LOG_VRAM_DIFF("train.bilateral_grid.backward");
                         raster_grad = bilateral_grid_->backward(output.image, raster_grad, cam->uid());
                         nvtxRangePop();
+                    }
+
+                    // SMN FocusedSegment hook: alpha gradient of the bg_noise
+                    // compose node (sits between rasterizer and PPISP, so it
+                    // uses raster_grad here - before the raw-SSIM grad, which
+                    // bypasses that node). No-op unless the smn noise apply
+                    // ran this iteration. See smn/focused_segment_bg.hpp.
+                    if (params_.optimization.bg_noise &&
+                        params_.optimization.mask_mode == lfs::core::param::MaskMode::FocusedSegment) {
+                        lfs::training::smn::focused_segment_bg_noise_alpha_grad(raster_grad, tile_grad_alpha);
                     }
 
                     if (tile_grad_raw.is_valid() && tile_grad_raw.numel() > 0) {
