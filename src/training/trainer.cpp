@@ -31,6 +31,7 @@
 #include "python/runner.hpp"
 #include "rasterization/fast_rasterizer.hpp"
 #include "rasterization/gsplat_rasterizer.hpp"
+#include "smn/focused_segment_bg.hpp"
 #include "strategies/mcmc.hpp"
 #include "strategies/strategy_factory.hpp"
 #include "strategies/strategy_utils.hpp"
@@ -2793,10 +2794,16 @@ namespace lfs::training {
         const float pg = TWO_PI * static_cast<float>(iter % BG_PERIOD_G) / BG_PERIOD_G;
         const float pb = TWO_PI * static_cast<float>(iter % BG_PERIOD_B) / BG_PERIOD_B;
 
-        const float result[3] = {
+        float result[3] = {
             std::clamp(0.5f * (1.0f + std::sin(pr)) * w, CLAMP_EPS, 1.0f - CLAMP_EPS),
             std::clamp(0.5f * (1.0f + std::sin(pg + PHASE_OFFSET_G)) * w, CLAMP_EPS, 1.0f - CLAMP_EPS),
             std::clamp(0.5f * (1.0f + std::sin(pb + PHASE_OFFSET_B)) * w, CLAMP_EPS, 1.0f - CLAMP_EPS)};
+
+        // SMN FocusedSegment hook: old-mode extreme binary modulation colors
+        // (implementation in training/smn/focused_segment_trainer.cpp).
+        if (params_.optimization.mask_mode == lfs::core::param::MaskMode::FocusedSegment) {
+            lfs::training::smn::focused_segment_extreme_bg_color(iter, w, result);
+        }
 
         if (bg_mix_buffer_.is_empty()) {
             bg_mix_buffer_ = lfs::core::Tensor::empty({3}, lfs::core::Device::CUDA, lfs::core::DataType::Float32);

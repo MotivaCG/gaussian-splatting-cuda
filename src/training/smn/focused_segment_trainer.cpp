@@ -7,10 +7,12 @@
 #include "core/logger.hpp"
 #include "lfs/kernels/ssim.cuh"
 #include "optimizer/adam_optimizer.hpp"
+#include "smn/focused_segment_bg.hpp"
 #include "smn/focused_segment_profiling.hpp"
 #include "smn/mask_pruning.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 
@@ -41,8 +43,25 @@ namespace lfs::training {
 
         constexpr bool FOCUSED_ENABLE_GRAD_ALPHA         = true; // master switch
         constexpr bool FOCUSED_ENABLE_GRAD_ALPHA_FG      = true && FOCUSED_ENABLE_GRAD_ALPHA;  // push FG alpha->1 (force opacity inside; fills holes)
-        constexpr bool FOCUSED_ENABLE_GRAD_ALPHA_BG      = true && FOCUSED_ENABLE_GRAD_ALPHA; // push BG alpha->0. OFF: it kills the BG splats
-        
+
+        // BG-down: permanently OFF in the "reconstruct-everything" strategy
+        // (2026-07-03). Every mechanism that fights the background during
+        // training (this one, masked loss, matting, boundary rings) ended in
+        // the same place: edge pixels NEED the real backdrop to explain their
+        // blend, and killing it forces the optimizer to bake backdrop-tinted
+        // halo splats into the subject. The empirically clean quadrant is
+        // FG-up ONLY (user datum: FG-up-only + manual bg deletion = clean
+        // subject). Background removal is a per-splat multi-view LABELING
+        // problem solved at export time, outside the optimizer, where nothing
+        // can compensate.
+        constexpr bool FOCUSED_ENABLE_GRAD_ALPHA_BG      = false && FOCUSED_ENABLE_GRAD_ALPHA; // push BG alpha->0. OFF: it kills the BG splats
+
+        // Convergence diagnostics: every N iters log mean rendered alpha
+        // inside/outside the mask. In this strategy FG should approach 1 and
+        // BG is EXPECTED to stay high (the backdrop is reconstructed on
+        // purpose) - watch FG, ignore BG level. 0 disables.
+        constexpr int FOCUSED_DIAG_LOG_EVERY = 500;
+
         // Densification (focused_segment_apply_densification_mask).
         // FOCUSED_DENSIFY_DILATE_RADIUS below still controls the dilation size.
         constexpr bool FOCUSED_ENABLE_DENSIFY_DILATION = true; // dilate the mask before applying it to the densification error map
@@ -52,8 +71,17 @@ namespace lfs::training {
         constexpr bool FOCUSED_ENABLE_CENTER_PENALTY_FG_FILL = true; // push opacity UP inside mask
         constexpr bool FOCUSED_ENABLE_CENTER_PENALTY_BG      = true; // push opacity DOWN outside mask
 
-        // Post-training mask-based pruning pipeline.
-        constexpr bool FOCUSED_ENABLE_POST_TRAINING_PRUNE    = false;// master switch (skips prune entirely)
+        // Post-training export classification (the "reconstruct-everything"
+        // strategy, 2026-07-03): training keeps the full scene alive (the
+        // backdrop is the compositing backing that prevents halos); at the
+        // end the model is CLASSIFIED subject/background per splat via the
+        // multi-view passes below and the background is dropped. Two PLYs
+        // result: "<name>-full" (saved by this hook BEFORE classification,
+        // nothing is ever lost) and "<name>" (subject only, via the normal
+        // final save). Deletion happens outside the optimizer, after
+        // convergence - nothing can compensate, unlike every training-time
+        // BG-force that ended in halos.
+        constexpr bool FOCUSED_ENABLE_POST_TRAINING_PRUNE    = true; // master switch (skips classification + dual export)
 
         // Per-pass switches for the post-training prune. Each can be disabled
         // independently to A/B test the impact of that specific pass. Only
@@ -831,6 +859,27 @@ namespace lfs::training {
             }
         }
 
+        // Convergence diagnostics (two GPU syncs, only every
+        // FOCUSED_DIAG_LOG_EVERY iters). In the reconstruct-everything
+        // strategy: FG mean alpha should approach 1 (FG-up + photometric);
+        // BG mean alpha is EXPECTED high - the backdrop is deliberately kept
+        // alive and removed at export time, not during training.
+        if constexpr (FOCUSED_DIAG_LOG_EVERY > 0) {
+            const int it = current_iteration_.load();
+            if (alpha.is_valid() && it > 0 && (it % FOCUSED_DIAG_LOG_EVERY) == 0) {
+                const Tensor alpha_2d = alpha.ndim() == 3 ? alpha.squeeze(0) : alpha;
+                const Tensor mask_f01 = fs_cache.mask_bool.to(DataType::Float32);
+                const float sum_in = (alpha_2d * mask_f01).sum().item<float>();
+                const float sum_all = alpha_2d.sum().item<float>();
+                LOG_INFO("[SMN] FocusedSegment diag iter {}: mean_alpha FG={:.3f} BG={:.4f} "
+                         "(fg-up w={:.3f}, darkness_boost={:.2f}, loss_prev={:.4f})",
+                         it,
+                         sum_in / fs_cache.fg_pixels,
+                         (sum_all - sum_in) / fs_cache.bg_pixels,
+                         w_fg, opt_params.darkness_boost, current_loss_.load());
+            }
+        }
+
         return Trainer::MaskLossResult{
             .loss = loss,
             .grad_corrected = grad,
@@ -1106,26 +1155,58 @@ namespace lfs::training {
             return;
         }
 
+        // Export step 1/2: save the FULL scene (subject + backdrop) before
+        // any classification pass mutates the model. join=true so the write
+        // completes first. This PLY is the safety net: classification
+        // thresholds can be re-evaluated against it without retraining.
+        const std::string full_name =
+            (params_.dataset.output_name.empty() ? std::string("splat") : params_.dataset.output_name) + "-full";
+        if (auto full_save = save_ply(params_.dataset.output_path,
+                                      full_name,
+                                      get_total_iterations(),
+                                      /*join=*/true,
+                                      /*save_checkpoint=*/false);
+            !full_save) {
+            LOG_WARN("[SMN] FocusedSegment export: full-scene PLY save failed ({}); "
+                     "continuing with classification anyway",
+                     full_save.error());
+        } else {
+            LOG_INFO("[SMN] FocusedSegment export: full scene saved as '{}', "
+                     "classifying subject vs background...",
+                     full_name);
+        }
+
+        // NOTE (2026-07-03): these configs now classify a HEALTHY model (the
+        // reconstruct-everything strategy - no halo shell to hunt), so they
+        // are tuned protective-first: the failure mode that matters is
+        // amputating extremities, not leftover floaters. First subject-only
+        // export showed semi-transparent SHOES: soles live at y~0 (floor
+        // pass default -0.1 bites them) and AI matting systematically eats
+        // the contact-shadow region, so sole centers vote "outside" in many
+        // views. Hence: floor pass relaxed, vote thresholds loosened.
         mask_pruning::GeometricDomePruningConfig geomdome_cfg;
-        // default values are ok
+        // Soles sit at world y~0; the -0.1 default is too tight when the
+        // estimated floor plane is slightly high. True floor splats are
+        // handled by the center vote anyway (floor is outside every mask).
+        geomdome_cfg.floor_y = -0.30f;
 
         mask_pruning::CenterVotePruningConfig center_cfg;
         center_cfg.enabled = true;
 
-        // Conservative threshold - protects legitimate border splats (feet, arms).
-        // Only removes Gaussians clearly outside the mask in a large majority of views.
-        // In a dome with 104 cameras, a splat visible in 30 views can afford 8 bad-mask
-        // views and still pass (73% good > 0.72).
-        center_cfg.vote_ratio_threshold = 0.8f;
+        // Protective threshold: tolerate up to 30% "outside" votes before
+        // removing. Covers the systematic mask error at shoe/floor contact
+        // (matting eats the contact shadow in a large fraction of views).
+        // Floaters still fail this easily - their centers land outside in
+        // far more than 30% of views.
+        center_cfg.vote_ratio_threshold = 0.70f;
         // Moderate margin - avoids penalizing splats near frustum edges without
         // being as permissive as the original 0.25 that missed lateral floaters.
         center_cfg.border_safe_margin = 0.33f;
         center_cfg.enable_depth_filtering = true;
-        // Dome-oriented rule: require visibility in at least 10% of usable cameras.
-        // With 104 usable cameras this means 11+ views, which is much stricter than
-        // the old fixed threshold and helps remove floaters seen only in a handful
-        // of side views.
-        center_cfg.min_visibility_ratio = 0.35f;
+        // Relaxed from 0.35: sole/underside splats are only well seen by the
+        // lower camera ring, and 0.35 (37+ views) was removing them as
+        // "low visibility". 0.20 still kills never-seen junk.
+        center_cfg.min_visibility_ratio = 0.20f;
         center_cfg.invert_masks = invert_masks;
 
         mask_pruning::LeakagePruningConfig leak_cfg;
@@ -1155,7 +1236,11 @@ namespace lfs::training {
         // because their center is inside the mask.
         mask_pruning::EllipseBoundaryPruningConfig ellipse_cfg;
         ellipse_cfg.enabled = true;
-        ellipse_cfg.mask_expansion_fraction = 0.005f; // ~10px at 2K - aggressive to catch thin dark edge fringes (was 0.02 = ~40px, too generous)
+        // 0.01 (~20px at 2K): protective on a healthy model. The 0.005 value
+        // was tuned to hunt halo fringes on corrupted models; those no longer
+        // exist, and sole/hair-tip ellipses that poke past a matting cut are
+        // legitimate subject matter now.
+        ellipse_cfg.mask_expansion_fraction = 0.01f;
         ellipse_cfg.negative_vote_threshold = 0.10f; // remove if >=10% of evaluating cameras flagged leakage
         ellipse_cfg.min_evaluating_cameras = 3;
         ellipse_cfg.invert_masks = invert_masks;
@@ -1272,5 +1357,47 @@ namespace lfs::training {
 
         LOG_INFO("{}", out);
     }
+
+    // =========================================================================
+    // SMN: old-mode extreme binary background modulation color.
+    //
+    // DISABLED (kEnabled = false) in the reconstruct-everything strategy: the
+    // clean FG-up-only reference runs used the stock sinusoidal modulation,
+    // and with the full backdrop reconstructed the rasterizer bg color barely
+    // shows anyway. The function stays defined because trainer.cpp's
+    // background_for_step hook links against it; flip kEnabled to experiment.
+    // Declared in smn/focused_segment_bg.hpp.
+    // =========================================================================
+    namespace smn {
+
+        void focused_segment_extreme_bg_color(const int iter, const float w, float rgb[3]) {
+            constexpr bool kEnabled = false;
+            if constexpr (!kEnabled) {
+                return; // keep the caller's sinusoidal color
+            }
+
+            constexpr float kEps = 1e-4f;
+            auto next = [](uint32_t& s) {
+                s = s * 1664525u + 1013904223u; // LCG, same constants as trainer_oldmode.cpp
+                return s;
+            };
+            uint32_t s = static_cast<uint32_t>(iter) ^ 0x9E3779B9u;
+
+            const int i_max = static_cast<int>(next(s) % 3u);
+            const int i_min = (i_max + 1 + static_cast<int>(next(s) % 2u)) % 3; // distinct from i_max
+            const int i_third = 3 - i_max - i_min;
+            const bool third_is_max = (next(s) & 1u) != 0;
+
+            float v[3] = {0.0f, 0.0f, 0.0f};
+            v[i_max] = 1.0f;
+            v[i_min] = 0.0f;
+            v[i_third] = third_is_max ? 1.0f : 0.0f;
+
+            for (int c = 0; c < 3; ++c) {
+                rgb[c] = std::clamp(v[c] * w, kEps, 1.0f - kEps);
+            }
+        }
+
+    } // namespace smn
 
 } // namespace lfs::training
