@@ -251,6 +251,7 @@ namespace lfs::core {
             std::vector<std::string> timelapse_images = {};
             int timelapse_every = 50;
             int max_width = 3840;
+            int min_track_length = 0;
             LoadingParams loading_params;
 
             // Mask loading parameters (copied from optimization params)
@@ -290,6 +291,7 @@ namespace lfs::core {
             // Optional trained splats to append to the training model before optimizer initialization
             std::vector<std::filesystem::path> add_splat_paths;
             std::vector<bool> add_splat_freeze;
+            bool exclude_frozen_add_splats_from_export = false;
 
             // Checkpoint to resume training from
             std::optional<std::filesystem::path> resume_checkpoint = std::nullopt;
@@ -321,6 +323,9 @@ namespace lfs::core {
         enum class LodBuilder { BHATT,
                                 OCTREE };
 
+        enum class RadExportMode { Stream,
+                                   NonStream };
+
         // Parameters for the convert command
         struct LFS_CORE_API ConvertParameters {
             std::filesystem::path input_path;
@@ -334,6 +339,7 @@ namespace lfs::core {
             std::uint32_t tiles_x = 1;
             std::uint32_t tiles_y = 1;
             LodBuilder lod_builder = LodBuilder::BHATT;
+            RadExportMode rad_export_mode = RadExportMode::Stream;
             bool overwrite = false; // Skip overwrite prompts
         };
 

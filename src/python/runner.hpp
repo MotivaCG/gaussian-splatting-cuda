@@ -49,14 +49,28 @@ namespace lfs::python {
     void ensure_plugins_loaded();
 
     /**
-     * @brief Schedule asynchronous plugin autoload after startup.
-     *        This keeps first-frame startup responsive.
+     * @brief Schedule plugin autoload after startup.
+     *        Actual imports are processed on the main thread by process_plugin_preload_step().
      */
     void preload_user_plugins_async();
 
     /**
-     * @brief Join the plugin preload thread if running.
-     *        Called from finalize() to ensure clean shutdown.
+     * @brief Process one scheduled startup plugin preload step.
+     * @return true if a step was processed.
+     */
+    bool process_plugin_preload_step();
+
+    /**
+     * @brief True while startup plugin preload is running.
+     *
+     * UI code uses this to avoid blocking Python calls while startup imports
+     * are in progress.
+     */
+    bool is_plugin_preload_running();
+
+    /**
+     * @brief Compatibility hook for startup plugin preload shutdown.
+     *        Preload currently runs on the main thread.
      */
     void join_plugin_preload();
 

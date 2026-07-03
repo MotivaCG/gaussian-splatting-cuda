@@ -73,6 +73,8 @@ class Action(enum.Enum):
 
     COPY_SELECTION = 32
 
+    CUT_SELECTION = 76
+
     PASTE_SELECTION = 33
 
     DEPTH_ADJUST_FAR = 34
@@ -99,6 +101,8 @@ class Action(enum.Enum):
 
     SELECTION_REMOVE = 46
 
+    SELECTION_INTERSECT = 73
+
     SELECT_MODE_CENTERS = 47
 
     SELECT_MODE_RECTANGLE = 48
@@ -108,6 +112,12 @@ class Action(enum.Enum):
     SELECT_MODE_LASSO = 50
 
     SELECT_MODE_RINGS = 51
+
+    SELECT_MODE_COLOR = 52
+
+    SELECT_MODE_BOX = 74
+
+    SELECT_MODE_SPHERE = 75
 
     APPLY_CROP_BOX = 53
 
@@ -142,6 +152,8 @@ class Action(enum.Enum):
     DEPTH_ADJUST_NEAR = 69
 
     HISTOGRAM_ZOOM_MARKED = 71
+
+    TOGGLE_CAMERA_FRUSTUMS = 72
 
 class ToolMode(enum.Enum):
     GLOBAL = 0

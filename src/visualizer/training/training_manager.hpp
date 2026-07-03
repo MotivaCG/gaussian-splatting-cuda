@@ -74,6 +74,7 @@ namespace lfs::vis {
         };
 
         void pauseTrainingTemporary();
+        [[nodiscard]] bool pauseTrainingTemporaryIfActive();
         [[nodiscard]] TemporaryPauseResult pauseTrainingTemporaryAndWait(std::chrono::milliseconds timeout);
         void resumeTrainingTemporary();
 
@@ -102,6 +103,9 @@ namespace lfs::vis {
         int getTotalIterations() const;
         int getNumSplats() const;
         int getMaxGaussians() const;
+        std::vector<size_t> getSaveSteps() const;
+        bool setSaveSteps(std::vector<size_t> save_steps);
+        bool canEditSaveSteps() const;
         const char* getStrategyType() const;
         bool isGutEnabled() const;
 

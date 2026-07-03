@@ -64,6 +64,37 @@ body {
     border-bottom-color: rgba(137, 180, 250, 255);
 }
 
+.scene-header-icon-button {
+    width: 30dp;
+    height: 30dp;
+    min-width: 30dp;
+    min-height: 30dp;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    background-color: rgba(49, 50, 68, 140);
+    border-width: 1dp;
+    border-color: #45475a;
+    border-radius: 4dp;
+    cursor: pointer;
+    transition: border-color background-color color 0.12s quadratic-out;
+}
+
+.scene-header-icon-button:hover,
+.scene-header-icon-button:focus-visible {
+    border-color: rgba(137, 180, 250, 110);
+    background-color: rgba(137, 180, 250, 24);
+}
+
+.scene-header-icon-button img {
+    width: 20dp;
+    height: 20dp;
+    image-color: #cdd6f4;
+}
+
 .scene-chip-row {
     display: flex;
     flex-wrap: wrap;
@@ -196,7 +227,7 @@ scene-graph,
 
 .logging-toolbar {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: flex-end;
     gap: 8dp;
 }
@@ -205,8 +236,9 @@ scene-graph,
     display: flex;
     flex-direction: column;
     gap: 4dp;
-    min-width: 132dp;
-    flex: 1 1 132dp;
+    min-width: 96dp;
+    width: 120dp;
+    flex: 0 1 120dp;
 }
 
 .logging-field-label {
@@ -217,13 +249,29 @@ scene-graph,
 }
 
 .logging-level-select {
+    width: 100%;
     min-height: 26dp;
 }
 
 .logging-actions {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     gap: 6dp;
+    flex: 0 0 auto;
+}
+
+.logging-actions .history-action {
+    display: inline-block;
+    width: 78dp;
+    min-width: 78dp;
+    height: 26dp;
+    min-height: 26dp;
+    line-height: 20dp;
+    padding: 2dp 8dp;
+    box-sizing: border-box;
+    text-align: center;
+    white-space: nowrap;
+    flex: 0 0 auto;
 }
 
 .logging-feedback {

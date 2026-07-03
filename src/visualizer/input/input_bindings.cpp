@@ -26,19 +26,11 @@ namespace lfs::vis::input {
 
     namespace {
 
-        constexpr int PROFILE_VERSION = 15; // Version 15 adds crop apply Enter bindings.
+        constexpr int PROFILE_VERSION = 19; // Version 19 adds cut selection.
+        constexpr Action LAST_ACTION = Action::CUT_SELECTION;
         constexpr int REMOVED_TOOL_MODE_2 = 2;
         constexpr int REMOVED_ACTION_39 = 39;
         constexpr int REMOVED_ACTION_66 = 66;
-        constexpr std::array<ToolMode, 7> ALL_MODES = {
-            ToolMode::GLOBAL,
-            ToolMode::SELECTION,
-            ToolMode::ALIGN,
-            ToolMode::CROP_BOX,
-            ToolMode::TRANSLATE,
-            ToolMode::ROTATE,
-            ToolMode::SCALE,
-        };
         constexpr std::array<ToolMode, 4> NODE_PICK_MODES = {
             ToolMode::GLOBAL,
             ToolMode::TRANSLATE,
@@ -71,7 +63,7 @@ namespace lfs::vis::input {
         [[nodiscard]] std::optional<Action> findActionByDescription(std::string_view description) {
             static const auto* const table = [] {
                 auto* const m = new std::unordered_map<std::string, Action>();
-                constexpr int kActionCount = static_cast<int>(Action::HISTOGRAM_ZOOM_MARKED) + 1;
+                constexpr int kActionCount = static_cast<int>(LAST_ACTION) + 1;
                 for (int i = 0; i < kActionCount; ++i) {
                     const auto a = static_cast<Action>(i);
                     m->emplace(toLowerCopy(getActionName(a)), a);
@@ -206,7 +198,7 @@ namespace lfs::vis::input {
                     break;
                 default:
                     if (!describe(binding.action).inherits_from_global) {
-                        added += mirrorLegacyBindingToModes(bindings, binding, binding.action, ALL_MODES);
+                        added += mirrorLegacyBindingToModes(bindings, binding, binding.action, kAllToolModes);
                     }
                     break;
                 }
@@ -495,6 +487,9 @@ namespace lfs::vis::input {
                 def.action == Action::APPLY_CROP_BOX &&
                 key_trigger &&
                 key_trigger->key == KEY_KP_ENTER;
+            const bool selection_volume_shortcut =
+                def.action == Action::SELECT_MODE_BOX ||
+                def.action == Action::SELECT_MODE_SPHERE;
             const bool should_add =
                 (version < 6 && def.action == Action::CAMERA_ROLL) ||
                 (version < 7 && def.action == Action::BRUSH_RESIZE && !brush_resize_shift_scroll) ||
@@ -503,7 +498,11 @@ namespace lfs::vis::input {
                 (version < 12 && brush_resize_shift_scroll) ||
                 (version < 13 && def.action == Action::CAMERA_SET_HOME) ||
                 (version < 14 && def.action == Action::HISTOGRAM_ZOOM_MARKED) ||
-                (version < 15 && def.action == Action::APPLY_CROP_BOX);
+                (version < 15 && def.action == Action::APPLY_CROP_BOX) ||
+                (version < 16 && def.action == Action::TOGGLE_CAMERA_FRUSTUMS) ||
+                (version < 17 && def.action == Action::SELECTION_INTERSECT) ||
+                (version < 18 && selection_volume_shortcut) ||
+                (version < 19 && def.action == Action::CUT_SELECTION);
             if (!should_add) {
                 continue;
             }
@@ -674,41 +673,46 @@ namespace lfs::vis::input {
 
     Action InputBindings::getActionForMouseButton(ToolMode mode, MouseButton button, int modifiers, bool is_double_click) const {
         const int mods = modifiers & MODIFIER_MASK;
-        const auto find_in_mode = [&](ToolMode query_mode) -> Action {
-            if (auto it = mouse_button_map_.find({query_mode, button, mods, is_double_click}); it != mouse_button_map_.end()) {
+        const auto find_in_mode = [&](ToolMode query_mode, const bool double_click) -> Action {
+            if (auto it = mouse_button_map_.find({query_mode, button, mods, double_click}); it != mouse_button_map_.end()) {
                 return it->second;
             }
             if (mods != MODIFIER_NONE) {
-                if (auto it = mouse_button_map_.find({query_mode, button, MODIFIER_NONE, is_double_click});
+                if (auto it = mouse_button_map_.find({query_mode, button, MODIFIER_NONE, double_click});
                     it != mouse_button_map_.end() &&
                     describe(it->second).allows_extra_modifiers) {
                     return it->second;
                 }
             }
-            // If double-click, also try a single-click binding in the same mode.
-            if (is_double_click) {
-                if (auto it = mouse_button_map_.find({query_mode, button, mods, false}); it != mouse_button_map_.end()) {
-                    return it->second;
-                }
-                if (mods != MODIFIER_NONE) {
-                    if (auto it = mouse_button_map_.find({query_mode, button, MODIFIER_NONE, false});
-                        it != mouse_button_map_.end() &&
-                        describe(it->second).allows_extra_modifiers) {
-                        return it->second;
-                    }
-                }
-            }
             return Action::NONE;
         };
 
-        if (const auto local_action = find_in_mode(mode); local_action != Action::NONE) {
+        if (const auto local_action = find_in_mode(mode, is_double_click); local_action != Action::NONE) {
             return local_action;
         }
         if (mode != ToolMode::GLOBAL) {
-            const auto global_action = find_in_mode(ToolMode::GLOBAL);
+            const auto global_action = find_in_mode(ToolMode::GLOBAL, is_double_click);
             if (global_action != Action::NONE &&
                 describe(global_action).inherits_from_global) {
                 return global_action;
+            }
+        }
+
+        // A double-click is its own gesture. Only fall back to single-click
+        // bindings after exact local and inherited global double-click bindings
+        // have both been considered. This keeps global viewport gestures such as
+        // Set Pivot available in every tool mode, even when that mode binds the
+        // same button to a single-click action.
+        if (is_double_click) {
+            if (const auto local_action = find_in_mode(mode, false); local_action != Action::NONE) {
+                return local_action;
+            }
+            if (mode != ToolMode::GLOBAL) {
+                const auto global_action = find_in_mode(ToolMode::GLOBAL, false);
+                if (global_action != Action::NONE &&
+                    describe(global_action).inherits_from_global) {
+                    return global_action;
+                }
             }
         }
         return Action::NONE;
@@ -976,6 +980,7 @@ namespace lfs::vis::input {
             {KeyTrigger{KEY_V, MODIFIER_NONE}, Action::TOGGLE_SPLIT_VIEW, "Split view"},
             {KeyTrigger{KEY_V, MODIFIER_SHIFT}, Action::TOGGLE_INDEPENDENT_SPLIT_VIEW, "Independent split"},
             {KeyTrigger{KEY_G, MODIFIER_NONE}, Action::TOGGLE_GT_COMPARISON, "GT comparison"},
+            {KeyTrigger{KEY_C, MODIFIER_ALT}, Action::TOGGLE_CAMERA_FRUSTUMS, "Camera frustums"},
             {KeyTrigger{KEY_T, MODIFIER_NONE}, Action::CYCLE_PLY, "Cycle PLY"},
             // Editing (Delete is mode-specific, added below)
             {KeyTrigger{KEY_Z, MODIFIER_CTRL}, Action::UNDO, "Undo"},
@@ -984,6 +989,7 @@ namespace lfs::vis::input {
             {KeyTrigger{KEY_D, MODIFIER_CTRL}, Action::DESELECT_ALL, "Deselect"},
             {KeyTrigger{KEY_A, MODIFIER_CTRL}, Action::SELECT_ALL, "Select all"},
             {KeyTrigger{KEY_C, MODIFIER_CTRL}, Action::COPY_SELECTION, "Copy"},
+            {KeyTrigger{KEY_X, MODIFIER_CTRL}, Action::CUT_SELECTION, "Cut"},
             {KeyTrigger{KEY_V, MODIFIER_CTRL}, Action::PASTE_SELECTION, "Paste"},
             // Selection mode shortcuts
             {KeyTrigger{KEY_T, MODIFIER_CTRL}, Action::CYCLE_SELECTION_VIS, "Sel vis"},
@@ -993,6 +999,8 @@ namespace lfs::vis::input {
             {KeyTrigger{KEY_4, MODIFIER_CTRL}, Action::SELECT_MODE_LASSO, "Lasso"},
             {KeyTrigger{KEY_5, MODIFIER_CTRL}, Action::SELECT_MODE_RINGS, "Rings"},
             {KeyTrigger{KEY_6, MODIFIER_CTRL}, Action::SELECT_MODE_COLOR, "Color"},
+            {KeyTrigger{KEY_7, MODIFIER_CTRL}, Action::SELECT_MODE_BOX, "Box"},
+            {KeyTrigger{KEY_8, MODIFIER_CTRL}, Action::SELECT_MODE_SPHERE, "Sphere"},
             {KeyTrigger{KEY_ESCAPE, MODIFIER_NONE}, Action::CANCEL_POLYGON, "Cancel"},
             // UI
             {KeyTrigger{KEY_F12, MODIFIER_NONE}, Action::TOGGLE_UI, "Hide UI"},
@@ -1020,6 +1028,7 @@ namespace lfs::vis::input {
             {MouseDragTrigger{MouseButton::LEFT, MODIFIER_NONE}, Action::SELECTION_REPLACE, "Select"},
             {MouseDragTrigger{MouseButton::LEFT, MODIFIER_SHIFT}, Action::SELECTION_ADD, "Add sel"},
             {MouseDragTrigger{MouseButton::LEFT, MODIFIER_CTRL}, Action::SELECTION_REMOVE, "Remove sel"},
+            {MouseDragTrigger{MouseButton::LEFT, MODIFIER_ALT}, Action::SELECTION_INTERSECT, "Intersect sel"},
         };
         for (const auto& b : selection_drags) {
             profile.bindings.push_back({ToolMode::SELECTION, b.trigger, b.action, b.desc});
@@ -1115,6 +1124,7 @@ namespace lfs::vis::input {
         case Action::INVERT_SELECTION: return "Invert Selection";
         case Action::DESELECT_ALL: return "Deselect All";
         case Action::COPY_SELECTION: return "Copy Selection";
+        case Action::CUT_SELECTION: return "Cut Selection";
         case Action::PASTE_SELECTION: return "Paste Selection";
         case Action::DEPTH_ADJUST_NEAR: return "Adjust Depth Box";
         case Action::DEPTH_ADJUST_FAR: return "Adjust Depth Box";
@@ -1129,12 +1139,15 @@ namespace lfs::vis::input {
         case Action::SELECTION_REPLACE: return "Selection: Replace";
         case Action::SELECTION_ADD: return "Selection: Add";
         case Action::SELECTION_REMOVE: return "Selection: Remove";
+        case Action::SELECTION_INTERSECT: return "Selection: Intersect";
         case Action::SELECT_MODE_CENTERS: return "Selection: Centers";
         case Action::SELECT_MODE_RECTANGLE: return "Selection: Rectangle";
         case Action::SELECT_MODE_POLYGON: return "Selection: Polygon";
         case Action::SELECT_MODE_LASSO: return "Selection: Lasso";
         case Action::SELECT_MODE_RINGS: return "Selection: Rings";
         case Action::SELECT_MODE_COLOR: return "Selection: Color";
+        case Action::SELECT_MODE_BOX: return "Selection: Box";
+        case Action::SELECT_MODE_SPHERE: return "Selection: Sphere";
         case Action::APPLY_CROP_BOX: return "Apply Crop Box";
         case Action::NODE_PICK: return "Pick Node";
         case Action::NODE_RECT_SELECT: return "Rectangle Select Nodes";
@@ -1151,6 +1164,7 @@ namespace lfs::vis::input {
         case Action::TOOL_ALIGN: return "Align Tool";
         case Action::PIE_MENU: return "Pie Menu";
         case Action::HISTOGRAM_ZOOM_MARKED: return "Zoom Histogram at Cursor";
+        case Action::TOGGLE_CAMERA_FRUSTUMS: return "Toggle Camera Frustums";
         default: return "Unknown";
         }
     }
@@ -1191,6 +1205,7 @@ namespace lfs::vis::input {
         case Action::INVERT_SELECTION: return "invert_selection";
         case Action::DESELECT_ALL: return "deselect_all";
         case Action::COPY_SELECTION: return "copy_selection";
+        case Action::CUT_SELECTION: return "cut_selection";
         case Action::PASTE_SELECTION: return "paste_selection";
         case Action::DEPTH_ADJUST_NEAR: return "depth_adjust_near";
         case Action::DEPTH_ADJUST_FAR: return "depth_adjust_far";
@@ -1205,12 +1220,15 @@ namespace lfs::vis::input {
         case Action::SELECTION_REPLACE: return "selection_replace";
         case Action::SELECTION_ADD: return "selection_add";
         case Action::SELECTION_REMOVE: return "selection_remove";
+        case Action::SELECTION_INTERSECT: return "selection_intersect";
         case Action::SELECT_MODE_CENTERS: return "select_mode_centers";
         case Action::SELECT_MODE_RECTANGLE: return "select_mode_rectangle";
         case Action::SELECT_MODE_POLYGON: return "select_mode_polygon";
         case Action::SELECT_MODE_LASSO: return "select_mode_lasso";
         case Action::SELECT_MODE_RINGS: return "select_mode_rings";
         case Action::SELECT_MODE_COLOR: return "select_mode_color";
+        case Action::SELECT_MODE_BOX: return "select_mode_box";
+        case Action::SELECT_MODE_SPHERE: return "select_mode_sphere";
         case Action::APPLY_CROP_BOX: return "apply_crop_box";
         case Action::NODE_PICK: return "node_pick";
         case Action::NODE_RECT_SELECT: return "node_rect_select";
@@ -1227,6 +1245,7 @@ namespace lfs::vis::input {
         case Action::TOOL_ALIGN: return "tool_align";
         case Action::PIE_MENU: return "pie_menu";
         case Action::HISTOGRAM_ZOOM_MARKED: return "histogram_zoom_marked";
+        case Action::TOGGLE_CAMERA_FRUSTUMS: return "toggle_camera_frustums";
         default: return {};
         }
     }
@@ -1234,7 +1253,7 @@ namespace lfs::vis::input {
     std::optional<Action> actionFromName(std::string_view name) {
         static const auto table = [] {
             std::unordered_map<std::string, Action> m;
-            for (int i = 0; i <= static_cast<int>(Action::HISTOGRAM_ZOOM_MARKED); ++i) {
+            for (int i = 0; i <= static_cast<int>(LAST_ACTION); ++i) {
                 const auto action = static_cast<Action>(i);
                 const auto key = actionNameKey(action);
                 if (!key.empty())
@@ -1844,6 +1863,7 @@ namespace lfs::vis::input {
         case Action::TOGGLE_SPLIT_VIEW:
         case Action::TOGGLE_INDEPENDENT_SPLIT_VIEW:
         case Action::TOGGLE_GT_COMPARISON:
+        case Action::TOGGLE_CAMERA_FRUSTUMS:
         case Action::CYCLE_PLY:
         case Action::CYCLE_SELECTION_VIS:
             return d_view_global_key;
@@ -1857,6 +1877,7 @@ namespace lfs::vis::input {
         case Action::DESELECT_ALL:
         case Action::SELECT_ALL:
         case Action::COPY_SELECTION:
+        case Action::CUT_SELECTION:
         case Action::PASTE_SELECTION:
             return d_editing_inherit;
 
@@ -1882,6 +1903,7 @@ namespace lfs::vis::input {
         case Action::SELECTION_REPLACE:
         case Action::SELECTION_ADD:
         case Action::SELECTION_REMOVE:
+        case Action::SELECTION_INTERSECT:
             return d_selection_drag;
         case Action::SELECT_MODE_CENTERS:
         case Action::SELECT_MODE_RECTANGLE:
@@ -1889,6 +1911,8 @@ namespace lfs::vis::input {
         case Action::SELECT_MODE_LASSO:
         case Action::SELECT_MODE_RINGS:
         case Action::SELECT_MODE_COLOR:
+        case Action::SELECT_MODE_BOX:
+        case Action::SELECT_MODE_SPHERE:
             return d_selection_mode_key;
 
         case Action::APPLY_CROP_BOX:
@@ -1940,6 +1964,8 @@ namespace lfs::vis::input {
         case Action::SELECT_MODE_LASSO:
         case Action::SELECT_MODE_RINGS:
         case Action::SELECT_MODE_COLOR:
+        case Action::SELECT_MODE_BOX:
+        case Action::SELECT_MODE_SPHERE:
         case Action::UNDO:
         case Action::REDO:
         case Action::DELETE_SELECTED:
@@ -1948,6 +1974,7 @@ namespace lfs::vis::input {
         case Action::DESELECT_ALL:
         case Action::SELECT_ALL:
         case Action::COPY_SELECTION:
+        case Action::CUT_SELECTION:
         case Action::PASTE_SELECTION:
         case Action::TOGGLE_DEPTH_MODE:
         case Action::TOGGLE_SELECTION_DEPTH_FILTER:
@@ -1955,6 +1982,11 @@ namespace lfs::vis::input {
         case Action::SEQUENCER_ADD_KEYFRAME:
         case Action::SEQUENCER_UPDATE_KEYFRAME:
         case Action::SEQUENCER_PLAY_PAUSE:
+        case Action::TOGGLE_SPLIT_VIEW:
+        case Action::TOGGLE_INDEPENDENT_SPLIT_VIEW:
+        case Action::TOGGLE_GT_COMPARISON:
+        case Action::TOGGLE_CAMERA_FRUSTUMS:
+        case Action::CYCLE_SELECTION_VIS:
             return ShortcutScope::GlobalWhenNotTextEditing;
 
         case Action::CAMERA_MOVE_FORWARD:
@@ -1973,10 +2005,6 @@ namespace lfs::vis::input {
         case Action::CAMERA_SPEED_DOWN:
         case Action::ZOOM_SPEED_UP:
         case Action::ZOOM_SPEED_DOWN:
-        case Action::TOGGLE_SPLIT_VIEW:
-        case Action::TOGGLE_INDEPENDENT_SPLIT_VIEW:
-        case Action::TOGGLE_GT_COMPARISON:
-        case Action::CYCLE_SELECTION_VIS:
         case Action::PIE_MENU:
             return ShortcutScope::Viewport;
 

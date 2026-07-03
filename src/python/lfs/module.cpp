@@ -791,7 +791,8 @@ NB_MODULE(lichtfeld, m) {
            const std::string& output_path, const std::string& init_path,
            const std::string& centralize_dataset,
            std::optional<int> max_width,
-           bool apply_auto_crop) {
+           bool apply_auto_crop,
+           std::optional<int> min_track_length) {
             nb::gil_scoped_release release;
             lfs::core::events::cmd::LoadFile{
                 .path = python_utf8_path(path),
@@ -800,6 +801,7 @@ NB_MODULE(lichtfeld, m) {
                 .init_path = python_utf8_path(init_path),
                 .centralize_dataset = centralize_dataset,
                 .max_width = max_width,
+                .min_track_length = min_track_length,
                 .apply_auto_crop = apply_auto_crop}
                 .emit();
         },
@@ -808,6 +810,7 @@ NB_MODULE(lichtfeld, m) {
         nb::arg("centralize_dataset") = "off",
         nb::arg("max_width") = nb::none(),
         nb::arg("apply_auto_crop") = false,
+        nb::arg("min_track_length") = nb::none(),
         "Load a file (PLY, checkpoint) or dataset into the scene.");
 
     m.def(
@@ -842,11 +845,12 @@ NB_MODULE(lichtfeld, m) {
     m.def(
         "export_scene",
         [](int format, const std::string& path, const std::vector<std::string>& node_names, int sh_degree,
-           bool rad_flip_y) {
-            lfs::python::invoke_export(format, path, node_names, sh_degree, rad_flip_y);
+           bool rad_flip_y, bool rad_streamable) {
+            lfs::python::invoke_export(format, path, node_names, sh_degree, rad_flip_y, rad_streamable);
         },
         nb::arg("format"), nb::arg("path"), nb::arg("node_names"), nb::arg("sh_degree"),
         nb::arg("rad_flip_y") = false,
+        nb::arg("rad_streamable") = true,
         "Export scene nodes to file. Format: 0=PLY, 1=SOG, 2=SPZ, 3=HTML, 4=USD, 5=USDZ NuRec, 6=RAD, 7=COLMAP.");
 
     m.def(

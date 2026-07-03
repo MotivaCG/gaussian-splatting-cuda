@@ -188,18 +188,30 @@ namespace lfs::vis {
             bool posted_work = false;
             bool render_work = false;
             bool store_dirty = false;
+            bool swapchain_resize_pending = false;
+            bool swapchain_resize_ready = false;
+            bool window_resize_paint_pending = false;
+            bool viewport_resize_deferring = false;
+            bool viewport_resize_settle_ready = false;
 
             [[nodiscard]] bool shouldRenderFrame() const {
                 return viewport_export_locked || scene_dirty || continuous_input ||
                        python_animation || python_overlay || python_redraw ||
                        gui_animation || input_event || posted_work || render_work ||
-                       store_dirty;
+                       store_dirty || swapchain_resize_ready || window_resize_paint_pending ||
+                       viewport_resize_settle_ready;
             }
 
             [[nodiscard]] bool needsContinuousLoop() const {
+                const bool resize_deferral_throttles_animation =
+                    viewport_resize_deferring ||
+                    (swapchain_resize_pending && !swapchain_resize_ready);
                 return scene_dirty || continuous_input || python_animation ||
-                       python_overlay || python_redraw || gui_animation ||
-                       render_work || viewport_export_locked || store_dirty;
+                       python_overlay || python_redraw ||
+                       (gui_animation && !resize_deferral_throttles_animation) ||
+                       render_work || viewport_export_locked || store_dirty ||
+                       swapchain_resize_ready || window_resize_paint_pending ||
+                       viewport_resize_settle_ready;
             }
         };
 
@@ -267,7 +279,9 @@ namespace lfs::vis {
         bool pending_auto_train_ = false;
         bool pending_new_project_ = false;
         bool pending_reset_ = false;
+        int pending_training_completion_refresh_frames_ = 0;
         bool gui_frame_rendered_ = false;
+        bool startup_plugin_preload_started_ = false;
         bool update_work_processed_ = false;
         std::chrono::high_resolution_clock::time_point last_frame_time_ = std::chrono::high_resolution_clock::now();
         bool sequencer_ui_initialized_ = false;

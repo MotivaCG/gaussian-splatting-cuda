@@ -663,6 +663,35 @@ namespace lfs::vis::gui {
         if (ph <= 0 || display_h <= 0.0f || ph > last_fbo_h_)
             return false;
 
+        if (tooltip_.hasActiveState() && input_) {
+            const float local_x = input_->mouse_x - x;
+            const float local_y = input_->mouse_y - y;
+            bool hovered = hitTestPanelShape(local_x, local_y,
+                                             static_cast<float>(last_fbo_w_),
+                                             static_cast<float>(last_fbo_h_));
+
+            if (hovered && clip_y_min_ >= 0.0f && clip_y_max_ > clip_y_min_) {
+                if (input_->mouse_y < clip_y_min_ || input_->mouse_y > clip_y_max_)
+                    hovered = false;
+            }
+
+            const bool any_capture = mouse_captured_[0] || mouse_captured_[1] || mouse_captured_[2];
+            const bool effective_hovered = hovered || any_capture;
+            const int rml_mx = static_cast<int>(local_x);
+            const int rml_my = static_cast<int>(local_y);
+            const bool pointer_event =
+                input_->mouse_clicked[0] || input_->mouse_released[0] ||
+                input_->mouse_clicked[1] || input_->mouse_released[1] ||
+                input_->mouse_wheel != 0.0f;
+
+            if (pointer_event ||
+                effective_hovered != last_hovered_ ||
+                (effective_hovered &&
+                 (rml_mx != last_forwarded_mx_ || rml_my != last_forwarded_my_))) {
+                return false;
+            }
+        }
+
         compositeDirectToScreen(x, y, w, display_h);
         return true;
     }

@@ -76,3 +76,7 @@
     background-color: @{surface};
     border-color: @{border};
 }
+
+.confirm-buttons .btn--secondary:hover {
+    background-color: @{surface_bright};
+}

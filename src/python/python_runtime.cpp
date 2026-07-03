@@ -180,6 +180,7 @@ namespace lfs::python {
         std::atomic<uint64_t> g_redraw_generation{0};
         std::atomic<uint64_t> g_pre_scene_panel_sync_generation{0};
         MainLoopWakeCallback g_main_loop_wake_callback = nullptr;
+        StartupPluginLoadStateCallback g_startup_plugin_load_state_callback = nullptr;
     } // namespace
 
     // Bridge API
@@ -239,6 +240,17 @@ namespace lfs::python {
 
     void set_main_loop_wake_callback(MainLoopWakeCallback cb) {
         g_main_loop_wake_callback = cb;
+    }
+
+    void set_startup_plugin_load_state_callback(StartupPluginLoadStateCallback cb) {
+        g_startup_plugin_load_state_callback = cb;
+    }
+
+    void notify_startup_plugin_load_state(bool active, float progress, const char* stage) {
+        if (g_startup_plugin_load_state_callback) {
+            g_startup_plugin_load_state_callback(active, progress, stage);
+        }
+        request_redraw();
     }
 
     // Operation context (short-lived)
@@ -948,7 +960,8 @@ namespace lfs::python {
 
     void invoke_export(int format, const std::string& path,
                        const std::vector<std::string>& node_names, int sh_degree,
-                       bool rad_flip_y) {
+                       bool rad_flip_y,
+                       bool rad_streamable) {
         if (!g_export_callback)
             return;
 
@@ -959,7 +972,8 @@ namespace lfs::python {
         }
         g_export_callback(format, path.c_str(), names_ptrs.data(),
                           static_cast<int>(names_ptrs.size()), sh_degree,
-                          rad_flip_y);
+                          rad_flip_y,
+                          rad_streamable);
     }
 
     bool has_python_toolbar() {

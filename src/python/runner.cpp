@@ -3,8 +3,10 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "runner.hpp"
+#include "core/event_bridge/localization_manager.hpp"
 #include "package_manager.hpp"
 #include "python_buffer_analysis.hpp"
+#include "visualizer/gui/string_keys.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -34,6 +36,11 @@ namespace lfs::python {
     static bool g_we_initialized_python = false;
 
     namespace {
+        template <typename... Args>
+        std::string format_runtime(const char* fmt, Args&&... args) {
+            return std::vformat(std::string_view{fmt}, std::make_format_args(args...));
+        }
+
         struct EnsureInitializedRegistrar {
             EnsureInitializedRegistrar() { set_ensure_initialized_callback(ensure_initialized); }
         };
@@ -50,19 +57,10 @@ namespace lfs::python {
     static std::mutex g_python_bridge_failure_mutex;
     static std::string g_python_bridge_failure_detail;
     static std::atomic<bool> g_plugin_preload_scheduled{false};
-
-    // RAII wrapper for the plugin preload thread that ensures proper cleanup
-    // at static destruction time to avoid crashes from std::thread::~thread()
-    // calling std::terminate() on a joinable thread.
-    struct PluginPreloadThread {
-        std::thread thread;
-        ~PluginPreloadThread() {
-            if (thread.joinable()) {
-                thread.join();
-            }
-        }
-    };
-    static PluginPreloadThread g_plugin_preload_thread;
+    static std::atomic<bool> g_plugin_preload_running{false};
+    static std::vector<std::string> g_plugin_preload_to_load;
+    static std::size_t g_plugin_preload_index = 0;
+    static bool g_plugin_preload_discovered = false;
 
     // Python C extension for capturing output
     static PyObject* capture_write(PyObject* self, PyObject* args) {
@@ -750,12 +748,38 @@ _add_dll_dirs()
             LOG_INFO("Plugin autoload: {} plugin(s) enabled for startup", to_load.size());
         }
 
-        for (const auto& name : to_load) {
+        if (to_load.empty()) {
+            mark_plugins_loaded();
+            return;
+        }
+
+        python::notify_startup_plugin_load_state(
+            true, 0.0f, LOC(lichtfeld::Strings::Startup::DISCOVERING_PLUGINS));
+
+        const std::size_t total = to_load.size();
+        for (std::size_t index = 0; index < total; ++index) {
+            const auto& name = to_load[index];
+            const float start_progress = static_cast<float>(index) / static_cast<float>(total);
+            const auto start_stage =
+                format_runtime(LOC(lichtfeld::Strings::Startup::LOADING_PLUGIN), index + 1, total, name);
+            python::notify_startup_plugin_load_state(
+                true, start_progress, start_stage.c_str());
             const GilAcquire gil;
             if (load_single_plugin_locked(name)) {
                 LOG_INFO("Loaded plugin: {}", name);
             } else {
                 LOG_ERROR("Failed to load plugin: {}", name);
+            }
+            const float end_progress = static_cast<float>(index + 1) / static_cast<float>(total);
+            if (index + 1 < total) {
+                const auto& next_name = to_load[index + 1];
+                const auto end_stage =
+                    format_runtime(LOC(lichtfeld::Strings::Startup::LOADING_PLUGIN), index + 2, total, next_name);
+                python::notify_startup_plugin_load_state(true, end_progress, end_stage.c_str());
+            } else {
+                const auto loaded_stage =
+                    format_runtime(LOC(lichtfeld::Strings::Startup::LOADED_PLUGINS), total, total);
+                python::notify_startup_plugin_load_state(false, 1.0f, loaded_stage.c_str());
             }
         }
 
@@ -772,9 +796,112 @@ _add_dll_dirs()
             return;
         }
 
-        g_plugin_preload_thread.thread = std::thread([]() {
-            ensure_plugins_loaded();
-        });
+        g_plugin_preload_running.store(true, std::memory_order_release);
+        python::request_redraw();
+    }
+
+    bool process_plugin_preload_step() {
+        if (!g_plugin_preload_running.load(std::memory_order_acquire)) {
+            return false;
+        }
+
+        if (!g_plugin_preload_discovered) {
+            ensure_initialized();
+            if (!can_acquire_gil()) {
+                LOG_WARN("Python GIL state not ready, skipping plugin preload");
+                g_plugin_preload_running.store(false, std::memory_order_release);
+                python::notify_startup_plugin_load_state(
+                    false, 1.0f, LOC(lichtfeld::Strings::Startup::PLUGIN_LOADING_SKIPPED));
+                python::request_redraw();
+                return true;
+            }
+
+            {
+                const GilAcquire gil;
+                std::lock_guard lock(g_plugin_init_mutex);
+                if (!ensure_python_bridge_ready_locked()) {
+                    LOG_WARN("Python bridge not ready, skipping plugin preload");
+                    g_plugin_preload_running.store(false, std::memory_order_release);
+                    python::notify_startup_plugin_load_state(
+                        false, 1.0f, LOC(lichtfeld::Strings::Startup::PLUGIN_LOADING_SKIPPED));
+                    python::request_redraw();
+                    return true;
+                }
+                if (are_plugins_loaded()) {
+                    g_plugin_preload_running.store(false, std::memory_order_release);
+                    const auto loaded_stage = format_runtime(LOC(lichtfeld::Strings::Startup::LOADED_PLUGINS), 0, 0);
+                    python::notify_startup_plugin_load_state(false, 1.0f, loaded_stage.c_str());
+                    python::request_redraw();
+                    return true;
+                }
+                g_plugin_preload_to_load = discover_enabled_plugins_locked();
+                g_plugin_preload_index = 0;
+                g_plugin_preload_discovered = true;
+                LOG_INFO("Plugin autoload: {} plugin(s) enabled for startup",
+                         g_plugin_preload_to_load.size());
+            }
+
+            if (g_plugin_preload_to_load.empty()) {
+                mark_plugins_loaded();
+                g_plugin_preload_running.store(false, std::memory_order_release);
+                const auto loaded_stage = format_runtime(LOC(lichtfeld::Strings::Startup::LOADED_PLUGINS), 0, 0);
+                python::notify_startup_plugin_load_state(false, 1.0f, loaded_stage.c_str());
+            } else {
+                python::notify_startup_plugin_load_state(
+                    true, 0.0f, LOC(lichtfeld::Strings::Startup::DISCOVERING_PLUGINS));
+            }
+            python::request_redraw();
+            return true;
+        }
+
+        const std::size_t total = g_plugin_preload_to_load.size();
+        if (g_plugin_preload_index >= total) {
+            mark_plugins_loaded();
+            g_plugin_preload_to_load.clear();
+            g_plugin_preload_discovered = false;
+            g_plugin_preload_running.store(false, std::memory_order_release);
+            const auto loaded_stage = format_runtime(LOC(lichtfeld::Strings::Startup::LOADED_PLUGINS), total, total);
+            python::notify_startup_plugin_load_state(false, 1.0f, loaded_stage.c_str());
+            python::request_redraw();
+            return true;
+        }
+
+        const std::size_t index = g_plugin_preload_index;
+        const auto name = g_plugin_preload_to_load[index];
+        const float start_progress = static_cast<float>(index) / static_cast<float>(total);
+        const auto start_stage =
+            format_runtime(LOC(lichtfeld::Strings::Startup::LOADING_PLUGIN), index + 1, total, name);
+        python::notify_startup_plugin_load_state(true, start_progress, start_stage.c_str());
+
+        {
+            const GilAcquire gil;
+            if (load_single_plugin_locked(name)) {
+                LOG_INFO("Loaded plugin: {}", name);
+            } else {
+                LOG_ERROR("Failed to load plugin: {}", name);
+            }
+        }
+
+        ++g_plugin_preload_index;
+        const float end_progress = static_cast<float>(g_plugin_preload_index) / static_cast<float>(total);
+        if (g_plugin_preload_index < total) {
+            const auto& next_name = g_plugin_preload_to_load[g_plugin_preload_index];
+            const auto end_stage = format_runtime(
+                LOC(lichtfeld::Strings::Startup::LOADING_PLUGIN), g_plugin_preload_index + 1, total, next_name);
+            python::notify_startup_plugin_load_state(true, end_progress, end_stage.c_str());
+        } else {
+            g_plugin_preload_to_load.clear();
+            g_plugin_preload_discovered = false;
+            g_plugin_preload_running.store(false, std::memory_order_release);
+            const auto loaded_stage = format_runtime(LOC(lichtfeld::Strings::Startup::LOADED_PLUGINS), total, total);
+            python::notify_startup_plugin_load_state(false, 1.0f, loaded_stage.c_str());
+        }
+        python::request_redraw();
+        return true;
+    }
+
+    bool is_plugin_preload_running() {
+        return g_plugin_preload_running.load(std::memory_order_acquire);
     }
 
     bool start_debugpy(const int port) {
@@ -808,9 +935,7 @@ _add_dll_dirs()
     }
 
     void join_plugin_preload() {
-        if (g_plugin_preload_thread.thread.joinable()) {
-            g_plugin_preload_thread.thread.join();
-        }
+        // Startup plugin preload runs on the main thread in incremental steps.
     }
 
     void finalize() {

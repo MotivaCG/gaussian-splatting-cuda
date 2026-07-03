@@ -289,10 +289,15 @@ set(TEST_FILES
     test_openmesh_bridge.cpp
     test_mesh_loader.cpp
     test_colmap_image_layout.cpp
+    test_colmap_points3d_text.cpp
     test_splat_simplify.cpp
     test_rml_text_input_handler.cpp
     test_rotated_sh_correctness.cpp
     test_tensor_stream.cpp
+    test_cuda_event_pool.cpp
+    test_tensor_multistream.cpp
+    test_mcmc_multinomial.cpp
+    test_arena_metrics_contention.cpp
     test_tensor_memory_planner.cpp
     test_vram_profiler_metrics.cpp
 )

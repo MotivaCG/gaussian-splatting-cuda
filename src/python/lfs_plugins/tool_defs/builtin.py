@@ -11,6 +11,67 @@ from __future__ import annotations
 from .definition import ToolDef, SubmodeDef, PivotModeDef
 
 
+def _poll_builtin_tool_available(tool_id: str) -> bool:
+    try:
+        import lichtfeld as lf
+
+        is_tool_available = getattr(getattr(lf, "ui", None), "is_tool_available", None)
+        return bool(is_tool_available(tool_id)) if callable(is_tool_available) else False
+    except Exception:
+        return False
+
+
+def _node_type_name(node) -> str:
+    try:
+        # nanobind enums: str() returns "NodeType.SPLAT", extract the suffix
+        return str(node.type).split(".")[-1]
+    except Exception:
+        return ""
+
+
+def _node_contains_cropbox_target(scene, node) -> bool:
+    if node is None:
+        return False
+    if _node_type_name(node) in {"SPLAT", "POINTCLOUD", "DATASET"}:
+        return True
+    for child_id in getattr(node, "children", []) or []:
+        child = scene.get_node_by_id(child_id)
+        if _node_contains_cropbox_target(scene, child):
+            return True
+    return False
+
+
+def _selected_node_types() -> tuple[str, ...]:
+    try:
+        import lichtfeld as lf
+
+        scene = lf.scene.current()
+        selected_names = lf.get_selected_node_names() or []
+        node_types: list[str] = []
+        for name in selected_names:
+            node = scene.get_node(name)
+            node_type = getattr(getattr(node, "type", None), "name", "")
+            if node_type:
+                node_types.append(node_type)
+        return tuple(node_types)
+    except Exception:
+        return ()
+
+
+def _selection_has_cropbox_target() -> bool:
+    try:
+        import lichtfeld as lf
+
+        scene = lf.scene.current()
+        selected_names = lf.get_selected_node_names() or []
+        return any(
+            _node_contains_cropbox_target(scene, scene.get_node(name))
+            for name in selected_names
+        )
+    except Exception:
+        return False
+
+
 def _poll_has_scene(context) -> bool:
     return getattr(context, "has_scene", False)
 
@@ -20,6 +81,25 @@ def _poll_has_gaussians(context) -> bool:
         getattr(context, "has_scene", False)
         and getattr(context, "num_gaussians", 0) > 0
     )
+
+
+def _poll_can_transform(context) -> bool:
+    return bool(getattr(context, "can_transform", False))
+
+
+def _poll_can_mirror(_context) -> bool:
+    return _poll_builtin_tool_available("builtin.mirror")
+
+
+def _poll_can_align(_context) -> bool:
+    return _poll_builtin_tool_available("builtin.align")
+
+
+def _poll_can_cropbox(context) -> bool:
+    import lichtfeld as lf
+    return (lf.ui.get_content_type() == "splat_files" and
+            _poll_has_scene(context) and
+            lf.can_transform_selection())
 
 
 BUILTIN_TOOLS: tuple[ToolDef, ...] = (
@@ -38,6 +118,8 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
             SubmodeDef("lasso", "Lasso", "lasso"),
             SubmodeDef("rings", "Rings", "ring"),
             SubmodeDef("color", "Color", "color-picker"),
+            SubmodeDef("box", "Box", "box"),
+            SubmodeDef("sphere", "Sphere", "sphere"),
         ),
         poll=_poll_has_gaussians,
     ),
@@ -58,7 +140,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
             PivotModeDef("origin", "Origin", "circle-dot"),
             PivotModeDef("bounds", "Bounds", "box"),
         ),
-        poll=_poll_has_scene,
+        poll=_poll_can_transform,
     ),
     ToolDef(
         id="builtin.rotate",
@@ -77,7 +159,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
             PivotModeDef("origin", "Origin", "circle-dot"),
             PivotModeDef("bounds", "Bounds", "box"),
         ),
-        poll=_poll_has_scene,
+        poll=_poll_can_transform,
     ),
     ToolDef(
         id="builtin.scale",
@@ -96,7 +178,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
             PivotModeDef("origin", "Origin", "circle-dot"),
             PivotModeDef("bounds", "Bounds", "box"),
         ),
-        poll=_poll_has_scene,
+        poll=_poll_can_transform,
     ),
     ToolDef(
         id="builtin.mirror",
@@ -111,7 +193,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
             SubmodeDef("y", "Y Axis", "mirror-y"),
             SubmodeDef("z", "Z Axis", "mirror-z"),
         ),
-        poll=_poll_has_gaussians,
+        poll=_poll_can_mirror,
     ),
     ToolDef(
         id="builtin.cropbox",
@@ -121,7 +203,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         order=70,
         description="Crop objects",
         gizmo="translate",
-        poll=_poll_has_scene,
+        poll=_poll_can_cropbox,
     ),
     ToolDef(
         id="builtin.align",
@@ -131,7 +213,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         order=80,
         description="Align to world axes",
         shortcut="6",
-        poll=_poll_has_scene,
+        poll=_poll_can_align,
     ),
 )
 

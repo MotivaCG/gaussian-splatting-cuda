@@ -471,7 +471,6 @@
     left: 0;
     right: 0;
     bottom: 0;
-    backdrop-filter: blur(3dp);
     display: flex;
     justify-content: center;
     align-items: center;

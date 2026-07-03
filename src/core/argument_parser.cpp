@@ -211,6 +211,7 @@ namespace {
             ::args::ValueFlag<std::string> init_path(paths_group, "path", "Initialize from splat file (.ply, .sog, .spz, .usd, .usda, .usdc, .usdz, .resume)", {"init"});
             ::args::ValueFlagList<std::string> add_splats(paths_group, "path", "Append trained splat file(s) to the training model before optimizer initialization", {"add-splat"});
             ::args::CounterFlag freeze(paths_group, "freeze", "Freeze the immediately preceding --add-splat rows from optimizer gradients and densification", {"freeze"});
+            ::args::Flag exclude_export(paths_group, "exclude_export", "Exclude frozen --add-splat rows from PLY exports", {"exclude-export"});
 
             ::args::ValueFlag<std::string> import_cameras(paths_group, "path", "Import COLMAP cameras from sparse folder (no images required)", {"import-cameras"});
 
@@ -264,6 +265,7 @@ namespace {
                                                                 {"4", 4},
                                                                 {"8", 8}});
             ::args::ValueFlag<int> max_width(dataset_group, "max_width", "Max width of images in px; 0 disables the cap (default: 3840)", {"max-width"});
+            ::args::ValueFlag<int> min_track_length(dataset_group, "min_track_length", "Minimum point track length for COLMAP sparse point import; 0 disables filtering", {"min-track-length"});
             ::args::Flag no_cpu_cache(dataset_group, "no_cpu_cache", "Disable CPU memory caching (default: enabled)", {"no-cpu-cache"});
             ::args::Flag no_fs_cache(dataset_group, "no_fs_cache", "Disable filesystem caching (default: enabled)", {"no-fs-cache"});
             ::args::Flag undistort(dataset_group, "undistort", "Undistort images on-the-fly before training", {"undistort"});
@@ -622,6 +624,12 @@ namespace {
                     return std::unexpected("ERROR: --max-width must be 0 or greater");
                 }
             }
+            if (min_track_length) {
+                int min_track = ::args::get(min_track_length);
+                if (min_track < 0) {
+                    return std::unexpected("ERROR: --min-track-length must be 0 or greater");
+                }
+            }
 
             if (ngs_noise) {
                 const auto path = ::args::get(ngs_noise);
@@ -720,6 +728,7 @@ namespace {
                                         iterations_val = cli_option_present({"-i", "--iter"}) ? std::optional<uint32_t>(::args::get(iterations)) : std::optional<uint32_t>(),
                                         resize_factor_val = resize_factor ? std::optional<int>(::args::get(resize_factor)) : std::optional<int>(1), // default 1
                                         max_width_val = max_width ? std::optional<int>(::args::get(max_width)) : std::optional<int>(3840),
+                                        min_track_length_val = cli_option_present({"--min-track-length"}) ? std::optional<int>(::args::get(min_track_length)) : std::optional<int>(),
                                         no_cpu_cache_flag = static_cast<bool>(no_cpu_cache),
                                         no_fs_cache_flag = static_cast<bool>(no_fs_cache),
                                         tcp_server_connection_port_val = tcp_server_connection_port ? std::optional<int>(::args::get(tcp_server_connection_port)) : std::optional<int>(),
@@ -787,6 +796,7 @@ namespace {
                                         use_depth_loss_flag = bool(use_depth_loss),
                                         no_error_map_flag = bool(no_error_map),
                                         no_edge_map_flag = bool(no_edge_map),
+                                        exclude_export_flag = bool(exclude_export),
                                         output_name_val = cli_option_present({"--output-name"}) ? std::optional<std::string>(::args::get(output_name)) : std::optional<std::string>()]() {
                 auto& opt = params.optimization;
                 auto& svs = params.server;
@@ -807,6 +817,7 @@ namespace {
                 setVal(iterations_val, opt.iterations);
                 setVal(resize_factor_val, ds.resize_factor);
                 setVal(max_width_val, ds.max_width);
+                setVal(min_track_length_val, ds.min_track_length);
                 if (no_cpu_cache_flag)
                     ds.loading_params.use_cpu_memory = false;
                 if (no_fs_cache_flag)
@@ -879,6 +890,7 @@ namespace {
                     opt.use_error_map = false;
                 if (no_edge_map_flag)
                     opt.use_edge_map = false;
+                setFlag(exclude_export_flag, params.exclude_frozen_add_splats_from_export);
 
                 // Mask parameters
                 setVal(mask_mode_val, opt.mask_mode);
@@ -1099,6 +1111,8 @@ namespace {
         ::args::ValueFlag<int> sog_iter(parser, "iterations", "K-means iterations for SOG (default: 10)", {"sog-iterations"});
         ::args::ValueFlag<std::string> tiles(parser, "AxB", "Replicate a PLY source across an AxB ground-plane grid (RAD output only)", {"tiles"});
         ::args::ValueFlag<std::string> lod_builder(parser, "builder", "PLY->RAD LOD tree builder: bhatt (default) or octree (hybrid: octree fine levels + similarity-ordered bhatt top, much faster)", {"lod-builder"});
+        ::args::Flag rad_stream(parser, "stream", "RAD output: streamable Spark-compatible chunks (default)", {"stream"});
+        ::args::Flag rad_none_stream(parser, "none-stream", "RAD output: native LichtFeld chunks", {"none-stream"});
         ::args::Flag overwrite(parser, "overwrite", "Overwrite existing files without prompting", {'y', "overwrite"});
 
         std::vector<std::string> args_vec(argv + 1, argv + argc);
@@ -1186,6 +1200,15 @@ namespace {
                 return std::unexpected("--lod-builder requires RAD output (--format rad)");
             }
         }
+
+        if (rad_stream && rad_none_stream) {
+            return std::unexpected("--stream and --none-stream are mutually exclusive");
+        }
+        if ((rad_stream || rad_none_stream) && params.format != param::OutputFormat::RAD) {
+            return std::unexpected("--stream/--none-stream require RAD output (--format rad)");
+        }
+        params.rad_export_mode = rad_none_stream ? param::RadExportMode::NonStream
+                                                 : param::RadExportMode::Stream;
 
         return core_args::ConvertMode{params};
     }

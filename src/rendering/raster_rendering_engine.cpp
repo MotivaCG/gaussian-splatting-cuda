@@ -1875,7 +1875,9 @@ namespace lfs::rendering {
                 }
             }
 
-            return best_uid;
+            if (best_score < HIT_RADIUS_PIXELS)
+                return best_uid;
+            return -1;
         }
 
         ScreenOverlayRenderer* getScreenOverlayRenderer() override {

@@ -58,7 +58,7 @@ namespace lfs::core {
             EVENT(ResetTraining, );
             EVENT(SwitchToLatestCheckpoint, );
             EVENT(SaveCheckpoint, std::optional<int> iteration;);
-            EVENT(LoadFile, std::filesystem::path path; bool is_dataset; std::filesystem::path output_path; std::filesystem::path init_path; std::string centralize_dataset; std::optional<int> max_width; bool apply_auto_crop = false;);
+            EVENT(LoadFile, std::filesystem::path path; bool is_dataset; std::filesystem::path output_path; std::filesystem::path init_path; std::string centralize_dataset; std::optional<int> max_width; std::optional<int> min_track_length; bool apply_auto_crop = false;);
             EVENT(LoadCheckpointForTraining, std::filesystem::path checkpoint_path; std::filesystem::path dataset_path; std::filesystem::path output_path;);
             EVENT(ImportColmapCameras, std::filesystem::path sparse_path;);
             EVENT(LoadConfigFile, std::filesystem::path path;);
@@ -118,6 +118,7 @@ namespace lfs::core {
             EVENT(DeselectAll, );
             EVENT(SelectAll, );
             EVENT(CopySelection, );
+            EVENT(CutSelection, );
             EVENT(PasteSelection, );
             EVENT(SelectBrush, float x; float y; float radius; int camera_index; std::string mode;);
             EVENT(SelectRect, float x0; float y0; float x1; float y1; int camera_index; std::string mode;);
@@ -252,6 +253,7 @@ namespace lfs::core {
         namespace ui {
             EVENT(FileDropReceived, ); // Emitted when files are dropped onto the window
             EVENT(WindowResized, int width; int height;);
+            EVENT(WindowResizeInteraction, bool active;);
             EVENT(CameraMove, glm::mat3 rotation; glm::vec3 translation;);
             EVENT(SpeedChanged, float current_speed; float max_speed;);
             EVENT(ZoomSpeedChanged, float zoom_speed; float max_zoom_speed;);

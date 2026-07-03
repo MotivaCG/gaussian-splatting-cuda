@@ -237,7 +237,34 @@ namespace lfs::vis {
             return python::dispatch_modal_event(py_evt);
         }
 
-        bool handleSelectionModeShortcut(const input::Action action, gui::GuiManager* gui) {
+        std::optional<ToolType> ownerToolForActivationAction(const input::Action action) {
+            switch (action) {
+            case input::Action::TOOL_SELECT:
+            case input::Action::SELECT_MODE_CENTERS:
+            case input::Action::SELECT_MODE_RECTANGLE:
+            case input::Action::SELECT_MODE_POLYGON:
+            case input::Action::SELECT_MODE_LASSO:
+            case input::Action::SELECT_MODE_RINGS:
+            case input::Action::SELECT_MODE_COLOR:
+            case input::Action::SELECT_MODE_BOX:
+            case input::Action::SELECT_MODE_SPHERE:
+                return ToolType::Selection;
+            case input::Action::TOOL_TRANSLATE:
+                return ToolType::Translate;
+            case input::Action::TOOL_ROTATE:
+                return ToolType::Rotate;
+            case input::Action::TOOL_SCALE:
+                return ToolType::Scale;
+            case input::Action::TOOL_MIRROR:
+                return ToolType::Mirror;
+            case input::Action::TOOL_ALIGN:
+                return ToolType::Align;
+            default:
+                return std::nullopt;
+            }
+        }
+
+        bool applySelectionModeShortcut(const input::Action action, gui::GuiManager* gui) {
             if (!gui)
                 return false;
 
@@ -268,6 +295,14 @@ namespace lfs::vis {
                 submode = SelectionSubMode::Color;
                 submode_id = "color";
                 break;
+            case input::Action::SELECT_MODE_BOX:
+                submode = SelectionSubMode::Box;
+                submode_id = "box";
+                break;
+            case input::Action::SELECT_MODE_SPHERE:
+                submode = SelectionSubMode::Sphere;
+                submode_id = "sphere";
+                break;
             default:
                 return false;
             }
@@ -277,33 +312,31 @@ namespace lfs::vis {
             return true;
         }
 
-        bool handleToolbarToolShortcut(const input::Action action) {
-            ToolType tool = ToolType::None;
-            switch (action) {
-            case input::Action::TOOL_SELECT:
-                tool = ToolType::Selection;
-                break;
-            case input::Action::TOOL_TRANSLATE:
-                tool = ToolType::Translate;
-                break;
-            case input::Action::TOOL_ROTATE:
-                tool = ToolType::Rotate;
-                break;
-            case input::Action::TOOL_SCALE:
-                tool = ToolType::Scale;
-                break;
-            case input::Action::TOOL_MIRROR:
-                tool = ToolType::Mirror;
-                break;
-            case input::Action::TOOL_ALIGN:
-                tool = ToolType::Align;
-                break;
-            default:
+        bool handleToolControlActivationShortcut(const input::Action action, gui::GuiManager* gui) {
+            const auto tool = ownerToolForActivationAction(action);
+            if (!tool) {
                 return false;
             }
 
-            lfs::core::events::tools::SetToolbarTool{.tool_mode = static_cast<int>(tool)}.emit();
+            lfs::core::events::tools::SetToolbarTool{.tool_mode = static_cast<int>(*tool)}.emit();
+            (void)applySelectionModeShortcut(action, gui);
             return true;
+        }
+
+        input::Action resolveCrossToolActivationShortcut(const input::InputBindings& bindings,
+                                                         const input::ToolMode current_mode,
+                                                         const int key,
+                                                         const int mods) {
+            for (const auto mode : input::kAllToolModes) {
+                if (mode == current_mode) {
+                    continue;
+                }
+                const auto candidate = bindings.getActionForKey(mode, key, mods);
+                if (ownerToolForActivationAction(candidate).has_value()) {
+                    return candidate;
+                }
+            }
+            return input::Action::NONE;
         }
 
         [[nodiscard]] bool shouldDeferClickActionForDrag(const input::Action action) {
@@ -480,6 +513,7 @@ namespace lfs::vis {
         held_keys_.clear();
         pending_click_drag_ = {};
         forced_mouse_press_action_ = input::Action::NONE;
+        text_input_viewport_click_button_ = -1;
         is_node_rect_dragging_ = false;
         node_rect_button_ = -1;
         node_point_pick_enabled_ = false;
@@ -578,6 +612,12 @@ namespace lfs::vis {
         const bool over_transform_gizmo = isTransformGizmoOverOrUsing();
         const int mods = getModifierKeys();
 
+        if (text_input_viewport_click_button_ == button &&
+            action == input::ACTION_RELEASE) {
+            text_input_viewport_click_button_ = -1;
+            return;
+        }
+
         // Consume all mouse events while pie menu is open
         if (gui && gui->gizmo().isPieMenuOpen()) {
             if (action == input::ACTION_PRESS && button == static_cast<int>(input::AppMouseButton::LEFT)) {
@@ -597,6 +637,17 @@ namespace lfs::vis {
             } else if (action == input::ACTION_RELEASE) {
                 gui->captureMouseButtonRelease(button);
             }
+            return;
+        }
+
+        const bool wants_text_input = input_router_
+                                          ? input_router_->isTextInputActive()
+                                          : gui::guiFocusState().want_text_input;
+        if (action == input::ACTION_PRESS &&
+            wants_text_input &&
+            !over_gui &&
+            isInViewport(x, y)) {
+            text_input_viewport_click_button_ = button;
             return;
         }
 
@@ -653,7 +704,12 @@ namespace lfs::vis {
             // If we have a hovered camera, check for double-click. Defer
             // single-click selection until release so orbit drags that start
             // over dataset image frustums do not change the node selection.
-            if (hovered_camera_id_ >= 0 && !over_gizmo && !over_transform_gizmo) {
+            const auto tool_mode = getCurrentToolMode();
+            const bool allow_camera_frustum_pick =
+                tool_mode == input::ToolMode::GLOBAL ||
+                tool_mode == input::ToolMode::SELECTION;
+            if (allow_camera_frustum_pick &&
+                hovered_camera_id_ >= 0 && !over_gizmo && !over_transform_gizmo) {
                 if (is_double_click && hovered_camera_id_ == last_clicked_camera_id_) {
                     cmd::GoToCamView{.cam_id = hovered_camera_id_}.emit();
 
@@ -737,8 +793,11 @@ namespace lfs::vis {
                 return;
             }
 
-            // Block if a transform gizmo is being used or hovered
-            if (over_transform_gizmo) {
+            // Pivot placement is a viewport-global double-click gesture and must
+            // remain available when an editing gizmo is merely hovered. Active
+            // gizmo manipulation still owns the pointer until the drag finishes.
+            if (isTransformGizmoUsing() ||
+                (over_transform_gizmo && bound_action != input::Action::CAMERA_SET_PIVOT)) {
                 return;
             }
 
@@ -895,15 +954,20 @@ namespace lfs::vis {
             case input::Action::SELECTION_REPLACE:
             case input::Action::SELECTION_ADD:
             case input::Action::SELECTION_REMOVE:
+            case input::Action::SELECTION_INTERSECT:
                 if (!over_gui && !over_gizmo && tool_context_ &&
                     !over_transform_gizmo) {
                     if (selection_tool_ && selection_tool_->isEnabled()) {
                         // Invoke selection stroke operator
                         auto* gm = services().guiOrNull();
                         const auto sub_mode = gm ? static_cast<int>(gm->gizmo().getSelectionSubMode()) : 0;
-                        const int selection_op = (bound_action == input::Action::SELECTION_ADD)      ? 1
-                                                 : (bound_action == input::Action::SELECTION_REMOVE) ? 2
-                                                                                                     : 0;
+                        int selection_op = 0;
+                        switch (bound_action) {
+                        case input::Action::SELECTION_ADD: selection_op = 1; break;
+                        case input::Action::SELECTION_REMOVE: selection_op = 2; break;
+                        case input::Action::SELECTION_INTERSECT: selection_op = 3; break;
+                        default: break;
+                        }
 
                         op::OperatorProperties props;
                         props.set("x", x);
@@ -1020,7 +1084,12 @@ namespace lfs::vis {
             if (press_consumed_camera_frustum) {
                 const double drag_dist = glm::length(glm::dvec2(x, y) - pressed_camera_frustum_pos);
                 const bool was_click = drag_dist < kCameraFrustumClickThreshold;
-                if (was_click && pressed_camera_frustum_id >= 0 &&
+                const auto tool_mode = getCurrentToolMode();
+                const bool allow_camera_frustum_pick =
+                    tool_mode == input::ToolMode::GLOBAL ||
+                    tool_mode == input::ToolMode::SELECTION;
+                if (allow_camera_frustum_pick &&
+                    was_click && pressed_camera_frustum_id >= 0 &&
                     !over_gui && !over_transform_gizmo) {
                     selectCameraByUid(pressed_camera_frustum_id);
                     if (button == node_rect_button_) {
@@ -1433,7 +1502,6 @@ namespace lfs::vis {
                         settings.ortho_scale = std::clamp(settings.ortho_scale * scale_factor, MIN_ORTHO_SCALE, MAX_ORTHO_SCALE);
                         services().renderingOrNull()->updateSettings(settings);
                     }
-                    services().renderingOrNull()->markDirty(DirtyFlag::CAMERA);
                 } else {
                     target_viewport.camera.zoom(delta, carry_pivot);
                 }
@@ -1493,7 +1561,10 @@ namespace lfs::vis {
         double mx = mx_f, my = my_f;
         const bool over_gui_hover = isPointerOverUiHover(mx, my);
         const auto tool_mode = getCurrentToolMode();
-        const auto bound_action = bindings_.getActionForKey(tool_mode, logical_key, mods);
+        auto bound_action = bindings_.getActionForKey(tool_mode, logical_key, mods);
+        if (bound_action == input::Action::NONE) {
+            bound_action = resolveCrossToolActivationShortcut(bindings_, tool_mode, logical_key, mods);
+        }
         if (action == input::ACTION_PRESS &&
             dispatchSelectionActionToModal(bound_action, mods, mx, my)) {
             return;
@@ -1559,10 +1630,7 @@ namespace lfs::vis {
         }
 
         if (action == input::ACTION_PRESS) {
-            if (handleSelectionModeShortcut(bound_action, gui))
-                return;
-
-            if (handleToolbarToolShortcut(bound_action))
+            if (handleToolControlActivationShortcut(bound_action, gui))
                 return;
         }
 
@@ -1579,6 +1647,14 @@ namespace lfs::vis {
 
             case input::Action::TOGGLE_GT_COMPARISON:
                 cmd::ToggleGTComparison{}.emit();
+                return;
+
+            case input::Action::TOGGLE_CAMERA_FRUSTUMS:
+                if (auto* rendering_manager = services().renderingOrNull()) {
+                    auto settings = rendering_manager->getSettings();
+                    settings.show_camera_frustums = !settings.show_camera_frustums;
+                    rendering_manager->updateSettings(settings);
+                }
                 return;
 
             case input::Action::CAMERA_NEXT_VIEW:
@@ -1667,6 +1743,8 @@ namespace lfs::vis {
                                 selection_service->setInteractiveSelectionMode(SelectionMode::Add);
                             } else if (mods & input::KEYMOD_CTRL) {
                                 selection_service->setInteractiveSelectionMode(SelectionMode::Remove);
+                            } else if (mods & input::KEYMOD_ALT) {
+                                selection_service->setInteractiveSelectionMode(SelectionMode::Intersect);
                             } else {
                                 selection_service->setInteractiveSelectionMode(SelectionMode::Replace);
                             }
@@ -1734,6 +1812,10 @@ namespace lfs::vis {
 
             case input::Action::COPY_SELECTION:
                 cmd::CopySelection{}.emit();
+                return;
+
+            case input::Action::CUT_SELECTION:
+                cmd::CutSelection{}.emit();
                 return;
 
             case input::Action::PASTE_SELECTION:
@@ -2391,7 +2473,7 @@ namespace lfs::vis {
         return out_min.x <= out_max.x;
     }
 
-    // Cached whole-scene radius used to scale WASD speed and pan distance with
+    // Cached whole-scene radius used to scale WASD speed and cap pan distance by
     // splat size. Uses the trimmed (1st/99th percentile) bounds so a few far-flung
     // floaters can't blow up the extent and make navigation far too fast. Lazily
     // computed after load (bounds may not exist the instant SceneLoaded fires) and
@@ -2843,8 +2925,8 @@ namespace lfs::vis {
             selection_tool_->syncDepthFilterToCamera(*active_viewport);
         }
 
-        if (services().renderingOrNull()) {
-            services().renderingOrNull()->markDirty(DirtyFlag::CAMERA);
+        if (auto* const rendering = services().renderingOrNull()) {
+            rendering->markCameraPoseChanged();
         }
 
         // Throttle event emission
@@ -2869,8 +2951,8 @@ namespace lfs::vis {
                 cmd::ToggleGTComparison{}.emit();
             }
 
-            if (auto* trainer = services().trainerOrNull(); trainer && trainer->isRunning()) {
-                trainer->pauseTrainingTemporary();
+            if (auto* trainer_mgr = services().trainerOrNull();
+                trainer_mgr && trainer_mgr->pauseTrainingTemporaryIfActive()) {
                 training_was_paused_by_camera_ = true;
             }
         } else {
@@ -2896,7 +2978,7 @@ namespace lfs::vis {
             if (training_was_paused_by_camera_ && services().trainerOrNull() && services().trainerOrNull()->isRunning()) {
                 services().trainerOrNull()->resumeTrainingTemporary();
                 training_was_paused_by_camera_ = false;
-                LOG_INFO("Camera movement stopped - resuming training temporarily");
+                LOG_DEBUG("Camera movement stopped - resumed temporary training pause");
             }
         }
     }
