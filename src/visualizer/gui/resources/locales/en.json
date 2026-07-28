@@ -435,6 +435,8 @@
     "options.mask.ignore": "Ignore",
     "options.mask.segment_and_ignore": "Segment + Ignore",
     "options.mask.alpha_consistent": "Alpha Consistent",
+    "options.mask.attention": "Attention",
+    "options.mask.attention_no_prune": "Attention (No Prune)",
     "options.depth_loss.ssi": "SSI (Auto)",
     "options.depth_loss.ssi_disparity": "SSI (Disparity Prior)",
     "options.depth_loss.ssi_depth": "SSI (Depth Prior)",
@@ -498,7 +500,9 @@
           "segment": "Use the segmentation mask for foreground",
           "ignore": "Ignore masked pixels in the loss",
           "segment_and_ignore": "Combination of Segment and Ignore",
-          "alpha_consistent": "Enforce alpha consistency with the mask"
+          "alpha_consistent": "Enforce alpha consistency with the mask",
+          "attention": "Soft out-of-mask weighting + scheduled opacity penalty, then prune background floaters after training",
+          "attention_no_prune": "Same as Attention but keeps all Gaussians (no post-training prune)"
         },
         "bg_mode": {
           "color": "Use a fixed background color",

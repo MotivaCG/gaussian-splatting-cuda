@@ -51,6 +51,11 @@
 #include "training/kernels/roi_weight_map.hpp"
 #include "training/training_setup.hpp"
 #include "training_cropbox_mask.hpp"
+// SMN begin — attention mask mode (training penalty + post-training prune)
+#include "smn/smn_attention_constants.h"
+#include "smn/smn_attention_penalty.hpp"
+#include "smn/smn_attention_prune.hpp"
+// SMN end
 
 #include <array>
 #include <chrono>
@@ -1756,6 +1761,24 @@ namespace lfs::training {
         constexpr float ALPHA_CONSISTENCY_WEIGHT = 10.0f;
 
         const auto mode = opt_params.mask_mode;
+
+        // SMN begin — attention mask modes are handled entirely by the SMN module
+        if (lfs::training::smn::is_attention_mask_mode(mode)) {
+            auto attention = lfs::training::smn::compute_attention_photometric_loss(
+                corrected, gt_image, mask, roi_weight, alpha, opt_params, raw_rendered,
+                current_iteration_.load(),
+                masked_fused_workspace_, masked_decoupled_fused_workspace_);
+            if (!attention) {
+                return std::unexpected(attention.error());
+            }
+            return MaskLossResult{
+                .loss = attention->loss,
+                .grad_corrected = attention->grad_corrected,
+                .grad_raw = attention->grad_raw,
+                .grad_alpha = attention->grad_alpha};
+        }
+        // SMN end
+
         const bool has_user_mask = mask.is_valid() && mask.numel() > 0;
         const bool has_roi_weight = roi_weight.is_valid() && roi_weight.numel() > 0;
         const Tensor mask_2d =
@@ -2980,7 +3003,9 @@ namespace lfs::training {
             LOG_INFO("Visualization: {}", params.optimization.headless ? "disabled" : "enabled");
             LOG_INFO("Strategy: {}", params.optimization.strategy);
             if (params.optimization.mask_mode != lfs::core::param::MaskMode::None) {
-                static constexpr const char* MASK_MODE_NAMES[] = {"none", "segment", "ignore", "segment_and_ignore", "alpha_consistent"};
+                // SMN begin — "attention"/"attention_no_prune" appended to keep index alignment with MaskMode
+                static constexpr const char* MASK_MODE_NAMES[] = {"none", "segment", "ignore", "segment_and_ignore", "alpha_consistent", "attention", "attention_no_prune"};
+                // SMN end
                 LOG_INFO("Mask mode: {}", MASK_MODE_NAMES[static_cast<int>(params.optimization.mask_mode)]);
             }
             if (current_iteration_ > 0) {
@@ -4453,7 +4478,11 @@ namespace lfs::training {
                              (use_mask &&
                               (params_.optimization.mask_mode == lfs::core::param::MaskMode::Segment ||
                                params_.optimization.mask_mode == lfs::core::param::MaskMode::Ignore ||
-                               params_.optimization.mask_mode == lfs::core::param::MaskMode::SegmentAndIgnore))) &&
+                               params_.optimization.mask_mode == lfs::core::param::MaskMode::SegmentAndIgnore ||
+                               // SMN begin — attention modes also run the masked fused path
+                               lfs::training::smn::is_attention_mask_mode(params_.optimization.mask_mode)
+                               // SMN end
+                               ))) &&
                             params_.optimization.lambda_dssim > 0.0f;
                         {
                             LFS_VRAM_SCOPE("train.photometric_loss");
@@ -6038,6 +6067,46 @@ namespace lfs::training {
         const bool rotate_checkpoint = get_active_sparsify_steps() == 0;
         apply_pending_params_at_safe_point();
         const auto terminal_params = getParams();
+
+        // SMN begin — attention mask mode: projection-vote prune before the final save.
+        // Only on a clean completion (not a user stop / error) so we never prune a
+        // half-trained model, and only when a strategy + training cameras exist.
+        if (!user_stopped && !terminal_error && strategy_ && train_dataset_ &&
+            terminal_params.optimization.mask_mode == lfs::core::param::MaskMode::Attention &&
+            lfs::training::smn::SMN_ATTENTION_PRUNE_ENABLED) {
+            // Optionally snapshot the pre-prune model so one attention run yields
+            // both the pre-prune and pruned PLYs (no need to retrain no-prune).
+            if (lfs::training::smn::SMN_ATTENTION_SAVE_PREPRUNE_COPY) {
+                const std::string base_name = terminal_params.dataset.output_name.empty()
+                                                  ? ("splat_" + std::to_string(terminal_iteration))
+                                                  : terminal_params.dataset.output_name;
+                const std::string preprune_name =
+                    base_name + std::string(lfs::training::smn::SMN_ATTENTION_PREPRUNE_SUFFIX);
+                if (auto preprune_save = save_ply(
+                        terminal_params.dataset.output_path,
+                        preprune_name,
+                        terminal_iteration,
+                        /*join=*/true,
+                        /*save_checkpoint=*/false);
+                    !preprune_save) {
+                    LOG_WARN("[SMN attention prune] Pre-prune snapshot save failed: {}",
+                             preprune_save.error());
+                }
+            }
+
+            const lfs::training::smn::AttentionPruneConfig prune_config{
+                .resize_factor = terminal_params.dataset.resize_factor,
+                .max_width = terminal_params.dataset.max_width,
+                .invert_masks = terminal_params.optimization.invert_masks,
+                .mask_threshold = terminal_params.optimization.mask_threshold};
+            if (auto prune_result = lfs::training::smn::run_attention_prune(
+                    *strategy_, train_dataset_->get_cameras(), prune_config);
+                !prune_result) {
+                LOG_WARN("[SMN attention prune] {}", prune_result.error());
+            }
+        }
+        // SMN end
+
         try {
             LOG_INFO("Saving {} model at iteration {}...",
                      terminal_error ? "recovery" : (user_stopped ? "stopped" : "final"),

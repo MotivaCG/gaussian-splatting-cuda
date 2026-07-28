@@ -34,6 +34,9 @@ set(LFS_TRAINING_KERNEL_SOURCES
     kernels/roi_weight_map.cu
     kernels/image_kernels.cu
     components/sparsity_optimizer_kernels.cu
+    # SMN begin — attention mask mode projection/vote kernel
+    smn/smn_attention_project_kernel.cu
+    # SMN end
 )
 
 # Create CUDA kernels library
@@ -85,6 +88,10 @@ set(TRAINING_NEW_SOURCES
     losses/regularization.cpp
     losses/photometric_loss.cpp
     losses/mask_loss.cpp
+    # SMN begin — attention mask mode (training penalty + prune orchestration)
+    smn/smn_attention_penalty.cpp
+    smn/smn_attention_prune.cpp
+    # SMN end
     strategies/strategy_utils.cpp
     strategies/mcmc.cpp
     strategies/mrnf.cpp

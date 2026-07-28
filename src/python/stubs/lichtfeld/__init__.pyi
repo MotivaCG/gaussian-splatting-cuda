@@ -1799,6 +1799,10 @@ class MaskMode(enum.Enum):
 
     ALPHA_CONSISTENT = 4
 
+    ATTENTION = 5
+
+    ATTENTION_NO_PRUNE = 6
+
 class BackgroundMode(enum.Enum):
     SOLID_COLOR = 0
 

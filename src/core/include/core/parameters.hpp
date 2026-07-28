@@ -27,7 +27,11 @@ namespace lfs::core {
             Segment,          // Soft penalty to enforce alpha→0 in masked areas
             Ignore,           // Completely ignore masked regions in loss
             SegmentAndIgnore, // 3-band mask (0-255): value<128 ignore, 128<=value<=250 segment, value>250 keep
-            AlphaConsistent   // Enforce exact alpha values from mask
+            AlphaConsistent,  // Enforce exact alpha values from mask
+            // SMN begin — attention mask mode (two variants share the same training loss)
+            Attention,       // Soft out-of-mask weighting + scheduled opacity penalty + post-training prune
+            AttentionNoPrune // Same as Attention but WITHOUT the post-training prune (for A/B comparison)
+            // SMN end
         };
 
         // Background mode for training - only one can be active at a time

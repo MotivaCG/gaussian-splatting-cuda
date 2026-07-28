@@ -125,7 +125,11 @@ namespace lfs::python {
                         {"Segment", MaskMode::Segment},
                         {"Ignore", MaskMode::Ignore},
                         {"SegmentAndIgnore", MaskMode::SegmentAndIgnore},
-                        {"AlphaConsistent", MaskMode::AlphaConsistent}},
+                        {"AlphaConsistent", MaskMode::AlphaConsistent},
+                        // SMN begin — attention mask modes
+                        {"Attention", MaskMode::Attention},
+                        {"AttentionNoPrune", MaskMode::AttentionNoPrune}},
+                       // SMN end
                        "Attention mask behavior during training")
             .bool_prop(&OptimizationParameters::invert_masks,
                        "invert_masks", "Invert Masks", false,
@@ -1060,7 +1064,11 @@ namespace lfs::python {
             .value("SEGMENT", MaskMode::Segment)
             .value("IGNORE", MaskMode::Ignore)
             .value("SEGMENT_AND_IGNORE", MaskMode::SegmentAndIgnore)
-            .value("ALPHA_CONSISTENT", MaskMode::AlphaConsistent);
+            .value("ALPHA_CONSISTENT", MaskMode::AlphaConsistent)
+            // SMN begin — attention mask modes
+            .value("ATTENTION", MaskMode::Attention)
+            .value("ATTENTION_NO_PRUNE", MaskMode::AttentionNoPrune);
+            // SMN end
 
         nb::enum_<BackgroundMode>(m, "BackgroundMode")
             .value("SOLID_COLOR", BackgroundMode::SolidColor)

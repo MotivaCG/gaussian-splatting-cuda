@@ -112,6 +112,10 @@
           <option value="2" data-tooltip="training.tooltip.opt.mask_mode.ignore">{{label_mask_ignore}}</option>
           <option value="3" data-tooltip="training.tooltip.opt.mask_mode.segment_and_ignore">{{label_mask_segment_and_ignore}}</option>
           <option value="4" data-tooltip="training.tooltip.opt.mask_mode.alpha_consistent">{{label_mask_alpha_consistent}}</option>
+          <!-- SMN begin — attention mask modes -->
+          <option value="5" data-tooltip="training.tooltip.opt.mask_mode.attention">{{label_mask_attention}}</option>
+          <option value="6" data-tooltip="training.tooltip.opt.mask_mode.attention_no_prune">{{label_mask_attention_no_prune}}</option>
+          <!-- SMN end -->
         </select>
       </div>
       <div class="setting-row" data-tooltip="training.tooltip.use_depth_loss">

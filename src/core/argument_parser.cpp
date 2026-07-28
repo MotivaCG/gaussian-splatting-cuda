@@ -296,14 +296,19 @@ namespace {
             ::args::Group mask_sep(parser, " ");
             ::args::Group mask_group(parser, "MASK / DEPTH / NORMAL OPTIONS:");
             ::args::MapFlag<std::string, lfs::core::param::MaskMode> mask_mode(mask_group, "mask_mode",
-                                                                               "Mask mode: none, segment, ignore, segment_and_ignore, alpha_consistent (default: none)",
+                                                                               "Mask mode: none, segment, ignore, segment_and_ignore, alpha_consistent, attention, attention_no_prune (default: none)",
                                                                                {"mask-mode"},
                                                                                std::unordered_map<std::string, lfs::core::param::MaskMode>{
                                                                                    {"none", lfs::core::param::MaskMode::None},
                                                                                    {"segment", lfs::core::param::MaskMode::Segment},
                                                                                    {"ignore", lfs::core::param::MaskMode::Ignore},
                                                                                    {"segment_and_ignore", lfs::core::param::MaskMode::SegmentAndIgnore},
-                                                                                   {"alpha_consistent", lfs::core::param::MaskMode::AlphaConsistent}});
+                                                                                   {"alpha_consistent", lfs::core::param::MaskMode::AlphaConsistent},
+                                                                                   // SMN begin — attention mask modes
+                                                                                   {"attention", lfs::core::param::MaskMode::Attention},
+                                                                                   {"attention_no_prune", lfs::core::param::MaskMode::AttentionNoPrune}
+                                                                                   // SMN end
+                                                                               });
             ::args::Flag invert_masks(mask_group, "invert_masks", "Invert mask values (swap object/background)", {"invert-masks"});
             ::args::Flag no_alpha_as_mask(mask_group, "no_alpha_as_mask", "Disable automatic alpha-as-mask for RGBA images", {"no-alpha-as-mask"});
             ::args::Flag use_depth_loss(mask_group, "use_depth_loss", "Load depth maps and enable depth-map supervision", {"use-depth-loss"});
