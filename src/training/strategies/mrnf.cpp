@@ -35,6 +35,7 @@ namespace lfs::training {
         constexpr int MRNF_BOUNDS_RECOMPUTE_INTERVAL_REFINES = 5;
         constexpr float MRNF_RAW_OPACITY_PRUNE_THRESHOLD = -5.54126358f; // logit(1 / 255)
         constexpr float MRNF_LOG_MIN_SCALE_THRESHOLD = -23.0258509f;     // log(1e-10)
+        constexpr float MRNF_DEFAULT_MIN_OPACITY = 0.005f;               // OptimizationParameters::min_opacity default
 
         [[nodiscard]] double compute_decay_gamma(const double start, const double end, const size_t steps) {
             if (steps == 0 || start <= 0.0 || end <= 0.0) {
@@ -612,7 +613,14 @@ namespace lfs::training {
         auto scale_min = log_scales.min(1);
         auto scale_max = log_scales.max(1);
 
-        auto prune_mask = (raw_opacities < MRNF_RAW_OPACITY_PRUNE_THRESHOLD) |
+        // Prune Gaussians below the minimum opacity: MRNF's 1/255 floor by default,
+        // overridable via --min-opacity (as in MCMC). Compared in raw space via logit.
+        float raw_opacity_prune_threshold = MRNF_RAW_OPACITY_PRUNE_THRESHOLD;
+        if (_params->min_opacity != MRNF_DEFAULT_MIN_OPACITY) {
+            raw_opacity_prune_threshold = std::log(_params->min_opacity / (1.0f - _params->min_opacity));
+        }
+
+        auto prune_mask = (raw_opacities < raw_opacity_prune_threshold) |
                           compute_near_zero_rotation_mask(_splat_data->rotation_raw()) |
                           (scale_min < MRNF_LOG_MIN_SCALE_THRESHOLD);
 
