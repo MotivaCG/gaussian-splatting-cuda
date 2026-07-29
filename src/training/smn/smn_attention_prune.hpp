@@ -5,49 +5,27 @@
 #pragma once
 
 // =============================================================================
-// SMN — Attention mask mode: post-training projection-vote prune
+// SMN — Attention mask mode: post-training multi-pass prune orchestrator
 // =============================================================================
 //
-// Runs once, after the final optimization step, when MaskMode::Attention is
-// active and SMN_ATTENTION_PRUNE_ENABLED is set. Every Gaussian center is
-// projected into each masked training view; Gaussians that consistently land
-// outside the mask (across the views that see them) are removed through the
-// strategy's own remove_gaussians() path, so optimizer state and frozen splats
-// are handled correctly.
+// Runs once, right before the final save, when MaskMode::Attention is active and
+// SMN_ATTENTION_PRUNE_ENABLED is set. Runs the mask_pruning passes enabled in
+// smn_attention_constants.h (section 5): geometric dome, center vote (with depth),
+// mask leakage, alpha consensus, ellipse boundary, isolation and SOR. Each pass
+// removes splats through the strategy's own soft-delete path, so optimizer state
+// and frozen splats are handled correctly. Strategy-agnostic (MRNF, MCMC, igs+).
 //
-// This is intentionally separate from the training-time loss/penalty code
-// (smn_attention_penalty.*): the penalty shapes the model during training, the
-// prune is a one-shot geometric cleanup at the end.
+// Never fails the training run: a failed pass is logged as a warning and the
+// remaining passes continue.
 // =============================================================================
 
 #include "strategies/istrategy.hpp"
-
-#include "core/camera.hpp"
-
-#include <expected>
-#include <memory>
-#include <string>
-#include <vector>
+#include "training/dataset.hpp"
 
 namespace lfs::training::smn {
 
-    // Mask-loading parameters needed to reproduce the training-time mask for a
-    // camera. These mirror the dataset/optimization fields the trainer already
-    // passes to Camera::load_and_get_mask.
-    struct AttentionPruneConfig {
-        int resize_factor = -1;
-        int max_width = 0;
-        bool invert_masks = false;
-        float mask_threshold = 0.5f;
-    };
-
-    // Prune background floaters from the model using the attention masks.
-    // No-op (returns success) when pruning is disabled by constant, when the
-    // model is empty, or when no usable masks are available. The model is
-    // mutated in place through `strategy`.
-    std::expected<void, std::string> run_attention_prune(
-        lfs::training::IStrategy& strategy,
-        const std::vector<std::shared_ptr<lfs::core::Camera>>& cameras,
-        const AttentionPruneConfig& config);
+    void run_attention_prune(lfs::training::IStrategy& strategy,
+                             const lfs::training::CameraDataset& dataset,
+                             bool invert_masks);
 
 } // namespace lfs::training::smn

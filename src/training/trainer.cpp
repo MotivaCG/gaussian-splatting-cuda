@@ -6112,16 +6112,8 @@ namespace lfs::training {
                 }
             }
 
-            const lfs::training::smn::AttentionPruneConfig prune_config{
-                .resize_factor = terminal_params.dataset.resize_factor,
-                .max_width = terminal_params.dataset.max_width,
-                .invert_masks = terminal_params.optimization.invert_masks,
-                .mask_threshold = terminal_params.optimization.mask_threshold};
-            if (auto prune_result = lfs::training::smn::run_attention_prune(
-                    *strategy_, train_dataset_->get_cameras(), prune_config);
-                !prune_result) {
-                LOG_WARN("[SMN attention prune] {}", prune_result.error());
-            }
+            lfs::training::smn::run_attention_prune(
+                *strategy_, *train_dataset_, terminal_params.optimization.invert_masks);
         }
         // SMN end
 

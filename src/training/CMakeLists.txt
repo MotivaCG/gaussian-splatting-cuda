@@ -34,8 +34,7 @@ set(LFS_TRAINING_KERNEL_SOURCES
     kernels/roi_weight_map.cu
     kernels/image_kernels.cu
     components/sparsity_optimizer_kernels.cu
-    # SMN begin — attention mask mode CUDA kernels (prune vote + fused opacity penalty)
-    smn/smn_attention_project_kernel.cu
+    # SMN begin — attention mask mode CUDA kernels (fused opacity penalty)
     smn/smn_attention_penalty_kernel.cu
     # SMN end
 )
@@ -89,9 +88,10 @@ set(TRAINING_NEW_SOURCES
     losses/regularization.cpp
     losses/photometric_loss.cpp
     losses/mask_loss.cpp
-    # SMN begin — attention mask mode (training penalty + prune orchestration)
+    # SMN begin — attention mask mode (training penalty + multi-pass prune + opacity)
     smn/smn_attention_penalty.cpp
     smn/smn_attention_prune.cpp
+    smn/mask_pruning.cpp
     smn/smn_opacity.cpp
     # SMN end
     strategies/strategy_utils.cpp
@@ -116,6 +116,15 @@ set(TRAINING_NEW_SOURCES
         trainer.cpp
     training_setup.cpp
 )
+
+# SMN: OpenMP for the multi-pass prune (smn/mask_pruning.cpp). LLVM runtime on
+# MSVC (classic OpenMP 2.0 rejects the unsigned loop indices used there). Must be
+# set before find_package(OpenMP). Optional: without it the prune runs single-
+# threaded (mask_pruning.cpp has an _OPENMP fallback).
+if(MSVC)
+    set(OpenMP_RUNTIME_MSVC "llvm")
+endif()
+find_package(OpenMP)
 
 # lfs_training - Training module with optimizer
 add_library(lfs_training STATIC ${TRAINING_NEW_SOURCES})
@@ -155,6 +164,7 @@ target_link_libraries(lfs_training
     PRIVATE
         lfs_depth_anchor        # Shared depth-anchor fit + sidecar cache
         lfs_python_utils
+        $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>  # SMN: multi-pass prune
 )
 
 # Set C++ standard

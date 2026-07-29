@@ -5,151 +5,118 @@
 #include "smn_attention_prune.hpp"
 
 #include "smn_attention_constants.h"
-#include "smn_attention_project_kernel.hpp"
+#include "mask_pruning.hpp"
 
 #include "core/logger.hpp"
-#include "core/tensor/internal/cuda_stream_context.hpp"
-
-#include <cstdint>
 
 namespace lfs::training::smn {
 
-    using lfs::core::DataType;
-    using lfs::core::Device;
-    using lfs::core::Tensor;
+    void run_attention_prune(lfs::training::IStrategy& strategy,
+                             const lfs::training::CameraDataset& dataset,
+                             const bool invert_masks) {
 
-    std::expected<void, std::string> run_attention_prune(
-        lfs::training::IStrategy& strategy,
-        const std::vector<std::shared_ptr<lfs::core::Camera>>& cameras,
-        const AttentionPruneConfig& config) {
-
-        if constexpr (!SMN_ATTENTION_PRUNE_ENABLED) {
-            return {}; // Compile-time disabled: nothing to do.
+        if (!SMN_ATTENTION_PRUNE_ENABLED) {
+            return;
         }
 
-        try {
-            lfs::core::SplatData& model = strategy.get_model();
-            const int64_t num_gaussians = static_cast<int64_t>(model.size());
-            if (num_gaussians <= 0) {
-                LOG_INFO("[SMN attention prune] No Gaussians to prune.");
-                return {};
-            }
+        namespace mp = mask_pruning;
 
-            const cudaStream_t stream = lfs::core::getCurrentCUDAStream();
-
-            // World-space centers [N,3], resident on CUDA for the projection kernel.
-            Tensor means = model.get_means().to(Device::CUDA).contiguous();
-            means.sync_to_stream(stream);
-
-            // Per-Gaussian vote accumulators, zeroed before the first view.
-            Tensor inside_votes = Tensor::zeros(
-                {static_cast<size_t>(num_gaussians)}, Device::CUDA, DataType::Int32);
-            Tensor visible_votes = Tensor::zeros(
-                {static_cast<size_t>(num_gaussians)}, Device::CUDA, DataType::Int32);
-            inside_votes.sync_to_stream(stream);
-            visible_votes.sync_to_stream(stream);
-
-            size_t views_used = 0;
-            size_t views_skipped = 0;
-            for (const auto& cam_ptr : cameras) {
-                lfs::core::Camera* cam = cam_ptr.get();
-                if (cam == nullptr || !cam->has_mask()) {
-                    ++views_skipped;
-                    continue;
-                }
-
-                // Reproduce the training-time mask, binarized to {0,1}.
-                Tensor mask = cam->load_and_get_mask(
-                    config.resize_factor,
-                    config.max_width,
-                    config.invert_masks,
-                    config.mask_threshold,
-                    /*binarize=*/true);
-                if (!mask.is_valid() || mask.numel() == 0) {
-                    ++views_skipped;
-                    continue;
-                }
-
-                Tensor mask_2d = mask.ndim() == 3 ? mask.squeeze(0) : mask;
-                Tensor mask_f =
-                    (mask_2d.dtype() == DataType::UInt8 || mask_2d.dtype() == DataType::Bool)
-                        ? mask_2d.gt(0).to(DataType::Float32)
-                        : mask_2d;
-                mask_f = mask_f.to(Device::CUDA).contiguous();
-                mask_f.sync_to_stream(stream);
-
-                const int H = static_cast<int>(mask_f.shape()[0]);
-                const int W = static_cast<int>(mask_f.shape()[1]);
-
-                const auto [fx, fy, cx, cy] = cam->get_intrinsics();
-                cam->world_view_transform().sync_to_stream(stream);
-
-                launch_attention_projection_vote(
-                    means.ptr<float>(),
-                    static_cast<int>(num_gaussians),
-                    cam->world_view_transform_ptr(),
-                    fx, fy, cx, cy,
-                    W, H,
-                    mask_f.ptr<float>(),
-                    SMN_ATTENTION_PRUNE_MASK_THRESHOLD,
-                    SMN_ATTENTION_PRUNE_NEAR_PLANE,
-                    inside_votes.ptr<int>(),
-                    visible_votes.ptr<int>(),
-                    stream);
-                ++views_used;
-            }
-
-            if (views_used == 0) {
-                LOG_WARN("[SMN attention prune] No usable masked views ({} skipped); skipping prune.",
-                         views_skipped);
-                return {};
-            }
-
-            // Keep a Gaussian only when it is seen often enough AND lands inside the
-            // mask in at least KEEP_THRESHOLD of the views that see it.
-            const Tensor visible_f = visible_votes.to(DataType::Float32);
-            const float total_visibility = visible_f.sum().item();
-            if (total_visibility <= 0.0f) {
-                LOG_WARN("[SMN attention prune] No visibility accumulated; skipping prune.");
-                return {};
-            }
-
-            const Tensor inside_f = inside_votes.to(DataType::Float32);
-            const Tensor inside_ratio = inside_f.div(visible_f.clamp_min(1.0f));
-
-            const Tensor meets_visibility =
-                visible_votes.ge(SMN_ATTENTION_PRUNE_MIN_VISIBILITY).to(DataType::Float32);
-            const Tensor inside_enough =
-                inside_ratio.ge(SMN_ATTENTION_PRUNE_KEEP_THRESHOLD).to(DataType::Float32);
-
-            // keep = meets_visibility AND inside_enough ; prune = NOT keep.
-            const Tensor keep = meets_visibility.mul(inside_enough);
-            const float keep_count = keep.sum().item();
-            if (keep_count <= 0.0f) {
-                LOG_WARN("[SMN attention prune] Keep set would be empty (threshold={:.2f}); "
-                         "skipping prune to avoid deleting the whole model.",
-                         SMN_ATTENTION_PRUNE_KEEP_THRESHOLD);
-                return {};
-            }
-
-            const Tensor prune_mask = keep.lt(0.5f); // bool [N]: true = remove
-            const int removed =
-                static_cast<int>(prune_mask.to(DataType::Int32).sum().item());
-            if (removed <= 0) {
-                LOG_INFO("[SMN attention prune] Nothing to remove ({} views used).", views_used);
-                return {};
-            }
-
-            strategy.remove_gaussians(prune_mask);
-
-            LOG_INFO("[SMN attention prune] Removed {} / {} Gaussians "
-                     "(views={}, keep_threshold={:.2f}, min_visibility={}).",
-                     removed, num_gaussians, views_used,
-                     SMN_ATTENTION_PRUNE_KEEP_THRESHOLD, SMN_ATTENTION_PRUNE_MIN_VISIBILITY);
-            return {};
-        } catch (const std::exception& e) {
-            return std::unexpected(std::string("SMN attention prune failed: ") + e.what());
+        const int before = static_cast<int>(strategy.get_model().size());
+        if (before == 0) {
+            return;
         }
+
+        // Configs from our constants (SMNV2's validated tuning). invert_masks flows
+        // to the mask passes.
+        mp::GeometricDomePruningConfig geom;
+        geom.enabled = SMN_PRUNE_GEOMETRIC_ENABLED;
+        geom.behind_tolerance = SMN_PRUNE_BEHIND_TOLERANCE;
+        geom.floor_y = SMN_PRUNE_FLOOR_Y;
+        geom.ceil_y = SMN_PRUNE_CEIL_Y;
+        geom.max_scale_in_meters = SMN_PRUNE_MAX_SCALE_M;
+
+        mp::CenterVotePruningConfig center;
+        center.enabled = SMN_PRUNE_CENTER_VOTE_ENABLED;
+        center.vote_ratio_threshold = SMN_PRUNE_CENTER_VOTE_RATIO;
+        center.min_visibility_ratio = SMN_PRUNE_CENTER_MIN_VIS_RATIO;
+        center.border_safe_margin = SMN_PRUNE_CENTER_BORDER_MARGIN;
+        center.enable_depth_filtering = SMN_PRUNE_CENTER_DEPTH_FILTER;
+        center.invert_masks = invert_masks;
+
+        mp::LeakagePruningConfig leak;
+        leak.enabled = SMN_PRUNE_LEAKAGE_ENABLED;
+        leak.leak_keep_threshold = SMN_PRUNE_LEAK_KEEP_THRESHOLD;
+        leak.per_view_leak_fraction = SMN_PRUNE_LEAK_PER_VIEW_FRACTION;
+        leak.min_visibility_ratio = SMN_PRUNE_LEAK_MIN_VIS_RATIO;
+        leak.min_pixel_radius = SMN_PRUNE_LEAK_MIN_PIXEL_RADIUS;
+        leak.sample_points = SMN_PRUNE_LEAK_SAMPLE_POINTS;
+        leak.dilate_px = SMN_PRUNE_LEAK_DILATE_PX;
+        leak.invert_masks = invert_masks;
+
+        mp::AlphaConsensusPruningConfig consensus;
+        consensus.enabled = SMN_PRUNE_CONSENSUS_ENABLED;
+        consensus.consensus_threshold = SMN_PRUNE_CONSENSUS_THRESHOLD;
+        consensus.min_visibility_count = SMN_PRUNE_CONSENSUS_MIN_VIS;
+        consensus.sample_grid = SMN_PRUNE_CONSENSUS_GRID;
+        consensus.invert_masks = invert_masks;
+
+        mp::EllipseBoundaryPruningConfig ellipse;
+        ellipse.enabled = SMN_PRUNE_ELLIPSE_ENABLED;
+        ellipse.mask_expansion_fraction = SMN_PRUNE_ELLIPSE_EXPANSION_FRACTION;
+        ellipse.negative_vote_threshold = SMN_PRUNE_ELLIPSE_NEG_VOTE_THRESHOLD;
+        ellipse.min_evaluating_cameras = SMN_PRUNE_ELLIPSE_MIN_CAMERAS;
+        ellipse.invert_masks = invert_masks;
+
+        mp::IsolationPruningConfig isolation;
+        isolation.enabled = SMN_PRUNE_ISOLATION_ENABLED;
+        isolation.k_neighbors = SMN_PRUNE_ISOLATION_K;
+        isolation.kth_neighbor = SMN_PRUNE_ISOLATION_KTH;
+        isolation.threshold_multiplier = SMN_PRUNE_ISOLATION_MULTIPLIER;
+
+        mp::SORPruningConfig sor;
+        sor.enabled = SMN_PRUNE_SOR_ENABLED;
+        sor.k_neighbors = SMN_PRUNE_SOR_NEIGHBORS;
+        sor.std_ratio = SMN_PRUNE_SOR_STD_RATIO;
+        sor.guard_kth = SMN_PRUNE_SOR_GUARD_KTH;
+        sor.guard_multiplier = SMN_PRUNE_SOR_GUARD_MULTIPLIER;
+
+        LOG_INFO("[SMN prune] Post-training multi-pass prune: classifying {} splats...", before);
+
+        // MCMC soft-deletes (size() unchanged) so compact after every pass or the
+        // passes never compound; apply_deleted is a no-op for MRNF.
+        const auto run = [&strategy](const char* name, auto&& fn) {
+            const size_t before_pass = strategy.get_model().size();
+            auto result = fn();
+            if (!result) {
+                LOG_WARN("[SMN prune] {} failed: {}", name, result.error());
+                return;
+            }
+            strategy.get_model().apply_deleted();
+            const size_t after_pass = strategy.get_model().size();
+            const size_t removed = (before_pass > after_pass) ? before_pass - after_pass : 0;
+            if (removed > 0) {
+                LOG_INFO("[SMN prune] {}: removed {} splats ({:.1f}%)",
+                         name, removed,
+                         before_pass > 0 ? 100.0f * static_cast<float>(removed) /
+                                               static_cast<float>(before_pass)
+                                         : 0.0f);
+            }
+        };
+
+        run("Geometric dome", [&] { return mp::prune_by_geometric_dome(strategy, dataset, geom); });
+        run("Center vote", [&] { return mp::prune_by_center_vote(strategy, dataset, center); });
+        run("Mask leakage", [&] { return mp::prune_by_mask_leakage(strategy, dataset, leak); });
+        run("Alpha consensus", [&] { return mp::prune_by_alpha_consensus(strategy, dataset, consensus); });
+        run("Isolation", [&] { return mp::prune_by_isolation_distance(strategy, isolation); });
+        run("Ellipse boundary", [&] { return mp::prune_by_ellipse_boundary(strategy, dataset, ellipse); });
+        // SOR last: it removes whatever the mask/geometry passes leave isolated.
+        run("SOR", [&] { return mp::prune_by_sor(strategy, sor); });
+
+        const int after = static_cast<int>(strategy.get_model().size());
+        LOG_INFO("[SMN prune] done: {} -> {} splats ({} removed, {:.1f}%)",
+                 before, after, before - after,
+                 before > 0 ? 100.0f * static_cast<float>(before - after) / static_cast<float>(before)
+                            : 0.0f);
     }
 
 } // namespace lfs::training::smn

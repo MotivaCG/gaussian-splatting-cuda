@@ -157,44 +157,93 @@ namespace lfs::training::smn {
 
 
     // -------------------------------------------------------------------------
-    // 5. Post-training prune (projection vote)
+    // 5. Post-training prune (multi-pass; see mask_pruning.hpp)
     // -------------------------------------------------------------------------
     //
-    // After the last optimization step, every Gaussian center is projected into
-    // each masked view. A Gaussian is kept only when it lands inside the mask in
-    // a large enough fraction of the views that actually see it. This removes
-    // background floaters the opacity penalty did not fully suppress.
+    // A sequence of independent post-training passes, each toggled below. They run
+    // once, right before the final save, and compound (MCMC soft-deletes are
+    // compacted between passes). All values below are SMNV2's validated tuning for
+    // inward-facing person captures — deliberately conservative so real geometry
+    // (a pointing fingertip, hair tips) survives.
 
-    // Master switch: set to false to skip the prune stage entirely while keeping
-    // the attention loss/penalty behavior intact.
+    // Master switch: false skips the whole prune stage (loss/penalty untouched).
     inline constexpr bool SMN_ATTENTION_PRUNE_ENABLED = true;
 
     // When true (and the prune runs), save an extra PLY of the model BEFORE
     // pruning, so a single MaskMode::Attention run yields both the pre-prune and
     // pruned results — no need to also train with attention_no_prune to compare.
-    // The copy is named "<output>_preprune.ply" alongside the final PLY.
     inline constexpr bool SMN_ATTENTION_SAVE_PREPRUNE_COPY = true;
 
     // Filename suffix (before ".ply") used for the pre-prune copy above.
     inline constexpr std::string_view SMN_ATTENTION_PREPRUNE_SUFFIX = "_preprune";
 
-    // Minimum fraction of visible views in which a Gaussian must project inside
-    // the mask to survive the prune. 0.8 => "inside in at least 80% of views".
-    inline constexpr float SMN_ATTENTION_PRUNE_KEEP_THRESHOLD = 0.8f;
+    // Per-pass enables (run in this order; each is a no-op when disabled).
+    // On an inward-facing DOME the mask passes average over views, so a surface
+    // hair splat (at the silhouette in only a few views, central in the rest)
+    // survives. Alpha CONSENSUS is the gentlest (mass-weighted) so it is ON; the
+    // harsher/redundant LEAKAGE and ELLIPSE (binary boundary, silhouette-strict)
+    // stay OFF. Caveat: consensus can still trim genuinely wispy flyaway strands
+    // that fall outside the tight mask in MANY views — disable it if that hurts.
+    // Geometric dome (position-based) and isolation/SOR (3D outliers) never touch
+    // the mask border.
+    inline constexpr bool SMN_PRUNE_GEOMETRIC_ENABLED = true;
+    inline constexpr bool SMN_PRUNE_CENTER_VOTE_ENABLED = true;
+    inline constexpr bool SMN_PRUNE_LEAKAGE_ENABLED = false;
+    inline constexpr bool SMN_PRUNE_CONSENSUS_ENABLED = true;
+    inline constexpr bool SMN_PRUNE_ELLIPSE_ENABLED = false;
+    inline constexpr bool SMN_PRUNE_ISOLATION_ENABLED = true;
+    inline constexpr bool SMN_PRUNE_SOR_ENABLED = true;
 
-    // A Gaussian must be visible in at least this many views before it is
-    // eligible for pruning. Guards against removing splats seen only once or
-    // twice, where the inside/outside vote is statistically unreliable.
-    inline constexpr int SMN_ATTENTION_PRUNE_MIN_VISIBILITY = 3;
+    // Geometric dome (behind-camera + floor/ceil-Y + max-scale). WORLD-space: verify
+    // the COLMAP Y axis / scale match a standing person with feet near y=0.
+    inline constexpr float SMN_PRUNE_BEHIND_TOLERANCE = -0.1f;
+    inline constexpr float SMN_PRUNE_FLOOR_Y = -0.30f;
+    inline constexpr float SMN_PRUNE_CEIL_Y = 2.6f;
+    inline constexpr float SMN_PRUNE_MAX_SCALE_M = 0.7f;
 
-    // Near-plane distance (camera space, +Z forward). A projected center with
-    // z <= this value is treated as not visible in that view.
-    inline constexpr float SMN_ATTENTION_PRUNE_NEAR_PLANE = 0.01f;
+    // Center vote (projected center in mask). Reverted to the old v4 single-pass
+    // behavior — strict by center, few views to be eligible, no frame margin, no
+    // depth — so hair-fringe streaks whose center lands off-mask are removed (the
+    // lenient SMNV2 values 0.70/0.20/0.33 relied on the now-disabled footprint
+    // passes and left those streaks behind the head).
+    inline constexpr float SMN_PRUNE_CENTER_VOTE_RATIO = 0.85f;
+    // Low visibility threshold ~= the old classic's absolute "min 3 views": a
+    // floater seen from few cameras must still be EVALUATED (and voted out for
+    // projecting off-mask), not kept as "not enough evidence". ~0.02 ≈ 3 views at
+    // 150 cameras. Only affects low-visibility splats (floaters); real geometry is
+    // seen in many views and unaffected.
+    inline constexpr float SMN_PRUNE_CENTER_MIN_VIS_RATIO = 0.02f;
+    inline constexpr float SMN_PRUNE_CENTER_BORDER_MARGIN = 0.0f;
+    inline constexpr bool SMN_PRUNE_CENTER_DEPTH_FILTER = false;
 
-    // Mask sampling threshold: mask pixels strictly greater than this count as
-    // "inside". Masks reach the prune already binarized to {0,1}, so 0.5 is a
-    // safe midpoint.
-    inline constexpr float SMN_ATTENTION_PRUNE_MASK_THRESHOLD = 0.5f;
+    // Mask leakage (footprint boundary samples outside the mask).
+    inline constexpr float SMN_PRUNE_LEAK_KEEP_THRESHOLD = 0.60f;
+    inline constexpr float SMN_PRUNE_LEAK_PER_VIEW_FRACTION = 0.20f;
+    inline constexpr float SMN_PRUNE_LEAK_MIN_VIS_RATIO = 0.10f;
+    inline constexpr float SMN_PRUNE_LEAK_MIN_PIXEL_RADIUS = 1.0f;
+    inline constexpr int SMN_PRUNE_LEAK_SAMPLE_POINTS = 8;
+    inline constexpr int SMN_PRUNE_LEAK_DILATE_PX = 2;
 
+    // Alpha consensus (fraction of 2D Gaussian mass inside the mask).
+    inline constexpr float SMN_PRUNE_CONSENSUS_THRESHOLD = 0.60f;
+    inline constexpr int SMN_PRUNE_CONSENSUS_MIN_VIS = 5;
+    inline constexpr int SMN_PRUNE_CONSENSUS_GRID = 5;
+
+    // Ellipse boundary (boundary points vs expanded mask).
+    inline constexpr float SMN_PRUNE_ELLIPSE_EXPANSION_FRACTION = 0.01f;
+    inline constexpr float SMN_PRUNE_ELLIPSE_NEG_VOTE_THRESHOLD = 0.10f;
+    inline constexpr int SMN_PRUNE_ELLIPSE_MIN_CAMERAS = 3;
+
+    // Isolation (kth-neighbor outlier vs global median).
+    inline constexpr int SMN_PRUNE_ISOLATION_K = 8;
+    inline constexpr int SMN_PRUNE_ISOLATION_KTH = 4;
+    inline constexpr float SMN_PRUNE_ISOLATION_MULTIPLIER = 32.0f;
+
+    // SOR (mean-kNN-distance outlier + connectivity guard). std_ratio 3.5 is
+    // conservative on purpose — protects extremities (pointing hand, hair tips).
+    inline constexpr int SMN_PRUNE_SOR_NEIGHBORS = 30;
+    inline constexpr float SMN_PRUNE_SOR_STD_RATIO = 3.5f;
+    inline constexpr int SMN_PRUNE_SOR_GUARD_KTH = 4;
+    inline constexpr float SMN_PRUNE_SOR_GUARD_MULTIPLIER = 5.0f;
 
 } // namespace lfs::training::smn
