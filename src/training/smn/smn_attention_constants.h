@@ -37,6 +37,14 @@ namespace lfs::training::smn {
     // border while still concentrating detail on the masked object.
     inline constexpr float SMN_ATTENTION_OUT_MASK_WEIGHT = 1.0f / 20.0f; // 0.05
 
+    // Dilation radius (pixels) of the mask used ONLY for "where to give priority":
+    // the photometric weight and the densification error map. It grows the full-
+    // priority region a few pixels beyond the (tight) mask so the border band —
+    // hair above all — is well reconstructed AND densified. The opacity penalty
+    // (alpha) and the post-training prune keep the TIGHT mask, so this does not
+    // push the background opaque (no halo) nor keep floaters. 0 disables it.
+    inline constexpr int SMN_ATTENTION_PRIORITY_DILATION_PX = 3;
+
 
 
     // -------------------------------------------------------------------------

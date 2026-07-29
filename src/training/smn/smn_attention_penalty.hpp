@@ -40,6 +40,12 @@ namespace lfs::training::smn {
                mode == lfs::core::param::MaskMode::AttentionNoPrune;
     }
 
+    // Morphological dilation (max filter) of a mask by `radius` pixels: grows the
+    // masked region so the border band counts as "inside". Returns a [H,W] Float32
+    // tensor. radius <= 0 returns the mask unchanged. Used for the attention
+    // priority mask (photometric weight + densification), never for alpha/prune.
+    [[nodiscard]] lfs::core::Tensor dilate_mask(const lfs::core::Tensor& mask, int radius);
+
     // Result of the attention photometric loss. Mirrors Trainer::MaskLossResult
     // field-for-field so the single upstream call site can forward it directly,
     // without this module depending on any Trainer-private type.

@@ -5046,11 +5046,19 @@ namespace lfs::training {
                                  lfs::training::smn::is_attention_mask_mode(params_.optimization.mask_mode)
                                  // SMN end
                                  )) {
-                                const auto mask_for_error =
+                                auto mask_for_error =
                                     (mask_tile.dtype() == lfs::core::DataType::UInt8 ||
                                      mask_tile.dtype() == lfs::core::DataType::Bool)
                                         ? mask_tile.to(lfs::core::DataType::Float32)
                                         : mask_tile;
+                                // SMN begin — dilate the attention priority mask so the border
+                                // band (hair) keeps densifying; alpha and prune stay tight.
+                                if (lfs::training::smn::is_attention_mask_mode(params_.optimization.mask_mode) &&
+                                    lfs::training::smn::SMN_ATTENTION_PRIORITY_DILATION_PX > 0) {
+                                    mask_for_error = lfs::training::smn::dilate_mask(
+                                        mask_for_error, lfs::training::smn::SMN_ATTENTION_PRIORITY_DILATION_PX);
+                                }
+                                // SMN end
                                 tile_error_map.mul_(mask_for_error);
                             }
                         }

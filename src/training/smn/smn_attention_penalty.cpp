@@ -94,6 +94,18 @@ namespace lfs::training::smn {
 
     } // namespace
 
+    Tensor dilate_mask(const Tensor& mask, const int radius) {
+        if (radius <= 0 || !mask.is_valid() || mask.numel() == 0) {
+            return mask;
+        }
+        const Tensor mf = mask_as_float(to_2d(mask)).contiguous(); // [H,W] Float32
+        const int H = static_cast<int>(mf.shape()[0]);
+        const int W = static_cast<int>(mf.shape()[1]);
+        // Dilation = max filter over a (2r+1)^2 window (stride 1, padding r).
+        const Tensor pooled = mf.reshape({1, 1, H, W}).max_pool2d(2 * radius + 1, 1, radius);
+        return pooled.reshape({H, W}).contiguous();
+    }
+
     float attention_penalty_schedule_weight(const int iteration, const int total_iterations) {
         if (total_iterations <= 0) {
             return 0.0f;
@@ -153,9 +165,18 @@ namespace lfs::training::smn {
         // After warmup with a mask: 1.0 inside, SMN_ATTENTION_OUT_MASK_WEIGHT outside.
         // During warmup, or without a usable mask, degrade to the crop ROI weight, or
         // to a flat weight so the fused kernel reproduces the ordinary photometric loss.
+        //
+        // The PRIORITY mask (full-weight region) is dilated a few pixels beyond the
+        // tight mask so the border band (hair) gets full reconstruction priority.
+        // The opacity penalty below keeps the TIGHT mask_f (no alpha push in the band).
+        const Tensor mask_priority =
+            (has_mask && SMN_ATTENTION_PRIORITY_DILATION_PX > 0)
+                ? dilate_mask(mask_f, SMN_ATTENTION_PRIORITY_DILATION_PX)
+                : mask_f;
+
         Tensor photometric_weight;
         if (has_mask && !in_warmup) {
-            photometric_weight = build_soft_photometric_weight(mask_f, roi_weight_2d);
+            photometric_weight = build_soft_photometric_weight(mask_priority, roi_weight_2d);
         } else if (roi_weight_2d.is_valid() && roi_weight_2d.numel() > 0) {
             photometric_weight = roi_weight_2d.contiguous();
         } else {
