@@ -5040,7 +5040,12 @@ namespace lfs::training {
 
                             if (use_mask &&
                                 (params_.optimization.mask_mode == lfs::core::param::MaskMode::Segment ||
-                                 params_.optimization.mask_mode == lfs::core::param::MaskMode::Ignore)) {
+                                 params_.optimization.mask_mode == lfs::core::param::MaskMode::Ignore ||
+                                 // SMN begin — mask the densification error map in attention too, so
+                                 // error/edge-driven densification (esp. igs+) does not fill the background.
+                                 lfs::training::smn::is_attention_mask_mode(params_.optimization.mask_mode)
+                                 // SMN end
+                                 )) {
                                 const auto mask_for_error =
                                     (mask_tile.dtype() == lfs::core::DataType::UInt8 ||
                                      mask_tile.dtype() == lfs::core::DataType::Bool)
@@ -5455,6 +5460,11 @@ namespace lfs::training {
                                        })
                                 .error();
                         }
+
+                        // SMN begin — per-step attention hook (opacity kick; no-op otherwise)
+                        lfs::training::smn::attention_on_optimizer_step(
+                            *strategy_, iter, get_total_iterations(), params_.optimization.mask_mode);
+                        // SMN end
 
                         // End-of-step: parameters are consistent until the next
                         // step's writes; readers wait on this point.

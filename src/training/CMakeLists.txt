@@ -92,6 +92,7 @@ set(TRAINING_NEW_SOURCES
     # SMN begin — attention mask mode (training penalty + prune orchestration)
     smn/smn_attention_penalty.cpp
     smn/smn_attention_prune.cpp
+    smn/smn_opacity.cpp
     # SMN end
     strategies/strategy_utils.cpp
     strategies/mcmc.cpp

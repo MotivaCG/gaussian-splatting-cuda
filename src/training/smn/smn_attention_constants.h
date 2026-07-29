@@ -26,6 +26,7 @@
 
 namespace lfs::training::smn {
 
+
     // -------------------------------------------------------------------------
     // 1. Photometric weighting
     // -------------------------------------------------------------------------
@@ -35,6 +36,8 @@ namespace lfs::training::smn {
     // instead of ignoring it outright, which stabilizes geometry near the ROI
     // border while still concentrating detail on the masked object.
     inline constexpr float SMN_ATTENTION_OUT_MASK_WEIGHT = 1.0f / 20.0f; // 0.05
+
+
 
     // -------------------------------------------------------------------------
     // 2. Opacity penalty (bidirectional, per pixel)
@@ -93,6 +96,8 @@ namespace lfs::training::smn {
     // penalty never fully vanishes when the photometric loss is tiny.
     inline constexpr float SMN_ATTENTION_PENALTY_LOSS_FLOOR = 1.0e-2f;
 
+
+
     // -------------------------------------------------------------------------
     // 3. Penalty schedule (fractions of total training iterations)
     // -------------------------------------------------------------------------
@@ -108,8 +113,43 @@ namespace lfs::training::smn {
     inline constexpr float SMN_ATTENTION_PENALTY_FULL_FRACTION = 0.5f;
     inline constexpr float SMN_ATTENTION_PENALTY_DECAY_END_FRACTION = 0.8f;
 
+
+
     // -------------------------------------------------------------------------
-    // 4. Post-training prune (projection vote)
+    // 4. One-shot opacity "kick"
+    // -------------------------------------------------------------------------
+    //
+    // Once during training, adjust every splat's LINEAR opacity, then let the
+    // optimizer + strategy decay relax it — a discrete "kick, then settle". Fires
+    // only in the attention modes; strategy-agnostic (MRNF and MCMC). Two
+    // compatible components are available; when both are enabled they apply in
+    // sequence (POW first, then MUL).
+
+    // Master switch for the kick.
+    inline constexpr bool SMN_OPACITY_KICK_ENABLED = true;
+
+    // Fraction of total training at which the kick fires (once).
+    inline constexpr float SMN_OPACITY_KICK_AT_FRACTION = 0.75f;
+
+    // Power (gamma) component: opacity_linear <- opacity_linear ^ POW_VALUE.
+    // POW_VALUE < 1 raises opacity (toward 1, strongest on low opacities), > 1
+    // lowers it, == 1 is a no-op.
+    inline constexpr bool SMN_OPACITY_KICK_POW_ENABLED = true;
+    inline constexpr float SMN_OPACITY_KICK_POW_VALUE = 0.45f;
+
+    // Multiplier component (SuperSplat): opacity_linear <- opacity_linear * e^MUL_VALUE.
+    // MUL_VALUE > 0 raises opacity, < 0 lowers it, == 0 is a no-op.
+    inline constexpr bool SMN_OPACITY_KICK_MUL_ENABLED = false;
+    inline constexpr float SMN_OPACITY_KICK_MUL_VALUE = 0.5f;
+
+    // Reset the opacity Adam moments right after the kick so stale momentum does
+    // not immediately undo it.
+    inline constexpr bool SMN_OPACITY_KICK_RESET_OPTIMIZER = true;
+
+
+
+    // -------------------------------------------------------------------------
+    // 5. Post-training prune (projection vote)
     // -------------------------------------------------------------------------
     //
     // After the last optimization step, every Gaussian center is projected into
@@ -147,5 +187,6 @@ namespace lfs::training::smn {
     // "inside". Masks reach the prune already binarized to {0,1}, so 0.5 is a
     // safe midpoint.
     inline constexpr float SMN_ATTENTION_PRUNE_MASK_THRESHOLD = 0.5f;
+
 
 } // namespace lfs::training::smn

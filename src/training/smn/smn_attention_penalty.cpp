@@ -6,10 +6,15 @@
 
 #include "smn_attention_constants.h"
 #include "smn_attention_penalty_kernel.hpp"
+#include "smn_opacity.hpp"
 
+#include "core/logger.hpp"
 #include "core/tensor/internal/cuda_stream_context.hpp"
+#include "optimizer/adam_optimizer.hpp"
+#include "strategies/istrategy.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace lfs::training::smn {
 
@@ -215,8 +220,7 @@ namespace lfs::training::smn {
         //   d/dalpha = w * SCALE / N * ( OUT * outside - IN * inside )
         //
         // where inside = mask (optionally * roi), outside = (1-mask) (optionally * roi).
-        // The penalty is evaluated by a single fused CUDA kernel (grad_alpha +
-        // reduced loss in one pass) instead of a chain of elementwise tensor ops.
+        // Evaluated by a single fused CUDA kernel (grad_alpha + reduced loss in one pass).
         Tensor grad_alpha;
         const float schedule_w =
             attention_penalty_schedule_weight(iteration, static_cast<int>(opt_params.iterations));
@@ -273,6 +277,46 @@ namespace lfs::training::smn {
             .grad_corrected = grad_corrected,
             .grad_raw = grad_raw,
             .grad_alpha = grad_alpha};
+    }
+
+    void attention_on_optimizer_step(
+        lfs::training::IStrategy& strategy,
+        const int iteration,
+        const int total_iterations,
+        const lfs::core::param::MaskMode mode) {
+
+        if (!is_attention_mask_mode(mode)) {
+            return; // attention-only behavior
+        }
+
+        // One-shot opacity kick: fire once at the configured fraction of training.
+        // POW and MUL are compatible; when both are enabled they apply in sequence.
+        if (SMN_OPACITY_KICK_ENABLED && total_iterations > 0) {
+            const int kick_iter = static_cast<int>(std::lround(
+                SMN_OPACITY_KICK_AT_FRACTION * static_cast<float>(total_iterations)));
+            if (iteration == kick_iter) {
+                bool applied = false;
+                if (SMN_OPACITY_KICK_POW_ENABLED) {
+                    modify_opacity_pow(strategy.get_model(), SMN_OPACITY_KICK_POW_VALUE);
+                    applied = true;
+                }
+                if (SMN_OPACITY_KICK_MUL_ENABLED) {
+                    modify_opacity_mul(strategy.get_model(), SMN_OPACITY_KICK_MUL_VALUE);
+                    applied = true;
+                }
+                if (applied && SMN_OPACITY_KICK_RESET_OPTIMIZER) {
+                    strategy.get_optimizer().reset_state(ParamType::Opacity);
+                }
+                if (applied) {
+                    LOG_INFO("[SMN opacity kick] {} on {} splats{}",
+                             SMN_OPACITY_KICK_POW_ENABLED && SMN_OPACITY_KICK_MUL_ENABLED
+                                 ? "pow + mul"
+                                 : (SMN_OPACITY_KICK_POW_ENABLED ? "pow" : "mul"),
+                             strategy.get_model().size(),
+                             SMN_OPACITY_KICK_RESET_OPTIMIZER ? " (opacity optimizer reset)" : "");
+                }
+            }
+        }
     }
 
 } // namespace lfs::training::smn

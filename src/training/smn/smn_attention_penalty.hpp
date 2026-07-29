@@ -25,6 +25,10 @@
 #include <expected>
 #include <string>
 
+namespace lfs::training {
+    class IStrategy;
+}
+
 namespace lfs::training::smn {
 
     // True for either attention variant. Both run the identical training-time
@@ -77,5 +81,15 @@ namespace lfs::training::smn {
     // Schedule weight w(iter) in [0,1] for the opacity penalty. Exposed for
     // testing and logging; see smn_attention_constants.h for the ramp shape.
     [[nodiscard]] float attention_penalty_schedule_weight(int iteration, int total_iterations);
+
+    // Per-optimizer-step hook for the attention modes. Call once per step from the
+    // trainer at a safe point (after strategy step). It is a no-op unless `mode` is
+    // an attention mode; currently it fires the one-shot opacity kick at
+    // SMN_OPACITY_KICK_AT_FRACTION. Strategy-agnostic (MRNF and MCMC).
+    void attention_on_optimizer_step(
+        lfs::training::IStrategy& strategy,
+        int iteration,
+        int total_iterations,
+        lfs::core::param::MaskMode mode);
 
 } // namespace lfs::training::smn
