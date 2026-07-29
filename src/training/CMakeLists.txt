@@ -34,8 +34,9 @@ set(LFS_TRAINING_KERNEL_SOURCES
     kernels/roi_weight_map.cu
     kernels/image_kernels.cu
     components/sparsity_optimizer_kernels.cu
-    # SMN begin — attention mask mode projection/vote kernel
+    # SMN begin — attention mask mode CUDA kernels (prune vote + fused opacity penalty)
     smn/smn_attention_project_kernel.cu
+    smn/smn_attention_penalty_kernel.cu
     # SMN end
 )
 

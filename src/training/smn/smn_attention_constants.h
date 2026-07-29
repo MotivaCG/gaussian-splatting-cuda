@@ -61,6 +61,22 @@ namespace lfs::training::smn {
     // contribution relative to the photometric loss.
     inline constexpr float SMN_ATTENTION_PENALTY_SCALE = 1.0f;
 
+    // Darkness boost (after oldmode make_darkness_weight): the PHOTOMETRIC loss is
+    // weighted per pixel by
+    //   w = 1 + (1 - brightness(GT)) * SMN_ATTENTION_DARKNESS_BOOST
+    // so dark target regions (dark hair, dark clothing) get more reconstruction
+    // attention. brightness is Rec.601 luma (0.299 R + 0.587 G + 0.114 B) of the
+    // GROUND-TRUTH image (never the render); darkness = 1 - brightness. (Oldmode's
+    // extra mean-normalization is omitted here: it cancels in the fused loss, which
+    // normalizes by the total weight sum.)
+    //
+    // This is a LOSS weight, not an opacity term — it never pushes alpha, so it
+    // cannot halo edges (the halo came from wrongly placing it in the penalty).
+    // It coexists with the opacity penalty (oldmode made them mutually exclusive;
+    // here they are independent). A value of 0 disables it; 2.0 is the oldmode
+    // default. GT-based, so it is static per image.
+    inline constexpr float SMN_ATTENTION_DARKNESS_BOOST = 2.0f;
+
     // Couple the penalty magnitude to the current photometric loss, i.e. multiply
     // it by (photometric_loss + SMN_ATTENTION_PENALTY_LOSS_FLOOR). This reproduces
     // oldmode's multiplicative form `loss*(1+p) + eps*p`, whose alpha gradient is

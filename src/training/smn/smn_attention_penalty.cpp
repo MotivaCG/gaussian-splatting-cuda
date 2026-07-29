@@ -5,6 +5,9 @@
 #include "smn_attention_penalty.hpp"
 
 #include "smn_attention_constants.h"
+#include "smn_attention_penalty_kernel.hpp"
+
+#include "core/tensor/internal/cuda_stream_context.hpp"
 
 #include <algorithm>
 
@@ -26,6 +29,46 @@ namespace lfs::training::smn {
             return (mask_2d.dtype() == DataType::UInt8 || mask_2d.dtype() == DataType::Bool)
                        ? mask_2d.gt(0).to(DataType::Float32)
                        : mask_2d;
+        }
+
+        // Per-pixel darkness weight from the GT image (NOT the render), after
+        // oldmode's make_darkness_weight. Emphasizes dark target regions in the
+        // PHOTOMETRIC loss (dark hair / clothing reconstruct more accurately):
+        //   w = 1 + (1 - brightness) * boost
+        // brightness is Rec.601 luma (0.299 R + 0.587 G + 0.114 B) in [0,1].
+        //
+        // Oldmode also divided w by its mean to keep the global loss scale stable,
+        // because it normalized the L1 term by the MASK sum. Here the darkness folds
+        // into the fused-loss weight, which is normalized by the TOTAL weight sum, so
+        // any global per-image scalar cancels in both loss and gradient — the mean
+        // normalization would be a redundant reduction and is omitted. The per-pixel
+        // dark emphasis (gradient ∝ darkness·mask) is identical either way.
+        //
+        // This is a photometric weight, never an opacity-penalty term, so it cannot
+        // halo fine edges.
+        [[nodiscard]] Tensor compute_darkness_weight(const Tensor& gt_image, const float boost) {
+            constexpr float kR = 0.299f, kG = 0.587f, kB = 0.114f; // Rec.601 luma
+            Tensor gt = gt_image.ndim() == 4 ? gt_image.squeeze(0) : gt_image;
+            Tensor gt_f = gt.dtype() == DataType::UInt8
+                              ? gt.to(DataType::Float32).mul(1.0f / 255.0f)
+                              : gt;
+            Tensor brightness;
+            if (gt_f.ndim() == 3 && gt_f.shape()[0] == 3) {
+                // channel-first [3,H,W]
+                brightness = gt_f.slice(0, 0, 1).squeeze(0).mul(kR)
+                                 .add(gt_f.slice(0, 1, 2).squeeze(0).mul(kG))
+                                 .add(gt_f.slice(0, 2, 3).squeeze(0).mul(kB));
+            } else if (gt_f.ndim() == 3 && gt_f.shape()[2] == 3) {
+                // channel-last [H,W,3]
+                brightness = gt_f.slice(2, 0, 1).squeeze(2).mul(kR)
+                                 .add(gt_f.slice(2, 1, 2).squeeze(2).mul(kG))
+                                 .add(gt_f.slice(2, 2, 3).squeeze(2).mul(kB));
+            } else {
+                brightness = gt_f.ndim() == 3 ? gt_f.squeeze(0) : gt_f;
+            }
+            // w = 1 + (1 - brightness) * boost = (1 + boost) - brightness * boost.
+            // No mean-normalization: it cancels in the fused loss (see note above).
+            return brightness.mul(-boost).add(1.0f + boost).contiguous();
         }
 
         // Soft photometric weight map: 1.0 inside the mask, SMN_ATTENTION_OUT_MASK_WEIGHT
@@ -117,6 +160,23 @@ namespace lfs::training::smn {
             photometric_weight = Tensor::full(spatial_shape, 1.0f, gt_image.device());
         }
 
+        // Darkness boost (oldmode): emphasize dark GT regions in the photometric
+        // loss so dark hair / clothing reconstruct more accurately. Applied to the
+        // whole image, every iteration (no schedule), and independent of the opacity
+        // penalty (the two are NOT mutually exclusive here, unlike oldmode). It is a
+        // photometric weight, never an opacity term, so it cannot halo edges.
+        //
+        // NOTE: oldmode weights ONLY the L1 term with darkness; this engine's fused
+        // L1+SSIM kernel takes a single per-pixel weight, so folding it here also
+        // weights SSIM. Because the darkness weight is mean-normalized (mean == 1),
+        // this is a minor, scale-neutral deviation (it only re-emphasizes the ~20%
+        // SSIM term spatially toward dark pixels). A bit-exact L1-only version would
+        // need two separate fused passes (≈2x loss cost); folded here for speed.
+        if (SMN_ATTENTION_DARKNESS_BOOST > 0.0f) {
+            const Tensor darkness = compute_darkness_weight(gt_image, SMN_ATTENTION_DARKNESS_BOOST);
+            photometric_weight = photometric_weight.mul(darkness).contiguous();
+        }
+
         const bool use_decoupled =
             raw_rendered.is_valid() && raw_rendered.numel() > 0 && opt_params.lambda_dssim > 0.0f;
 
@@ -155,44 +215,57 @@ namespace lfs::training::smn {
         //   d/dalpha = w * SCALE / N * ( OUT * outside - IN * inside )
         //
         // where inside = mask (optionally * roi), outside = (1-mask) (optionally * roi).
+        // The penalty is evaluated by a single fused CUDA kernel (grad_alpha +
+        // reduced loss in one pass) instead of a chain of elementwise tensor ops.
         Tensor grad_alpha;
         const float schedule_w =
             attention_penalty_schedule_weight(iteration, static_cast<int>(opt_params.iterations));
         if (schedule_w > 0.0f && has_mask && alpha.is_valid() && alpha.numel() > 0) {
-            const Tensor alpha_2d = to_2d(alpha);
-
-            // Per-pixel inside / outside indicators, restricted to the crop ROI.
-            Tensor inside = mask_f;
-            Tensor outside = mask_f.mul(-1.0f).add(1.0f); // 1 - mask
-            if (roi_weight_2d.is_valid() && roi_weight_2d.numel() > 0) {
-                inside = inside.mul(roi_weight_2d);
-                outside = outside.mul(roi_weight_2d);
-            }
+            const Tensor alpha_2d = to_2d(alpha).contiguous();      // [H,W] inside indicator source
+            const Tensor mask_in = mask_f.contiguous();             // [H,W] mask in {0,1}
+            const bool has_roi = roi_weight_2d.is_valid() && roi_weight_2d.numel() > 0;
+            const Tensor roi_c = has_roi ? roi_weight_2d.contiguous() : Tensor{};
 
             const float w = schedule_w * SMN_ATTENTION_PENALTY_SCALE;
-            const float inv_n = 1.0f / static_cast<float>(alpha_2d.numel());
             const float cin = w * SMN_ATTENTION_PENALTY_INSIDE_WEIGHT;
             const float cout = w * SMN_ATTENTION_PENALTY_OUTSIDE_WEIGHT;
-            const Tensor one_minus_alpha = alpha_2d.mul(-1.0f).add(1.0f);
 
-            Tensor inside_term = one_minus_alpha.mul(inside).mean().mul(cin);   // [1]
-            Tensor outside_term = alpha_2d.mul(outside).mean().mul(cout);       // [1]
-            // grad wrt alpha = (cout*outside - cin*inside) / N  (before coupling)
-            Tensor grad = outside.mul(cout * inv_n).sub(inside.mul(cin * inv_n)); // [H,W]
+            // Coupling factor (photometric_loss + floor) as a device scalar, captured
+            // BEFORE folding the penalty into `loss` to avoid self-reference.
+            const Tensor couple = SMN_ATTENTION_PENALTY_COUPLE_TO_LOSS
+                                      ? loss.add(SMN_ATTENTION_PENALTY_LOSS_FLOOR).contiguous()
+                                      : Tensor{};
 
-            // Couple to the photometric loss (oldmode behavior): multiply the whole
-            // penalty by (loss + floor). `loss` here is still the photometric loss;
-            // capturing it before we fold the penalty in avoids self-reference, and
-            // using tensor ops on the [1] scalar keeps this sync-free.
-            if (SMN_ATTENTION_PENALTY_COUPLE_TO_LOSS) {
-                const Tensor couple = loss.add(SMN_ATTENTION_PENALTY_LOSS_FLOOR); // [1]
-                inside_term = inside_term.mul(couple);
-                outside_term = outside_term.mul(couple);
-                grad = grad.mul(couple); // broadcasts [1] over [H,W]
+            const int H = static_cast<int>(alpha_2d.shape()[0]);
+            const int W = static_cast<int>(alpha_2d.shape()[1]);
+            grad_alpha = Tensor::empty(
+                lfs::core::TensorShape({static_cast<size_t>(H), static_cast<size_t>(W)}),
+                alpha_2d.device());
+            Tensor penalty_loss = Tensor::empty(lfs::core::TensorShape({1}), loss.device());
+
+            const cudaStream_t stream = lfs::core::getCurrentCUDAStream();
+            alpha_2d.sync_to_stream(stream);
+            mask_in.sync_to_stream(stream);
+            if (has_roi) {
+                roi_c.sync_to_stream(stream);
             }
+            if (couple.is_valid()) {
+                couple.sync_to_stream(stream);
+            }
+            grad_alpha.set_stream(stream);
+            penalty_loss.set_stream(stream);
 
-            loss = loss.add(inside_term).add(outside_term);
-            grad_alpha = grad.contiguous();
+            launch_attention_opacity_penalty(
+                alpha_2d.ptr<float>(),
+                mask_in.ptr<float>(),
+                has_roi ? roi_c.ptr<float>() : nullptr,
+                H, W, cin, cout,
+                couple.is_valid() ? couple.ptr<float>() : nullptr,
+                grad_alpha.ptr<float>(),
+                penalty_loss.ptr<float>(),
+                stream);
+
+            loss = loss.add(penalty_loss);
         }
 
         return AttentionLossResult{
