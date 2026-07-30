@@ -123,6 +123,7 @@ namespace lfs::core {
             bool bg_modulation = false;                        // Enable sinusoidal background modulation
             bool enable_eval = false;                          // Only evaluate when explicitly enabled
             bool enable_save_eval_images = true;               // Save during evaluation images
+            bool skip_intermediate = false;                    // SMN: skip intermediate saves (step checkpoints, regular-phase PLY, .ppisp sidecars); keeps final + pre-prune PLYs
             bool headless = false;                             // Disable visualization during training
             bool auto_train = false;                           // Start training immediately on startup
             bool no_splash = false;                            // Skip splash screen on startup

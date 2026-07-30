@@ -249,6 +249,7 @@ namespace {
             ::args::ValueFlag<float> steps_scaler(training_group, "steps_scaler", "Scale training steps by factor", {"steps-scaler"});
             ::args::Flag no_error_map(training_group, "no_error_map", "Disable per-pixel SSIM error-map weighting of the MRNF refine signal (default: enabled)", {"no-error-map"});
             ::args::Flag no_edge_map(training_group, "no_edge_map", "Disable Sobel edge-map weighting of the MRNF refine signal (default: enabled)", {"no-edge-map"});
+            ::args::Flag skip_intermediate(training_group, "skip_intermediate", "Skip intermediate saves (step checkpoints, regular-phase PLY, .ppisp sidecars); keep only the final and pre-prune PLYs", {"skip-intermediate"}); // SMN
             ::args::ValueFlag<std::string> bg_mode(training_group, "mode", "Background mode: solidcolor, modulation, image, random, pseudorandom (default: solidcolor)", {"bg-mode"});
             ::args::ValueFlag<std::string> bg_color(training_group, "color", "solidcolor background color as #RRGGBB or (R,G,B) with 0-255 channels (default: #000000)", {"bg-color"});
             ::args::ValueFlag<std::string> bg_image_path(training_group, "path", "Background image path (required when --bg-mode image)", {"bg-image-path"});
@@ -832,6 +833,7 @@ namespace {
                                         use_normal_loss_flag = bool(use_normal_loss),
                                         no_error_map_flag = bool(no_error_map),
                                         no_edge_map_flag = bool(no_edge_map),
+                                        skip_intermediate_flag = bool(skip_intermediate), // SMN
                                         freeze_lr_scale_val = cli_option_present({"--freeze-lr-scale"}) ? std::optional<float>(::args::get(freeze_lr_scale)) : std::optional<float>(),
                                         exclude_export_flag = bool(exclude_export),
                                         output_name_val = cli_option_present({"--output-name"}) ? std::optional<std::string>(::args::get(output_name)) : std::optional<std::string>()]() {
@@ -923,6 +925,8 @@ namespace {
                     opt.use_error_map = false;
                 if (no_edge_map_flag)
                     opt.use_edge_map = false;
+                if (skip_intermediate_flag) // SMN
+                    opt.skip_intermediate = true;
                 setVal(freeze_lr_scale_val, params.freeze_lr_scale);
                 setFlag(exclude_export_flag, params.exclude_frozen_add_splats_from_export);
 

@@ -5510,7 +5510,7 @@ namespace lfs::training {
                     const bool save_regular_phase_output = get_active_sparsify_steps() > 0 &&
                                                            iter == get_sparsity_boundary_iteration();
                     current_phase = StepPhase::TerminalCleanup;
-                    if (save_regular_phase_output) {
+                    if (save_regular_phase_output && !params_.optimization.skip_intermediate /* SMN */) {
                         LOG_INFO("Saving regular-phase checkpoint and PLY at iteration {} before sparsification", iter);
                         if (auto ply_result = save_ply(
                                 params_.dataset.output_path, "", iter, /*join=*/false, /*save_checkpoint=*/false);
@@ -5526,7 +5526,8 @@ namespace lfs::training {
                     for (size_t save_step : params_.optimization.save_steps) {
                         if (iter == static_cast<int>(save_step) &&
                             iter != get_total_iterations() &&
-                            !save_regular_phase_output) {
+                            !save_regular_phase_output &&
+                            !params_.optimization.skip_intermediate /* SMN */) {
                             auto result = save_checkpoint(iter);
                             if (!result) {
                                 LOG_WARN("Failed to save checkpoint at iteration {}: {}", iter, result.error());
@@ -6278,7 +6279,7 @@ namespace lfs::training {
             }
         }
 
-        if (ppisp_) {
+        if (ppisp_ && !params_.optimization.skip_intermediate /* SMN */) {
             const auto ppisp_path = get_ppisp_companion_path(ply_options.output_path);
             std::optional<PPISPFileMetadata> metadata;
             if (auto metadata_result = build_ppisp_sidecar_metadata(); metadata_result) {
