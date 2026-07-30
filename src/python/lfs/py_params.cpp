@@ -326,7 +326,8 @@ namespace lfs::python {
                        {{"SolidColor", BackgroundMode::SolidColor},
                         {"Modulation", BackgroundMode::Modulation},
                         {"Image", BackgroundMode::Image},
-                        {"Random", BackgroundMode::Random}},
+                        {"Random", BackgroundMode::Random},
+                        {"Pseudorandom", BackgroundMode::Pseudorandom}}, // SMN
                        "Background mode")
             .build();
     }
@@ -1074,7 +1075,8 @@ namespace lfs::python {
             .value("SOLID_COLOR", BackgroundMode::SolidColor)
             .value("MODULATION", BackgroundMode::Modulation)
             .value("IMAGE", BackgroundMode::Image)
-            .value("RANDOM", BackgroundMode::Random);
+            .value("RANDOM", BackgroundMode::Random)
+            .value("PSEUDORANDOM", BackgroundMode::Pseudorandom); // SMN
 
         nb::class_<PyOptimizationParams>(m, "OptimizationParams")
             .def(nb::init<>())

@@ -51,10 +51,11 @@
 #include "training/kernels/roi_weight_map.hpp"
 #include "training/training_setup.hpp"
 #include "training_cropbox_mask.hpp"
-// SMN begin — attention mask mode (training penalty + post-training prune)
+// SMN begin — attention mask mode (training penalty + post-training prune) + pseudorandom bg
 #include "smn/smn_attention_constants.h"
 #include "smn/smn_attention_penalty.hpp"
 #include "smn/smn_attention_prune.hpp"
+#include "smn/smn_pseudorandom_bg.hpp"
 // SMN end
 
 #include <array>
@@ -3865,6 +3866,22 @@ namespace lfs::training {
                     LFS_VRAM_SCOPE("train.random_background");
                     LOG_VRAM_DIFF("train.random_background");
                     bg_image = get_random_background_for_camera(cam->image_width(), cam->image_height(), iter);
+                    // SMN begin — pseudorandom background (RGBCMYKW blocky + offset, forces opacity)
+                } else if (params_.optimization.bg_mode == lfs::core::param::BackgroundMode::Pseudorandom) {
+                    LFS_VRAM_SCOPE("train.pseudorandom_background");
+                    const int bg_h = cam->image_height();
+                    const int bg_w = cam->image_width();
+                    const size_t required = 3ULL * static_cast<size_t>(bg_h) * static_cast<size_t>(bg_w);
+                    if (!random_bg_buffer_.is_valid() || random_bg_buffer_.numel() != required) {
+                        random_bg_buffer_ = lfs::core::Tensor::empty(
+                            {3, static_cast<size_t>(bg_h), static_cast<size_t>(bg_w)},
+                            lfs::core::Device::CUDA, lfs::core::DataType::Float32);
+                    }
+                    lfs::training::smn::launch_pseudorandom_background(
+                        random_bg_buffer_.ptr<float>(), bg_h, bg_w,
+                        static_cast<uint64_t>(iter), random_bg_buffer_.stream());
+                    bg_image = random_bg_buffer_;
+                    // SMN end
                 }
 
                 const bool fastgs_path = !params_.optimization.gut;

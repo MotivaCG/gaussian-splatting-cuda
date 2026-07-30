@@ -34,8 +34,9 @@ set(LFS_TRAINING_KERNEL_SOURCES
     kernels/roi_weight_map.cu
     kernels/image_kernels.cu
     components/sparsity_optimizer_kernels.cu
-    # SMN begin — attention mask mode CUDA kernels (fused opacity penalty)
+    # SMN begin — attention mask mode CUDA kernels (fused opacity penalty) + pseudorandom bg
     smn/smn_attention_penalty_kernel.cu
+    smn/smn_pseudorandom_bg.cu
     # SMN end
 )
 
