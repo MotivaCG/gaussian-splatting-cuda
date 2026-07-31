@@ -170,8 +170,8 @@ namespace lfs::core {
             }
 
             // Mask parameters
-            // SMN begin — "attention"/"attention_no_prune" appended to keep index alignment with MaskMode
-            static constexpr const char* MASK_MODE_NAMES[] = {"none", "segment", "ignore", "segment_and_ignore", "alpha_consistent", "attention", "attention_no_prune"};
+            // SMN begin — "attention" appended to keep index alignment with MaskMode
+            static constexpr const char* MASK_MODE_NAMES[] = {"none", "segment", "ignore", "segment_and_ignore", "alpha_consistent", "attention"};
             // SMN end
             opt_json["mask_mode"] = MASK_MODE_NAMES[static_cast<int>(mask_mode)];
             opt_json["invert_masks"] = invert_masks;
@@ -694,11 +694,9 @@ namespace lfs::core {
                     params.mask_mode = MaskMode::SegmentAndIgnore;
                 } else if (mode == "alpha_consistent") {
                     params.mask_mode = MaskMode::AlphaConsistent;
-                    // SMN begin — attention mask modes
+                    // SMN begin — attention mask mode
                 } else if (mode == "attention") {
                     params.mask_mode = MaskMode::Attention;
-                } else if (mode == "attention_no_prune") {
-                    params.mask_mode = MaskMode::AttentionNoPrune;
                     // SMN end
                 }
             }

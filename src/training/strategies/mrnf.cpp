@@ -12,6 +12,7 @@
 #include "kernels/image_kernels.hpp"
 #include "kernels/mcmc_kernels.hpp"
 #include "kernels/mrnf_kernels.hpp"
+#include "smn/smn_attention_constants.h" // SMN: inside-biased replacement toggle
 #include "strategy_utils.hpp"
 #include "training/dataset.hpp"
 #include <algorithm>
@@ -738,6 +739,15 @@ namespace lfs::training {
             if (edge_guidance.is_valid()) {
                 replace_weights = replace_weights * edge_guidance;
             }
+            // SMN begin — bias replacement toward the mask interior: drop background
+            // candidates (zero mask-zeroed refine weight) so opaque background is not
+            // re-cloned into freed slots. _refine_weight_max is the insideness proxy.
+            if (lfs::training::smn::SMN_ATTENTION_INSIDE_BIASED_REPLACEMENT &&
+                _refine_weight_max.numel() == n &&
+                _params->mask_mode == lfs::core::param::MaskMode::Attention) {
+                replace_weights = replace_weights * (_refine_weight_max > 0.0f);
+            }
+            // SMN end
             const int selectable_replace = static_cast<int>(replace_weights.count_nonzero());
             actual_replace = std::min(requested_replace, selectable_replace);
             if (actual_replace > 0) {

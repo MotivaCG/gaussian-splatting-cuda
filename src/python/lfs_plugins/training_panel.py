@@ -198,9 +198,8 @@ LOCALE_KEYS = {
     "mask_ignore": "training.options.mask.ignore",
     "mask_segment_and_ignore": "training.options.mask.segment_and_ignore",
     "mask_alpha_consistent": "training.options.mask.alpha_consistent",
-    # SMN begin — attention mask modes
+    # SMN begin — attention mask mode
     "mask_attention": "training.options.mask.attention",
-    "mask_attention_no_prune": "training.options.mask.attention_no_prune",
     # SMN end
     "depth_loss_ssi": "training.options.depth_loss.ssi",
     "depth_loss_ssi_disparity": "training.options.depth_loss.ssi_disparity",

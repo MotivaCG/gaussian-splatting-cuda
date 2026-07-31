@@ -31,13 +31,11 @@ namespace lfs::training {
 
 namespace lfs::training::smn {
 
-    // True for either attention variant. Both run the identical training-time
-    // loss/penalty; they differ only in whether the post-training prune runs
-    // (see run_attention_prune, gated on MaskMode::Attention only).
+    // True for the attention mask mode (out-of-mask weighting + scheduled opacity
+    // penalty + post-training prune). Kept as a helper so call sites read clearly.
     [[nodiscard]] inline constexpr bool is_attention_mask_mode(
         const lfs::core::param::MaskMode mode) noexcept {
-        return mode == lfs::core::param::MaskMode::Attention ||
-               mode == lfs::core::param::MaskMode::AttentionNoPrune;
+        return mode == lfs::core::param::MaskMode::Attention;
     }
 
     // Morphological dilation (max filter) of a mask by `radius` pixels: grows the

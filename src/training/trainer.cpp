@@ -3004,8 +3004,8 @@ namespace lfs::training {
             LOG_INFO("Visualization: {}", params.optimization.headless ? "disabled" : "enabled");
             LOG_INFO("Strategy: {}", params.optimization.strategy);
             if (params.optimization.mask_mode != lfs::core::param::MaskMode::None) {
-                // SMN begin — "attention"/"attention_no_prune" appended to keep index alignment with MaskMode
-                static constexpr const char* MASK_MODE_NAMES[] = {"none", "segment", "ignore", "segment_and_ignore", "alpha_consistent", "attention", "attention_no_prune"};
+                // SMN begin — "attention" appended to keep index alignment with MaskMode
+                static constexpr const char* MASK_MODE_NAMES[] = {"none", "segment", "ignore", "segment_and_ignore", "alpha_consistent", "attention"};
                 // SMN end
                 LOG_INFO("Mask mode: {}", MASK_MODE_NAMES[static_cast<int>(params.optimization.mask_mode)]);
             }

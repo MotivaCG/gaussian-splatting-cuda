@@ -46,6 +46,17 @@ namespace lfs::training::smn {
     // push the background opaque (no halo) nor keep floaters. 0 disables it.
     inline constexpr int SMN_ATTENTION_PRIORITY_DILATION_PX = 3;
 
+    // Bias MRNF's REPLACEMENT (filling freed slots by cloning) toward the mask
+    // INTERIOR. MRNF grows only where the (mask-zeroed) densification error is
+    // nonzero, but its replacement step clones by OPACITY alone, so opaque
+    // background gaussians get re-cloned and the count creeps up outside the
+    // subject — splats the final prune then deletes for nothing. We reuse
+    // _refine_weight_max (accumulated from the mask-zeroed error map, hence ~0 on
+    // pure background) as a free per-gaussian "insideness" proxy: replacement
+    // candidates with zero refine weight are dropped. MCMC already samples by the
+    // (masked) error score, so this is MRNF-only. Attention modes only.
+    inline constexpr bool SMN_ATTENTION_INSIDE_BIASED_REPLACEMENT = true;
+
 
     // -------------------------------------------------------------------------
     // 2. Opacity penalty (bidirectional, per pixel)
@@ -158,7 +169,7 @@ namespace lfs::training::smn {
     // disable without editing the list, set SMN_OPACITY_KICK_ENABLED = false.
     inline constexpr std::array SMN_OPACITY_KICKS = {
         //OpacityKick{0.15f, 0.45f, OpacityKickOp::Pow}, //sample
-        OpacityKick{0.9f, 0.15f, OpacityKickOp::Mul}, //sample
+        OpacityKick{0.8f, 0.5f, OpacityKickOp::Mul}, //sample
         //OpacityKick{0.9f, 0.8f, OpacityKickOp::Pow},
     };
 
@@ -183,7 +194,7 @@ namespace lfs::training::smn {
 
     // When true (and the prune runs), save an extra PLY of the model BEFORE
     // pruning, so a single MaskMode::Attention run yields both the pre-prune and
-    // pruned results — no need to also train with attention_no_prune to compare.
+    // pruned results in one go.
     inline constexpr bool SMN_ATTENTION_SAVE_PREPRUNE_COPY = true;
 
     // Filename suffix (before ".ply") used for the pre-prune copy above.
