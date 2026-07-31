@@ -89,9 +89,9 @@ namespace lfs::training::smn {
     [[nodiscard]] float attention_penalty_schedule_weight(int iteration, int total_iterations);
 
     // Per-optimizer-step hook for the attention modes. Call once per step from the
-    // trainer at a safe point (after strategy step). It is a no-op unless `mode` is
-    // an attention mode; currently it fires the one-shot opacity kick at
-    // SMN_OPACITY_KICK_AT_FRACTION. Strategy-agnostic (MRNF and MCMC).
+    // trainer at a safe point (after strategy step). It is a no-op unless `mode` is an
+    // attention mode; it fires the scheduled opacity kicks (SMN_OPACITY_KICKS) as
+    // training crosses each entry's fraction. Strategy-agnostic (MRNF and MCMC).
     void attention_on_optimizer_step(
         lfs::training::IStrategy& strategy,
         int iteration,

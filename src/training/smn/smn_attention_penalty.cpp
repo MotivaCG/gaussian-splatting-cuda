@@ -306,36 +306,35 @@ namespace lfs::training::smn {
         const int total_iterations,
         const lfs::core::param::MaskMode mode) {
 
-        if (!is_attention_mask_mode(mode)) {
+        if (!is_attention_mask_mode(mode) || total_iterations <= 0) {
             return; // attention-only behavior
         }
 
-        // One-shot opacity kick: fire once at the configured fraction of training.
-        // POW and MUL are compatible; when both are enabled they apply in sequence.
-        if (SMN_OPACITY_KICK_ENABLED && total_iterations > 0) {
-            const int kick_iter = static_cast<int>(std::lround(
-                SMN_OPACITY_KICK_AT_FRACTION * static_cast<float>(total_iterations)));
-            if (iteration == kick_iter) {
-                bool applied = false;
-                if (SMN_OPACITY_KICK_POW_ENABLED) {
-                    modify_opacity_pow(strategy.get_model(), SMN_OPACITY_KICK_POW_VALUE);
-                    applied = true;
+        // Scheduled discrete opacity kicks: at each listed fraction, apply the entry's
+        // opacity op (pow or mul) once, then reset the opacity optimizer so stale
+        // momentum does not immediately undo it. See smn_attention_constants.h section 4.
+        if (SMN_OPACITY_KICK_ENABLED) {
+            for (const OpacityKick& kick : SMN_OPACITY_KICKS) {
+                const int kick_iter = static_cast<int>(std::lround(
+                    kick.fraction * static_cast<float>(total_iterations)));
+                if (iteration != kick_iter) {
+                    continue;
                 }
-                if (SMN_OPACITY_KICK_MUL_ENABLED) {
-                    modify_opacity_mul(strategy.get_model(), SMN_OPACITY_KICK_MUL_VALUE);
-                    applied = true;
+                const bool is_mul = kick.op == OpacityKickOp::Mul;
+                if (is_mul) {
+                    modify_opacity_mul(strategy.get_model(), kick.value);
+                } else {
+                    modify_opacity_pow(strategy.get_model(), kick.value);
                 }
-                if (applied && SMN_OPACITY_KICK_RESET_OPTIMIZER) {
+                if (SMN_OPACITY_KICK_RESET_OPTIMIZER) {
                     strategy.get_optimizer().reset_state(ParamType::Opacity);
                 }
-                if (applied) {
-                    LOG_INFO("[SMN opacity kick] {} on {} splats{}",
-                             SMN_OPACITY_KICK_POW_ENABLED && SMN_OPACITY_KICK_MUL_ENABLED
-                                 ? "pow + mul"
-                                 : (SMN_OPACITY_KICK_POW_ENABLED ? "pow" : "mul"),
-                             strategy.get_model().size(),
-                             SMN_OPACITY_KICK_RESET_OPTIMIZER ? " (opacity optimizer reset)" : "");
-                }
+                LOG_INFO("[SMN opacity kick] {}({:.3f}) at {:.0f}% on {} splats{}",
+                         is_mul ? "mul" : "pow",
+                         kick.value,
+                         kick.fraction * 100.0f,
+                         strategy.get_model().size(),
+                         SMN_OPACITY_KICK_RESET_OPTIMIZER ? " (opacity optimizer reset)" : "");
             }
         }
     }

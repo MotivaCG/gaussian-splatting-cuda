@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <array>
 #include <string_view>
 
 // =============================================================================
@@ -35,7 +36,7 @@ namespace lfs::training::smn {
     // is always 1.0. A small value (< 1) keeps the background loosely supervised
     // instead of ignoring it outright, which stabilizes geometry near the ROI
     // border while still concentrating detail on the masked object.
-    inline constexpr float SMN_ATTENTION_OUT_MASK_WEIGHT = 1.0f / 20.0f; // 0.05
+    inline constexpr float SMN_ATTENTION_OUT_MASK_WEIGHT = 1.0f / 40.0f; // 0.05
 
     // Dilation radius (pixels) of the mask used ONLY for "where to give priority":
     // the photometric weight and the densification error map. It grows the full-
@@ -44,7 +45,6 @@ namespace lfs::training::smn {
     // (alpha) and the post-training prune keep the TIGHT mask, so this does not
     // push the background opaque (no halo) nor keep floaters. 0 disables it.
     inline constexpr int SMN_ATTENTION_PRIORITY_DILATION_PX = 3;
-
 
 
     // -------------------------------------------------------------------------
@@ -102,7 +102,7 @@ namespace lfs::training::smn {
 
     // Additive floor for the coupling above (oldmode's `1e-2`). Ensures the
     // penalty never fully vanishes when the photometric loss is tiny.
-    inline constexpr float SMN_ATTENTION_PENALTY_LOSS_FLOOR = 1.0e-2f;
+    inline constexpr float SMN_ATTENTION_PENALTY_LOSS_FLOOR = 5.0e-2f;
 
 
 
@@ -124,33 +124,45 @@ namespace lfs::training::smn {
 
 
     // -------------------------------------------------------------------------
-    // 4. One-shot opacity "kick"
+    // 4. Opacity "kicks" (scheduled list)
     // -------------------------------------------------------------------------
     //
-    // Once during training, adjust every splat's LINEAR opacity, then let the
-    // optimizer + strategy decay relax it — a discrete "kick, then settle". Fires
-    // only in the attention modes; strategy-agnostic (MRNF and MCMC). Two
-    // compatible components are available; when both are enabled they apply in
-    // sequence (POW first, then MUL).
+    // At each listed fraction of training, adjust every splat's LINEAR opacity by the
+    // entry's op, once, then let the optimizer + strategy relax it — a discrete "kick,
+    // then settle". It acts on opacity, not the mask border, so it cannot halo. Two ops
+    // (dispatched to modify_opacity_pow / modify_opacity_mul):
+    //   Pow -> o <- o^value    : SELF-TARGETING — shoves low (transparent) opacities
+    //                            hard, barely moves ones near 1. value < 1 boosts, > 1
+    //                            lowers, == 1 no-op. Composes: three pow(0.77)~=pow(0.45).
+    //   Mul -> o <- o * e^value: uniform multiplier. value > 0 boosts, < 0 lowers,
+    //                            == 0 no-op.
+    //
+    // Fires once per entry when training crosses its fraction. Attention modes only;
+    // strategy-agnostic (MRNF and MCMC). Prefer a few gentle kicks LATE in training —
+    // late kicks "stick", early ones relax back (if they don't, the loss is holding
+    // opacity: good).
 
-    // Master switch for the kick.
+    // Master switch for all kicks.
     inline constexpr bool SMN_OPACITY_KICK_ENABLED = true;
 
-    // Fraction of total training at which the kick fires (once).
-    inline constexpr float SMN_OPACITY_KICK_AT_FRACTION = 0.75f;
+    enum class OpacityKickOp { Pow, Mul };
 
-    // Power (gamma) component: opacity_linear <- opacity_linear ^ POW_VALUE.
-    // POW_VALUE < 1 raises opacity (toward 1, strongest on low opacities), > 1
-    // lowers it, == 1 is a no-op.
-    inline constexpr bool SMN_OPACITY_KICK_POW_ENABLED = true;
-    inline constexpr float SMN_OPACITY_KICK_POW_VALUE = 0.45f;
+    struct OpacityKick {
+        float fraction;   // point in training [0,1] at which this kick fires
+        float value;      // Pow: exponent (<1 boosts); Mul: log-multiplier (>0 boosts)
+        OpacityKickOp op; // which opacity op to apply
+    };
 
-    // Multiplier component (SuperSplat): opacity_linear <- opacity_linear * e^MUL_VALUE.
-    // MUL_VALUE > 0 raises opacity, < 0 lowers it, == 0 is a no-op.
-    inline constexpr bool SMN_OPACITY_KICK_MUL_ENABLED = false;
-    inline constexpr float SMN_OPACITY_KICK_MUL_VALUE = 0.5f;
+    // The kick schedule (size deduced — add/remove entries freely without counting).
+    // Kept gentle and weighted late so the boosts stick (see the note above). To
+    // disable without editing the list, set SMN_OPACITY_KICK_ENABLED = false.
+    inline constexpr std::array SMN_OPACITY_KICKS = {
+        //OpacityKick{0.15f, 0.45f, OpacityKickOp::Pow}, //sample
+        OpacityKick{0.9f, 0.15f, OpacityKickOp::Mul}, //sample
+        //OpacityKick{0.9f, 0.8f, OpacityKickOp::Pow},
+    };
 
-    // Reset the opacity Adam moments right after the kick so stale momentum does
+    // Reset the opacity Adam moments right after each kick so stale momentum does
     // not immediately undo it.
     inline constexpr bool SMN_OPACITY_KICK_RESET_OPTIMIZER = true;
 

@@ -251,6 +251,9 @@ namespace {
             ::args::Flag no_edge_map(training_group, "no_edge_map", "Disable Sobel edge-map weighting of the MRNF refine signal (default: enabled)", {"no-edge-map"});
             ::args::Flag skip_intermediate(training_group, "skip_intermediate", "Skip intermediate saves (step checkpoints, regular-phase PLY, .ppisp sidecars); keep only the final and pre-prune PLYs", {"skip-intermediate"}); // SMN
             ::args::ValueFlag<std::string> bg_mode(training_group, "mode", "Background mode: solidcolor, modulation, image, random, pseudorandom (default: solidcolor)", {"bg-mode"});
+            // SMN: one-shot preset for people/chroma captures. Expands to the validated recipe
+            // (attention mask + pseudorandom bg + depth-normal consistency). Explicit flags override.
+            ::args::Flag smn(training_group, "smn", "SMN preset for people/chroma captures: sets --mask-mode attention --bg-mode pseudorandom --use-normal-loss --normal-loss-weight 0 --normal-consistency-weight 0.1 (any explicit flag overrides it)", {"smn"});
             ::args::ValueFlag<std::string> bg_color(training_group, "color", "solidcolor background color as #RRGGBB or (R,G,B) with 0-255 channels (default: #000000)", {"bg-color"});
             ::args::ValueFlag<std::string> bg_image_path(training_group, "path", "Background image path (required when --bg-mode image)", {"bg-image-path"});
 
@@ -831,6 +834,7 @@ namespace {
                                         no_alpha_as_mask_flag = bool(no_alpha_as_mask),
                                         use_depth_loss_flag = bool(use_depth_loss),
                                         use_normal_loss_flag = bool(use_normal_loss),
+                                        smn_preset_flag = bool(smn), // SMN
                                         no_error_map_flag = bool(no_error_map),
                                         no_edge_map_flag = bool(no_edge_map),
                                         skip_intermediate_flag = bool(skip_intermediate), // SMN
@@ -853,6 +857,23 @@ namespace {
                 };
 
                 // Apply all overrides
+
+                // SMN begin — `--smn` preset: the validated attention recipe for
+                // people/chroma captures (masked training + pseudorandom bg + the
+                // depth-normal consistency that breaks the front-transparent /
+                // back-colored depth-ordering cheat). Applied FIRST so any explicit
+                // flag below overrides it (setVal/setFlag only act when the option is
+                // actually present on the command line).
+                if (smn_preset_flag) {
+                    opt.mask_mode = lfs::core::param::MaskMode::Attention;
+                    opt.bg_mode = lfs::core::param::BackgroundMode::Pseudorandom;
+                    opt.bg_modulation = false;
+                    opt.use_normal_loss = true;
+                    opt.normal_loss_weight = 0.0f;
+                    opt.normal_consistency_weight = 0.1f;
+                }
+                // SMN end
+
                 setVal(iterations_val, opt.iterations);
                 setVal(resize_factor_val, ds.resize_factor);
                 setVal(max_width_val, ds.max_width);
