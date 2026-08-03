@@ -858,17 +858,28 @@ namespace {
                 // Apply all overrides
 
                 // SMN begin — `--smn` preset: the validated attention recipe for
-                // people/chroma captures (masked training + pseudorandom bg + the
-                // depth-normal consistency that breaks the front-transparent /
-                // back-colored depth-ordering cheat). Applied FIRST so any explicit
-                // flag below overrides it (setVal/setFlag only act when the option is
-                // actually present on the command line).
+                // people/chroma captures. Applied FIRST so any explicit flag below
+                // OVERRIDES it (setVal/setFlag only act when the option is actually
+                // present on the command line). Everything --smn forces, and why:
                 if (smn_preset_flag) {
+                    // Masked training with the attention loss (soft out-of-mask
+                    // weighting + scheduled opacity penalty + post-training prune).
                     opt.mask_mode = lfs::core::param::MaskMode::Attention;
+                    // Pseudorandom (RGBCMYKW) background to force opacity where masks
+                    // are imprecise; disables the sinusoidal modulation background.
                     opt.bg_mode = lfs::core::param::BackgroundMode::Pseudorandom;
                     opt.bg_modulation = false;
+                    // Turn on the normal-supervision machinery (renders normals +
+                    // enables the depth-normal consistency + surfel flattening)...
                     opt.use_normal_loss = true;
+                    // ...but WITHOUT the prior normal loss, so NO external normal maps
+                    // are loaded/required (weight 0 => load_normals is skipped).
                     opt.normal_loss_weight = 0.0f;
+                    // The self-supervised depth-normal consistency (2DGS-style). This
+                    // is the key term: it concentrates each ray onto ONE surface and so
+                    // breaks the depth-ordering cheat (front splats left transparent,
+                    // back splats providing the color). Starts at 20% of training and
+                    // self-excludes hair (alpha>0.5, small depth jump).
                     opt.normal_consistency_weight = 0.1f;
                 }
                 // SMN end
