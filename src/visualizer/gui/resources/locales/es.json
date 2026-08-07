@@ -1016,6 +1016,7 @@
     "options.strategy.mcmc": "MCMC",
     "options.strategy.mrnf": "MRNF",
     "options.strategy.igs_plus": "IGS+",
+    "options.strategy.hybrid": "Híbrido (MCMC → MRNF)",
     "section.dataset": "Dataset",
     "section.optimization": "Optimización",
     "section.refinement": "Refinamiento",
@@ -1165,11 +1166,13 @@
       "sparsify_steps": "Número de pasos de dispersión",
       "init_rho": "Penalización inicial de dispersión (rho)",
       "prune_ratio": "Fracción final de gaussianas a podar al terminar la dispersión",
+      "hybrid_at": "Fracción del total de iteraciones en la que Híbrido pasa de MCMC a MRNF",
       "opt": {
         "strategy": {
           "mrnf": "Estrategia 3DGS por defecto con refinamiento MRNF",
           "igs_plus": "3DGS+ mejorado con crecimiento/poda refinados",
-          "mcmc": "Estrategia MCMC con densificación basada en muestreo"
+          "mcmc": "Estrategia MCMC con densificación basada en muestreo",
+          "hybrid": "Entrena con MCMC y cambia automáticamente a MRNF a mitad de camino (ver Cambiar en)"
         },
         "sh_degree": {
           "0": "Solo difuso — el más rápido, sin color dependiente de la vista",
@@ -1232,6 +1235,7 @@
   },
   "training_params": {
     "strategy": "Estrategia:",
+    "hybrid_at": "  Cambiar en:",
     "iterations": "Iteraciones:",
     "max_gaussians": "Máx. de gaussianas:",
     "sh_degree": "Grado SH:",

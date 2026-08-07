@@ -152,6 +152,8 @@ namespace lfs::core {
             opt_json["gut"] = gut;
             opt_json["undistort"] = undistort;
             opt_json["steps_scaler"] = steps_scaler;
+            opt_json["smn_switch_strategy_to"] = smn_switch_strategy_to; // SMN
+            opt_json["smn_switch_at_fraction"] = smn_switch_at_fraction; // SMN
             opt_json["sh_degree_interval"] = sh_degree_interval;
             opt_json["random"] = random;
             opt_json["init_num_pts"] = init_num_pts;
@@ -254,6 +256,12 @@ namespace lfs::core {
                 return std::format("steps_scaler must be finite (got {})", steps_scaler);
             if (ppisp_warmup_steps < 0)
                 return std::format("ppisp_warmup_steps must be nonnegative (got {})", ppisp_warmup_steps);
+            // SMN begin — in-process cross-strategy switch
+            if (!smn_switch_strategy_to.empty() && !is_valid_strategy_name(smn_switch_strategy_to))
+                return std::format("smn_switch_strategy_to must be mcmc, mrnf, or igs+ (got '{}')", smn_switch_strategy_to);
+            if (!std::isfinite(smn_switch_at_fraction) || smn_switch_at_fraction < 0.0f || smn_switch_at_fraction > 1.0f)
+                return std::format("smn_switch_at_fraction must be within [0, 1] (got {})", smn_switch_at_fraction);
+            // SMN end
             if (debug_python && (debug_python_port <= 0 || debug_python_port > 65535))
                 return std::format("debug_python_port must be within [1, 65535] (got {})", debug_python_port);
 
@@ -625,6 +633,12 @@ namespace lfs::core {
             }
             if (json.contains("steps_scaler")) {
                 params.steps_scaler = json["steps_scaler"];
+            }
+            if (json.contains("smn_switch_strategy_to")) { // SMN
+                params.smn_switch_strategy_to = json["smn_switch_strategy_to"];
+            }
+            if (json.contains("smn_switch_at_fraction")) { // SMN
+                params.smn_switch_at_fraction = json["smn_switch_at_fraction"];
             }
             if (json.contains("sh_degree_interval")) {
                 params.sh_degree_interval = json["sh_degree_interval"];

@@ -190,6 +190,10 @@ LOCALE_KEYS = {
     "strategy_mcmc": "training.options.strategy.mcmc",
     "strategy_mrnf": "training.options.strategy.mrnf",
     "strategy_igs_plus": "training.options.strategy.igs_plus",
+    # SMN begin — hybrid (mcmc -> mrnf in-process switch) preset
+    "strategy_hybrid": "training.options.strategy.hybrid",
+    "hybrid_at": "training_params.hybrid_at",
+    # SMN end
     "tile_full": "training.options.tile.full",
     "tile_half": "training.options.tile.half",
     "tile_quarter": "training.options.tile.quarter",
@@ -218,7 +222,27 @@ STRATEGY_LABEL_KEYS = {
     "mnrf": "training.options.strategy.mrnf",
     "lfs": "training.options.strategy.mrnf",
     "igs+": "training.options.strategy.igs_plus",
+    "hybrid": "training.options.strategy.hybrid",  # SMN
 }
+
+
+# SMN begin — hybrid (mcmc -> mrnf in-process switch) preset
+def _is_hybrid_strategy(prm):
+    return bool(
+        prm
+        and prm.has_params()
+        and prm.strategy == "mcmc"
+        and prm.smn_switch_strategy_to == "mrnf"
+    )
+
+
+def _effective_strategy_name(prm):
+    if _is_hybrid_strategy(prm):
+        return "hybrid"
+    return prm.strategy if prm and prm.has_params() else "mcmc"
+
+
+# SMN end
 
 PARAM_BOOL_PROPS = [
     "use_bilateral_grid",
@@ -647,6 +671,9 @@ class TrainingPanel(Panel):
             "dep_igs",
             lambda: p() is not None and p().has_params() and p().strategy == "igs+",
         )
+        # SMN begin — hybrid (mcmc -> mrnf in-process switch) preset
+        model.bind_func("dep_hybrid", lambda: _is_hybrid_strategy(p()))
+        # SMN end
         model.bind_func(
             "dep_sparsity",
             lambda: p() is not None and p().has_params() and p().enable_sparsity,
@@ -760,9 +787,18 @@ class TrainingPanel(Panel):
     def _bind_select_props(self, model, p, d):
         model.bind(
             "strategy",
-            lambda: p().strategy if p() and p().has_params() else "mcmc",
+            lambda: _effective_strategy_name(p()),  # SMN: "hybrid" when mcmc+switch-to-mrnf
             lambda v: self._set_strategy(v),
         )
+        # SMN begin — hybrid (mcmc -> mrnf in-process switch) preset
+        model.bind(
+            "hybrid_at_str",
+            lambda: (
+                f"{p().smn_switch_at_fraction:.2f}" if p() and p().has_params() else "0.25"
+            ),
+            lambda v: self._set_hybrid_at(v),
+        )
+        # SMN end
         model.bind(
             "sh_degree_str",
             lambda: str(p().sh_degree) if p() and p().has_params() else "0",
@@ -1173,8 +1209,9 @@ class TrainingPanel(Panel):
         model.bind_func(
             "opt_strategy_display",
             lambda: (
-                tr(STRATEGY_LABEL_KEYS.get(p().strategy, ""))
-                if p() and p().has_params() and p().strategy in STRATEGY_LABEL_KEYS
+                # SMN: report "hybrid" instead of the underlying "mcmc" when armed
+                tr(STRATEGY_LABEL_KEYS.get(_effective_strategy_name(p()), ""))
+                if p() and p().has_params() and _effective_strategy_name(p()) in STRATEGY_LABEL_KEYS
                 else (p().strategy if p() and p().has_params() else "")
             ),
         )
@@ -1699,14 +1736,21 @@ class TrainingPanel(Panel):
         params = lf.optimization_params()
         if not params or not params.has_params():
             return
-        if val == "igs+" and params.gut:
+        # SMN begin — "hybrid" is a UI/CLI-only preset, never a real strategy_type.
+        # Translate it here before it ever reaches set_strategy() (which only accepts
+        # mcmc/mrnf/igs+ and would raise otherwise).
+        is_hybrid = val == "hybrid"
+        real_val = "mcmc" if is_hybrid else val
+        # SMN end
+        if real_val == "igs+" and params.gut:
             btn_gut = tr("training.conflict.btn_disable_gut")
             btn_cancel = tr("training.conflict.btn_cancel")
 
-            def _on_conflict(button, _gut=btn_gut, _val=val):
+            def _on_conflict(button, _gut=btn_gut, _val=real_val):
                 p = lf.optimization_params()
                 if button == _gut:
                     p.gut = False
+                    p.smn_switch_strategy_to = ""  # SMN: leaving hybrid disarms the switch
                     p.set_strategy(_val)
                     if self._handle:
                         self._sync_text_bufs()
@@ -1719,10 +1763,30 @@ class TrainingPanel(Panel):
                 _on_conflict,
             )
         else:
-            params.set_strategy(val)
+            # SMN begin — hybrid preset defaults; disarm the switch for any plain strategy
+            if is_hybrid:
+                params.smn_switch_strategy_to = "mrnf"
+                params.smn_switch_at_fraction = 0.25
+            else:
+                params.smn_switch_strategy_to = ""
+            # SMN end
+            params.set_strategy(real_val)
             if self._handle:
                 self._sync_text_bufs()
                 self._handle.dirty_all()
+
+    # SMN begin — hybrid (mcmc -> mrnf in-process switch) preset
+    def _set_hybrid_at(self, val_str):
+        params = lf.optimization_params()
+        if not params or not params.has_params():
+            return
+        try:
+            params.smn_switch_at_fraction = max(0.01, min(1.0, float(val_str)))
+            if self._handle:
+                self._handle.dirty_all()
+        except (ValueError, TypeError):
+            pass
+    # SMN end
 
     def _set_int_param(self, prop, val_str):
         params = lf.optimization_params()

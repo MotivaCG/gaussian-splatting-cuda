@@ -419,6 +419,9 @@ namespace lfs::training {
         // Handle control requests
         void handle_control_requests(int iter, std::stop_token stop_token = {});
         void apply_pending_params_at_safe_point();
+        // SMN begin — in-process cross-strategy switch
+        void apply_smn_strategy_switch_if_due(int iter);
+        // SMN end
         void apply_param_side_effects(
             const lfs::core::param::TrainingParameters& params,
             bool background_image_path_changed);
@@ -462,6 +465,10 @@ namespace lfs::training {
         std::shared_ptr<CameraDataset> val_dataset_;
         std::shared_ptr<lfs::io::PipelinedImageLoader> active_image_loader_;
         std::unique_ptr<IStrategy> strategy_;
+        // SMN begin — in-process cross-strategy switch: resolved once at setup from
+        // params_.optimization.smn_switch_at_fraction; -1 means disabled or already fired.
+        int smn_strategy_switch_iter_ = -1;
+        // SMN end
         // Hot-loop reads use params_ without locking. Active updates therefore
         // coalesce here and are installed only by the worker at safe boundaries.
         mutable std::mutex params_mutex_;

@@ -55,6 +55,7 @@
 #include "smn/smn_attention_constants.h"
 #include "smn/smn_attention_penalty.hpp"
 #include "smn/smn_attention_prune.hpp"
+#include "smn/smn_cross_strategy_resume.hpp"
 #include "smn/smn_pseudorandom_bg.hpp"
 // SMN end
 
@@ -2835,6 +2836,20 @@ namespace lfs::training {
             }
             LOG_DEBUG("Strategy initialized");
 
+            // SMN begin — in-process cross-strategy switch: resolve the switch iteration
+            // once total iterations are known. Ignored on resume (checkpoint may already
+            // be past this point); recomputed here so it always reflects the current run.
+            smn_strategy_switch_iter_ = -1;
+            if (!params_.optimization.smn_switch_strategy_to.empty() && params_.optimization.smn_switch_at_fraction > 0.0f) {
+                smn_strategy_switch_iter_ = std::max(
+                    1, static_cast<int>(std::lround(get_total_iterations() * params_.optimization.smn_switch_at_fraction)));
+                LOG_INFO("SMN cross-strategy switch armed: '{}' -> '{}' at iteration {} ({:.0f}% of {})",
+                         strategy_->strategy_type(), params_.optimization.smn_switch_strategy_to,
+                         smn_strategy_switch_iter_, params_.optimization.smn_switch_at_fraction * 100.0f,
+                         get_total_iterations());
+            }
+            // SMN end
+
             // Initialize bilateral grid if enabled
             if (auto result = initialize_bilateral_grid(); !result) {
                 return std::unexpected(result.error());
@@ -3448,6 +3463,44 @@ namespace lfs::training {
         }
     }
 
+    // SMN begin — in-process cross-strategy switch
+    void Trainer::apply_smn_strategy_switch_if_due(const int iter) {
+        if (smn_strategy_switch_iter_ < 0 || iter != smn_strategy_switch_iter_) {
+            return;
+        }
+        smn_strategy_switch_iter_ = -1; // fire at most once, even if this attempt fails
+        const std::string target_type = params_.optimization.smn_switch_strategy_to;
+        const std::string source_type = strategy_->strategy_type();
+        try {
+            // Same safe point/lock discipline as apply_param_side_effects: this only
+            // rebuilds Trainer-owned strategy bookkeeping (optimizer/scheduler/internal
+            // buffers) around the SAME already-live model — no model tensor is moved or
+            // reallocated, so the render thread only needs to be excluded for the brief
+            // window where strategy_ itself is swapped.
+            std::unique_lock<std::shared_mutex> render_lock(render_mutex_);
+            auto new_strategy = lfs::training::smn::build_cross_strategy_target(
+                target_type, strategy_->get_model(), get_runtime_optimization_params());
+            new_strategy->set_training_dataset(train_dataset_);
+            if (active_image_loader_) {
+                new_strategy->set_image_loader(active_image_loader_.get());
+            }
+            strategy_ = std::move(new_strategy);
+            if (auto result = ensureModelTensorAllocatorStorage(strategy_->get_model(), "strategy switch"); !result) {
+                LOG_ERROR("SMN strategy switch: {}", result.error());
+            }
+            apply_frozen_ranges_to_optimizer(
+                strategy_->get_model(), strategy_->get_optimizer(), params_.freeze_lr_scale);
+        } catch (const std::exception& e) {
+            LOG_ERROR("SMN strategy switch at iteration {} ('{}' -> '{}') failed: {}",
+                      iter, source_type, target_type, e.what());
+            return;
+        }
+        LOG_WARN("SMN in-process strategy switch at iteration {}: '{}' -> '{}'. Optimizer momentum, LR "
+                 "schedule progress, and strategy-internal state were reset for the new strategy.",
+                 iter, source_type, target_type);
+    }
+    // SMN end
+
     TrainingProgress::Phase Trainer::get_progress_phase(
         const int iter,
         const bool in_controller_phase) const {
@@ -3810,6 +3863,10 @@ namespace lfs::training {
                 // reads (viewer packs, metric renders) — GPU-side waits, ~free once
                 // the reads have retired.
                 waitForModelReaders();
+
+                // SMN begin — in-process cross-strategy switch, fires at most once
+                apply_smn_strategy_switch_if_due(iter);
+                // SMN end
 
                 // Python hook: iteration start (safe, pre-forward)
                 {

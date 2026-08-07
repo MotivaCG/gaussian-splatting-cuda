@@ -13,6 +13,9 @@
 #include "optimizer/adam_optimizer.hpp"
 #include "strategies/istrategy.hpp"
 #include "strategies/strategy_factory.hpp"
+// SMN begin — cross-strategy checkpoint resume (--allow-strategy-switch)
+#include "smn/smn_cross_strategy_resume.hpp"
+// SMN end
 #include <fstream>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -297,7 +300,11 @@ namespace lfs::training {
             if (!file)
                 return std::unexpected("Invalid checkpoint: truncated strategy name");
 
-            if (!lfs::core::param::strategy_names_match(saved_type, strategy.strategy_type())) {
+            // SMN begin — --allow-strategy-switch opts into cross-strategy resume below
+            const bool strategy_mismatch = !lfs::core::param::strategy_names_match(saved_type, strategy.strategy_type());
+            const bool cross_strategy = strategy_mismatch && params.allow_strategy_switch;
+            if (strategy_mismatch && !cross_strategy) {
+                // SMN end
                 return std::unexpected("Strategy mismatch: '" + saved_type +
                                        "' vs '" + strategy.strategy_type() + "'");
             }
@@ -388,6 +395,19 @@ namespace lfs::training {
             else
                 loaded_strategy->set_optimization_params(loaded_params.optimization);
             loaded_strategy->deserialize(file);
+            // SMN begin — cross-strategy resume: `loaded_strategy` above is always built as
+            // `saved_type` just to correctly consume the checkpoint's strategy-specific
+            // bytes. Its state (optimizer momentum, strategy-internal buffers) means
+            // nothing to a different concrete strategy, so swap it here for a strategy of
+            // the live `target_type`, initialized fresh around the same loaded model. This
+            // still runs before the commit boundary below, so a failure here is a normal
+            // error return that never touches the live trainer state. Everything from this
+            // point on is unmodified upstream code operating on `loaded_strategy`.
+            if (cross_strategy) {
+                loaded_strategy = lfs::training::smn::build_cross_strategy_target(
+                    strategy.strategy_type(), loaded_model, loaded_params.optimization);
+            }
+            // SMN end
             if (!checkpoint_adopter || !checkpoint_adopter->can_adopt_checkpoint_state(*loaded_strategy)) {
                 throw std::runtime_error(
                     "Strategy does not support transactional checkpoint state adoption");
@@ -458,6 +478,13 @@ namespace lfs::training {
             static_assert(std::is_nothrow_swappable_v<lfs::core::param::TrainingParameters>);
             static_assert(std::is_nothrow_move_assignable_v<lfs::core::SplatData>);
 
+            // SMN begin
+            if (cross_strategy) {
+                LOG_WARN("Cross-strategy checkpoint load: '{}' -> '{}'. Transferred the Gaussian model only; "
+                         "optimizer momentum, LR schedule progress, and strategy-internal state were reset.",
+                         saved_type, strategy.strategy_type());
+            }
+            // SMN end
             // All remaining operations transfer already-owned storage and cannot
             // allocate. The live state therefore changes as one commit boundary.
             std::swap(params, loaded_params);

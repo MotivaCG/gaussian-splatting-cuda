@@ -191,6 +191,16 @@ namespace lfs::core {
             bool undistort = false;
             float steps_scaler = 1.f; // Scales training step counts; values <= 0 disable scaling
 
+            // SMN begin — in-process cross-strategy switch (incl. the "hybrid" preset,
+            // mcmc -> mrnf). At smn_switch_at_fraction of the resolved total iterations,
+            // hot-swaps the live strategy to smn_switch_strategy_to within the same run
+            // (no --resume round trip). Same transfer semantics as allow_strategy_switch:
+            // model only, optimizer/scheduler/strategy-internal state resets fresh.
+            // Disabled when smn_switch_strategy_to is empty or the fraction is <= 0.
+            std::string smn_switch_strategy_to;
+            float smn_switch_at_fraction = 0.0f;
+            // SMN end
+
             // MRNF strategy specific parameters
             float growth_grad_threshold = 0.003f;
             float grow_fraction = 0.07f;
@@ -311,6 +321,15 @@ namespace lfs::core {
 
             // Checkpoint to resume training from
             std::optional<std::filesystem::path> resume_checkpoint = std::nullopt;
+
+            // SMN begin — cross-strategy checkpoint resume (--allow-strategy-switch)
+            // Allow --resume to load a checkpoint saved under a different --strategy.
+            // Only the Gaussian model (means/sh/scale/rotation/opacity) is transferred;
+            // optimizer momentum, LR schedule progress, and strategy-internal buffers
+            // (e.g. MCMC noise, MRNF decay/edge-score state) are reset for the target strategy.
+            // Session-only: deliberately NOT part of the checkpoint's serialized JSON.
+            bool allow_strategy_switch = false;
+            // SMN end
 
             // Headless camera-path -> video render mode (see --render-camera-path)
             std::optional<RenderPathConfig> render_path = std::nullopt;

@@ -427,6 +427,7 @@
     "options.strategy.mcmc": "MCMC",
     "options.strategy.mrnf": "MRNF",
     "options.strategy.igs_plus": "IGS+",
+    "options.strategy.hybrid": "Hybrid (MCMC → MRNF)",
     "options.tile.full": "1 tile",
     "options.tile.half": "2 tiles (3DGUT)",
     "options.tile.quarter": "4 tiles (3DGUT)",
@@ -482,11 +483,13 @@
       "sparsify_steps": "Number of sparsification steps",
       "init_rho": "Initial sparsity penalty (rho)",
       "prune_ratio": "Final fraction of Gaussians to prune at the end of sparsification",
+      "hybrid_at": "Fraction of total iterations at which Hybrid switches from MCMC to MRNF",
       "opt": {
         "strategy": {
           "mrnf": "Default 3DGS strategy with MRNF refinement",
           "igs_plus": "Improved 3DGS+ with refined growing/pruning",
-          "mcmc": "MCMC strategy with sampling-based densification"
+          "mcmc": "MCMC strategy with sampling-based densification",
+          "hybrid": "Trains with MCMC, then auto-switches to MRNF partway through (see Switch At)"
         },
         "sh_degree": {
           "0": "Diffuse only — fastest, no view-dependent color",
@@ -1295,6 +1298,7 @@
   },
   "training_params": {
     "strategy": "Strategy:",
+    "hybrid_at": "  Switch At:",
     "iterations": "Iterations:",
     "max_gaussians": "Max Gaussians:",
     "sh_degree": "SH Degree:",

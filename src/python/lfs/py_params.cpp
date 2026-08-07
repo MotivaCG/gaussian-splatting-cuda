@@ -1191,6 +1191,18 @@ namespace lfs::python {
                 [](PyOptimizationParams& self) { return self.params().steps_scaler; },
                 [](PyOptimizationParams&, float v) { modify_params([v](auto& p) { p.steps_scaler = v; }); },
                 "Scale factor for training step counts")
+            // SMN begin — in-process cross-strategy switch (incl. the "hybrid" preset)
+            .def_prop_rw(
+                "smn_switch_strategy_to",
+                [](PyOptimizationParams& self) { return self.params().smn_switch_strategy_to; },
+                [](PyOptimizationParams&, const std::string& v) { modify_params([v](auto& p) { p.smn_switch_strategy_to = v; }); },
+                "Target strategy for the in-process switch; empty disables it")
+            .def_prop_rw(
+                "smn_switch_at_fraction",
+                [](PyOptimizationParams& self) { return self.params().smn_switch_at_fraction; },
+                [](PyOptimizationParams&, float v) { modify_params([v](auto& p) { p.smn_switch_at_fraction = v; }); },
+                "Fraction (0-1] of total iterations at which the in-process switch fires")
+            // SMN end
             .def(
                 "apply_step_scaling",
                 [](PyOptimizationParams&, float new_scaler) {

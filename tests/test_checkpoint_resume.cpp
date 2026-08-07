@@ -622,6 +622,95 @@ namespace {
             return name;
         });
 
+    // SMN begin — cross-strategy checkpoint resume (--allow-strategy-switch)
+    TEST(CheckpointCrossStrategyTest, RejectsMismatchWithoutOptIn) {
+        const auto temp_dir = std::filesystem::temp_directory_path() / "lfs_checkpoint_cross_strategy_reject";
+        std::error_code ec;
+        std::filesystem::remove_all(temp_dir, ec);
+        std::filesystem::create_directories(temp_dir / "checkpoints");
+
+        lfs::core::param::TrainingParameters params;
+        params.dataset.output_path = temp_dir;
+        params.optimization.strategy = "mcmc";
+        params.optimization.iterations = 20;
+        params.optimization.sh_degree = 0;
+        params.optimization.max_cap = 16;
+
+        auto source_model = make_checkpoint_test_splat(4);
+        lfs::training::MCMC source_strategy(*source_model);
+        source_strategy.initialize(params.optimization);
+        auto save_result = lfs::training::save_checkpoint(temp_dir, 11, source_strategy, params);
+        ASSERT_TRUE(save_result.has_value()) << save_result.error();
+
+        auto target_model = make_checkpoint_test_splat(1);
+        auto target_result = lfs::training::StrategyFactory::instance().create("mrnf", *target_model);
+        ASSERT_TRUE(target_result.has_value()) << target_result.error();
+        auto target = std::move(*target_result);
+        target->initialize(params.optimization);
+
+        auto loaded_params = params;
+        loaded_params.allow_strategy_switch = false;
+        const auto load_result = lfs::training::load_checkpoint(
+            lfs::training::checkpoint_output_path(temp_dir),
+            *target, loaded_params, nullptr, nullptr, nullptr);
+
+        ASSERT_FALSE(load_result.has_value());
+        EXPECT_NE(load_result.error().find("Strategy mismatch"), std::string::npos) << load_result.error();
+        // Rejected before any commit boundary: target model must be untouched.
+        EXPECT_EQ(target->get_model().size(), 1);
+
+        std::filesystem::remove_all(temp_dir, ec);
+    }
+
+    TEST(CheckpointCrossStrategyTest, AllowSwitchTransfersModelAndResetsOptimizer) {
+        const auto temp_dir = std::filesystem::temp_directory_path() / "lfs_checkpoint_cross_strategy_allow";
+        std::error_code ec;
+        std::filesystem::remove_all(temp_dir, ec);
+        std::filesystem::create_directories(temp_dir / "checkpoints");
+
+        lfs::core::param::TrainingParameters params;
+        params.dataset.output_path = temp_dir;
+        params.optimization.strategy = "mcmc";
+        params.optimization.iterations = 20;
+        params.optimization.sh_degree = 0;
+        params.optimization.max_cap = 16;
+
+        auto source_model = make_checkpoint_test_splat(4);
+        lfs::training::MCMC source_strategy(*source_model);
+        source_strategy.initialize(params.optimization);
+        source_strategy.get_optimizer().set_lr(0.0123f); // proves this does NOT carry over
+        auto save_result = lfs::training::save_checkpoint(temp_dir, 11, source_strategy, params);
+        ASSERT_TRUE(save_result.has_value()) << save_result.error();
+
+        auto target_model = make_checkpoint_test_splat(1);
+        auto target_result = lfs::training::StrategyFactory::instance().create("mrnf", *target_model);
+        ASSERT_TRUE(target_result.has_value()) << target_result.error();
+        auto target = std::move(*target_result);
+        auto mrnf_params = params;
+        mrnf_params.optimization.strategy = "mrnf";
+        target->initialize(mrnf_params.optimization);
+        const float default_lr = target->get_optimizer().get_lr();
+
+        auto loaded_params = params;
+        loaded_params.allow_strategy_switch = true;
+        const auto load_result = lfs::training::load_checkpoint(
+            lfs::training::checkpoint_output_path(temp_dir),
+            *target, loaded_params, nullptr, nullptr, nullptr);
+
+        ASSERT_TRUE(load_result.has_value()) << load_result.error();
+        EXPECT_EQ(*load_result, 11);
+        EXPECT_STREQ(target->strategy_type(), "mrnf"); // strategy did NOT flip to the checkpoint's saved type
+        EXPECT_EQ(target->get_model().size(), 4);
+        EXPECT_EQ(target->get_model().means().cpu().to_vector(),
+                  source_strategy.get_model().means().cpu().to_vector());
+        // Optimizer state resets fresh for the new strategy rather than adopting MCMC's momentum/LR.
+        EXPECT_FLOAT_EQ(target->get_optimizer().get_lr(), default_lr);
+        EXPECT_NE(target->get_optimizer().get_lr(), 0.0123f);
+
+        std::filesystem::remove_all(temp_dir, ec);
+    }
+    // SMN end
+
     class CheckpointResumeTest : public ::testing::TestWithParam<std::tuple<std::string, int, int, int>> {
     protected:
         void SetUp() override {

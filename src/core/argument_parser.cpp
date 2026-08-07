@@ -201,6 +201,9 @@ namespace {
             ::args::Flag version(mode_group, "version", "Display version information", {'V', "version"});
             ::args::ValueFlag<std::string> view_ply(mode_group, "path", "View file(s). Supports splat (.ply, .sog, .spz, .rad, .usd, .usda, .usdc, .usdz) and mesh (.obj, .fbx, .gltf, .glb, .stl) formats. If directory, loads all.", {'v', "view"});
             ::args::ValueFlag<std::string> resume_checkpoint(mode_group, "checkpoint", "Resume training from checkpoint file", {"resume"});
+            // SMN begin — cross-strategy checkpoint resume
+            ::args::Flag allow_strategy_switch(mode_group, "allow_strategy_switch", "With --resume: allow the checkpoint's strategy to differ from --strategy. Transfers the Gaussian model only; optimizer momentum and strategy-internal state are reset for the new strategy.", {"allow-strategy-switch"});
+            // SMN end
             ::args::ValueFlag<std::string> render_camera_path(mode_group, "path", "Render a JSON camera-keyframe path to video, headless (no GUI/window). Requires --render-load and --render-output; see RENDER PATH options.", {"render-camera-path"});
             ::args::CompletionFlag completion(parser, {"complete"});
 
@@ -239,7 +242,11 @@ namespace {
             ::args::Group training_sep(parser, " ");
             ::args::Group training_group(parser, "TRAINING PARAMETERS:");
             ::args::ValueFlag<uint32_t> iterations(training_group, "iterations", "Number of iterations", {'i', "iter"});
-            ::args::ValueFlag<std::string> strategy(training_group, "strategy", "Optimization strategy: mcmc, mrnf, igs+ (legacy aliases: mnrf, lfs)", {"strategy"});
+            ::args::ValueFlag<std::string> strategy(training_group, "strategy", "Optimization strategy: mcmc, mrnf, igs+, hybrid (mcmc -> mrnf, auto-switches at --hybrid-at, default 0.25) (legacy aliases: mnrf, lfs)", {"strategy"});
+            // SMN begin — in-process cross-strategy switch (single-run "train coarse, refine different")
+            ::args::ValueFlag<std::string> strategy_switch_to(training_group, "strategy", "Hot-swap to this strategy mid-run at --strategy-switch-at, without --resume. Same transfer semantics as --allow-strategy-switch: model only, optimizer/scheduler/strategy-internal state resets.", {"strategy-switch-to"});
+            ::args::ValueFlag<float> strategy_switch_at(training_group, "fraction", "Fraction (0-1] of total iterations at which --strategy-switch-to (or --strategy hybrid) fires", {"strategy-switch-at", "hybrid-at"});
+            // SMN end
             ::args::ValueFlag<int> sh_degree(training_group, "sh_degree", "Max SH degree [0-3]", {"sh-degree"});
             ::args::ValueFlag<int> sh_degree_interval(training_group, "sh_degree_interval", "SH degree interval", {"sh-degree-interval"});
             ::args::ValueFlag<int> max_cap(training_group, "max_cap", "Maximum number of Gaussians", {"max-cap"});
@@ -570,6 +577,9 @@ namespace {
                     params.resume_checkpoint = ckpt_path;
                 }
             }
+            // SMN begin
+            params.allow_strategy_switch = static_cast<bool>(allow_strategy_switch);
+            // SMN end
 
             if (init_path) {
                 const auto path_str = ::args::get(init_path);
@@ -656,11 +666,27 @@ namespace {
                 }
             }
 
+            // SMN begin — "hybrid" preset flag. Declared here (immediate scope) so it can
+            // be captured by apply_cmd_overrides below: the actual smn_switch_* fields
+            // must be set THERE (deferred), not here, because parse_args_and_params
+            // reassigns the whole `optimization` struct via mcmc_defaults()/etc. right
+            // after parse_arguments() returns — same reason --smn's preset is deferred.
+            bool is_hybrid_strategy = false;
+            // SMN end
             if (strategy) {
-                const auto strat = ::args::get(strategy);
+                auto strat = ::args::get(strategy);
+                // SMN begin — "hybrid" preset: train mcmc, auto-switch to mrnf later.
+                // Rewritten to "mcmc" before the VALID_STRATEGIES check and the
+                // defaults-selection block in parse_args_and_params, so both see a real
+                // strategy name (that block picks mcmc_defaults() based on this string).
+                is_hybrid_strategy = (strat == "hybrid");
+                if (is_hybrid_strategy) {
+                    strat = "mcmc";
+                }
+                // SMN end
                 if (VALID_STRATEGIES.find(strat) == VALID_STRATEGIES.end()) {
                     return std::unexpected(std::format(
-                        "ERROR: Invalid optimization strategy '{}'. Valid strategies are: mcmc, mrnf, igs+ (legacy aliases: mnrf, lfs)",
+                        "ERROR: Invalid optimization strategy '{}'. Valid strategies are: mcmc, mrnf, igs+, hybrid (legacy aliases: mnrf, lfs)",
                         strat));
                 }
 
@@ -669,6 +695,27 @@ namespace {
                 // in `read_optim_params_from_json()`
                 params.optimization.strategy = std::string(lfs::core::param::canonical_strategy_name(strat));
             }
+
+            // SMN begin — in-process cross-strategy switch: validate eagerly (same as
+            // other immediately-checked flags, e.g. --sh-degree below), but the actual
+            // assignment is deferred into apply_cmd_overrides (see is_hybrid_strategy).
+            if (strategy_switch_to || strategy_switch_at) {
+                if (!strategy_switch_to && !is_hybrid_strategy) {
+                    return std::unexpected(
+                        "ERROR: --strategy-switch-at requires --strategy-switch-to (or --strategy hybrid)");
+                }
+                if (strategy_switch_to &&
+                    VALID_STRATEGIES.find(::args::get(strategy_switch_to)) == VALID_STRATEGIES.end()) {
+                    return std::unexpected(std::format(
+                        "ERROR: Invalid --strategy-switch-to '{}'. Valid strategies are: mcmc, mrnf, igs+ (legacy aliases: mnrf, lfs)",
+                        ::args::get(strategy_switch_to)));
+                }
+                if (strategy_switch_at &&
+                    !(::args::get(strategy_switch_at) > 0.0f && ::args::get(strategy_switch_at) <= 1.0f)) {
+                    return std::unexpected("ERROR: --strategy-switch-at must be in (0, 1]");
+                }
+            }
+            // SMN end
 
             if (config_file) {
                 params.optimization.config_file = ::args::get(config_file);
@@ -786,7 +833,16 @@ namespace {
                                         cropbox_loss_weight_val = cli_option_present({"--cropbox-loss-weight"}) ? std::optional<float>(::args::get(cropbox_loss_weight)) : std::optional<float>(),
                                         init_num_pts_val = cli_option_present({"--init-num-pts"}) ? std::optional<int>(::args::get(init_num_pts)) : std::optional<int>(),
                                         init_extent_val = cli_option_present({"--init-extent"}) ? std::optional<float>(::args::get(init_extent)) : std::optional<float>(),
-                                        strategy_val = cli_option_present({"--strategy"}) ? std::optional<std::string>(::args::get(strategy)) : std::optional<std::string>(),
+                                        // Canonicalized/rewritten value (params.optimization.strategy was already
+                                        // set by the immediate `if (strategy)` block above), NOT the raw CLI
+                                        // string — otherwise this reapplies literal "hybrid" over the "mcmc" the
+                                        // defaults-selection block resolved, and validate() rejects it. // SMN
+                                        strategy_val = cli_option_present({"--strategy"}) ? std::optional<std::string>(params.optimization.strategy) : std::optional<std::string>(),
+                                        // SMN begin — in-process cross-strategy switch / "hybrid" preset
+                                        is_hybrid_strategy_flag = is_hybrid_strategy,
+                                        strategy_switch_to_val = strategy_switch_to ? std::optional<std::string>(std::string(lfs::core::param::canonical_strategy_name(::args::get(strategy_switch_to)))) : std::optional<std::string>(),
+                                        strategy_switch_at_val = strategy_switch_at ? std::optional<float>(::args::get(strategy_switch_at)) : std::optional<float>(),
+                                        // SMN end
                                         timelapse_images_val = cli_option_present({"--timelapse-images"}) ? std::optional<std::vector<std::string>>(::args::get(timelapse_images)) : std::optional<std::vector<std::string>>(),
                                         timelapse_every_val = cli_option_present({"--timelapse-every"}) ? std::optional<int>(::args::get(timelapse_every)) : std::optional<int>(),
                                         // Sparsity parameters
@@ -882,6 +938,17 @@ namespace {
                     // self-excludes hair (alpha>0.5, small depth jump).
                     opt.normal_consistency_weight = 0.1f;
                 }
+                // SMN end
+
+                // SMN begin — "hybrid" preset defaults (applied first, same rule as
+                // --smn above) + explicit --strategy-switch-to/--strategy-switch-at
+                // (or --hybrid-at) overrides.
+                if (is_hybrid_strategy_flag) {
+                    opt.smn_switch_strategy_to = "mrnf";
+                    opt.smn_switch_at_fraction = 0.25f;
+                }
+                setVal(strategy_switch_to_val, opt.smn_switch_strategy_to);
+                setVal(strategy_switch_at_val, opt.smn_switch_at_fraction);
                 // SMN end
 
                 setVal(iterations_val, opt.iterations);

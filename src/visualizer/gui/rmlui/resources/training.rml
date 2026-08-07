@@ -66,8 +66,17 @@
           <option value="mrnf" data-tooltip="training.tooltip.opt.strategy.mrnf">{{label_strategy_mrnf}}</option>
           <option value="igs+" data-tooltip="training.tooltip.opt.strategy.igs_plus">{{label_strategy_igs_plus}}</option>
           <option value="mcmc" data-tooltip="training.tooltip.opt.strategy.mcmc">{{label_strategy_mcmc}}</option>
+          <!-- SMN begin — hybrid (mcmc -> mrnf in-process switch) preset -->
+          <option value="hybrid" data-tooltip="training.tooltip.opt.strategy.hybrid">{{label_strategy_hybrid}}</option>
+          <!-- SMN end -->
         </select>
       </div>
+      <!-- SMN begin — hybrid (mcmc -> mrnf in-process switch) preset -->
+      <div class="setting-row" data-if="dep_hybrid" data-tooltip="training.tooltip.hybrid_at">
+        <span class="prop-label">{{label_hybrid_at}}</span>
+        <input type="text" class="number-input" data-value="hybrid_at_str" />
+      </div>
+      <!-- SMN end -->
       <div class="setting-row steps-scale-lock-row" data-tooltip="training.tooltip.iterations">
         <span class="prop-label">{{label_iterations}}</span>
         <input type="text" class="number-input" data-value="iterations_str" />
