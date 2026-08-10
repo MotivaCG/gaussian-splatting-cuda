@@ -221,13 +221,16 @@ namespace lfs::core {
             float steps_scaler = 1.f; // Scales training step counts; values <= 0 disable scaling
 
             // SMN begin — in-process cross-strategy switch (incl. the "hybrid" preset,
-            // mcmc -> mrnf). At smn_switch_at_fraction of the resolved total iterations,
+            // mcmc -> mrnf). At smn_switch_at_fraction of the effective total iterations,
             // hot-swaps the live strategy to smn_switch_strategy_to within the same run
             // (no --resume round trip). Same transfer semantics as allow_strategy_switch:
             // model only, optimizer/scheduler/strategy-internal state resets fresh.
             // Disabled when smn_switch_strategy_to is empty or the fraction is <= 0.
             std::string smn_switch_strategy_to;
             float smn_switch_at_fraction = 0.0f;
+            // Persist the proven Hybrid handoff signal across GUI updates/checkpoints:
+            // MRNF owns refinement, but receives MCMC-scale (unnormalized) error scores.
+            bool smn_hybrid_mcmc_densification = false;
             // SMN end
 
             // MRNF strategy specific parameters

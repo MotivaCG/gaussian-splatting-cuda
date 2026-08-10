@@ -95,6 +95,7 @@ set(TRAINING_NEW_SOURCES
     smn/mask_pruning.cpp
     smn/smn_opacity.cpp
     smn/smn_cross_strategy_resume.cpp
+    smn/smn_hybrid.cpp
     # SMN end
     strategies/strategy_utils.cpp
     strategies/mcmc.cpp

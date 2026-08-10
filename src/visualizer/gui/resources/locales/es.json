@@ -1069,7 +1069,7 @@
     "tooltip.ppisp_lr": "Tasa de aprendizaje para los parámetros PPISP",
     "tooltip.ppisp_reg": "Peso de regularización para los parámetros PPISP",
     "tooltip.ppisp_warmup": "Pasos antes de que comience el entrenamiento PPISP",
-    "tooltip.ppisp_activation_step": "Iteración en la que comienza el entrenamiento del controlador. Los valores negativos equivalen por defecto a iterations - round(5000 * max(steps_scaler, 1)).",
+    "tooltip.ppisp_activation_step": "Iteración en la que comienza el entrenamiento del controlador. Los valores negativos usan las iteraciones totales de ejecución - round(5000 * escalador efectivo).",
     "tooltip.ppisp_controller_lr": "Tasa de aprendizaje para la red del controlador",
     "tooltip.ppisp_freeze_gaussians": "Congelar los parámetros de las gaussianas durante el entrenamiento del controlador",
     "error.strategy_gut_title": "Ajustes incompatibles",
@@ -1276,7 +1276,7 @@
       "sparsify_steps": "Número de pasos de dispersión",
       "init_rho": "Penalización inicial de dispersión (rho)",
       "prune_ratio": "Fracción final de gaussianas a podar al terminar la dispersión",
-      "hybrid_at": "Fracción del total de iteraciones en la que Híbrido pasa de MCMC a MRNF",
+      "hybrid_at": "Fracción de las iteraciones totales efectivas en la que Híbrido pasa de MCMC a MRNF",
       "skip_intermediate": "Omitir guardados intermedios (checkpoints por paso, PLY de fase regular, sidecars .ppisp); conservar solo el PLY final y el previo a la poda",
       "opt": {
         "strategy": {

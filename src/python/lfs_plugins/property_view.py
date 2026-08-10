@@ -103,6 +103,7 @@ BESPOKE_OR_HIDDEN = {
     "steps_scaler": "driven by apply_step_scaling via the iterations lock; raw edits desync step counts",
     # SMN begin — in-process cross-strategy switch (incl. the "hybrid" preset)
     "smn_switch_strategy_to": "string prop, no retained-mode row kind; set via the hybrid strategy preset",
+    "smn_hybrid_mcmc_densification": "internal persisted Hybrid handoff state",
     # SMN end
 }
 

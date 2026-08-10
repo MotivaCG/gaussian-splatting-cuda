@@ -145,6 +145,9 @@ set(TEST_FILES
     test_expression_templates.cpp
     test_lfs_scheduler.cpp
     test_mrnf_strategy.cpp
+    # SMN begin — hybrid/scaler schedule invariants
+    test_smn_hybrid.cpp
+    # SMN end
     test_sparsity_optimizer.cpp
     test_mcmc_tensor_ops.cpp
     test_training_cropbox_mask.cpp

@@ -926,7 +926,12 @@ namespace lfs::python {
                 "smn_switch_at_fraction",
                 [](PyOptimizationParams& self) { return self.params().smn_switch_at_fraction; },
                 [](PyOptimizationParams&, float v) { modify_params([v](auto& p) { p.smn_switch_at_fraction = v; }); },
-                "Fraction (0-1] of total iterations at which the in-process switch fires")
+                "Fraction (0-1] of effective total iterations at which the in-process switch fires")
+            .def_prop_rw(
+                "smn_hybrid_mcmc_densification",
+                [](PyOptimizationParams& self) { return self.params().smn_hybrid_mcmc_densification; },
+                [](PyOptimizationParams&, bool v) { modify_params([v](auto& p) { p.smn_hybrid_mcmc_densification = v; }); },
+                "Internal Hybrid state preserving MCMC-scale densification after the MRNF handoff")
             // SMN end
             .def(
                 "apply_step_scaling",

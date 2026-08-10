@@ -197,6 +197,12 @@ namespace lfs::training {
         }
 
         void setOnIterationStart(std::function<void()> cb) { on_iteration_start_ = std::move(cb); }
+        // SMN begin — publish a completed in-process switch to GUI parameter storage
+        void setOnStrategySwitch(
+            std::function<void(const lfs::core::param::OptimizationParameters&)> cb) {
+            on_strategy_switch_ = std::move(cb);
+        }
+        // SMN end
 
         lfs::core::Scene* getScene() const { return scene_; }
         std::shared_ptr<lfs::io::PipelinedImageLoader> getActiveImageLoader() const;
@@ -463,6 +469,8 @@ namespace lfs::training {
         // SMN begin — in-process cross-strategy switch: resolved once at setup from
         // params_.optimization.smn_switch_at_fraction; -1 means disabled or already fired.
         int smn_strategy_switch_iter_ = -1;
+        std::function<void(const lfs::core::param::OptimizationParameters&)>
+            on_strategy_switch_;
         // SMN end
         // Hot-loop reads use params_ without locking. Active updates therefore
         // coalesce here and are installed only by the worker at safe boundaries.

@@ -56,7 +56,9 @@
 #include "smn/smn_attention_penalty.hpp"
 #include "smn/smn_attention_prune.hpp"
 #include "smn/smn_cross_strategy_resume.hpp"
+#include "smn/smn_hybrid.hpp"
 #include "smn/smn_pseudorandom_bg.hpp"
+#include "smn/smn_step_scaling.hpp"
 // SMN end
 
 #include <array>
@@ -1289,6 +1291,10 @@ namespace lfs::training {
         try {
             BilateralGrid::Config config;
             config.lr = params_.optimization.bilateral_grid_lr;
+            // SMN begin — keep hidden component warmups proportional to steps_scaler
+            config.warmup_steps = lfs::training::smn::scaled_component_steps(
+                config.warmup_steps, params_.optimization.steps_scaler);
+            // SMN end
 
             // BilateralGrid is indexed with cam->uid() in the training loop. Those UIDs stay
             // in the original camera space even when train/val splits are enabled, so the grid
@@ -1609,6 +1615,10 @@ namespace lfs::training {
 
             PPISPControllerPool::Config config;
             config.lr = params_.optimization.ppisp_controller_lr;
+            // SMN begin — keep the controller warmup proportional to its scaled phase
+            config.warmup_steps = lfs::training::smn::scaled_component_steps(
+                config.warmup_steps, params_.optimization.steps_scaler);
+            // SMN end
 
             const int activation_step = params_.optimization.resolved_ppisp_controller_activation_step(get_total_iterations());
             if (params_.optimization.ppisp_controller_activation_step < 0) {
@@ -2821,14 +2831,12 @@ namespace lfs::training {
             }
             LOG_DEBUG("Strategy initialized");
 
-            // SMN begin — in-process cross-strategy switch: resolve the switch iteration
-            // once total iterations are known. Ignored on resume (checkpoint may already
-            // be past this point); recomputed here so it always reflects the current run.
-            smn_strategy_switch_iter_ = -1;
-            if (!params_.optimization.smn_switch_strategy_to.empty() && params_.optimization.smn_switch_at_fraction > 0.0f) {
-                smn_strategy_switch_iter_ = std::max(
-                    1, static_cast<int>(std::lround(get_total_iterations() * params_.optimization.smn_switch_at_fraction)));
-                LOG_INFO("SMN cross-strategy switch armed: '{}' -> '{}' at iteration {} ({:.0f}% of {})",
+            // SMN begin — preserve the original Hybrid schedule: resolve against the
+            // effective runtime total (scaled regular phase plus fixed sparse tail).
+            smn_strategy_switch_iter_ =
+                lfs::training::smn::resolve_strategy_switch_iteration(params_.optimization);
+            if (smn_strategy_switch_iter_ > 0) {
+                LOG_INFO("SMN cross-strategy switch armed: '{}' -> '{}' at iteration {} ({:.0f}% of total {})",
                          strategy_->strategy_type(), params_.optimization.smn_switch_strategy_to,
                          smn_strategy_switch_iter_, params_.optimization.smn_switch_at_fraction * 100.0f,
                          get_total_iterations());
@@ -3457,6 +3465,12 @@ namespace lfs::training {
         const std::string target_type = params_.optimization.smn_switch_strategy_to;
         const std::string source_type = strategy_->strategy_type();
         try {
+            const auto target_params = lfs::training::smn::make_in_process_target_params(
+                params_.optimization, target_type, iter);
+            auto runtime_target_params = target_params;
+            runtime_target_params.iterations = static_cast<size_t>(
+                std::max(0, static_cast<int>(target_params.iterations) + get_active_sparsify_steps()));
+
             // Same safe point/lock discipline as apply_param_side_effects: this only
             // rebuilds Trainer-owned strategy bookkeeping (optimizer/scheduler/internal
             // buffers) around the SAME already-live model — no model tensor is moved or
@@ -3464,17 +3478,30 @@ namespace lfs::training {
             // window where strategy_ itself is swapped.
             std::unique_lock<std::shared_mutex> render_lock(render_mutex_);
             auto new_strategy = lfs::training::smn::build_cross_strategy_target(
-                target_type, strategy_->get_model(), get_runtime_optimization_params());
+                target_type, strategy_->get_model(), runtime_target_params);
             new_strategy->set_training_dataset(train_dataset_);
             if (active_image_loader_) {
                 new_strategy->set_image_loader(active_image_loader_.get());
             }
             strategy_ = std::move(new_strategy);
+            // The Trainer dispatches densification and serializes checkpoints from
+            // params_.optimization, not strategy_->strategy_type(). Commit the target
+            // parameter set only after construction succeeds.
+            params_.optimization = target_params;
             if (auto result = ensureModelTensorAllocatorStorage(strategy_->get_model(), "strategy switch"); !result) {
                 LOG_ERROR("SMN strategy switch: {}", result.error());
             }
             apply_frozen_ranges_to_optimizer(
                 strategy_->get_model(), strategy_->get_optimizer(), params_.freeze_lr_scale);
+            render_lock.unlock();
+            if (on_strategy_switch_) {
+                try {
+                    on_strategy_switch_(target_params);
+                } catch (const std::exception& callback_error) {
+                    LOG_WARN("SMN strategy switch UI synchronization failed: {}",
+                             callback_error.what());
+                }
+            }
         } catch (const std::exception& e) {
             LOG_ERROR("SMN strategy switch at iteration {} ('{}' -> '{}') failed: {}",
                       iter, source_type, target_type, e.what());
@@ -3970,6 +3997,11 @@ namespace lfs::training {
                                                         params_.optimization.ppisp_use_controller &&
                                                         params_.optimization.ppisp_freeze_gaussians_on_distill &&
                                                         iter >= ppisp_activation_step;
+                // SMN begin — the original Hybrid handoff used MRNF refinement with
+                // MCMC-scale, unnormalized error scores. Preserve that useful behavior
+                // explicitly while keeping the persistent strategy state truthful.
+                const bool hybrid_mcmc_densification =
+                    lfs::training::smn::uses_mcmc_densification_signal(params_.optimization);
                 const bool use_pixel_error_densification =
                     (params_.optimization.strategy == "mcmc") ||
                     (params_.optimization.strategy == "igs+") ||
@@ -3977,10 +4009,11 @@ namespace lfs::training {
                      params_.optimization.use_error_map);
                 const bool use_ssim_error = use_pixel_error_densification;
                 DensificationType densification_type = DensificationType::None;
-                if (params_.optimization.strategy == "mcmc")
+                if (params_.optimization.strategy == "mcmc" || hybrid_mcmc_densification)
                     densification_type = DensificationType::MCMC;
                 else if (core::param::is_mrnf_strategy(params_.optimization.strategy))
                     densification_type = DensificationType::MRNF;
+                // SMN end
                 const bool update_gaussians_this_iter = !freeze_gaussians_this_iter;
                 const bool run_fastgs_gaussian_backward =
                     fastgs_path &&
@@ -5122,7 +5155,12 @@ namespace lfs::training {
                             }
                         }
 
-                        if (tile_error_map.is_valid() && core::param::is_mrnf_strategy(params_.optimization.strategy)) {
+                        // SMN begin — plain MRNF uses its normalized score domain. Hybrid
+                        // keeps the lower MCMC score domain expected by inherited thresholds;
+                        // normalizing it caused translucent patches and local split damage.
+                        if (tile_error_map.is_valid() &&
+                            core::param::is_mrnf_strategy(params_.optimization.strategy) &&
+                            !hybrid_mcmc_densification) {
                             LFS_VRAM_SCOPE("train.densification_error_map");
                             LOG_VRAM_DIFF("train.densification_error_map.normalize");
                             const auto map_mean = tile_error_map.mean();
@@ -5131,6 +5169,7 @@ namespace lfs::training {
                                 tile_error_map.ptr<float>(), tile_error_map.numel(),
                                 map_mean.ptr<float>(), 1e-6f);
                         }
+                        // SMN end
 
                         if (live_vram_profiler_enabled()) {
                             if (fast_ctx) {

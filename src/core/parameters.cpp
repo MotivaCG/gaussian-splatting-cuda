@@ -163,13 +163,31 @@ namespace lfs::core {
             const auto apply = [ratio](const size_t v) {
                 return static_cast<size_t>(std::lround(static_cast<float>(v) * ratio));
             };
-            iterations = apply(iterations);
+            // SMN begin — very small manual scalers must not turn modulo/divisor
+            // schedules into zero and make an otherwise valid configuration crash.
+            const auto apply_required = [&apply](const size_t v) {
+                return v > 0 ? std::max<size_t>(1, apply(v)) : size_t{0};
+            };
+            iterations = apply_required(iterations);
             start_refine = apply(start_refine);
             stop_refine = apply(stop_refine);
-            reset_every = apply(reset_every);
-            refine_every = apply(refine_every);
-            sh_degree_interval = apply(sh_degree_interval);
+            reset_every = apply_required(reset_every);
+            refine_every = apply_required(refine_every);
+            sh_degree_interval = apply_required(sh_degree_interval);
+            // SMN end
             grow_until_iter = apply(grow_until_iter);
+
+            // SMN begin — absolute optimizer/controller warmups are training steps too.
+            // Preserve zero as the explicit "no warmup / start immediately" value.
+            if (ppisp_warmup_steps > 0) {
+                ppisp_warmup_steps = static_cast<int>(apply_required(
+                    static_cast<size_t>(ppisp_warmup_steps)));
+            }
+            if (ppisp_controller_activation_step > 0) {
+                ppisp_controller_activation_step = static_cast<int>(apply_required(
+                    static_cast<size_t>(ppisp_controller_activation_step)));
+            }
+            // SMN end
 
             for (auto* steps : {&eval_steps, &save_steps}) {
                 std::set<size_t> unique;
@@ -204,8 +222,11 @@ namespace lfs::core {
             if (ppisp_controller_activation_step >= 0)
                 return ppisp_controller_activation_step;
 
-            const float clamped_scaler = std::max(steps_scaler, 1.0f);
-            const int tail_iters = static_cast<int>(std::lround(5000.0f * clamped_scaler));
+            // SMN begin — a manual scaler below 1 must shorten this phase just as a
+            // scaler above 1 lengthens it. Non-positive values disable scaling.
+            const float effective_scaler = steps_scaler > 0.0f ? steps_scaler : 1.0f;
+            const int tail_iters = static_cast<int>(std::lround(5000.0f * effective_scaler));
+            // SMN end
             return std::max(0, total_iterations - tail_iters);
         }
 

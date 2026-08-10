@@ -1023,6 +1023,17 @@ namespace lfs::vis {
                 applyPendingParams();
             }
         });
+        // SMN begin — after Hybrid switches, make MRNF the active GUI parameter
+        // slot. Otherwise a later UI edit would submit stale MCMC parameters back
+        // into the already-live MRNF trainer.
+        trainer_->setOnStrategySwitch([this](const auto& optimization) {
+            if (auto* pm = services().paramsOrNull()) {
+                pm->importParams(optimization);
+            } else {
+                pending_opt_params_ = optimization;
+            }
+        });
+        // SMN end
 
         lfs::core::run_guarded<void>(
             lfs::core::TaskContext{

@@ -682,11 +682,16 @@ namespace lfs::core::param {
             .all_strategies()
             .float_prop(&OptimizationParameters::smn_switch_at_fraction,
                         "smn_switch_at_fraction", "Switch At", d.smn_switch_at_fraction, 0.0f, 1.0f,
-                        "Fraction of total iterations at which the in-process strategy switch fires")
+                        "Fraction of effective total iterations at which the in-process strategy switch fires")
             .locale("training_params.hybrid_at")
             .tooltip("training.tooltip.hybrid_at")
             .precision(2)
             .ui_step(0.01)
+            .all_strategies()
+            .bool_prop(&OptimizationParameters::smn_hybrid_mcmc_densification,
+                       "smn_hybrid_mcmc_densification", "Hybrid MCMC Densification",
+                       d.smn_hybrid_mcmc_densification,
+                       "Internal Hybrid state: keep MCMC-scale error signals after switching to MRNF")
             .all_strategies()
             // SMN end
             .build();

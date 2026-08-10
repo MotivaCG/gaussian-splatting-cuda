@@ -470,7 +470,7 @@
     "tooltip.ppisp_lr": "Learning rate for PPISP parameters",
     "tooltip.ppisp_reg": "Regularization weight for PPISP parameters",
     "tooltip.ppisp_warmup": "Steps before PPISP training starts",
-    "tooltip.ppisp_activation_step": "Iteration when controller training begins. Negative values default to iterations - round(5000 * max(steps_scaler, 1)).",
+    "tooltip.ppisp_activation_step": "Iteration when controller training begins. Negative values use total runtime iterations - round(5000 * effective steps_scaler).",
     "tooltip.ppisp_controller_lr": "Learning rate for the controller network",
     "tooltip.ppisp_freeze_gaussians": "Freeze Gaussian parameters during controller training",
     "tooltip.opt.depth_loss_mode.ssi": "Auto-detect per image whether the prior is disparity-like or depth-like",
@@ -562,7 +562,7 @@
       "sparsify_steps": "Number of sparsification steps",
       "init_rho": "Initial sparsity penalty (rho)",
       "prune_ratio": "Final fraction of Gaussians to prune at the end of sparsification",
-      "hybrid_at": "Fraction of total iterations at which Hybrid switches from MCMC to MRNF",
+      "hybrid_at": "Fraction of effective total iterations at which Hybrid switches from MCMC to MRNF",
       "skip_intermediate": "Skip intermediate saves (step checkpoints, regular-phase PLY, .ppisp sidecars); keep only the final and pre-prune PLYs",
       "opt": {
         "strategy": {

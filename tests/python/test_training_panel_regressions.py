@@ -286,6 +286,68 @@ def test_strategy_switch_resyncs_generated_rows_and_requests_panel_update(
     assert panel._handle.request_update_count == 1
 
 
+# SMN begin — hybrid fields belong to the MCMC parameter slot selected by the preset
+def test_hybrid_preset_arms_underlying_mcmc_slot(training_panel_module, monkeypatch):
+    class SlotParams:
+        def __init__(self):
+            self._strategy = "mrnf"
+            self._slots = {
+                "mrnf": {"smn_switch_strategy_to": "", "smn_switch_at_fraction": 0.0},
+                "mcmc": {"smn_switch_strategy_to": "", "smn_switch_at_fraction": 0.0},
+            }
+            self.gut = False
+
+        def has_params(self):
+            return True
+
+        @property
+        def strategy(self):
+            return self._strategy
+
+        def set_strategy(self, strategy):
+            self._strategy = strategy
+
+        @property
+        def smn_switch_strategy_to(self):
+            return self._slots[self._strategy]["smn_switch_strategy_to"]
+
+        @smn_switch_strategy_to.setter
+        def smn_switch_strategy_to(self, value):
+            self._slots[self._strategy]["smn_switch_strategy_to"] = value
+
+        @property
+        def smn_switch_at_fraction(self):
+            return self._slots[self._strategy]["smn_switch_at_fraction"]
+
+        @smn_switch_at_fraction.setter
+        def smn_switch_at_fraction(self, value):
+            self._slots[self._strategy]["smn_switch_at_fraction"] = value
+
+    params = SlotParams()
+    panel = training_panel_module.TrainingPanel()
+    monkeypatch.setattr(
+        training_panel_module.lf,
+        "optimization_params",
+        lambda: params,
+    )
+
+    panel._set_strategy("hybrid")
+
+    assert params.strategy == "mcmc"
+    assert params._slots["mcmc"]["smn_switch_strategy_to"] == "mrnf"
+    assert params._slots["mcmc"]["smn_switch_at_fraction"] == pytest.approx(0.25)
+    assert params._slots["mrnf"]["smn_switch_strategy_to"] == ""
+    assert params.smn_hybrid_mcmc_densification is False
+
+    params.smn_hybrid_mcmc_densification = True
+    panel._set_strategy("mrnf")
+    assert params.strategy == "mrnf"
+    assert params._slots["mcmc"]["smn_switch_strategy_to"] == ""
+    assert params._slots["mrnf"]["smn_switch_strategy_to"] == ""
+    assert params.smn_hybrid_mcmc_densification is False
+# SMN end
+
+
 def test_auto_scale_marker_survives_reset_but_not_dataset_change(
     training_panel_module, monkeypatch
 ):
@@ -770,6 +832,21 @@ def test_legacy_negative_ppisp_activation_step_displays_resolved_value(training_
 
     getter, _setter = model.bindings["ppisp_activation_step_str"]
     assert getter() == "50,000"
+
+
+# SMN begin — manual sub-unit scaler and sparse tail match the C++ runtime schedule
+def test_negative_ppisp_activation_uses_subunit_scaler_and_sparse_tail(
+    training_panel_module,
+):
+    params = _ParamsStub()
+    params.iterations = 15_000
+    params.steps_scaler = 0.5
+    params.ppisp_controller_activation_step = -1
+    params.enable_sparsity = True
+    params.sparsify_steps = 15_000
+
+    assert training_panel_module._display_ppisp_activation_step(params) == 27_500
+# SMN end
 
 
 def test_eval_test_every_one_clamps_to_preserve_training_split(training_panel_module, monkeypatch):

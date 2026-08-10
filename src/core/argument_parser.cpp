@@ -370,7 +370,7 @@ namespace {
             ::args::ValueFlag<std::string> strategy(training_group, "strategy", "Optimization strategy: mcmc, mrnf, igs+, hybrid (mcmc -> mrnf, auto-switches at --hybrid-at, default 0.25) (legacy aliases: mnrf, lfs)", {"strategy"});
             // SMN begin — in-process cross-strategy switch (single-run "train coarse, refine different")
             ::args::ValueFlag<std::string> strategy_switch_to(training_group, "strategy", "Hot-swap to this strategy mid-run at --strategy-switch-at, without --resume. Same transfer semantics as --allow-strategy-switch: model only, optimizer/scheduler/strategy-internal state resets.", {"strategy-switch-to"});
-            ::args::ValueFlag<float> strategy_switch_at(training_group, "fraction", "Fraction (0-1] of total iterations at which --strategy-switch-to (or --strategy hybrid) fires", {"strategy-switch-at", "hybrid-at"});
+            ::args::ValueFlag<float> strategy_switch_at(training_group, "fraction", "Fraction (0-1] of effective total iterations at which --strategy-switch-to (or --strategy hybrid) fires", {"strategy-switch-at", "hybrid-at"});
             // SMN end
             ::args::ValueFlag<int> sh_degree(training_group, "sh_degree", lfs::core::args::optimization_cli_help("--sh-degree"), {"sh-degree"});
             ::args::ValueFlag<int> sh_degree_interval(training_group, "sh_degree_interval", lfs::core::args::optimization_cli_help("--sh-degree-interval"), {"sh-degree-interval"});

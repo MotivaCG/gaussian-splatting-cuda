@@ -118,9 +118,15 @@ def _resolved_ppisp_activation_step(
 ):  # Must match OptimizationParameters::resolved_ppisp_controller_activation_step()
     if params is None or not params.has_params():
         return 0
-    scaler = max(float(getattr(params, "steps_scaler", 1.0)), 1.0)
+    # SMN begin — mirror the C++ effective scaler, including manual values below 1,
+    # and include the optional fixed sparsification tail in the runtime total.
+    raw_scaler = float(getattr(params, "steps_scaler", 1.0))
+    scaler = raw_scaler if raw_scaler > 0.0 else 1.0
     iterations = int(getattr(params, "iterations", 0))
+    if bool(getattr(params, "enable_sparsity", False)):
+        iterations += max(0, int(getattr(params, "sparsify_steps", 0)))
     tail_iters = int(5000.0 * scaler + 0.5)
+    # SMN end
     return max(0, iterations - tail_iters)
 
 
@@ -1640,14 +1646,23 @@ class TrainingPanel(Panel):
                 _on_conflict,
             )
         else:
-            # SMN begin — hybrid preset defaults; disarm the switch for any plain strategy
+            # SMN begin — set_strategy changes the active per-strategy parameter slot,
+            # so write the hybrid fields only after selecting the underlying MCMC slot.
+            # When leaving hybrid, clear both the source slot and the destination slot
+            # so returning to MCMC later cannot silently re-arm an old preset.
+            if not is_hybrid:
+                params.smn_switch_strategy_to = ""
+            params.set_strategy(real_val)
+            params = lf.optimization_params()
             if is_hybrid:
                 params.smn_switch_strategy_to = "mrnf"
                 params.smn_switch_at_fraction = 0.25
             else:
                 params.smn_switch_strategy_to = ""
+            # A new preset starts clean; the trainer enables this internal marker
+            # only after a real MCMC -> MRNF handoff.
+            params.smn_hybrid_mcmc_densification = False
             # SMN end
-            params.set_strategy(real_val)
             self._refresh_strategy_values()
 
     def _set_int_param(self, prop, val_str):
