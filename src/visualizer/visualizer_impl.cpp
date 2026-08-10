@@ -451,6 +451,7 @@ namespace lfs::vis {
                 state.active = tasks.isExporting();
                 state.progress = tasks.getExportProgress();
                 state.stage = tasks.getExportStage();
+                state.outcome = tasks.getExportOutcome();
                 const auto fmt = tasks.getExportFormat();
                 state.format = fmt == core::ExportFormat::PLY           ? "PLY"
                                : fmt == core::ExportFormat::SOG         ? "SOG"
@@ -1570,7 +1571,9 @@ namespace lfs::vis {
         demand.scene_dirty = rendering_manager_ && rendering_manager_->pollDirtyState();
         demand.continuous_input = input_controller_ && input_controller_->isContinuousInputActive();
         const bool plugin_preload_running = python::is_plugin_preload_running();
-        demand.python_animation = !plugin_preload_running && python::has_frame_callback();
+        demand.python_animation = !plugin_preload_running &&
+                                  (python::has_frame_callback() ||
+                                   python::has_scene_time_callback());
         demand.python_overlay = !plugin_preload_running && python::has_viewport_draw_handlers();
         demand.python_redraw = consume_python_redraw ? python::consume_redraw_request()
                                                      : python::has_redraw_request();
@@ -1641,6 +1644,18 @@ namespace lfs::vis {
             python::tick_frame_callback(delta_time);
             if (rendering_manager_) {
                 rendering_manager_->markDirty(DirtyFlag::ALL);
+            }
+        }
+
+        if (!python::is_plugin_preload_running()) {
+            if (python::has_scene_time_callback()) {
+                live_scene_clip_time_ += delta_time;
+                python::tick_scene_time_callback(live_scene_clip_time_);
+                if (rendering_manager_) {
+                    rendering_manager_->markDirty(DirtyFlag::ALL);
+                }
+            } else {
+                live_scene_clip_time_ = 0.0f;
             }
         }
 
@@ -1755,13 +1770,16 @@ namespace lfs::vis {
                                                   vulkan_frame.flip_y,
                                                   vulkan_frame.external_image_generation,
                                                   vulkan_frame.completion_semaphore,
-                                                  vulkan_frame.completion_value);
+                                                  vulkan_frame.completion_value,
+                                                  vulkan_frame.alloc_size);
                 } else {
                     interop.setSceneImage(
                         vulkan_frame.image,
                         vulkan_frame.size,
                         vulkan_frame.flip_y,
-                        vulkan_frame.image_generation,
+                        vulkan_frame.split_left_image_generation != 0
+                            ? vulkan_frame.split_left_image_generation
+                            : vulkan_frame.image_generation,
                         vulkan_frame.completion_semaphore,
                         vulkan_frame.completion_value);
                 }

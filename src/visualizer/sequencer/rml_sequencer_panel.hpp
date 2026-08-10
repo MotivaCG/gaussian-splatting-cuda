@@ -124,7 +124,6 @@ namespace lfs::vis {
                     const PanelInputState& input,
                     RenderingManager* rm, SceneManager* sm,
                     gui::FilmStripRenderer& film_strip);
-        void compositeToScreen(int screen_w, int screen_h);
         void clearPendingComposite();
 
         void setFilmStripAttached(bool attached) { film_strip_attached_ = attached; }
@@ -143,6 +142,7 @@ namespace lfs::vis {
 
         [[nodiscard]] bool isHovered() const { return hovered_; }
         [[nodiscard]] bool wantsKeyboard() const { return wants_keyboard_; }
+        [[nodiscard]] bool needsLocalizationFrame() const;
 
         [[nodiscard]] float cachedPanelY() const { return cached_panel_y_; }
         [[nodiscard]] float getDisplayEndTime() const;

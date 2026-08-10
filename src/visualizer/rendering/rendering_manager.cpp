@@ -111,6 +111,9 @@ namespace lfs::vis {
     // RenderingManager Implementation
     RenderingManager::RenderingManager() {
         viewport_interop_ = std::make_unique<ViewportInteropService>();
+        gt_comparison_image_worker_ = std::jthread([this](std::stop_token stop_token) {
+            gtComparisonImageWorkerLoop(stop_token);
+        });
         camera_metrics_worker_ = std::jthread([this](std::stop_token stop_token) {
             cameraMetricsWorkerLoop(stop_token);
         });
@@ -118,6 +121,12 @@ namespace lfs::vis {
     }
 
     RenderingManager::~RenderingManager() {
+        invalidateGTComparisonImageCache();
+        gt_comparison_image_worker_.request_stop();
+        gt_comparison_image_cv_.notify_all();
+        if (gt_comparison_image_worker_.joinable()) {
+            gt_comparison_image_worker_.join();
+        }
         shutdownViewportInterop();
         if (lod_controller_) {
             lod_controller_->setReadyCallback(nullptr);
@@ -275,11 +284,6 @@ namespace lfs::vis {
         updateSettings(settings, changed ? DirtyFlag::ALL : DirtyFlag::SPLATS);
     }
 
-    bool RenderingManager::isLodEnabled() const {
-        std::lock_guard<std::mutex> lock(settings_mutex_);
-        return settings_.lod_enabled;
-    }
-
     SparkLodController::Stats RenderingManager::getLodStats() const {
         SparkLodController::Stats stats;
         if (lod_controller_) {
@@ -370,20 +374,22 @@ namespace lfs::vis {
     }
 
     void RenderingManager::clearVulkanViewportImageState(const glm::ivec2 size,
-                                                         const bool flip_y) {
+                                                         const bool flip_y,
+                                                         const glm::ivec2 alloc_size) {
         vulkan_viewport_image_.reset();
         vulkan_external_viewport_image_ = VK_NULL_HANDLE;
         vulkan_external_viewport_image_view_ = VK_NULL_HANDLE;
         vulkan_external_viewport_image_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
         vulkan_external_viewport_image_generation_ = 0;
         vulkan_viewport_image_size_ = size;
+        vulkan_viewport_image_alloc_size_ = alloc_size.x > 0 && alloc_size.y > 0 ? alloc_size : size;
         vulkan_viewport_image_flip_y_ = flip_y;
         vulkan_gt_comparison_content_size_ = {0, 0};
     }
 
     void RenderingManager::releaseSceneRenderResources() {
         viewport_artifact_service_.clearViewportOutput();
-        gt_comparison_image_cache_ = {};
+        invalidateGTComparisonImageCache();
         clearVulkanViewportImageState();
         last_logged_vksplat_render_error_.clear();
         vulkan_viewport_image_generation_ = 0;
@@ -400,6 +406,17 @@ namespace lfs::vis {
         if (vksplat_viewport_renderer_) {
             vksplat_viewport_renderer_->reset();
         }
+        // F3-4: renderer reset frees ring cells; clear manager GT ticket state so the
+        // next frame does not poll a stale ticket id against a fresh ring.
+        gt_async_depth_ticket_ = 0;
+        gt_async_depth_dest_ = {};
+        gt_async_ticket_mode_ = GTComparisonMode::RGB;
+        gt_async_ticket_intrinsics_.reset();
+        gt_async_ticket_flip_y_ = false;
+        gt_async_ticket_metadata_ = {};
+        gt_async_held_display_.reset();
+        gt_async_held_flip_y_ = false;
+        gt_async_held_metadata_ = {};
         if (point_cloud_vulkan_renderer_) {
             point_cloud_vulkan_renderer_->reset();
         }
@@ -554,22 +571,6 @@ namespace lfs::vis {
         markDirty(DirtyFlag::CAMERA);
     }
 
-    float RenderingManager::getScalingModifier() const {
-        std::lock_guard<std::mutex> lock(settings_mutex_);
-        return settings_.scaling_modifier;
-    }
-
-    void RenderingManager::setScalingModifier(const float s) {
-        std::lock_guard<std::mutex> lock(settings_mutex_);
-        settings_.scaling_modifier = s;
-        markDirty(DirtyFlag::SPLATS);
-    }
-
-    void RenderingManager::syncSelectionGroupColor(const int group_id, const glm::vec3& color) {
-        lfs::rendering::config::setSelectionGroupColor(group_id, make_float3(color.x, color.y, color.z));
-        markDirty(DirtyFlag::SELECTION);
-    }
-
     void RenderingManager::advanceSplitOffset() {
         std::lock_guard<std::mutex> lock(settings_mutex_);
         split_view_service_.advanceSplitOffset(settings_);
@@ -628,27 +629,12 @@ namespace lfs::vis {
         markDirty(DirtyFlag::OVERLAY);
     }
 
-    void RenderingManager::setLatestCameraMetrics(CameraMetricsOverlayState metrics) {
-        const auto app_metrics = toAppCameraMetrics(metrics);
-        {
-            std::lock_guard<std::mutex> lock(camera_metrics_mutex_);
-            latest_camera_metrics_ = std::move(metrics);
-            last_camera_metrics_refresh_time_ = std::chrono::steady_clock::now();
-        }
-        app_store().camera_metrics.set(app_metrics);
-    }
-
     void RenderingManager::clearLatestCameraMetrics() {
         {
             std::lock_guard<std::mutex> lock(camera_metrics_mutex_);
             latest_camera_metrics_.reset();
         }
         app_store().camera_metrics.set(std::optional<AppStore::CameraMetrics>{});
-    }
-
-    std::optional<RenderingManager::CameraMetricsOverlayState> RenderingManager::getLatestCameraMetrics() const {
-        std::lock_guard<std::mutex> lock(camera_metrics_mutex_);
-        return latest_camera_metrics_;
     }
 
     void RenderingManager::invalidateCameraMetricsRequests(const bool clear_latest) {
@@ -732,8 +718,7 @@ namespace lfs::vis {
                 active_camera_metrics_request_ &&
                 request_matches(*active_camera_metrics_request_, request);
 
-            if ((immediate_refresh || stale_iteration) &&
-                refresh_interval_elapsed &&
+            if ((immediate_refresh || (stale_iteration && refresh_interval_elapsed)) &&
                 !same_as_pending &&
                 !same_as_active) {
                 request.generation = ++camera_metrics_request_generation_;

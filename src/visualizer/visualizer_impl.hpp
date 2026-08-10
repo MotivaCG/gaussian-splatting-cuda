@@ -96,10 +96,6 @@ namespace lfs::vis {
         Viewport& getViewport() { return viewport_; }
 
         // FPS monitoring
-        [[nodiscard]] float getCurrentFPS() const {
-            return rendering_manager_ ? rendering_manager_->getCurrentFPS() : 0.0f;
-        }
-
         [[nodiscard]] float getAverageFPS() const {
             return rendering_manager_ ? rendering_manager_->getAverageFPS() : 0.0f;
         }
@@ -321,6 +317,7 @@ namespace lfs::vis {
         std::chrono::nanoseconds plugin_preload_max_update_stall_{};
         bool update_work_processed_ = false;
         std::chrono::high_resolution_clock::time_point last_frame_time_ = std::chrono::high_resolution_clock::now();
+        float live_scene_clip_time_ = 0.0f;
         bool sequencer_ui_initialized_ = false;
         std::unique_ptr<python::SequencerUIStateData> sequencer_ui_state_;
         std::vector<std::filesystem::path> pending_view_paths_;

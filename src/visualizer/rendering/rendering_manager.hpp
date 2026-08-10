@@ -5,6 +5,7 @@
 #pragma once
 
 #include "camera_interaction_service.hpp"
+#include "core/cuda/undistort/undistort.hpp"
 #include "core/export.hpp"
 #include "core/tensor.hpp"
 #include "dirty_flags.hpp"
@@ -31,9 +32,11 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <expected>
 #include <filesystem>
 #include <functional>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -49,6 +52,10 @@ namespace lfs::core {
     class SplatData;
     class Tensor;
 } // namespace lfs::core
+
+namespace lfs::io {
+    class PipelinedImageLoader;
+}
 
 namespace lfs::core::events::ui {
     struct GridSettingsChanged;
@@ -93,7 +100,9 @@ namespace lfs::vis {
             // Cache-HIT frames keep the previous value so downstream consumers
             // (e.g. CUDA→Vulkan interop upload) can skip work by generation.
             std::uint64_t image_generation = 0;
-            glm::ivec2 size{0, 0};
+            std::uint64_t split_left_image_generation = 0;
+            glm::ivec2 size{0, 0};       // valid/logical viewport extent
+            glm::ivec2 alloc_size{0, 0}; // bucketed image extent (0 = treat as size)
             bool flip_y = false;
 
             // Split-view right panel. The left panel reuses the `image` slot above
@@ -113,7 +122,6 @@ namespace lfs::vis {
         bool isInitialized() const { return initialized_; }
 
         // Main render function
-        void renderFrame(const RenderContext& context);
         VulkanFrameResult renderVulkanFrame(const RenderContext& context);
         [[nodiscard]] std::expected<void, std::string> ensureVksplatTrainingSharedScratchReady(
             VulkanContext& context,
@@ -250,8 +258,6 @@ namespace lfs::vis {
         void setOrthographic(bool enabled, float viewport_height, float distance_to_pivot);
 
         float getFovDegrees() const;
-        float getScalingModifier() const;
-        void setScalingModifier(float s);
         float getFocalLengthMm() const;
         void setFocalLength(float focal_mm);
 
@@ -331,7 +337,11 @@ namespace lfs::vis {
 
         // Current camera tracking for GT comparison
         void setCurrentCameraId(int cam_id) {
+            const bool changed = camera_interaction_service_.currentCameraId() != cam_id;
             camera_interaction_service_.setCurrentCameraId(cam_id);
+            if (changed) {
+                invalidateCameraMetricsRequests(true);
+            }
             markDirty(DirtyFlag::SPLIT_VIEW | DirtyFlag::PPISP);
         }
         int getCurrentCameraId() const { return camera_interaction_service_.currentCameraId(); }
@@ -345,19 +355,13 @@ namespace lfs::vis {
             bool used_mask = false;
         };
 
-        void setLatestCameraMetrics(CameraMetricsOverlayState metrics);
         void clearLatestCameraMetrics();
-        [[nodiscard]] std::optional<CameraMetricsOverlayState> getLatestCameraMetrics() const;
 
         // FPS monitoring
-        float getCurrentFPS() const { return framerate_controller_.getCurrentFPS(); }
         float getAverageFPS() const { return framerate_controller_.getAverageFPS(); }
 
         // Access to the auxiliary rendering engine used by point-cloud, mesh, and readback paths.
         lfs::rendering::RenderingEngine* getRenderingEngine();
-        [[nodiscard]] lfs::rendering::RenderingEngine* getRenderingEngineIfInitialized() const {
-            return initialized_ ? engine_.get() : nullptr;
-        }
         [[nodiscard]] lfs::rendering::ScreenOverlayRenderer* getScreenOverlayRenderer() {
             return &screen_overlay_renderer_;
         }
@@ -387,8 +391,18 @@ namespace lfs::vis {
         glm::ivec2 getRenderedSize() const { return viewport_artifact_service_.renderedSize(); }
         std::shared_ptr<lfs::core::Tensor> getViewportImageIfAvailable() const;
         std::shared_ptr<lfs::core::Tensor> captureViewportImage();
-        [[nodiscard]] uint64_t getViewportArtifactGeneration() const {
-            return viewport_artifact_service_.artifactGeneration();
+
+        // Where the 3D viewport sat inside the window framebuffer on the last frame,
+        // top-left origin. Lets callers crop a full-window readback down to the viewport
+        // when no render path published an offscreen image to capture.
+        struct FramebufferViewportRect {
+            glm::ivec2 top_left{0, 0};
+            glm::ivec2 size{0, 0};
+
+            [[nodiscard]] bool valid() const { return size.x > 0 && size.y > 0; }
+        };
+        [[nodiscard]] FramebufferViewportRect framebufferViewportRect() const {
+            return framebuffer_viewport_rect_;
         }
         [[nodiscard]] uint64_t getViewportProjectionGeneration() const {
             return viewport_projection_generation_;
@@ -475,7 +489,6 @@ namespace lfs::vis {
 
         // Vulkan mesh frame — populated by `renderVulkanFrame` when there are meshes in
         // the scene, consumed by gui_manager to feed `vulkan_viewport_pass.mesh_items`.
-        // Replaces the old CPU `renderVideoCompositeFrame` mesh path.
         struct VulkanMeshFrame {
             glm::mat4 view_projection{1.0f};
             glm::vec3 camera_position{0.0f};
@@ -518,9 +531,6 @@ namespace lfs::vis {
         }
         [[nodiscard]] int getHoveredGaussianId() const { return viewport_overlay_service_.hoveredGaussianId(); }
 
-        // Sync selection group colors to GPU constant memory
-        void syncSelectionGroupColor(int group_id, const glm::vec3& color);
-
         // Gizmo state for wireframe sync during manipulation
         void setCropboxGizmoState(bool active, const glm::vec3& min, const glm::vec3& max,
                                   const glm::mat4& world_transform, bool affects_render,
@@ -557,12 +567,9 @@ namespace lfs::vis {
         [[nodiscard]] double secondsUntilViewportResizeSettleReady() const {
             return frame_lifecycle_service_.secondsUntilResizeSettleReady();
         }
-        bool consumeResizeCompleted() { return frame_lifecycle_service_.consumeResizeCompleted(); }
-
         // LOD management
         void setLodAvailable(bool available);
         void setLodEnabled(bool enabled);
-        [[nodiscard]] bool isLodEnabled() const;
         [[nodiscard]] SparkLodController::Stats getLodStats() const;
 
     private:
@@ -581,7 +588,9 @@ namespace lfs::vis {
         [[nodiscard]] static PreviewImageReadbackConfig previewImageReadbackConfig(
             PreviewImageReadback readback,
             bool has_background_color_override);
-        void clearVulkanViewportImageState(glm::ivec2 size = {0, 0}, bool flip_y = false);
+        void clearVulkanViewportImageState(glm::ivec2 size = {0, 0},
+                                           bool flip_y = false,
+                                           glm::ivec2 alloc_size = {0, 0});
 
         std::shared_ptr<lfs::core::Tensor> renderPreviewImageWithState(
             SceneManager* scene_manager,
@@ -652,7 +661,35 @@ namespace lfs::vis {
             RenderSettings settings{};
         };
 
+        struct GTComparisonImageJobRequest {
+            uint64_t generation = 0;
+            int camera_uid = -1;
+            std::filesystem::path image_path;
+            int preview_max_dimension = 0;
+            glm::ivec2 image_size{0, 0};
+            bool undistort_requested = false;
+            lfs::core::UndistortParams undistort_params{};
+            std::shared_ptr<lfs::io::PipelinedImageLoader> image_loader;
+            std::chrono::steady_clock::time_point queued_at{};
+        };
+
+        enum class GTComparisonImageStatus {
+            Loading,
+            Ready,
+            Failed,
+        };
+
+        struct GTComparisonImageLookup {
+            GTComparisonImageStatus status = GTComparisonImageStatus::Loading;
+            std::shared_ptr<lfs::core::Tensor> image;
+            std::string error;
+            std::shared_ptr<lfs::core::Tensor> stale_image;
+            bool grace_elapsed = true;
+        };
+
         static constexpr auto CAMERA_METRICS_REFRESH_INTERVAL = std::chrono::milliseconds(500);
+        static constexpr auto GT_COMPARISON_IMAGE_GRACE_PERIOD = std::chrono::milliseconds(300);
+        static constexpr auto GT_COMPARISON_IMAGE_RETRY_COOLDOWN = std::chrono::seconds(2);
 
         void applySplitModeChange(const SplitViewService::ModeChangeResult& result);
         void queueCameraMetricsRefreshIfStale(SceneManager* scene_manager);
@@ -662,6 +699,16 @@ namespace lfs::vis {
         void requestResizeTrainingPause(TrainerManager* trainer_manager);
         void releaseResizeTrainingPause();
         void cameraMetricsWorkerLoop(std::stop_token stop_token);
+        [[nodiscard]] GTComparisonImageLookup getOrQueueGTComparisonImage(
+            GTComparisonImageJobRequest request);
+        void queueGTComparisonImagePrefetch(GTComparisonImageJobRequest request);
+        void invalidateGTComparisonImageCache();
+        void insertGTComparisonImageCacheEntry(
+            const GTComparisonImageJobRequest& request,
+            std::shared_ptr<lfs::core::Tensor> image,
+            std::string error,
+            std::chrono::steady_clock::time_point now);
+        void gtComparisonImageWorkerLoop(std::stop_token stop_token);
         void releaseSceneModelResources();
         void releaseSceneRenderResources();
         void setupEventHandlers();
@@ -715,19 +762,67 @@ namespace lfs::vis {
         VkImageView vulkan_external_viewport_image_view_ = VK_NULL_HANDLE;
         VkImageLayout vulkan_external_viewport_image_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
         std::uint64_t vulkan_external_viewport_image_generation_ = 0;
+        static constexpr std::uint64_t SPLIT_LEFT_GENERATION_BIT = 1ULL << 63;
         std::uint64_t split_view_image_generation_ = 0;
+        std::uint64_t split_left_image_generation_ = 0;
+        const lfs::core::Tensor* split_left_source_ = nullptr;
+        glm::ivec2 split_left_source_size_{0, 0};
+        int split_left_source_camera_uid_ = -1;
+        bool split_left_source_undistorted_ = false;
+        std::shared_ptr<lfs::core::Tensor> gt_comparison_cuda_image_;
+        const lfs::core::Tensor* gt_comparison_cuda_source_ = nullptr;
+        std::uint64_t gt_comparison_cuda_generation_ = 0;
+        int gt_comparison_cuda_camera_uid_ = -1;
+        glm::ivec2 gt_comparison_cuda_size_{0, 0};
+        bool gt_comparison_cuda_undistorted_ = false;
+        std::shared_ptr<lfs::core::Tensor> gt_comparison_loading_placeholder_;
+        glm::ivec2 gt_comparison_loading_placeholder_size_{0, 0};
+        std::shared_ptr<lfs::core::Tensor> gt_comparison_failed_placeholder_;
+        glm::ivec2 gt_comparison_failed_placeholder_size_{0, 0};
         std::mutex wake_callback_mutex_;
         std::function<void()> wake_callback_;
         glm::ivec2 vulkan_viewport_image_size_{0, 0};
+        glm::ivec2 vulkan_viewport_image_alloc_size_{0, 0};
         bool vulkan_viewport_image_flip_y_ = false;
         glm::ivec2 vulkan_gt_comparison_content_size_{0, 0};
-        struct GTComparisonImageCache {
+        struct GTComparisonImageCacheEntry {
             int camera_uid = -1;
             bool undistort_requested = false;
             std::filesystem::path image_path;
-            std::shared_ptr<lfs::core::Tensor> image;
             glm::ivec2 image_size{0, 0};
-        } gt_comparison_image_cache_;
+            std::shared_ptr<lfs::core::Tensor> image;
+            std::string error;
+            std::chrono::steady_clock::time_point failure_time{};
+            std::chrono::steady_clock::time_point last_used{};
+        };
+        static bool gtRequestMatches(const GTComparisonImageJobRequest& lhs,
+                                     const GTComparisonImageJobRequest& rhs);
+        static bool gtCacheEntryMatches(const GTComparisonImageCacheEntry& entry,
+                                        const GTComparisonImageJobRequest& request);
+        static constexpr std::size_t GT_COMPARISON_IMAGE_CACHE_MAX_ENTRIES = 6;
+        static constexpr std::size_t GT_COMPARISON_IMAGE_CACHE_MAX_BYTES = 128ULL * 1024ULL * 1024ULL;
+        static constexpr std::size_t GT_COMPARISON_IMAGE_PREFETCH_MAX_ENTRIES = 4;
+        std::list<GTComparisonImageCacheEntry> gt_comparison_image_cache_;
+        std::size_t gt_comparison_image_cache_bytes_ = 0;
+        mutable std::mutex gt_comparison_image_mutex_;
+        std::optional<GTComparisonImageJobRequest> pending_gt_comparison_image_request_;
+        std::optional<GTComparisonImageJobRequest> active_gt_comparison_image_request_;
+        bool active_gt_comparison_image_is_prefetch_ = false;
+        std::deque<GTComparisonImageJobRequest> prefetch_gt_comparison_image_requests_;
+        uint64_t gt_comparison_image_request_generation_ = 0;
+        std::condition_variable_any gt_comparison_image_cv_;
+        std::jthread gt_comparison_image_worker_;
+        // #1574 GT depth/normal async hold-then-swap: at most one outstanding ticket.
+        // Panel keeps gt_async_held_display_ until the next ticket delivers (never blank).
+        std::uint64_t gt_async_depth_ticket_ = 0;
+        lfs::core::Tensor gt_async_depth_dest_{};
+        GTComparisonMode gt_async_ticket_mode_ = GTComparisonMode::RGB;
+        std::optional<lfs::rendering::CameraIntrinsics> gt_async_ticket_intrinsics_;
+        bool gt_async_ticket_flip_y_ = false;
+        lfs::rendering::FrameMetadata gt_async_ticket_metadata_{};
+        std::shared_ptr<lfs::core::Tensor> gt_async_held_display_;
+        bool gt_async_held_flip_y_ = false;
+        lfs::rendering::FrameMetadata gt_async_held_metadata_{};
         TrainerManager* resize_training_pause_trainer_ = nullptr;
         bool resize_training_pause_active_ = false;
 
@@ -735,6 +830,7 @@ namespace lfs::vis {
         std::atomic<uint32_t> dirty_mask_{DirtyFlag::ALL};
 
         RenderAnimationState animation_state_;
+        FramebufferViewportRect framebuffer_viewport_rect_;
         ViewportArtifactService viewport_artifact_service_;
         std::unique_ptr<ViewportInteropService> viewport_interop_;
 
@@ -760,9 +856,6 @@ namespace lfs::vis {
         bool lod_available_ = false;
 
         ViewportInteractionContext viewport_interaction_context_;
-
-        // Debug tracking
-        uint64_t render_count_ = 0;
 
         ViewportOverlayService viewport_overlay_service_;
 

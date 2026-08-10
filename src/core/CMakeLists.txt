@@ -41,7 +41,6 @@ set(TENSOR_SOURCES
         tensor/tensor_row_proxy.cpp
         tensor/tensor_nn_ops.cpp
         tensor/pinned_memory_allocator.cpp
-        tensor/offset_allocator.cpp
         tensor/tensor_exports.cu
 )
 
@@ -70,10 +69,12 @@ set(CORE_SOURCES
         cuda_version.cpp
         image_io.cpp
         mapped_file.cpp
+        optimization_properties.cpp
         parameters.cpp
         property_registry.cpp
         reactive_store.cpp
         scene.cpp
+        session_breadcrumb.cpp
         splat_simplify.cpp
         bhatt_lod.cpp
         octree_lod.cpp
@@ -84,6 +85,7 @@ set(CORE_SOURCES
         tensor_debug.cpp
         training_snapshot.cpp
         mesh_data.cpp
+        system_info.cpp
 )
 
 add_library(lfs_core SHARED ${CORE_SOURCES} ${TENSOR_SOURCES})

@@ -7,11 +7,11 @@
   },
   "configurePresets": [
     {
-      "name": "dev-release",
-      "displayName": "Full-featured developer Release",
-      "description": "Full application dependency set, one locally detected CUDA architecture, tests off, compiler cache on",
+      "name": "build",
+      "displayName": "Build",
+      "description": "Release build: full application dependency set, one locally detected CUDA architecture, tests off, compiler cache on",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/dev-release",
+      "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "BUILD_TESTS": "OFF",
@@ -20,25 +20,25 @@
       }
     },
     {
-      "name": "measure-release",
-      "displayName": "Full-featured clean-build measurement",
-      "description": "Same production feature set as dev-release, with compiler caching disabled for reproducible timing",
-      "inherits": "dev-release",
-      "binaryDir": "${sourceDir}/build/measure-release",
+      "name": "debug",
+      "displayName": "Debug",
+      "description": "Same feature set as build, compiled with debug information",
+      "inherits": "build",
+      "binaryDir": "${sourceDir}/build-debug",
       "cacheVariables": {
-        "ENABLE_COMPILER_CACHE": "OFF"
+        "CMAKE_BUILD_TYPE": "Debug"
       }
     }
   ],
   "buildPresets": [
     {
-      "name": "dev-release",
-      "configurePreset": "dev-release",
+      "name": "build",
+      "configurePreset": "build",
       "jobs": 6
     },
     {
-      "name": "measure-release",
-      "configurePreset": "measure-release",
+      "name": "debug",
+      "configurePreset": "debug",
       "jobs": 6
     }
   ]

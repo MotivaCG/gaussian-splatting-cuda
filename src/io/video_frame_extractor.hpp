@@ -82,7 +82,7 @@ namespace lfs::io {
             int custom_height = 0;
 
             // Output naming
-            std::string filename_pattern = "frame_%d"; // %d = frame number
+            std::string filename_pattern = "frame_%d"; // %d = 1-based source video frame number
             bool generate_metadata = false;
             int rotation = 0; // 0, 90, 180, 270
             bool convert_hdr_to_sdr = false;

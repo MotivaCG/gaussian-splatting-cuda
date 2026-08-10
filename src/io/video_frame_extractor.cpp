@@ -36,6 +36,7 @@ extern "C" {
 #include <limits>
 #include <stdexcept>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 namespace lfs::io {
@@ -1328,6 +1329,7 @@ namespace lfs::io {
                     double sharpness_score;
                 };
                 std::vector<FrameSaveInfo> saved_frames;
+                std::unordered_set<std::filesystem::path> emitted_filenames;
 
                 const bool seek_timestamps_available =
                     std::isfinite(time_base) && time_base > 0.0 && std::isfinite(video_duration) &&
@@ -1395,6 +1397,29 @@ namespace lfs::io {
                     return params.output_dir / (formatFrameFilenameStem(params.filename_pattern, frame_num) + ext);
                 };
 
+                const auto source_frame_for_time = [&](const double frame_time) {
+                    return std::max(
+                        1, static_cast<int>(std::llround(frame_time * video_fps)) + 1);
+                };
+
+                auto reserve_output_filename = [&](const std::filesystem::path& filename,
+                                                   const int source_frame) {
+                    if (emitted_filenames.insert(filename).second)
+                        return true;
+                    LOG_WARN("Skipping duplicate source frame {} output: {}",
+                             source_frame, lfs::core::path_to_utf8(filename));
+                    return false;
+                };
+
+                auto finish_selected_frame = [&]() {
+                    saved_count++;
+
+                    if (params.progress_callback) {
+                        params.progress_callback(saved_count + skipped_count, estimated_total, skipped_count);
+                    }
+                    throw_if_cancelled();
+                };
+
                 auto should_extract_frame = [&](const double frame_time) {
                     bool should_extract = false;
                     if (params.mode == ExtractionMode::FPS) {
@@ -1419,8 +1444,13 @@ namespace lfs::io {
                         [](const CandidateFrame& a, const CandidateFrame& b) {
                             return a.score < b.score;
                         });
-                    std::filesystem::path fname = generate_filename(
-                        written_count + 1);
+                    std::filesystem::path fname = generate_filename(best->source_frame);
+                    if (!reserve_output_filename(fname, best->source_frame)) {
+                        finish_selected_frame();
+                        window_candidates.clear();
+                        window_skip_counter = 0;
+                        return;
+                    }
                     // Apply rotation to the best window frame before writing
                     int write_w = out_width;
                     int write_h = out_height;
@@ -1468,17 +1498,14 @@ namespace lfs::io {
                                                     best->score});
                         }
                     }
-                    ++saved_count;
-                    if (params.progress_callback)
-                        params.progress_callback(saved_count, estimated_total, skipped_count);
+                    finish_selected_frame();
                     window_candidates.clear();
                     window_skip_counter = 0;
-                    throw_if_cancelled();
                 };
 
                 auto process_frame_hw = [&](AVFrame* hw_frame) {
                     throw_if_cancelled();
-                    std::filesystem::path filename = generate_filename(saved_count + 1);
+                    std::filesystem::path filename = generate_filename(current_src_frame);
 
                     const AVPixelFormat hw_sw_format = hardwareFrameSoftwareFormat(hw_frame);
                     if (decoded_software_format == AV_PIX_FMT_NONE &&
@@ -1530,6 +1557,11 @@ namespace lfs::io {
                                     params.progress_callback(saved_count + skipped_count, estimated_total, skipped_count);
                                 return;
                             }
+                        }
+
+                        if (!reserve_output_filename(filename, current_src_frame)) {
+                            finish_selected_frame();
+                            return;
                         }
 
                         const int rot = params.rotation;
@@ -1615,6 +1647,11 @@ namespace lfs::io {
                             }
                         }
                         // --- End sharpness ---
+
+                        if (!reserve_output_filename(filename, current_src_frame)) {
+                            finish_selected_frame();
+                            return;
+                        }
 
                         // --- Rotation (hybrid HW path) ---
                         int hw_rot_w = out_width;
@@ -1730,6 +1767,12 @@ namespace lfs::io {
                     }
                     // --- End sharpness ---
 
+                    std::filesystem::path filename = generate_filename(current_src_frame);
+                    if (!reserve_output_filename(filename, current_src_frame)) {
+                        finish_selected_frame();
+                        return;
+                    }
+
                     // --- Rotation (SW path) ---
                     int sw_rot_w = out_width;
                     int sw_rot_h = out_height;
@@ -1764,8 +1807,6 @@ namespace lfs::io {
                                     static_cast<size_t>(out_width) * out_height * 3);
                     }
                     // --- End rotation ---
-
-                    std::filesystem::path filename = generate_filename(saved_count + 1);
 
                     if (gpu_encoding_enabled) {
                         if (batch_encode_w == 0) {
@@ -1802,12 +1843,7 @@ namespace lfs::io {
                         LOG_WARN("Failed to write extracted frame: {}", lfs::core::path_to_utf8(filename));
                     }
 
-                    saved_count++;
-
-                    if (params.progress_callback) {
-                        params.progress_callback(saved_count + skipped_count, estimated_total, skipped_count);
-                    }
-                    throw_if_cancelled();
+                    finish_selected_frame();
                 };
 
                 if (params.mode == ExtractionMode::FPS) {
@@ -1839,8 +1875,7 @@ namespace lfs::io {
                 const auto process_selected_frame = [&](AVFrame* const selected_frame,
                                                         const double frame_time) {
                     current_frame_time = frame_time;
-                    current_src_frame = std::max(
-                        1, static_cast<int>(std::llround(frame_time * video_fps)) + 1);
+                    current_src_frame = source_frame_for_time(frame_time);
                     if (using_hw_decode)
                         process_frame_hw(selected_frame);
                     else
@@ -1870,7 +1905,7 @@ namespace lfs::io {
                     }
 
                     current_frame_time = frame_time;
-                    current_src_frame = decoded_frame_count;
+                    current_src_frame = source_frame_for_time(frame_time);
                     if (params.sharpness.enabled && params.sharpness.window_mode) {
                         const int window_index = params.mode == ExtractionMode::FPS
                                                      ? static_cast<int>(std::floor(

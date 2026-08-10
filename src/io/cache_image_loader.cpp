@@ -111,16 +111,6 @@ namespace lfs::io {
         return 1.0 - (static_cast<double>(available) / static_cast<double>(total));
     }
 
-    std::string CacheLoader::to_string(CacheMode mode) {
-        switch (mode) {
-        case CacheMode::Undetermined: return "Undetermined";
-        case CacheMode::NoCache: return "NoCache";
-        case CacheMode::CPU_memory: return "CPU_memory";
-        case CacheMode::FileSystem: return "FileSystem";
-        }
-        return "Unknown";
-    }
-
     void CacheLoader::update_cache_params(bool use_cpu_memory, bool use_fs_cache, int num_expected_images,
                                           float min_cpu_free_GB, float min_cpu_free_memory_ratio,
                                           bool print_cache_status, int print_status_freq_num) {
@@ -389,7 +379,7 @@ namespace lfs::io {
         // Cache if memory available
         {
             std::lock_guard lock(cpu_cache_mutex_);
-            if (has_sufficient_memory(tensor_bytes)) {
+            if (!params.skip_blob_cache && has_sufficient_memory(tensor_bytes)) {
                 evict_if_needed(tensor_bytes);
                 auto unpinned = Tensor::empty_unpinned(tensor.shape(), tensor.dtype());
                 std::memcpy(unpinned.data_ptr(), tensor.data_ptr(), tensor_bytes);
@@ -429,6 +419,9 @@ namespace lfs::io {
         std::tuple<unsigned char*, int, int, int> result;
         if (does_cache_image_exist(cache_img_path)) {
             result = load_image(cache_img_path);
+        } else if (params.skip_blob_cache) {
+            auto [data, w, h, c] = load_image(path, params.resize_factor, params.max_width);
+            return load_and_preprocess(data, w, h, c);
         } else {
             result = load_image(path, params.resize_factor, params.max_width);
 
@@ -696,46 +689,48 @@ namespace lfs::io {
                     }
                 }
 
-                bool should_cache = false;
-                {
-                    std::lock_guard lock(jpeg_blob_mutex_);
-                    should_cache = !jpeg_being_loaded_.contains(cache_key);
-                    if (should_cache) {
-                        jpeg_being_loaded_.insert(cache_key);
-                    }
-                }
-
-                if (should_cache) {
-                    std::vector<uint8_t> cache_bytes;
-                    if (needs_resize || params.undistort) {
-                        // Re-encode resized image
-                        try {
-                            cache_bytes = nvcodec.encode_to_jpeg(tensor, CACHE_JPEG_QUALITY, params.cuda_stream);
-                        } catch (const std::exception& enc_err) {
-                            LOG_DEBUG("[CacheLoader] JPEG re-encode failed: {}, using original bytes", enc_err.what());
-                            cache_bytes = jpeg_bytes; // Fall back to original
-                        } catch (...) {
-                            LOG_DEBUG("[CacheLoader] JPEG re-encode failed with unknown error, using original bytes");
-                            cache_bytes = jpeg_bytes; // Fall back to original
+                if (!params.skip_blob_cache) {
+                    bool should_cache = false;
+                    {
+                        std::lock_guard lock(jpeg_blob_mutex_);
+                        should_cache = !jpeg_being_loaded_.contains(cache_key);
+                        if (should_cache) {
+                            jpeg_being_loaded_.insert(cache_key);
                         }
-                    } else {
-                        // No resize - cache original bytes directly
-                        cache_bytes = jpeg_bytes;
                     }
 
-                    const std::size_t cache_size = cache_bytes.size();
-                    std::lock_guard lock(jpeg_blob_mutex_);
-                    if (has_sufficient_memory(cache_size)) {
-                        evict_jpeg_blobs_if_needed(cache_size);
-                        jpeg_blob_cache_[cache_key] = CachedJpegBlob{
-                            .compressed_data = std::move(cache_bytes),
-                            .size_bytes = cache_size,
-                            .last_access = std::chrono::steady_clock::now()};
-                        // Only remove from tracking set after successful caching
-                        jpeg_being_loaded_.erase(cache_key);
-                    } else {
-                        // Memory insufficient - remove from tracking to allow retry later
-                        jpeg_being_loaded_.erase(cache_key);
+                    if (should_cache) {
+                        std::vector<uint8_t> cache_bytes;
+                        if (needs_resize || params.undistort) {
+                            // Re-encode resized image
+                            try {
+                                cache_bytes = nvcodec.encode_to_jpeg(tensor, CACHE_JPEG_QUALITY, params.cuda_stream);
+                            } catch (const std::exception& enc_err) {
+                                LOG_DEBUG("[CacheLoader] JPEG re-encode failed: {}, using original bytes", enc_err.what());
+                                cache_bytes = jpeg_bytes; // Fall back to original
+                            } catch (...) {
+                                LOG_DEBUG("[CacheLoader] JPEG re-encode failed with unknown error, using original bytes");
+                                cache_bytes = jpeg_bytes; // Fall back to original
+                            }
+                        } else {
+                            // No resize - cache original bytes directly
+                            cache_bytes = jpeg_bytes;
+                        }
+
+                        const std::size_t cache_size = cache_bytes.size();
+                        std::lock_guard lock(jpeg_blob_mutex_);
+                        if (has_sufficient_memory(cache_size)) {
+                            evict_jpeg_blobs_if_needed(cache_size);
+                            jpeg_blob_cache_[cache_key] = CachedJpegBlob{
+                                .compressed_data = std::move(cache_bytes),
+                                .size_bytes = cache_size,
+                                .last_access = std::chrono::steady_clock::now()};
+                            // Only remove from tracking set after successful caching
+                            jpeg_being_loaded_.erase(cache_key);
+                        } else {
+                            // Memory insufficient - remove from tracking to allow retry later
+                            jpeg_being_loaded_.erase(cache_key);
+                        }
                     }
                 }
                 return tensor;

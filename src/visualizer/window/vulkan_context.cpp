@@ -601,6 +601,36 @@ namespace lfs::vis {
             }
         }
 
+        // #1488: surface leaked External* counts after idle, before device destroy.
+        {
+            const auto survivors = gpu_object_census_.report();
+            if (survivors.empty()) {
+                LOG_DEBUG("GpuObjectCensus: no live external GPU objects at shutdown");
+            } else {
+                auto kind_name = [](GpuObjectKind kind) -> const char* {
+                    switch (kind) {
+                    case GpuObjectKind::ExternalImage:
+                        return "ExternalImage";
+                    case GpuObjectKind::ExternalBuffer:
+                        return "ExternalBuffer";
+                    case GpuObjectKind::ExternalSemaphore:
+                        return "ExternalSemaphore";
+                    }
+                    return "Unknown";
+                };
+                for (const auto& row : survivors) {
+                    LOG_WARN("GpuObjectCensus leak: kind={} scope='{}' count={}",
+                             kind_name(row.kind),
+                             row.scope,
+                             row.count);
+                }
+            }
+            if (gpu_object_census_.underflowFlagged()) {
+                LOG_WARN("GpuObjectCensus: destroy-without-create underflow was observed "
+                         "this session (see debug/epic1496/sweep_b.md F-B12)");
+            }
+        }
+
         for (VkFence& fence : in_flight_) {
             if (fence != VK_NULL_HANDLE) {
                 vkDestroyFence(device_, fence, nullptr);
@@ -663,9 +693,12 @@ namespace lfs::vis {
         frame_rendering_active_ = false;
         frame_timeline_waits_.clear();
         frame_timeline_waits_valid_ = true;
-        last_frame_timeline_wait_values_.clear();
-        last_immediate_timeline_wait_values_.clear();
-        last_immediate_timeline_signal_values_.clear();
+        {
+            const std::lock_guard lock(timeline_value_tracker_mutex_);
+            last_frame_timeline_wait_values_.clear();
+            last_immediate_timeline_wait_values_.clear();
+            last_immediate_timeline_signal_values_.clear();
+        }
     }
 
     VkExtent2D VulkanContext::framebufferExtent() const {
@@ -700,13 +733,33 @@ namespace lfs::vis {
         const bool requires_recreate,
         const std::optional<bool> allow_headroom) {
         const auto now = std::chrono::steady_clock::now();
-        framebuffer_resize_deferred_ = true;
-        framebuffer_resize_requires_recreate_ = framebuffer_resize_requires_recreate_ || requires_recreate;
         if (allow_headroom.has_value()) {
             framebuffer_resize_allow_headroom_ = *allow_headroom;
         }
         framebuffer_resize_last_change_ = now;
-        framebuffer_resized_ = false;
+        last_error_.clear();
+        // A rebuild already forced by an out-of-date swapchain or a failed recreate keeps
+        // its immediacy: debouncing it would park an unpresentable swapchain until the
+        // drag goes quiet.
+        if (framebuffer_resized_) {
+            return;
+        }
+        framebuffer_resize_deferred_ = true;
+        framebuffer_resize_requires_recreate_ = framebuffer_resize_requires_recreate_ || requires_recreate;
+    }
+
+    void VulkanContext::requireSwapchainRecreateAfterOutOfDate() {
+        // An out-of-date swapchain cannot produce another frame, so there is nothing
+        // to coalesce: recreate on the next beginFrame. Routing this through
+        // deferSwapchainResizeRecreate would re-stamp framebuffer_resize_last_change_
+        // on every retry, and a shrink (grow_delta <= 0) waits on that quiet delay --
+        // the retry keeps resetting the gate it is waiting for, so acquire spins
+        // forever and no frame is ever presented again.
+        framebuffer_resize_exact_after_interactive_ = false;
+        framebuffer_resize_allow_headroom_ = false;
+        framebuffer_resize_deferred_ = false;
+        framebuffer_resize_requires_recreate_ = false;
+        framebuffer_resized_ = true;
         last_error_.clear();
     }
 
@@ -895,6 +948,8 @@ namespace lfs::vis {
         }
         frame_timeline_waits_.clear();
         frame_timeline_waits_valid_ = true;
+        // Do not reset immediate_submits_this_frame_ here: prepareFrame runs before
+        // beginFrame and is the primary source of steady-state immediates (#1575).
         frame = {};
         if (device_ == VK_NULL_HANDLE) {
             return fail(std::format(
@@ -1061,8 +1116,7 @@ namespace lfs::vis {
                               framebuffer_height_,
                               swapchain_extent_.width,
                               swapchain_extent_.height);
-                    framebuffer_resize_exact_after_interactive_ = false;
-                    deferSwapchainResizeRecreate(true, false);
+                    requireSwapchainRecreateAfterOutOfDate();
                     return false;
                 }
                 // Stop/shutdown on acquire: soft skip-frame, no recreate.
@@ -1171,6 +1225,7 @@ namespace lfs::vis {
         image_barriers_.transitionImage(
             command_buffer,
             swapchain_images_[image_index],
+            swapchain_epoch_,
             VK_IMAGE_ASPECT_COLOR_BIT,
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             VulkanImageBarrierTracker::AccessScope{
@@ -1190,6 +1245,7 @@ namespace lfs::vis {
         const DepthStencilResource& depth_stencil = depth_stencil_resources_[current_frame];
         image_barriers_.transitionImage(command_buffer,
                                         depth_stencil.image,
+                                        swapchain_epoch_,
                                         depthStencilAspectMask(),
                                         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
@@ -1322,6 +1378,7 @@ namespace lfs::vis {
         }
         image_barriers_.transitionImage(command_buffer,
                                         swapchain_images_[active_image_index_],
+                                        swapchain_epoch_,
                                         VK_IMAGE_ASPECT_COLOR_BIT,
                                         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 
@@ -1441,17 +1498,19 @@ namespace lfs::vis {
                         (fence_recovered ? "; frame fence replaced and swapchain retirement scheduled"
                                          : "; frame fence recovery failed"));
         }
-        LOG_DEBUG("Vulkan endFrame submit: submit_id={}, frame_slot={}, image={}, acquire_index={}, waits={}, timeline_waits={}, framebuffer={}x{}, extent={}x{}",
-                  submit_id,
-                  current_frame,
-                  active_image_index_,
-                  active_acquire_index_,
-                  wait_semaphores.size(),
-                  frame_timeline_waits_.size(),
-                  framebuffer_width_,
-                  framebuffer_height_,
-                  swapchain_extent_.width,
-                  swapchain_extent_.height);
+        LOG_PERF("Vulkan endFrame submit: submit_id={}, frame_slot={}, image={}, acquire_index={}, waits={}, timeline_waits={}, immediates={}, framebuffer={}x{}, extent={}x{}",
+                 submit_id,
+                 current_frame,
+                 active_image_index_,
+                 active_acquire_index_,
+                 wait_semaphores.size(),
+                 frame_timeline_waits_.size(),
+                 immediate_submits_this_frame_,
+                 framebuffer_width_,
+                 framebuffer_height_,
+                 swapchain_extent_.width,
+                 swapchain_extent_.height);
+        // Counter retained until next prepareFrame reset so mid-frame readers still see it.
         result = vkQueueSubmit(graphics_queue_, 1, &submit_info, frame_fence);
         frame_timeline_waits_.clear();
         if (result != VK_SUCCESS) {
@@ -1470,6 +1529,7 @@ namespace lfs::vis {
                                          : "; frame fence recovery failed"));
         }
         frame_submit_serials_[current_frame] = submit_id;
+        last_successful_frame_submit_serial_ = submit_id;
         if (active_image_index_ < swapchain_images_in_flight_.size()) {
             swapchain_images_in_flight_[active_image_index_] = frame_fence;
         }
@@ -1509,8 +1569,7 @@ namespace lfs::vis {
                       swapchain_extent_.width,
                       swapchain_extent_.height);
             frame_suboptimal_ = false;
-            framebuffer_resize_exact_after_interactive_ = false;
-            deferSwapchainResizeRecreate(true, false);
+            requireSwapchainRecreateAfterOutOfDate();
             return true;
         }
         frame_suboptimal_ = false;
@@ -1634,6 +1693,7 @@ namespace lfs::vis {
         const VkImage image = swapchain_images_[active_image_index_];
         image_barriers_.transitionImage(command_buffer,
                                         image,
+                                        swapchain_epoch_,
                                         VK_IMAGE_ASPECT_COLOR_BIT,
                                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
@@ -1744,6 +1804,93 @@ namespace lfs::vis {
         return waitForFrameFences();
     }
 
+    std::uint64_t VulkanContext::lastFrameSubmitSerial() const {
+        return frame_submit_serial_;
+    }
+
+    std::uint64_t VulkanContext::lastSuccessfulFrameSubmitSerial() const {
+        return last_successful_frame_submit_serial_;
+    }
+
+    std::uint64_t VulkanContext::retiredFrameSubmitSerial() const {
+        if (device_ == VK_NULL_HANDLE) {
+            return frame_submit_serial_;
+        }
+        // Start at last submit: nothing past that serial has been submitted.
+        std::uint64_t retired = frame_submit_serial_;
+        for (std::size_t i = 0; i < kFramesInFlight; ++i) {
+            const std::uint64_t serial = frame_submit_serials_[i];
+            if (serial == 0) {
+                continue; // never submitted
+            }
+            const VkFence fence = in_flight_[i];
+            if (fence == VK_NULL_HANDLE) {
+                continue;
+            }
+            const VkResult status = vkGetFenceStatus(device_, fence);
+            if (status != VK_SUCCESS) {
+                // Unsignaled (or error): still in flight — watermark is serial-1.
+                retired = std::min(retired, serial - 1);
+            }
+        }
+        return retired;
+    }
+
+    bool VulkanContext::getTimelineSemaphoreCounterValue(const VkSemaphore semaphore,
+                                                         std::uint64_t& out_value) const {
+        out_value = 0;
+        if (device_ == VK_NULL_HANDLE || semaphore == VK_NULL_HANDLE) {
+            return false;
+        }
+        const VkResult result = vkGetSemaphoreCounterValue(device_, semaphore, &out_value);
+        return result == VK_SUCCESS;
+    }
+
+    bool VulkanContext::waitForRetiredFrameSubmitSerial(const std::uint64_t serial) {
+        if (serial == 0 || device_ == VK_NULL_HANDLE) {
+            return true;
+        }
+        if (retiredFrameSubmitSerial() >= serial) {
+            return true;
+        }
+
+        // Bound the wait so a wedged GPU surfaces as an error rather than a hang.
+        // Matches waitForFrameFences (2 s); healthy frames complete in <16 ms.
+        constexpr std::uint64_t kRetiredSerialWaitTimeoutNs = 2'000'000'000ull;
+        std::vector<VkFence> fences;
+        fences.reserve(kFramesInFlight);
+        // Only in_flight_ slots whose submit serial is still relevant. Swapchain
+        // image aliases (swapchain_images_in_flight_) hold the same fence objects
+        // assigned in endFrame, so listing them separately would only duplicate.
+        for (std::size_t i = 0; i < kFramesInFlight; ++i) {
+            const std::uint64_t slot_serial = frame_submit_serials_[i];
+            if (slot_serial == 0 || slot_serial > serial) {
+                continue;
+            }
+            const VkFence fence = in_flight_[i];
+            if (fence != VK_NULL_HANDLE) {
+                fences.push_back(fence);
+            }
+        }
+        if (fences.empty()) {
+            return true;
+        }
+
+        const VkResult result = vkWaitForFences(device_,
+                                                static_cast<std::uint32_t>(fences.size()),
+                                                fences.data(),
+                                                VK_TRUE,
+                                                kRetiredSerialWaitTimeoutNs);
+        if (result != VK_SUCCESS) {
+            return fail(std::format(
+                "vkWaitForFences(retired frame serial {}) failed: {} (fences={})",
+                serial,
+                vkResultToString(result),
+                fences.size()));
+        }
+        return true;
+    }
+
     bool VulkanContext::waitForImmediateSubmits() {
         if (device_ == VK_NULL_HANDLE || pending_immediate_submits_.empty()) {
             return true;
@@ -1794,7 +1941,7 @@ namespace lfs::vis {
         return true;
     }
 
-    void VulkanContext::addFrameTimelineWait(const VkSemaphore semaphore,
+    bool VulkanContext::addFrameTimelineWait(const VkSemaphore semaphore,
                                              const std::uint64_t value,
                                              const VkPipelineStageFlags wait_stage) {
         if (!frame_active_ || semaphore == VK_NULL_HANDLE || value == 0 || wait_stage == 0) {
@@ -1806,8 +1953,9 @@ namespace lfs::vis {
                 value,
                 static_cast<std::uint64_t>(wait_stage),
                 frame_timeline_waits_.size()));
-            return;
+            return false;
         }
+        const std::lock_guard lock(timeline_value_tracker_mutex_);
         const std::uint64_t previous = last_frame_timeline_wait_values_[semaphore];
         if (value <= previous) {
             frame_timeline_waits_valid_ = false;
@@ -1819,7 +1967,7 @@ namespace lfs::vis {
                 static_cast<std::uint64_t>(wait_stage),
                 active_frame_index_,
                 active_image_index_));
-            return;
+            return false;
         }
         last_frame_timeline_wait_values_[semaphore] = value;
         frame_timeline_waits_.push_back(FrameTimelineWait{
@@ -1827,6 +1975,7 @@ namespace lfs::vis {
             .value = value,
             .wait_stage = wait_stage,
         });
+        return true;
     }
 
     bool VulkanContext::createInstance() {
@@ -1991,6 +2140,29 @@ namespace lfs::vis {
                 !indices.async_compute.has_value()) {
                 indices.async_compute = i;
             }
+        }
+
+        // Transfer family (#1574): prefer pure DMA (TRANSFER without GRAPHICS/COMPUTE),
+        // else TRANSFER|COMPUTE without GRAPHICS. Never pick the graphics family.
+        std::optional<uint32_t> pure_transfer;
+        std::optional<uint32_t> transfer_compute;
+        for (uint32_t i = 0; i < count; ++i) {
+            const VkQueueFlags flags = families[i].queueFlags;
+            if ((flags & VK_QUEUE_TRANSFER_BIT) == 0 || (flags & VK_QUEUE_GRAPHICS_BIT) != 0) {
+                continue;
+            }
+            if ((flags & VK_QUEUE_COMPUTE_BIT) == 0) {
+                if (!pure_transfer.has_value()) {
+                    pure_transfer = i;
+                }
+            } else if (!transfer_compute.has_value()) {
+                transfer_compute = i;
+            }
+        }
+        if (pure_transfer.has_value()) {
+            indices.transfer = pure_transfer;
+        } else if (transfer_compute.has_value()) {
+            indices.transfer = transfer_compute;
         }
         return indices;
     }
@@ -2199,11 +2371,6 @@ namespace lfs::vis {
         props2.pNext = &id_props;
         vkGetPhysicalDeviceProperties2(physical_device_, &props2);
         std::memcpy(device_uuid_.data(), id_props.deviceUUID, VK_UUID_SIZE);
-#ifdef _WIN32
-        std::memcpy(device_luid_.data(), id_props.deviceLUID, VK_LUID_SIZE);
-        device_luid_valid_ = id_props.deviceLUIDValid != VK_FALSE;
-        device_node_mask_ = id_props.deviceNodeMask;
-#endif
         return true;
     }
 
@@ -2225,6 +2392,15 @@ namespace lfs::vis {
         } else {
             compute_queue_family_ = graphics_queue_family_;
             has_dedicated_compute_queue_ = false;
+        }
+        if (families.transfer.has_value() &&
+            *families.transfer != graphics_queue_family_) {
+            unique_families.insert(*families.transfer);
+            transfer_queue_family_ = *families.transfer;
+            has_dedicated_transfer_queue_ = true;
+        } else {
+            transfer_queue_family_ = 0;
+            has_dedicated_transfer_queue_ = false;
         }
         std::vector<VkDeviceQueueCreateInfo> queue_infos;
         constexpr float queue_priority = 1.0f;
@@ -2451,8 +2627,8 @@ namespace lfs::vis {
         }
 
         // 16-bit storage for the fp16 splat raster path (half4 partials,
-        // half-packed staging). Mirrors device support; consumers must check
-        // hasFloat16Storage() and fall back to fp32 shader variants.
+        // half-packed staging). Features are enabled when the device supports them;
+        // runtime float16 capability is probed via VulkanGSRenderer::supportsFloat16Storage().
         VkPhysicalDeviceVulkan11Features features11{};
         features11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
         features11.storageBuffer16BitAccess = supported_features11.storageBuffer16BitAccess;
@@ -2520,6 +2696,16 @@ namespace lfs::vis {
             LOG_INFO("Vulkan: no dedicated async-compute family; sharing graphics queue family {}",
                      graphics_queue_family_);
         }
+        if (has_dedicated_transfer_queue_) {
+            vkGetDeviceQueue(device_, transfer_queue_family_, 0, &transfer_queue_);
+            LOG_INFO("Vulkan: dedicated transfer queue family {} (graphics family {})",
+                     transfer_queue_family_,
+                     graphics_queue_family_);
+        } else {
+            transfer_queue_ = VK_NULL_HANDLE;
+            LOG_INFO("Vulkan: no dedicated transfer family; image readbacks use graphics family {}",
+                     graphics_queue_family_);
+        }
         setDebugObjectName(VK_OBJECT_TYPE_DEVICE, device_, "lichtfeld.device");
         setDebugObjectName(VK_OBJECT_TYPE_QUEUE, graphics_queue_, "lichtfeld.queue.graphics");
         setDebugObjectName(VK_OBJECT_TYPE_QUEUE, present_queue_, "lichtfeld.queue.present");
@@ -2527,13 +2713,14 @@ namespace lfs::vis {
                            compute_queue_,
                            has_dedicated_compute_queue_ ? "lichtfeld.queue.compute"
                                                         : "lichtfeld.queue.graphics_compute");
+        if (has_dedicated_transfer_queue_) {
+            setDebugObjectName(VK_OBJECT_TYPE_QUEUE, transfer_queue_, "lichtfeld.queue.transfer");
+        }
         external_memory_interop_enabled_ = enable_external_memory;
         external_semaphore_interop_enabled_ = enable_external_semaphore;
         external_memory_dedicated_allocation_enabled_ = enable_dedicated_allocation;
         swapchain_maintenance1_enabled_ = enable_swapchain_maintenance1;
         has_push_descriptor_ = enable_push_descriptor;
-        has_float16_storage_ = features12.shaderFloat16 == VK_TRUE &&
-                               features11.storageBuffer16BitAccess == VK_TRUE;
         has_conditional_rendering_ = enable_conditional_rendering;
         has_host_image_copy_ = enable_host_image_copy_feature;
         has_fill_mode_non_solid_ = features2.features.fillModeNonSolid == VK_TRUE;
@@ -2880,17 +3067,29 @@ namespace lfs::vis {
         image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         image_info.usage = usage;
         image_info.samples = VK_SAMPLE_COUNT_1_BIT;
-        // External images written on the async-compute queue and sampled on the
-        // graphics queue need either SHARING_MODE_CONCURRENT or paired ownership-
-        // transfer barriers. CONCURRENT trades a tiny driver-side overhead for the
-        // ability to drop the transfer barriers entirely; the spec-mandated
-        // alternative is fragile when the producer/consumer queue choice can vary.
-        std::array<uint32_t, 2> external_image_families{
-            graphics_queue_family_,
-            has_dedicated_compute_queue_ ? compute_queue_family_ : graphics_queue_family_};
+        // External images may be produced on compute, sampled on graphics, and
+        // copied on a transfer queue. CONCURRENT with the full family set avoids
+        // QFOT (tracker has no ownership-transfer support; #1574 resolved choice).
+        std::array<uint32_t, 3> external_image_families{};
+        uint32_t external_image_family_count = 0;
+        const auto push_unique_family = [&](const uint32_t family) {
+            for (uint32_t i = 0; i < external_image_family_count; ++i) {
+                if (external_image_families[i] == family) {
+                    return;
+                }
+            }
+            external_image_families[external_image_family_count++] = family;
+        };
+        push_unique_family(graphics_queue_family_);
         if (has_dedicated_compute_queue_) {
+            push_unique_family(compute_queue_family_);
+        }
+        if (has_dedicated_transfer_queue_) {
+            push_unique_family(transfer_queue_family_);
+        }
+        if (external_image_family_count > 1u) {
             image_info.sharingMode = VK_SHARING_MODE_CONCURRENT;
-            image_info.queueFamilyIndexCount = static_cast<uint32_t>(external_image_families.size());
+            image_info.queueFamilyIndexCount = external_image_family_count;
             image_info.pQueueFamilyIndices = external_image_families.data();
         } else {
             image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -3005,10 +3204,16 @@ namespace lfs::vis {
                             "interop.external.image[{}x{}].view",
                             extent.width,
                             extent.height);
+        gpu_object_census_.onCreate(GpuObjectKind::ExternalImage, out.diagnostic_scope);
+        out.census_counted = true;
         return true;
     }
 
     void VulkanContext::destroyExternalImage(ExternalImage& image) {
+        const bool was_live = image.image != VK_NULL_HANDLE || image.memory != VK_NULL_HANDLE ||
+                              image.view != VK_NULL_HANDLE;
+        const bool census_counted = image.census_counted;
+        const std::string scope = image.diagnostic_scope;
         if (!image.diagnostic_scope.empty() && !image.diagnostic_label.empty()) {
             recordCurrentVulkanBytes(image.diagnostic_scope, image.diagnostic_label, 0);
         }
@@ -3024,6 +3229,10 @@ namespace lfs::vis {
             }
         }
         closeExternalNativeHandle(image.native_handle);
+        // Fail-path scrubs never reached onCreate — do not under-count census (sweep_b F-B12).
+        if (was_live && census_counted) {
+            gpu_object_census_.onDestroy(GpuObjectKind::ExternalImage, scope);
+        }
         image = {};
     }
 
@@ -3167,6 +3376,8 @@ namespace lfs::vis {
             destroyExternalBuffer(out);
             return fail(std::format("Exporting external buffer memory handle failed: {}", vkResultToString(result)));
         }
+        gpu_object_census_.onCreate(GpuObjectKind::ExternalBuffer, out.diagnostic_scope);
+        out.census_counted = true;
         return true;
     }
 
@@ -3322,10 +3533,15 @@ namespace lfs::vis {
             memory_requirements.memoryTypeBits,
             compatible_memory_type_bits,
             allocate_info.memoryTypeIndex);
+        gpu_object_census_.onCreate(GpuObjectKind::ExternalBuffer, out.diagnostic_scope);
+        out.census_counted = true;
         return true;
     }
 
     void VulkanContext::destroyExternalBuffer(ExternalBuffer& buffer) {
+        const bool was_live = buffer.buffer != VK_NULL_HANDLE || buffer.memory != VK_NULL_HANDLE;
+        const bool census_counted = buffer.census_counted;
+        const std::string scope = buffer.diagnostic_scope;
         if (!buffer.diagnostic_scope.empty() && !buffer.diagnostic_label.empty()) {
             recordCurrentVulkanBytes(buffer.diagnostic_scope, buffer.diagnostic_label, 0);
         }
@@ -3338,6 +3554,9 @@ namespace lfs::vis {
             }
         }
         closeExternalNativeHandle(buffer.native_handle);
+        if (was_live && census_counted) {
+            gpu_object_census_.onDestroy(GpuObjectKind::ExternalBuffer, scope);
+        }
         buffer = {};
     }
 
@@ -3347,7 +3566,9 @@ namespace lfs::vis {
         return handle;
     }
 
-    bool VulkanContext::createExternalTimelineSemaphore(const std::uint64_t initial_value, ExternalSemaphore& out) {
+    bool VulkanContext::createExternalTimelineSemaphore(const std::uint64_t initial_value,
+                                                        ExternalSemaphore& out,
+                                                        const std::string_view diagnostic_scope) {
         out = {};
 
         if (!device_ || !physical_device_) {
@@ -3366,6 +3587,8 @@ namespace lfs::vis {
         }
 
         out.initial_value = initial_value;
+        out.diagnostic_scope =
+            diagnostic_scope.empty() ? "vulkan.external.semaphore" : std::string(diagnostic_scope);
 
         VkExportSemaphoreCreateInfo export_info{};
         export_info.sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO;
@@ -3385,6 +3608,12 @@ namespace lfs::vis {
         if (result != VK_SUCCESS) {
             out = {};
             return fail(std::format("vkCreateSemaphore(external timeline) failed: {}", vkResultToString(result)));
+        }
+        {
+            const std::lock_guard lock(timeline_value_tracker_mutex_);
+            last_frame_timeline_wait_values_.erase(out.semaphore);
+            last_immediate_timeline_wait_values_.erase(out.semaphore);
+            last_immediate_timeline_signal_values_.erase(out.semaphore);
         }
         setDebugObjectNamef(VK_OBJECT_TYPE_SEMAPHORE,
                             out.semaphore,
@@ -3424,14 +3653,28 @@ namespace lfs::vis {
             destroyExternalSemaphore(out);
             return fail(std::format("Exporting external timeline semaphore handle failed: {}", vkResultToString(result)));
         }
+        gpu_object_census_.onCreate(GpuObjectKind::ExternalSemaphore, out.diagnostic_scope);
+        out.census_counted = true;
         return true;
     }
 
     void VulkanContext::destroyExternalSemaphore(ExternalSemaphore& semaphore) {
-        if (device_ && semaphore.semaphore != VK_NULL_HANDLE) {
-            vkDestroySemaphore(device_, semaphore.semaphore, nullptr);
+        const bool was_live = semaphore.semaphore != VK_NULL_HANDLE;
+        const bool census_counted = semaphore.census_counted;
+        const std::string scope = semaphore.diagnostic_scope;
+        if (semaphore.semaphore != VK_NULL_HANDLE) {
+            const std::lock_guard lock(timeline_value_tracker_mutex_);
+            last_frame_timeline_wait_values_.erase(semaphore.semaphore);
+            last_immediate_timeline_wait_values_.erase(semaphore.semaphore);
+            last_immediate_timeline_signal_values_.erase(semaphore.semaphore);
+            if (device_) {
+                vkDestroySemaphore(device_, semaphore.semaphore, nullptr);
+            }
         }
         closeExternalNativeHandle(semaphore.native_handle);
+        if (was_live && census_counted) {
+            gpu_object_census_.onDestroy(GpuObjectKind::ExternalSemaphore, scope);
+        }
         semaphore = {};
     }
 
@@ -3484,88 +3727,130 @@ namespace lfs::vis {
                                                        const VkImageLayout old_layout,
                                                        const VkImageLayout new_layout,
                                                        const ImmediateTransitionOptions& options) {
-        if (device_ == VK_NULL_HANDLE || immediate_command_pool_ == VK_NULL_HANDLE ||
-            graphics_queue_ == VK_NULL_HANDLE || image == VK_NULL_HANDLE) {
-            return fail(std::format(
-                "Immediate image transition requires initialized graphics resources (device={:#x}, command_pool={:#x}, queue={:#x}, image={:#x}, old_layout={}({}), new_layout={}({}))",
-                vkHandleValue(device_),
-                vkHandleValue(immediate_command_pool_),
-                vkHandleValue(graphics_queue_),
-                vkHandleValue(image),
-                vkImageLayoutToString(old_layout),
-                static_cast<int>(old_layout),
-                vkImageLayoutToString(new_layout),
-                static_cast<int>(new_layout)));
-        }
-        if (frame_active_) {
-            return fail(std::format(
-                "Immediate image transition cannot run during an active frame (frame_active={}, frame_slot={}, image_index={}, image={:#x}, old_layout={}({}), new_layout={}({}))",
-                frame_active_,
-                active_frame_index_,
-                active_image_index_,
-                vkHandleValue(image),
-                vkImageLayoutToString(old_layout),
-                static_cast<int>(old_layout),
-                vkImageLayoutToString(new_layout),
-                static_cast<int>(new_layout)));
-        }
-        if (options.aspect_mask == 0 ||
-            (options.wait &&
-             (options.wait->semaphore == VK_NULL_HANDLE || options.wait->value == 0)) ||
-            (options.signal &&
-             (options.signal->semaphore == VK_NULL_HANDLE || options.signal->value == 0))) {
-            return fail(std::format(
-                "Immediate image transition requires a non-zero aspect and valid timeline points (image={:#x}, aspect_mask={:#x}, wait_semaphore={:#x}, wait_value={}, wait_stage={:#x}, signal_semaphore={:#x}, signal_value={})",
-                vkHandleValue(image),
-                static_cast<std::uint32_t>(options.aspect_mask),
-                vkHandleValue(options.wait ? options.wait->semaphore : VK_NULL_HANDLE),
-                options.wait ? options.wait->value : 0,
-                static_cast<std::uint64_t>(options.wait_stage),
-                vkHandleValue(options.signal ? options.signal->semaphore : VK_NULL_HANDLE),
-                options.signal ? options.signal->value : 0));
-        }
-        if (old_layout == new_layout) {
-            if (options.wait || options.signal) {
-                return fail(std::format(
-                    "A no-op image transition cannot carry timeline synchronization (image={:#x}, layout={}({}), wait_semaphore={:#x}, wait_value={}, signal_semaphore={:#x}, signal_value={})",
-                    vkHandleValue(image),
-                    vkImageLayoutToString(old_layout),
-                    static_cast<int>(old_layout),
-                    vkHandleValue(options.wait ? options.wait->semaphore : VK_NULL_HANDLE),
-                    options.wait ? options.wait->value : 0,
-                    vkHandleValue(options.signal ? options.signal->semaphore : VK_NULL_HANDLE),
-                    options.signal ? options.signal->value : 0));
-            }
+        const ImmediateLayoutTransition transition{
+            .image = image,
+            .old_layout = old_layout,
+            .new_layout = new_layout,
+            .options = options,
+        };
+        return transitionImageLayoutsImmediate(std::span<const ImmediateLayoutTransition>(&transition, 1));
+    }
+
+    bool VulkanContext::transitionImageLayoutsImmediate(
+        const std::span<const ImmediateLayoutTransition> transitions) {
+        if (transitions.empty()) {
             last_error_.clear();
             return true;
         }
-        const std::uint64_t previous_wait_value =
-            options.wait ? last_immediate_timeline_wait_values_[options.wait->semaphore] : 0;
-        const std::uint64_t previous_signal_value =
-            options.signal ? last_immediate_timeline_signal_values_[options.signal->semaphore] : 0;
-        if (options.wait && options.wait->value <= previous_wait_value) {
+        if (device_ == VK_NULL_HANDLE || immediate_command_pool_ == VK_NULL_HANDLE ||
+            graphics_queue_ == VK_NULL_HANDLE) {
             return fail(std::format(
-                "Immediate-submit timeline waits must increase strictly (semaphore={:#x}, requested_value={}, previous_value={}, image={:#x}, old_layout={}({}), new_layout={}({}))",
-                vkHandleValue(options.wait->semaphore),
-                options.wait->value,
-                previous_wait_value,
-                vkHandleValue(image),
-                vkImageLayoutToString(old_layout),
-                static_cast<int>(old_layout),
-                vkImageLayoutToString(new_layout),
-                static_cast<int>(new_layout)));
+                "Immediate image transition requires initialized graphics resources (device={:#x}, command_pool={:#x}, queue={:#x}, count={})",
+                vkHandleValue(device_),
+                vkHandleValue(immediate_command_pool_),
+                vkHandleValue(graphics_queue_),
+                transitions.size()));
         }
-        if (options.signal && options.signal->value <= previous_signal_value) {
+        if (frame_active_) {
             return fail(std::format(
-                "Immediate-submit timeline signals must increase strictly (semaphore={:#x}, requested_value={}, previous_value={}, image={:#x}, old_layout={}({}), new_layout={}({}))",
-                vkHandleValue(options.signal->semaphore),
-                options.signal->value,
-                previous_signal_value,
-                vkHandleValue(image),
-                vkImageLayoutToString(old_layout),
-                static_cast<int>(old_layout),
-                vkImageLayoutToString(new_layout),
-                static_cast<int>(new_layout)));
+                "Immediate image transition cannot run during an active frame (frame_active={}, frame_slot={}, image_index={}, count={})",
+                frame_active_,
+                active_frame_index_,
+                active_image_index_,
+                transitions.size()));
+        }
+
+        // Filter no-ops (same layout, no timeline) and validate the rest.
+        std::vector<const ImmediateLayoutTransition*> active;
+        active.reserve(transitions.size());
+        for (const auto& t : transitions) {
+            if (t.image == VK_NULL_HANDLE) {
+                return fail(std::format(
+                    "Immediate image transition requires a non-null image (count={}, index={})",
+                    transitions.size(),
+                    active.size()));
+            }
+            if (t.options.aspect_mask == 0 ||
+                (t.options.wait &&
+                 (t.options.wait->semaphore == VK_NULL_HANDLE || t.options.wait->value == 0)) ||
+                (t.options.signal &&
+                 (t.options.signal->semaphore == VK_NULL_HANDLE || t.options.signal->value == 0))) {
+                return fail(std::format(
+                    "Immediate image transition requires a non-zero aspect and valid timeline points (image={:#x}, aspect_mask={:#x}, wait_semaphore={:#x}, wait_value={}, wait_stage={:#x}, signal_semaphore={:#x}, signal_value={})",
+                    vkHandleValue(t.image),
+                    static_cast<std::uint32_t>(t.options.aspect_mask),
+                    vkHandleValue(t.options.wait ? t.options.wait->semaphore : VK_NULL_HANDLE),
+                    t.options.wait ? t.options.wait->value : 0,
+                    static_cast<std::uint64_t>(t.options.wait_stage),
+                    vkHandleValue(t.options.signal ? t.options.signal->semaphore : VK_NULL_HANDLE),
+                    t.options.signal ? t.options.signal->value : 0));
+            }
+            if (t.old_layout == t.new_layout) {
+                if (t.options.wait || t.options.signal) {
+                    return fail(std::format(
+                        "A no-op image transition cannot carry timeline synchronization (image={:#x}, layout={}({}), wait_semaphore={:#x}, wait_value={}, signal_semaphore={:#x}, signal_value={})",
+                        vkHandleValue(t.image),
+                        vkImageLayoutToString(t.old_layout),
+                        static_cast<int>(t.old_layout),
+                        vkHandleValue(t.options.wait ? t.options.wait->semaphore : VK_NULL_HANDLE),
+                        t.options.wait ? t.options.wait->value : 0,
+                        vkHandleValue(t.options.signal ? t.options.signal->semaphore : VK_NULL_HANDLE),
+                        t.options.signal ? t.options.signal->value : 0));
+                }
+                continue;
+            }
+            active.push_back(&t);
+        }
+        if (active.empty()) {
+            last_error_.clear();
+            return true;
+        }
+
+        {
+            const std::lock_guard timeline_value_lock(timeline_value_tracker_mutex_);
+            // Track max wait/signal per semaphore within this batch so multi-edge
+            // batches still enforce strictly increasing values.
+            std::unordered_map<VkSemaphore, std::uint64_t> batch_wait_hi;
+            std::unordered_map<VkSemaphore, std::uint64_t> batch_signal_hi;
+            for (const auto* tp : active) {
+                const auto& options = tp->options;
+                if (options.wait) {
+                    const std::uint64_t previous = std::max(
+                        last_immediate_timeline_wait_values_[options.wait->semaphore],
+                        batch_wait_hi[options.wait->semaphore]);
+                    if (options.wait->value <= previous) {
+                        return fail(std::format(
+                            "Immediate-submit timeline waits must increase strictly (semaphore={:#x}, requested_value={}, previous_value={}, image={:#x}, old_layout={}({}), new_layout={}({}))",
+                            vkHandleValue(options.wait->semaphore),
+                            options.wait->value,
+                            previous,
+                            vkHandleValue(tp->image),
+                            vkImageLayoutToString(tp->old_layout),
+                            static_cast<int>(tp->old_layout),
+                            vkImageLayoutToString(tp->new_layout),
+                            static_cast<int>(tp->new_layout)));
+                    }
+                    batch_wait_hi[options.wait->semaphore] = options.wait->value;
+                }
+                if (options.signal) {
+                    const std::uint64_t previous = std::max(
+                        last_immediate_timeline_signal_values_[options.signal->semaphore],
+                        batch_signal_hi[options.signal->semaphore]);
+                    if (options.signal->value <= previous) {
+                        return fail(std::format(
+                            "Immediate-submit timeline signals must increase strictly (semaphore={:#x}, requested_value={}, previous_value={}, image={:#x}, old_layout={}({}), new_layout={}({}))",
+                            vkHandleValue(options.signal->semaphore),
+                            options.signal->value,
+                            previous,
+                            vkHandleValue(tp->image),
+                            vkImageLayoutToString(tp->old_layout),
+                            static_cast<int>(tp->old_layout),
+                            vkImageLayoutToString(tp->new_layout),
+                            static_cast<int>(tp->new_layout)));
+                    }
+                    batch_signal_hi[options.signal->semaphore] = options.signal->value;
+                }
+            }
         }
 
         // Imported CUDA timeline operations are opaque to Vulkan validation.
@@ -3573,23 +3858,28 @@ namespace lfs::vis {
         // so the layer sees the external half of the ownership handoff. Keep the
         // queue wait below: unlike a host wait, it supplies the external-memory
         // acquire needed before Vulkan accesses CUDA-written image contents.
-        if (validation_enabled_ && options.wait) {
-            VkSemaphoreWaitInfo wait_info{};
-            wait_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-            wait_info.semaphoreCount = 1;
-            wait_info.pSemaphores = &options.wait->semaphore;
-            wait_info.pValues = &options.wait->value;
-            auto outcome = lfs::rendering::wait_semaphores_bounded(
-                device_, wait_info, std::stop_token{}, lfs::rendering::VulkanWaitPolicy{},
-                makeWaitContext("vulkan.context.validation.wait_observe"));
-            if (!mapValidationWaitOutcome(
-                    std::move(outcome),
-                    std::format(
-                        "vkWaitSemaphores failed while observing an external timeline for validation (semaphore={:#x}, value={}, image={:#x})",
-                        vkHandleValue(options.wait->semaphore),
-                        options.wait->value,
-                        vkHandleValue(image)))) {
-                return false;
+        if (validation_enabled_) {
+            for (const auto* tp : active) {
+                if (!tp->options.wait) {
+                    continue;
+                }
+                VkSemaphoreWaitInfo wait_info{};
+                wait_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+                wait_info.semaphoreCount = 1;
+                wait_info.pSemaphores = &tp->options.wait->semaphore;
+                wait_info.pValues = &tp->options.wait->value;
+                auto outcome = lfs::rendering::wait_semaphores_bounded(
+                    device_, wait_info, std::stop_token{}, lfs::rendering::VulkanWaitPolicy{},
+                    makeWaitContext("vulkan.context.validation.wait_observe"));
+                if (!mapValidationWaitOutcome(
+                        std::move(outcome),
+                        std::format(
+                            "vkWaitSemaphores failed while observing an external timeline for validation (semaphore={:#x}, value={}, image={:#x})",
+                            vkHandleValue(tp->options.wait->semaphore),
+                            tp->options.wait->value,
+                            vkHandleValue(tp->image)))) {
+                    return false;
+                }
             }
         }
         // Reap any prior fire-and-forget submits that have completed. Bound
@@ -3629,31 +3919,36 @@ namespace lfs::vis {
             return fail(std::format("vkBeginCommandBuffer(layout transition) failed: {}", vkResultToString(result)));
         }
 
-        const auto source = VulkanImageBarrierTracker::layoutAccess(
-            old_layout, VulkanImageBarrierTracker::AccessDirection::Source);
-        const auto destination = VulkanImageBarrierTracker::layoutAccess(
-            new_layout, VulkanImageBarrierTracker::AccessDirection::Destination);
-        VkImageMemoryBarrier2 barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-        barrier.srcStageMask = source.stage;
-        barrier.srcAccessMask = source.access;
-        barrier.dstStageMask = destination.stage;
-        barrier.dstAccessMask = destination.access;
-        barrier.oldLayout = old_layout;
-        barrier.newLayout = new_layout;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image = image;
-        barrier.subresourceRange.aspectMask = options.aspect_mask;
-        barrier.subresourceRange.baseMipLevel = 0;
-        barrier.subresourceRange.levelCount = 1;
-        barrier.subresourceRange.baseArrayLayer = 0;
-        barrier.subresourceRange.layerCount = 1;
+        std::vector<VkImageMemoryBarrier2> barriers;
+        barriers.reserve(active.size());
+        for (const auto* tp : active) {
+            const auto source = VulkanImageBarrierTracker::layoutAccess(
+                tp->old_layout, VulkanImageBarrierTracker::AccessDirection::Source);
+            const auto destination = VulkanImageBarrierTracker::layoutAccess(
+                tp->new_layout, VulkanImageBarrierTracker::AccessDirection::Destination);
+            VkImageMemoryBarrier2 barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            barrier.srcStageMask = source.stage;
+            barrier.srcAccessMask = source.access;
+            barrier.dstStageMask = destination.stage;
+            barrier.dstAccessMask = destination.access;
+            barrier.oldLayout = tp->old_layout;
+            barrier.newLayout = tp->new_layout;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = tp->image;
+            barrier.subresourceRange.aspectMask = tp->options.aspect_mask;
+            barrier.subresourceRange.baseMipLevel = 0;
+            barrier.subresourceRange.levelCount = 1;
+            barrier.subresourceRange.baseArrayLayer = 0;
+            barrier.subresourceRange.layerCount = 1;
+            barriers.push_back(barrier);
+        }
 
         VkDependencyInfo dependency{};
         dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-        dependency.imageMemoryBarrierCount = 1;
-        dependency.pImageMemoryBarriers = &barrier;
+        dependency.imageMemoryBarrierCount = static_cast<std::uint32_t>(barriers.size());
+        dependency.pImageMemoryBarriers = barriers.data();
         vkCmdPipelineBarrier2(command_buffer, &dependency);
 
         result = vkEndCommandBuffer(command_buffer);
@@ -3662,34 +3957,58 @@ namespace lfs::vis {
             return fail(std::format("vkEndCommandBuffer(layout transition) failed: {}", vkResultToString(result)));
         }
 
+        std::vector<VkSemaphore> wait_semaphores;
+        std::vector<std::uint64_t> wait_values;
+        std::vector<VkPipelineStageFlags> wait_stages;
+        std::vector<VkSemaphore> signal_semaphores;
+        std::vector<std::uint64_t> signal_values;
+        wait_semaphores.reserve(active.size());
+        wait_values.reserve(active.size());
+        wait_stages.reserve(active.size());
+        signal_semaphores.reserve(active.size());
+        signal_values.reserve(active.size());
+        for (const auto* tp : active) {
+            if (tp->options.wait) {
+                wait_semaphores.push_back(tp->options.wait->semaphore);
+                wait_values.push_back(tp->options.wait->value);
+                wait_stages.push_back(tp->options.wait_stage == 0
+                                          ? static_cast<VkPipelineStageFlags>(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
+                                          : tp->options.wait_stage);
+            }
+            if (tp->options.signal) {
+                signal_semaphores.push_back(tp->options.signal->semaphore);
+                signal_values.push_back(tp->options.signal->value);
+            }
+        }
+
         VkSubmitInfo submit_info{};
         submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submit_info.commandBufferCount = 1;
         submit_info.pCommandBuffers = &command_buffer;
         VkTimelineSemaphoreSubmitInfo timeline_submit_info{};
-        VkPipelineStageFlags resolved_wait_stage = options.wait_stage == 0
-                                                       ? static_cast<VkPipelineStageFlags>(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
-                                                       : options.wait_stage;
         // The submit-time wait gates the GPU on the external (CUDA) timeline.
         // The validation-only host observation above is solely for a layer that
         // cannot otherwise see CUDA's signal; normal rendering remains async.
-        if (options.wait) {
+        if (!wait_semaphores.empty() || !signal_semaphores.empty()) {
             timeline_submit_info.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-            timeline_submit_info.waitSemaphoreValueCount = 1;
-            timeline_submit_info.pWaitSemaphoreValues = &options.wait->value;
+            if (!wait_semaphores.empty()) {
+                timeline_submit_info.waitSemaphoreValueCount =
+                    static_cast<std::uint32_t>(wait_values.size());
+                timeline_submit_info.pWaitSemaphoreValues = wait_values.data();
+                submit_info.waitSemaphoreCount = static_cast<std::uint32_t>(wait_semaphores.size());
+                submit_info.pWaitSemaphores = wait_semaphores.data();
+                submit_info.pWaitDstStageMask = wait_stages.data();
+            }
+            if (!signal_semaphores.empty()) {
+                timeline_submit_info.signalSemaphoreValueCount =
+                    static_cast<std::uint32_t>(signal_values.size());
+                timeline_submit_info.pSignalSemaphoreValues = signal_values.data();
+                submit_info.signalSemaphoreCount = static_cast<std::uint32_t>(signal_semaphores.size());
+                submit_info.pSignalSemaphores = signal_semaphores.data();
+            }
             submit_info.pNext = &timeline_submit_info;
-            submit_info.waitSemaphoreCount = 1;
-            submit_info.pWaitSemaphores = &options.wait->semaphore;
-            submit_info.pWaitDstStageMask = &resolved_wait_stage;
         }
-        if (options.signal) {
-            timeline_submit_info.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-            timeline_submit_info.signalSemaphoreValueCount = 1;
-            timeline_submit_info.pSignalSemaphoreValues = &options.signal->value;
-            submit_info.pNext = &timeline_submit_info;
-            submit_info.signalSemaphoreCount = 1;
-            submit_info.pSignalSemaphores = &options.signal->semaphore;
-        }
+
         VkFenceCreateInfo fence_info{};
         fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         VkFence submit_fence = VK_NULL_HANDLE;
@@ -3709,39 +4028,52 @@ namespace lfs::vis {
             vkFreeCommandBuffers(device_, immediate_command_pool_, 1, &command_buffer);
             return fail(std::format("Immediate Vulkan image layout transition submit failed: {}", vkResultToString(result)));
         }
-        if (options.wait) {
-            last_immediate_timeline_wait_values_[options.wait->semaphore] = options.wait->value;
-        }
-        if (options.signal) {
-            last_immediate_timeline_signal_values_[options.signal->semaphore] = options.signal->value;
+        {
+            const std::lock_guard timeline_value_lock(timeline_value_tracker_mutex_);
+            for (const auto* tp : active) {
+                if (tp->options.wait) {
+                    last_immediate_timeline_wait_values_[tp->options.wait->semaphore] =
+                        tp->options.wait->value;
+                }
+                if (tp->options.signal) {
+                    last_immediate_timeline_signal_values_[tp->options.signal->semaphore] =
+                        tp->options.signal->value;
+                }
+            }
         }
         // Fire-and-forget: queue cmd+fence for lazy reaping. Vulkan queues are
         // FIFO per VkQueue, so subsequent submits on graphics_queue_ correctly
         // observe the layout transition without any CPU-side wait.
         pending_immediate_submits_.push_back({command_buffer, submit_fence});
-        if (validation_enabled_ && options.signal) {
+        ++immediate_submits_this_frame_;
+        if (validation_enabled_) {
             // Finish Vulkan's half before CUDA is allowed to advance this same
             // imported timeline. Without this observation, validation may see
             // CUDA's later value while the preceding Vulkan signal is still
             // pending and diagnose a false non-monotonic signal. The production
             // path remains fire-and-forget. Site 6 is post-push_back: retain
             // pending submit on quarantine (do not free cmd/fence here).
-            VkSemaphoreWaitInfo wait_info{};
-            wait_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-            wait_info.semaphoreCount = 1;
-            wait_info.pSemaphores = &options.signal->semaphore;
-            wait_info.pValues = &options.signal->value;
-            auto outcome = lfs::rendering::wait_semaphores_bounded(
-                device_, wait_info, std::stop_token{}, lfs::rendering::VulkanWaitPolicy{},
-                makeWaitContext("vulkan.context.validation.signal_publish"));
-            if (!mapValidationWaitOutcome(
-                    std::move(outcome),
-                    std::format(
-                        "vkWaitSemaphores failed while publishing a Vulkan timeline signal for validation (semaphore={:#x}, value={}, image={:#x})",
-                        vkHandleValue(options.signal->semaphore),
-                        options.signal->value,
-                        vkHandleValue(image)))) {
-                return false;
+            for (const auto* tp : active) {
+                if (!tp->options.signal) {
+                    continue;
+                }
+                VkSemaphoreWaitInfo wait_info{};
+                wait_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+                wait_info.semaphoreCount = 1;
+                wait_info.pSemaphores = &tp->options.signal->semaphore;
+                wait_info.pValues = &tp->options.signal->value;
+                auto outcome = lfs::rendering::wait_semaphores_bounded(
+                    device_, wait_info, std::stop_token{}, lfs::rendering::VulkanWaitPolicy{},
+                    makeWaitContext("vulkan.context.validation.signal_publish"));
+                if (!mapValidationWaitOutcome(
+                        std::move(outcome),
+                        std::format(
+                            "vkWaitSemaphores failed while publishing a Vulkan timeline signal for validation (semaphore={:#x}, value={}, image={:#x})",
+                            vkHandleValue(tp->options.signal->semaphore),
+                            tp->options.signal->value,
+                            vkHandleValue(tp->image)))) {
+                    return false;
+                }
             }
         }
         last_error_.clear();
@@ -3759,11 +4091,17 @@ namespace lfs::vis {
         const VkPresentModeKHR present_mode = choosePresentMode(support.present_modes);
         const bool extent_fixed_to_surface =
             support.capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max();
-        const auto present_scaling_capabilities = queryPresentScalingCapabilities(present_mode);
-        const bool use_present_scaling =
-            old_swapchain != VK_NULL_HANDLE && present_scaling_capabilities.has_value();
         const bool add_resize_headroom =
             old_swapchain != VK_NULL_HANDLE && framebuffer_resize_allow_headroom_;
+        // Present scaling only has work to do when the swapchain is deliberately sized
+        // away from the surface, which is the headroom path. Requesting it for an
+        // exact-extent swapchain gains nothing and makes NVIDIA run a scaled-image setup
+        // that fails ("Failed to initialize scaled swapchain images") on every recreate.
+        std::optional<VkSurfacePresentScalingCapabilitiesEXT> present_scaling_capabilities;
+        if (add_resize_headroom) {
+            present_scaling_capabilities = queryPresentScalingCapabilities(present_mode);
+        }
+        const bool use_present_scaling = present_scaling_capabilities.has_value();
         const VkExtent2D extent = chooseSwapchainExtent(support.capabilities,
                                                         framebuffer_width,
                                                         framebuffer_height,
@@ -3882,7 +4220,6 @@ namespace lfs::vis {
         recordCurrentVulkanBytes("vulkan.swapchain", "driver_owned_images_estimate", swapchain_estimated_bytes_);
         swapchain_images_in_flight_.assign(image_count, VK_NULL_HANDLE);
         swapchain_format_ = surface_format.format;
-        swapchain_color_space_ = surface_format.colorSpace;
         swapchain_extent_fixed_to_surface_ = extent_fixed_to_surface;
         swapchain_present_scaling_enabled_ = use_present_scaling;
         has_hdr_ = surface_format.colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
@@ -3945,8 +4282,10 @@ namespace lfs::vis {
         active_acquire_index_ = 0;
         swapchain_extent_ = extent;
         swapchain_image_usage_ = create_info.imageUsage;
+        ++swapchain_epoch_;
         for (size_t i = 0; i < swapchain_images_.size(); ++i) {
             image_barriers_.registerImage(swapchain_images_[i],
+                                          swapchain_epoch_,
                                           VK_IMAGE_ASPECT_COLOR_BIT,
                                           VK_IMAGE_LAYOUT_UNDEFINED);
             setDebugObjectNamef(VK_OBJECT_TYPE_IMAGE,
@@ -4085,6 +4424,7 @@ namespace lfs::vis {
                                 i);
 
             image_barriers_.registerImage(resource.image,
+                                          swapchain_epoch_,
                                           depthStencilAspectMask(),
                                           VK_IMAGE_LAYOUT_UNDEFINED);
         }

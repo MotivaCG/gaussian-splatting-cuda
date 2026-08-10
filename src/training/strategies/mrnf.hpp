@@ -10,6 +10,7 @@
 #include "kernels/mrnf_kernels.hpp"
 #include "optimizer/adam_optimizer.hpp"
 #include "optimizer/scheduler.hpp"
+#include <cassert>
 #include <memory>
 
 class MRNFStrategyTest_EdgeGuidanceFactorPrefersHigherPrecomputedEdgeScores_Test;
@@ -50,8 +51,14 @@ namespace lfs::training {
 
         void remove_gaussians(const lfs::core::Tensor& mask) override;
 
-        AdamOptimizer& get_optimizer() override { return *_optimizer; }
-        const AdamOptimizer& get_optimizer() const override { return *_optimizer; }
+        AdamOptimizer& get_optimizer() override {
+            assert(_optimizer);
+            return *_optimizer;
+        }
+        const AdamOptimizer& get_optimizer() const override {
+            assert(_optimizer);
+            return *_optimizer;
+        }
 
         void serialize(std::ostream& os) const override;
         void deserialize(std::istream& is) override;
@@ -108,7 +115,6 @@ namespace lfs::training {
             const lfs::core::Tensor& shN,
             const lfs::core::Tensor& opacities,
             int64_t count);
-        [[nodiscard]] lfs::core::Tensor compute_edge_scores(int iter);
         [[nodiscard]] lfs::core::Tensor edge_guidance_factor() const;
 
         std::unique_ptr<AdamOptimizer> _optimizer;

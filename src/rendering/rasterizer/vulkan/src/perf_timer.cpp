@@ -12,11 +12,6 @@ namespace PerfTimer {
         PERF_TIMER_TRAIN_STAGES};
 #undef _
 
-    static struct _TimerObject {
-        size_t count = 0;
-        double total_time = 0.0;
-    } stages[TrainStage::END];
-
     const char* diagnosticStageScope(const TrainStage stage) {
         switch (stage) {
         case ProjectionForward: return "vksplat.shaders.slang.spirv.projection_forward";
@@ -32,6 +27,8 @@ namespace PerfTimer {
         case CopyPrimitiveSortIndices: return "vksplat.shaders.slang.spirv.copy_primitive_sort_indices";
         case ApplyDepthOrdering: return "vksplat.shaders.slang.spirv.apply_depth_ordering";
         case PrepareTileSort: return "vksplat.shaders.slang.spirv.prepare_tile_sort";
+        case CullSplats: return "vksplat.shaders.slang.spirv.cull_splats";
+        case ProjectionSurvivors: return "vksplat.shaders.slang.spirv.projection_survivors";
         case END: break;
         }
         return nullptr;
@@ -82,29 +79,19 @@ namespace PerfTimer {
     template <TrainStage stage>
     Timer<stage>::Timer(VulkanGSPipeline* module) : module(module) {
         then = std::chrono::high_resolution_clock::now();
-        if (module->writeTimestamp(1))
-            marks.emplace_back(stage, 1);
+        module->writeTimestamp(1);
+        marks.emplace_back(stage, 1);
     }
 
     template <TrainStage stage>
     Timer<stage>::~Timer() {
-        PerfTimer::stages[int(stage)].count += 1;
-
         if (module->writeTimestampNoExcept(-1))
             marks.emplace_back(stage, -1);
     }
 
     void pushMarker(VulkanGSPipeline* module) {
 
-        if (!module->writeTimestamp(-1)) {
-            lfs::rendering::throw_renderer_contract(
-                std::format(
-                    "PerfTimer::pushMarker could not write an exit timestamp (module={:#x}, marker_count={}, pushed_marker_count={})",
-                    lfs::rendering::vkHandleValue(module),
-                    marks.size(),
-                    pushedMarks.size()),
-                LFS_SOURCE_SITE_CURRENT());
-        }
+        module->writeTimestamp(-1);
 
         int depth = 1;
         for (int i = (int)marks.size() - 1; i >= 0; --i) {
@@ -130,17 +117,7 @@ namespace PerfTimer {
         while (!pushedMarks.empty()) {
             auto stage = pushedMarks.back();
             pushedMarks.pop_back();
-            PerfTimer::stages[int(stage)].total_time += hostTimeDelta;
-            if (!module->writeTimestamp(1)) {
-                lfs::rendering::throw_renderer_contract(
-                    std::format(
-                        "PerfTimer::popMarkers could not reopen a paused marker (module={:#x}, stage={}, remaining_pushed={}, marker_count={})",
-                        lfs::rendering::vkHandleValue(module),
-                        static_cast<int>(stage),
-                        pushedMarks.size(),
-                        marks.size()),
-                    LFS_SOURCE_SITE_CURRENT());
-            }
+            module->writeTimestamp(1);
             marks.emplace_back(static_cast<int>(stage), 1);
         }
         hostTimeDelta = 0.0;
@@ -192,7 +169,6 @@ namespace PerfTimer {
                     stack.size(),
                     stack.empty() ? -1 : static_cast<int>(stack.back().first));
                 double dt = times[i] - stack.back().second;
-                PerfTimer::stages[int(stage)].total_time += dt;
                 stack.pop_back();
                 results[stage].first += 1;
                 results[stage].second += dt;

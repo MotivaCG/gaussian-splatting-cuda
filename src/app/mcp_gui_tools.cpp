@@ -67,6 +67,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/euler_angles.hpp>
@@ -166,6 +167,52 @@ namespace lfs::app {
             return post_render_and_wait(viewer_impl, std::forward<F>(fn));
         }
 
+        std::expected<std::string, std::string> capture_viewport_from_window(
+            vis::VisualizerImpl* viewer_impl,
+            const vis::RenderingManager& rendering_manager,
+            const int width,
+            const int height) {
+            const auto rect = rendering_manager.framebufferViewportRect();
+            if (!rect.valid())
+                return std::unexpected("No rendered viewport image is available yet");
+
+            auto* const window_manager = viewer_impl->getWindowManager();
+            auto* const vulkan_context = window_manager ? window_manager->getVulkanContext() : nullptr;
+            if (!vulkan_context)
+                return std::unexpected("Viewport capture requires a Vulkan window");
+
+            auto capture = vulkan_context->captureAndEndActiveFrameRgba();
+            if (!capture)
+                return std::unexpected(capture.error());
+
+            const int left = std::clamp(rect.top_left.x, 0, capture->width);
+            const int top = std::clamp(rect.top_left.y, 0, capture->height);
+            const int right = std::clamp(left + rect.size.x, left, capture->width);
+            const int bottom = std::clamp(top + rect.size.y, top, capture->height);
+            const int crop_width = right - left;
+            const int crop_height = bottom - top;
+            if (crop_width <= 0 || crop_height <= 0)
+                return std::unexpected("Viewport region lies outside the captured window");
+
+            constexpr int kChannels = 4;
+            std::vector<std::uint8_t> cropped(
+                static_cast<std::size_t>(crop_width) * crop_height * kChannels);
+            for (int row = 0; row < crop_height; ++row) {
+                const auto src = (static_cast<std::size_t>(top + row) * capture->width + left) * kChannels;
+                const auto dst = static_cast<std::size_t>(row) * crop_width * kChannels;
+                std::copy_n(capture->rgba.begin() + static_cast<std::ptrdiff_t>(src),
+                            static_cast<std::size_t>(crop_width) * kChannels,
+                            cropped.begin() + static_cast<std::ptrdiff_t>(dst));
+            }
+
+            return mcp::encode_pixels_to_base64(cropped.data(),
+                                                crop_width,
+                                                crop_height,
+                                                kChannels,
+                                                width,
+                                                height);
+        }
+
         std::expected<std::string, std::string> capture_live_viewport_to_base64(
             vis::Visualizer* viewer,
             int width = 0,
@@ -178,11 +225,14 @@ namespace lfs::app {
             if (!rendering_manager)
                 return std::unexpected("Viewport capture is not initialized");
 
-            auto image = rendering_manager->captureViewportImage();
-            if (!image || !image->is_valid())
-                return std::unexpected("No rendered viewport image is available yet");
+            if (auto image = rendering_manager->captureViewportImage(); image && image->is_valid())
+                return mcp::encode_render_tensor_to_base64(*image, width, height);
 
-            return mcp::encode_render_tensor_to_base64(*image, width, height);
+            // Mesh-only and environment-only scenes are drawn by GPU passes that composite
+            // straight into the window, so no render path publishes an offscreen image to
+            // read back. The viewport is on screen regardless, so crop it out of the
+            // composited window instead of reporting nothing to capture.
+            return capture_viewport_from_window(viewer_impl, *rendering_manager, width, height);
         }
 
         std::expected<std::string, std::string> capture_full_window_to_base64(
@@ -1011,179 +1061,6 @@ namespace lfs::app {
             }
 
             return json{{"success", true}, {"count", nodes.size()}, {"nodes", nodes}};
-        }
-
-        std::expected<void, std::string> prepare_scene_select_node_operator(
-            vis::Visualizer& viewer,
-            const json& /*args*/,
-            vis::op::OperatorProperties& props) {
-            auto* const scene_manager = viewer.getSceneManager();
-            if (!scene_manager)
-                return std::unexpected("Scene manager not initialized");
-
-            const auto name = props.get<std::string>("name");
-            if (!name || name->empty())
-                return std::unexpected("Field 'name' must be provided");
-            if (!scene_manager->getScene().getNode(*name))
-                return std::unexpected("Node not found: " + *name);
-
-            const auto mode = props.get_or<std::string>("mode", "replace");
-            if (mode != "replace" && mode != "add")
-                return std::unexpected("Unsupported node selection mode: " + mode);
-
-            return {};
-        }
-
-        json scene_select_node_result(vis::Visualizer& viewer,
-                                      const json& /*args*/,
-                                      const vis::op::OperatorProperties& /*props*/,
-                                      const vis::op::OperatorReturnValue& /*result*/) {
-            auto* const scene_manager = viewer.getSceneManager();
-            if (!scene_manager)
-                return json{{"error", "Scene manager not initialized"}};
-
-            const auto& scene = scene_manager->getScene();
-            json nodes = json::array();
-            for (const auto& selected_name : scene_manager->getSelectedNodeNames()) {
-                if (const auto* const node = scene.getNode(selected_name))
-                    nodes.push_back(node_summary_json(scene, *node));
-            }
-
-            return json{{"success", true}, {"count", nodes.size()}, {"nodes", nodes}};
-        }
-
-        std::expected<void, std::string> prepare_crop_box_add_operator(
-            vis::Visualizer& viewer,
-            const json& /*args*/,
-            vis::op::OperatorProperties& props) {
-            auto* const scene_manager = viewer.getSceneManager();
-            if (!scene_manager)
-                return std::unexpected("Scene manager not initialized");
-
-            auto parent_id = vis::cap::resolveCropBoxParentId(
-                *scene_manager, props.get<std::string>("node"));
-            if (!parent_id)
-                return std::unexpected(parent_id.error());
-            return {};
-        }
-
-        std::expected<void, std::string> prepare_crop_box_set_operator(
-            vis::Visualizer& viewer,
-            const json& /*args*/,
-            vis::op::OperatorProperties& props) {
-            auto* const scene_manager = viewer.getSceneManager();
-            if (!scene_manager)
-                return std::unexpected("Scene manager not initialized");
-
-            auto cropbox_id = vis::cap::resolveCropBoxId(*scene_manager, props.get<std::string>("node"));
-            if (!cropbox_id)
-                return std::unexpected(cropbox_id.error());
-
-            if (!props.has("min") && !props.has("max") &&
-                !props.has("translation") && !props.has("rotation") && !props.has("scale") &&
-                !props.has("inverse") && !props.has("enabled") && !props.has("show") && !props.has("use")) {
-                return std::unexpected("No crop box fields were provided");
-            }
-            return {};
-        }
-
-        std::expected<void, std::string> prepare_crop_box_target_operator(
-            vis::Visualizer& viewer,
-            const json& /*args*/,
-            vis::op::OperatorProperties& props) {
-            auto* const scene_manager = viewer.getSceneManager();
-            if (!scene_manager)
-                return std::unexpected("Scene manager not initialized");
-
-            auto cropbox_id = vis::cap::resolveCropBoxId(*scene_manager, props.get<std::string>("node"));
-            if (!cropbox_id)
-                return std::unexpected(cropbox_id.error());
-            return {};
-        }
-
-        json crop_box_operator_result(vis::Visualizer& viewer,
-                                      const json& /*args*/,
-                                      const vis::op::OperatorProperties& props,
-                                      const vis::op::OperatorReturnValue& /*result*/) {
-            auto* const scene_manager = viewer.getSceneManager();
-            auto* const rendering_manager = viewer.getRenderingManager();
-            if (!scene_manager)
-                return json{{"error", "Scene manager not initialized"}};
-
-            const auto cropbox_id = props.get<core::NodeId>("resolved_cropbox_id");
-            if (!cropbox_id)
-                return json{{"error", "Crop box result did not resolve a target"}};
-
-            return crop_box_info_json(*scene_manager, rendering_manager, *cropbox_id);
-        }
-
-        json ellipsoid_info_json(const vis::SceneManager& scene_manager,
-                                 const vis::RenderingManager* rendering_manager,
-                                 const core::NodeId ellipsoid_id);
-
-        std::expected<void, std::string> prepare_ellipsoid_add_operator(
-            vis::Visualizer& viewer,
-            const json& /*args*/,
-            vis::op::OperatorProperties& props) {
-            auto* const scene_manager = viewer.getSceneManager();
-            if (!scene_manager)
-                return std::unexpected("Scene manager not initialized");
-
-            auto parent_id = vis::cap::resolveEllipsoidParentId(
-                *scene_manager, props.get<std::string>("node"));
-            if (!parent_id)
-                return std::unexpected(parent_id.error());
-            return {};
-        }
-
-        std::expected<void, std::string> prepare_ellipsoid_set_operator(
-            vis::Visualizer& viewer,
-            const json& /*args*/,
-            vis::op::OperatorProperties& props) {
-            auto* const scene_manager = viewer.getSceneManager();
-            if (!scene_manager)
-                return std::unexpected("Scene manager not initialized");
-
-            auto ellipsoid_id = vis::cap::resolveEllipsoidId(*scene_manager, props.get<std::string>("node"));
-            if (!ellipsoid_id)
-                return std::unexpected(ellipsoid_id.error());
-
-            if (!props.has("radii") && !props.has("translation") && !props.has("rotation") &&
-                !props.has("scale") && !props.has("inverse") && !props.has("enabled") &&
-                !props.has("show") && !props.has("use")) {
-                return std::unexpected("No ellipsoid fields were provided");
-            }
-            return {};
-        }
-
-        std::expected<void, std::string> prepare_ellipsoid_target_operator(
-            vis::Visualizer& viewer,
-            const json& /*args*/,
-            vis::op::OperatorProperties& props) {
-            auto* const scene_manager = viewer.getSceneManager();
-            if (!scene_manager)
-                return std::unexpected("Scene manager not initialized");
-
-            auto ellipsoid_id = vis::cap::resolveEllipsoidId(*scene_manager, props.get<std::string>("node"));
-            if (!ellipsoid_id)
-                return std::unexpected(ellipsoid_id.error());
-            return {};
-        }
-
-        json ellipsoid_operator_result(vis::Visualizer& viewer,
-                                       const json& /*args*/,
-                                       const vis::op::OperatorProperties& props,
-                                       const vis::op::OperatorReturnValue& /*result*/) {
-            auto* const scene_manager = viewer.getSceneManager();
-            auto* const rendering_manager = viewer.getRenderingManager();
-            if (!scene_manager)
-                return json{{"error", "Scene manager not initialized"}};
-
-            const auto ellipsoid_id = props.get<core::NodeId>("resolved_ellipsoid_id");
-            if (!ellipsoid_id)
-                return json{{"error", "Ellipsoid result did not resolve a target"}};
-
-            return ellipsoid_info_json(*scene_manager, rendering_manager, *ellipsoid_id);
         }
 
         json camera_node_json(const core::Scene& scene, const core::SceneNode& node) {
@@ -2029,7 +1906,9 @@ namespace lfs::app {
                 },
             .render_capture =
                 [viewer](std::optional<int> camera_index, int width, int height) {
-                    return post_and_wait(viewer, [viewer, camera_index, width, height]() {
+                    // Runs as render work, not plain posted work: the window-crop fallback
+                    // inside capture_live_viewport_to_base64 needs an active GUI frame.
+                    return capture_after_gui_render(viewer, [viewer, camera_index, width, height]() {
                         if (camera_index)
                             return render_scene_to_base64(viewer->getScene(), *camera_index, width, height);
                         return capture_live_viewport_to_base64(viewer, width, height);
@@ -4452,7 +4331,7 @@ namespace lfs::app {
                 .is_visible = []() { return python::is_sequencer_visible(); },
                 .set_visible = [](const bool visible) { python::set_sequencer_visible(visible); },
                 .ui_state = []() { return python::get_sequencer_ui_state(); },
-                .add_keyframe = []() { core::events::cmd::SequencerAddKeyframe{}.emit(); },
+                .add_keyframe = [](const std::optional<float> time) { core::events::cmd::SequencerAddKeyframe{.time = time}.emit(); },
                 .update_selected_keyframe = []() { core::events::cmd::SequencerUpdateKeyframe{}.emit(); },
                 .select_keyframe = [](const size_t index) { core::events::cmd::SequencerSelectKeyframe{.keyframe_index = index}.emit(); },
                 .go_to_keyframe = [](const size_t index) { core::events::cmd::SequencerGoToKeyframe{.keyframe_index = index}.emit(); },
@@ -4767,7 +4646,7 @@ namespace lfs::app {
                 .description = "Base64-encoded PNG capture of the live viewport region only; excludes panels, toolbars, and other window UI",
                 .mime_type = "image/png"},
             [viewer](const std::string& uri) -> std::expected<std::vector<McpResourceContent>, std::string> {
-                auto result = post_and_wait(viewer, [viewer]() {
+                auto result = capture_after_gui_render(viewer, [viewer]() {
                     return capture_live_viewport_to_base64(viewer);
                 });
                 if (!result)
@@ -4797,7 +4676,7 @@ namespace lfs::app {
             [viewer](const std::string& uri) -> std::expected<std::vector<McpResourceContent>, std::string> {
                 std::expected<std::string, std::string> result = std::unexpected("Unknown resource URI: " + uri);
                 if (uri == "lichtfeld://render/current") {
-                    result = post_and_wait(viewer, [viewer]() {
+                    result = capture_after_gui_render(viewer, [viewer]() {
                         return capture_live_viewport_to_base64(viewer);
                     });
                 } else if (uri == "lichtfeld://render/window") {

@@ -23,6 +23,34 @@
 
 namespace lfs::core {
 
+    std::string truncate_log_tail(const std::string_view text, const std::size_t max_bytes) {
+        if (text.size() <= max_bytes)
+            return std::string(text);
+        if (max_bytes == 0)
+            return {};
+
+        const auto start = text.size() - max_bytes;
+        const auto newline = text.find('\n', start);
+        if (newline == std::string_view::npos)
+            return std::string(text.substr(start));
+        return std::string(text.substr(newline + 1));
+    }
+
+    std::filesystem::path lichtfeld_home_directory() {
+#ifdef _WIN32
+        if (const char* profile = std::getenv("USERPROFILE"); profile && profile[0])
+            return std::filesystem::path(profile);
+        const char* drive = std::getenv("HOMEDRIVE");
+        const char* homepath = std::getenv("HOMEPATH");
+        if (drive && drive[0] && homepath && homepath[0])
+            return std::filesystem::path(std::string(drive) + homepath);
+#else
+        if (const char* home = std::getenv("HOME"); home && home[0])
+            return std::filesystem::path(home);
+#endif
+        return std::filesystem::temp_directory_path();
+    }
+
     namespace {
         namespace fs = std::filesystem;
 
@@ -408,25 +436,6 @@ namespace lfs::core {
             }
         }
 
-        // Mirrors preprocessing/preprocess.cpp's private home_directory() helper.
-        // Not shared via core/path_utils.hpp: lfs_logger is a leaf library with
-        // deliberately zero upstream includes (see src/core/logger/CMakeLists.txt),
-        // and path_utils.hpp sits outside its include root.
-        fs::path lichtfeld_home_directory() {
-#ifdef _WIN32
-            if (const char* profile = std::getenv("USERPROFILE"); profile && profile[0])
-                return fs::path(profile);
-            const char* drive = std::getenv("HOMEDRIVE");
-            const char* homepath = std::getenv("HOMEPATH");
-            if (drive && drive[0] && homepath && homepath[0])
-                return fs::path(std::string(drive) + homepath);
-#else
-            if (const char* home = std::getenv("HOME"); home && home[0])
-                return fs::path(home);
-#endif
-            return fs::temp_directory_path();
-        }
-
         fs::path resolve_default_log_directory(const std::string& user_dir_override) {
             return user_dir_override.empty()
                        ? lichtfeld_home_directory() / ".lichtfeld"
@@ -667,14 +676,6 @@ namespace lfs::core {
         for (const LogHandlerToken token : faulty_tokens) {
             remove_log_handler(token);
         }
-    }
-
-    void Logger::enable_module(const LogModule module, const bool enabled) {
-        module_enabled_[static_cast<size_t>(module)] = enabled;
-    }
-
-    void Logger::set_module_level(const LogModule module, const LogLevel level) {
-        module_level_[static_cast<size_t>(module)] = static_cast<uint8_t>(level);
     }
 
     void Logger::set_level(const LogLevel level) {

@@ -6,7 +6,6 @@
 #include "control/command_api.hpp"
 #include "core/camera.hpp"
 #include "core/cuda_error.hpp"
-#include "core/cuda_version.hpp"
 #include "core/environment.hpp"
 #include "core/event_bridge/command_center_bridge.hpp"
 #include "core/event_bridge/localization_manager.hpp"
@@ -150,15 +149,17 @@ namespace lfs::vis::gui {
                 return state;
 
             if (stats.full_quality_reference) {
-                state.status_text = "Full quality reference";
+                state.status_text = LOC("runtime.lod_full_quality_reference");
             } else if (stats.active && stats.gpu_selection) {
-                state.status_text = "Active, GPU select";
+                state.status_text = LOC("runtime.lod_active_gpu_select");
             } else if (stats.active) {
-                state.status_text = stats.async_result_ready ? "Active, async ready" : "Active";
+                state.status_text = LOC(stats.async_result_ready ? "runtime.lod_active_async_ready"
+                                                                 : "runtime.lod_active");
             } else if (stats.has_tree || stats.available) {
-                state.status_text = stats.enabled ? "Waiting for frame" : "Tree loaded, off";
+                state.status_text = LOC(stats.enabled ? "runtime.lod_waiting_for_frame"
+                                                      : "runtime.lod_tree_loaded_off");
             } else {
-                state.status_text = stats.enabled ? "Enabled, no tree" : "No RAD LOD";
+                state.status_text = LOC(stats.enabled ? "runtime.lod_enabled_no_tree" : "runtime.lod_disabled");
             }
 
             const std::size_t selected = stats.selected_splats > 0 ? stats.selected_splats : stats.output_size;
@@ -272,8 +273,8 @@ namespace lfs::vis::gui {
                                                  formatLodFloat(stats.pixel_scale_limit),
                                                  formatLodFloat(stats.min_pixel_scale));
             state.render_text = stats.full_quality_reference
-                                    ? "leaf-only reference"
-                                    : std::format("LOD scale x{:.1f}", stats.lod_render_scale);
+                                    ? LOC("runtime.lod_leaf_only_reference")
+                                    : LOCF("runtime.lod_scale", stats.lod_render_scale);
             state.foveation_text = stats.gpu_selection
                                        ? std::format("cone {:.0f}/{:.0f} deg | edge x{:.2f} | behind x{:.2f}",
                                                      stats.cone_inner_degrees,
@@ -3024,15 +3025,6 @@ namespace lfs::vis::gui {
         async_tasks_.setupEvents();
         sequencer_ui_.setupEvents();
         gizmo_manager_.setupEvents();
-        checkCudaVersionAndNotify();
-    }
-
-    void GuiManager::checkCudaVersionAndNotify() {
-        using namespace lfs::core;
-        const auto info = check_cuda_version();
-        if (!info.query_failed && !info.supported) {
-            pending_cuda_warning_ = info;
-        }
     }
 
     void GuiManager::promptFileAssociation() {
@@ -3689,6 +3681,10 @@ namespace lfs::vis::gui {
             rendering->markDirty(DirtyFlag::OVERLAY);
     }
 
+    void GuiManager::requestLocalizationUiRefresh() {
+        pending_localization_ui_refresh_ = true;
+    }
+
     bool GuiManager::shouldDeferDevResourceHotReload() const {
         if (rmlui_manager_.wantsTextInput() || rmlui_manager_.anyItemActive())
             return true;
@@ -3983,8 +3979,7 @@ namespace lfs::vis::gui {
             appendScreenOverlayCommandOverlays(params, rendering_manager->getScreenOverlayRenderer());
 
             // Pull GPU mesh / environment frame populated by renderVulkanFrame.
-            // vulkan_viewport_pass rasterizes these on the GPU instead of the
-            // auxiliary CPU mesh / environment paths.
+            // vulkan_viewport_pass rasterizes these on the GPU.
             auto mesh_frame = rendering_manager->getVulkanMeshFrame();
             params.mesh_view_projection = mesh_frame.view_projection;
             params.mesh_camera_position = mesh_frame.camera_position;
@@ -4429,22 +4424,10 @@ namespace lfs::vis::gui {
                                                LFS_SOURCE_SITE_CURRENT());
         }
 
-        if (pending_cuda_warning_) {
-            constexpr int MIN_MAJOR = lfs::core::MIN_CUDA_VERSION / 1000;
-            constexpr int MIN_MINOR = (lfs::core::MIN_CUDA_VERSION % 1000) / 10;
-            lfs::core::events::state::CudaVersionUnsupported{
-                .major = pending_cuda_warning_->major,
-                .minor = pending_cuda_warning_->minor,
-                .min_major = MIN_MAJOR,
-                .min_minor = MIN_MINOR}
-                .emit();
-            pending_cuda_warning_.reset();
-        }
-
         if (!cuda_unavailable_notified_ && lfs::core::cuda_is_unavailable()) {
             cuda_unavailable_notified_ = true;
             lfs::core::events::state::CudaUnavailable{
-                .message = "CUDA unavailable — GPU features disabled. A driver restart may be required."}
+                .message = LOC("runtime.cuda_unavailable_message")}
                 .emit();
         }
 
@@ -4550,6 +4533,20 @@ namespace lfs::vis::gui {
         if (should_poll_dev_resources) {
             LOG_TIMER_THRESHOLD("gui_render.panel_setup.dev_resource_poll", 0.25);
             pollDevResourceHotReload();
+        }
+
+        const auto language_generation = app_store().language_generation.get();
+        if (language_generation != localized_rml_language_generation_)
+            pending_localization_ui_refresh_ = true;
+
+        if (pending_localization_ui_refresh_) {
+            pending_localization_ui_refresh_ = false;
+            localized_rml_language_generation_ = language_generation;
+            ui_layout_settle_frames_ = std::max<uint8_t>(ui_layout_settle_frames_, 3);
+            if (rmlui_manager_.refreshLocalizedDocuments()) {
+                if (auto* const rendering = viewer_ ? viewer_->getRenderingManager() : nullptr)
+                    rendering->markDirty(DirtyFlag::OVERLAY);
+            }
         }
 
         // Hot-reload themes (check once per second)
@@ -5524,19 +5521,26 @@ namespace lfs::vis::gui {
 
             bool interop_prepare_ok = true;
             auto* const rendering = viewer_ ? viewer_->getRenderingManager() : nullptr;
-            if (vulkan_context && !isViewportExportLocked()) {
-                LOG_TIMER_THRESHOLD("gui_render.prepareVulkanSceneInterop", 0.25);
-                try {
-                    if (rendering) {
-                        rendering->prepareViewportInterop(*vulkan_context);
+            if (vulkan_context) {
+                if (!isViewportExportLocked()) {
+                    LOG_TIMER_THRESHOLD("gui_render.prepareVulkanSceneInterop", 0.25);
+                    try {
+                        if (rendering) {
+                            rendering->prepareViewportInterop(*vulkan_context);
+                        }
+                    } catch (const std::exception& error) {
+                        interop_prepare_ok = false;
+                        LOG_ERROR("Skipping Vulkan GUI frame after CUDA/Vulkan interop failure: {}",
+                                  error.what());
+                    } catch (...) {
+                        interop_prepare_ok = false;
+                        LOG_ERROR(
+                            "Skipping Vulkan GUI frame after unknown CUDA/Vulkan interop failure");
                     }
-                } catch (const std::exception& error) {
-                    interop_prepare_ok = false;
-                    LOG_ERROR("Skipping Vulkan GUI frame after CUDA/Vulkan interop failure: {}",
-                              error.what());
-                } catch (...) {
-                    interop_prepare_ok = false;
-                    LOG_ERROR("Skipping Vulkan GUI frame after unknown CUDA/Vulkan interop failure");
+                } else if (rendering) {
+                    // F2-1: export-locked frames still run begin/endFrame, so layout-commit
+                    // markers must be evaluated every frame even when Phases 1–2 uploads skip.
+                    rendering->viewportInterop().syncUnsubmittedLayoutCommits(*vulkan_context);
                 }
             }
 
@@ -5550,6 +5554,10 @@ namespace lfs::vis::gui {
             }
             if (begin_ok) {
                 if (rendering) {
+                    // #1575 Phase 3: GENERAL→READ_ONLY barriers + CUDA S2 waits on the frame
+                    // submit, before any sampling of interop images (slot B).
+                    rendering->viewportInterop().recordFrameBarriers(frame.command_buffer,
+                                                                     *vulkan_context);
                     const auto completion = rendering->viewportInterop().frameCompletion();
                     if (completion.semaphore != VK_NULL_HANDLE && completion.value != 0) {
                         LOG_TIMER_THRESHOLD("gui_render.vksplat_completion_wait_submit", 0.25);
@@ -6320,11 +6328,11 @@ namespace lfs::vis::gui {
 
         state::SplatFileLoadFailed::when([this](const auto& e) {
             lfs::core::ModalRequest req;
-            req.title = "Failed to load file";
+            req.title = LOC(lichtfeld::Strings::ErrorModal::FILE_OPEN_FAILED);
             req.body_rml = std::format(
-                "<div>Could not load <b>{}</b>:</div>"
+                "<div>{}</div>"
                 "<div class=\"content-row error-text\" style=\"margin-top: 8dp;\">{}</div>",
-                lfs::core::path_to_utf8(e.path.filename()),
+                LOCF(lichtfeld::Strings::Runtime::FILE_LOAD_FAILED_BODY, lfs::core::path_to_utf8(e.path.filename())),
                 e.error);
             req.style = lfs::core::ModalStyle::Error;
             req.width_dp = 520;
@@ -6618,10 +6626,6 @@ namespace lfs::vis::gui {
 
     bool GuiManager::isViewportExportLocked() const {
         return async_tasks_.isExporting() || async_tasks_.isExportingVideo();
-    }
-
-    void GuiManager::dismissStartupOverlay() {
-        startup_overlay_.dismiss();
     }
 
     void GuiManager::setStartupPluginLoadState(const bool started,

@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -32,6 +33,41 @@ namespace lfs::core {
             Attention // Soft out-of-mask weighting + scheduled opacity penalty + post-training prune
             // SMN end
         };
+
+        enum class NormalLossSpace {
+            Auto,
+            CameraOpenCV,
+            CameraOpenGL,
+            World,
+        };
+
+        [[nodiscard]] inline constexpr std::string_view normal_loss_space_name(
+            const NormalLossSpace space) noexcept {
+            switch (space) {
+            case NormalLossSpace::Auto:
+                return "auto";
+            case NormalLossSpace::CameraOpenCV:
+                return "camera-opencv";
+            case NormalLossSpace::CameraOpenGL:
+                return "camera-opengl";
+            case NormalLossSpace::World:
+                return "world";
+            }
+            return "auto";
+        }
+
+        [[nodiscard]] inline constexpr std::optional<NormalLossSpace> normal_loss_space_from_string(
+            const std::string_view value) noexcept {
+            if (value == "auto")
+                return NormalLossSpace::Auto;
+            if (value == "camera-opencv")
+                return NormalLossSpace::CameraOpenCV;
+            if (value == "camera-opengl")
+                return NormalLossSpace::CameraOpenGL;
+            if (value == "world")
+                return NormalLossSpace::World;
+            return std::nullopt;
+        }
 
         // Background mode for training - only one can be active at a time
         enum class BackgroundMode {
@@ -109,7 +145,6 @@ namespace lfs::core {
             size_t refine_every = 100;
             size_t start_refine = 500;
             size_t stop_refine = 25'000;
-            float grad_threshold = 0.0002f;
             int sh_degree = 3;
             float opacity_reg = 0.01f;
             float scale_reg = 0.01f;
@@ -148,7 +183,7 @@ namespace lfs::core {
             float normal_loss_weight = 0.05f;        // Prior normal supervision weight
             float normal_consistency_weight = 0.05f; // Depth-normal consistency weight
             float normal_flatten_weight = 1.0f;      // L1 on the smallest scale axis while normal supervision is active
-            std::string normal_loss_space = "auto";  // auto, camera-opencv, camera-opengl, or world
+            NormalLossSpace normal_loss_space = NormalLossSpace::Auto;
 
             // Mip filter (anti-aliasing)
             bool mip_filter = false;
@@ -180,13 +215,7 @@ namespace lfs::core {
 
             // Shared densification thresholds and reset controls
             float prune_opacity = 0.005f;
-            float grow_scale3d = 0.01f;
-            float grow_scale2d = 0.05f;
-            float prune_scale3d = 0.1f;
-            float prune_scale2d = 0.15f;
             size_t reset_every = 3'000;
-            size_t pause_refine_after_reset = 0;
-            bool revised_opacity = false;
             bool gut = false;
             bool undistort = false;
             float steps_scaler = 1.f; // Scales training step counts; values <= 0 disable scaling
@@ -240,6 +269,7 @@ namespace lfs::core {
             static OptimizationParameters mcmc_defaults();
             static OptimizationParameters mrnf_defaults();
             static OptimizationParameters igs_plus_defaults();
+            static OptimizationParameters defaults_for_strategy(std::string_view strategy);
         };
 
         struct LFS_CORE_API LoadingParams {

@@ -4,38 +4,44 @@ sidebar_position: 4
 
 # Building LichtFeld Studio
 
-The standard developer preset builds the complete application feature set. It
-keeps tests out of the normal app graph, compiles for one native CUDA
-architecture, uses at most six parallel jobs, and automatically uses
+Two presets are available, `build` and `debug`. Both build the complete
+application feature set, keep tests out of the normal app graph, compile for one
+native CUDA architecture, use at most six parallel jobs, and automatically use
 `sccache` or `ccache` when either launcher is installed.
 
 ```sh
-cmake --preset dev-release
-cmake --build --preset dev-release
+cmake --preset build
+cmake --build --preset build
 ```
 
-This is a full-featured build: it does not disable USD, FFmpeg, OpenImageIO,
-RmlUi, Python, MCP, or GUI support. The compiler cache can be disabled without
-changing the feature set:
+`build` is a Release configuration in `build/`. `debug` is the same feature set
+compiled with debug information, in `build-debug/`:
 
 ```sh
-cmake -S . -B build/dev-release -DENABLE_COMPILER_CACHE=OFF
-cmake --build build/dev-release -j6
+cmake --preset debug
+cmake --build --preset debug
+```
+
+Neither preset disables USD, FFmpeg, OpenImageIO, RmlUi, Python, MCP, or GUI
+support. The compiler cache can be disabled without changing the feature set:
+
+```sh
+cmake -S . -B build -DENABLE_COMPILER_CACHE=OFF
+cmake --build build -j6
 ```
 
 ## Reproducible build measurements
 
-Use the measurement preset for compiler or dependency work. It has the same
-application features as the developer preset but disables compiler caching, so
-clean and incremental timings describe work performed by the compiler rather
-than cache hits.
+For compiler or dependency work, disable compiler caching so clean and
+incremental timings describe work performed by the compiler rather than cache
+hits:
 
 ```sh
-cmake --preset measure-release
-/usr/bin/time -v cmake --build --preset measure-release
+cmake -S . -B build-measure -DENABLE_COMPILER_CACHE=OFF -G Ninja -DCMAKE_BUILD_TYPE=Release
+/usr/bin/time -v cmake --build build-measure -j6
 ```
 
-Delete `build/measure-release` before measuring clean configure time. Keep
+Delete the build directory before measuring clean configure time. Keep
 `BUILD_TESTS=OFF`: tests are a separate opt-in graph and are not representative
 of the application build.
 
@@ -53,7 +59,7 @@ worktrees. Consequently, `__FILE__` is repository-relative (for example,
 behavior independently when exact checkout paths are required:
 
 ```sh
-cmake -S . -B build/dev-release -DCOMPILER_CACHE_PATH_INDEPENDENT=OFF
+cmake -S . -B build -DCOMPILER_CACHE_PATH_INDEPENDENT=OFF
 ```
 
 Debug, RelWithDebInfo, multi-config, MSVC, and Windows builds retain their
@@ -83,7 +89,7 @@ configure the equivalent disk-cache size in sccache's configuration file.
 Use no more than six build jobs on a 31 GiB development machine:
 
 ```sh
-cmake --build build/dev-release -j6
+cmake --build build -j6
 ```
 
 vcpkg runs during configure rather than during the Ninja build. Its automatic
@@ -91,7 +97,7 @@ package-build concurrency is capped at six. Override it explicitly only on a
 machine with enough memory:
 
 ```sh
-cmake -S . -B build/dev-release -DLFS_VCPKG_MAX_CONCURRENCY=4
+cmake -S . -B build -DLFS_VCPKG_MAX_CONCURRENCY=4
 ```
 
 An explicit `VCPKG_MAX_CONCURRENCY` environment value remains supported for
@@ -128,12 +134,7 @@ CUDA: native (native)
 
 ## Tests
 
-Tests remain opt-in and have their own manifest dependency feature:
-
-```sh
-cmake -S . -B build/tests -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
-cmake --build build/tests --target lichtfeld_tests -j6
-```
-
-This keeps test-only package restore and target generation out of the normal
-application loop without changing any shipped feature.
+Tests remain opt-in, keeping test-only package restore and target generation
+out of the normal application loop without changing any shipped feature. The
+canonical [source build guide](../../building_and_distribution.md#tests)
+documents the test build targets, CTest tiers, and required real-data layout.

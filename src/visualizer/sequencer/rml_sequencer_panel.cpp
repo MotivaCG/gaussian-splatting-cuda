@@ -302,6 +302,12 @@ namespace lfs::vis {
     void RmlSequencerPanel::clearPendingComposite() {
     }
 
+    bool RmlSequencerPanel::needsLocalizationFrame() const {
+        const std::string current_language =
+            lfs::event::LocalizationManager::getInstance().getCurrentLanguage();
+        return !current_language.empty() && current_language != last_language_;
+    }
+
     void RmlSequencerPanel::clearElementCache() {
         elements_cached_ = false;
         el_panel_ = nullptr;
@@ -420,11 +426,6 @@ namespace lfs::vis {
         } catch (const std::exception& e) {
             LOG_ERROR("RmlUI: sequencer resource not found during reload: {}", e.what());
         }
-    }
-
-    void RmlSequencerPanel::compositeToScreen(const int screen_w, const int screen_h) {
-        (void)screen_w;
-        (void)screen_h;
     }
 
     RmlSequencerPanel::RenderSignature RmlSequencerPanel::makeRenderSignature(
@@ -1039,7 +1040,8 @@ namespace lfs::vis {
             el_btn_dock_toggle_->SetClass("hidden", false);
         }
         if (el_dock_toggle_label_)
-            el_dock_toggle_label_->SetInnerRML(floating_ ? "Dock" : "Undock");
+            el_dock_toggle_label_->SetInnerRML(
+                lfs::event::LocalizationManager::getInstance().get(floating_ ? "ui.dock" : "ui.undock"));
         if (el_btn_close_panel_) {
             el_btn_close_panel_->SetAttribute("data-tooltip", "common.close");
             el_btn_close_panel_->SetClass("hidden", !floating_);

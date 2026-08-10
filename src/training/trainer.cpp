@@ -212,7 +212,7 @@ namespace lfs::training {
 
         [[nodiscard]] NormalPriorConvention resolve_normal_prior_convention(
             const std::vector<const lfs::core::Camera*>& cameras,
-            const std::string& forced_space) {
+            const lfs::core::param::NormalLossSpace forced_space) {
             constexpr size_t kProbeViews = 16;
             constexpr size_t kProbeSamplesPerView = 4096;
             constexpr float kMinValidNormSq = 0.25f;
@@ -343,13 +343,16 @@ namespace lfs::training {
                 std::string description;
             };
             std::vector<Hypothesis> hypotheses;
-            if (forced_space == "auto" || forced_space == "camera-opencv") {
+            if (forced_space == lfs::core::param::NormalLossSpace::Auto ||
+                forced_space == lfs::core::param::NormalLossSpace::CameraOpenCV) {
                 hypotheses.push_back({false, false, {}, "camera-space OpenCV"});
             }
-            if (forced_space == "auto" || forced_space == "camera-opengl") {
+            if (forced_space == lfs::core::param::NormalLossSpace::Auto ||
+                forced_space == lfs::core::param::NormalLossSpace::CameraOpenGL) {
                 hypotheses.push_back({true, false, {}, "camera-space OpenGL"});
             }
-            if (forced_space == "auto" || forced_space == "world") {
+            if (forced_space == lfs::core::param::NormalLossSpace::Auto ||
+                forced_space == lfs::core::param::NormalLossSpace::World) {
                 for (const auto& rotation : proper_signed_permutations()) {
                     hypotheses.push_back({false, true, rotation,
                                           "world-space, n_world = " + describe_axis_rotation(rotation) + " of prior"});
@@ -377,7 +380,7 @@ namespace lfs::training {
                 result.world_rotation = best->world_rotation;
             }
             result.description = best->description;
-            const bool forced = forced_space != "auto";
+            const bool forced = forced_space != lfs::core::param::NormalLossSpace::Auto;
             result.usable = forced || result.score >= kMinAcceptScore;
             return result;
         }
@@ -1992,24 +1995,6 @@ namespace lfs::training {
         }
 
         optimizer.set_crop_damping_mask(std::move(*crop_mask));
-    }
-
-    Trainer::Trainer(std::shared_ptr<CameraDataset> dataset,
-                     std::unique_ptr<IStrategy> strategy,
-                     std::optional<std::tuple<std::vector<std::string>, std::vector<std::string>>> provided_splits)
-        : base_dataset_(std::move(dataset)),
-          strategy_(std::move(strategy)),
-          provided_splits_(std::move(provided_splits)) {
-        LFS_ASSERT_MSG(base_dataset_ != nullptr, "Trainer requires a camera dataset");
-        LFS_ASSERT_MSG(strategy_ != nullptr, "Trainer requires a training strategy");
-
-        // Check CUDA availability
-        int device_count = 0;
-        LFS_CUDA_TRY(cudaGetDeviceCount(&device_count), nullptr, "CUDA device discovery");
-        LFS_ASSERT_MSG(device_count > 0, "CUDA is not available - aborting");
-        createCudaResources();
-
-        LOG_DEBUG("Trainer constructed with {} cameras", base_dataset_->get_cameras().size());
     }
 
     Trainer::Trainer(lfs::core::Scene& scene)
@@ -5873,7 +5858,7 @@ namespace lfs::training {
                 }
                 LOG_INFO("Normal loss enabled (weight={}, space={})",
                          params_.optimization.normal_loss_weight,
-                         params_.optimization.normal_loss_space);
+                         lfs::core::param::normal_loss_space_name(params_.optimization.normal_loss_space));
                 if (normal_cameras.empty()) {
                     LOG_WARN("Normal loss is enabled but none of the {} training cameras has a normal map — "
                              "the normal loss will be inactive. Normal files go in <dataset>/normals (or normal/) "
@@ -5902,17 +5887,18 @@ namespace lfs::training {
                                  convention.description,
                                  convention.srgb ? "sRGB" : "linear",
                                  convention.score,
-                                 params_.optimization.normal_loss_space);
+                                 lfs::core::param::normal_loss_space_name(params_.optimization.normal_loss_space));
                         if (convention.score >= 0.0f && convention.score < 0.9f) {
                             LOG_WARN("Normal prior visibility consistency is only {:.3f} — the forced "
                                      "convention '{}' may not match the data",
-                                     convention.score, params_.optimization.normal_loss_space);
+                                     convention.score,
+                                     lfs::core::param::normal_loss_space_name(params_.optimization.normal_loss_space));
                         }
                     } else {
                         LOG_WARN("Normal prior convention could not be resolved ({}; best visibility "
                                  "consistency {:.3f}, space='{}') — normal loss disabled",
                                  convention.description, convention.score,
-                                 params_.optimization.normal_loss_space);
+                                 lfs::core::param::normal_loss_space_name(params_.optimization.normal_loss_space));
                     }
                 }
                 aux_pipeline_config.load_normals = normal_prior_usable_;

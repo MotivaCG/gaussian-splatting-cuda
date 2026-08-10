@@ -29,6 +29,7 @@ from .import_panels import (
     open_url_import_panel,
     open_watch_dirs_dialog,
 )
+from .localization import localized_count
 from .types import Panel
 from .ui import RuntimeState
 
@@ -841,7 +842,7 @@ class AssetManagerPanel(Panel):
             return tr("asset_manager.status.select_item")
         if count == 1:
             return tr("asset_manager.status.one_item_selected")
-        return tr("asset_manager.status.multi_items_selected", count=count)
+        return tr("asset_manager.status.multi_items_selected").format(count=count)
 
     def get_has_selection(self) -> bool:
         """Return True if any assets are selected."""
@@ -1275,9 +1276,7 @@ class AssetManagerPanel(Panel):
         total = self._last_asset_match_count
         if total <= 0:
             return ""
-        if total == 1:
-            return "Showing 1 asset"
-        return f"Showing {total:,} assets"
+        return localized_count("asset_manager.status.showing_assets", total)
 
     def _asset_scroll_container(self, doc=None):
         root = doc or self._doc

@@ -89,7 +89,6 @@ namespace lichtfeld::Strings {
             inline constexpr const char* BASIC_PARAMS = "training.section.basic_params";
             inline constexpr const char* ADVANCED_PARAMS = "training.section.advanced_params";
             inline constexpr const char* SPARSITY = "training.section.sparsity";
-            inline constexpr const char* PRUNING_GROWING = "training.section.pruning_growing";
         } // namespace Section
 
         namespace Dataset {
@@ -162,12 +161,6 @@ namespace lichtfeld::Strings {
         namespace Thresholds {
             inline constexpr const char* MIN_OPACITY = "training.thresholds.min_opacity";
             inline constexpr const char* PRUNE_OPACITY = "training.thresholds.prune_opacity";
-            inline constexpr const char* GROW_SCALE_3D = "training.thresholds.grow_scale_3d";
-            inline constexpr const char* GROW_SCALE_2D = "training.thresholds.grow_scale_2d";
-            inline constexpr const char* PRUNE_SCALE_3D = "training.thresholds.prune_scale_3d";
-            inline constexpr const char* PRUNE_SCALE_2D = "training.thresholds.prune_scale_2d";
-            inline constexpr const char* PAUSE_AFTER_RESET = "training.thresholds.pause_after_reset";
-            inline constexpr const char* REVISED_OPACITY = "training.thresholds.revised_opacity";
         } // namespace Thresholds
 
         namespace Tooltip {
@@ -303,6 +296,8 @@ namespace lichtfeld::Strings {
         inline constexpr const char* KEYFRAME_EASING_EASE_IN = "scene.keyframe_easing.ease_in";
         inline constexpr const char* KEYFRAME_EASING_EASE_OUT = "scene.keyframe_easing.ease_out";
         inline constexpr const char* KEYFRAME_EASING_EASE_IN_OUT = "scene.keyframe_easing.ease_in_out";
+        inline constexpr const char* PLY_SEQUENCE_LABEL = "scene.ply_sequence_label";
+        inline constexpr const char* KEYFRAME_NODE_LABEL = "scene.keyframe_node_label";
         inline constexpr const char* SAVE_ASSET = "scene.save_asset";
         inline constexpr const char* SAVE_ASSET_AS = "scene.save_asset_as";
         inline constexpr const char* SAVE_TO_DISK = "scene.save_to_disk";
@@ -381,7 +376,6 @@ namespace lichtfeld::Strings {
         inline constexpr const char* EMPTY = "status.empty";
         inline constexpr const char* MODE = "status.mode";
         inline constexpr const char* GAUSSIANS = "status.gaussians";
-        inline constexpr const char* ITERATION = "status.iteration";
         inline constexpr const char* FPS = "status.fps";
         inline constexpr const char* STEP = "status.step";
         inline constexpr const char* LOSS = "status.loss";
@@ -581,7 +575,6 @@ namespace lichtfeld::Strings {
         inline constexpr const char* NEW_STEP = "training_panel.new_step";
         inline constexpr const char* NO_SAVE_STEPS = "training_panel.no_save_steps";
         inline constexpr const char* SPARSITY = "training_panel.sparsity";
-        inline constexpr const char* PRUNING_GROWING = "training_panel.pruning_growing";
         inline constexpr const char* MRNF_PARAMS = "training_panel.mrnf_params";
     } // namespace TrainingPanel
 
@@ -750,11 +743,7 @@ namespace lichtfeld::Strings {
         inline constexpr const char* RANDOM_INIT = "training_params.random_init";
         inline constexpr const char* NUM_POINTS = "training_params.num_points";
         inline constexpr const char* EXTENT = "training_params.extent";
-        inline constexpr const char* PRUNE_SCALE_3D = "training_params.prune_scale_3d";
         inline constexpr const char* PRUNE_OPACITY = "training_params.prune_opacity";
-        inline constexpr const char* PRUNE_SCALE_2D = "training_params.prune_scale_2d";
-        inline constexpr const char* PAUSE_AFTER_RESET = "training_params.pause_after_reset";
-        inline constexpr const char* REVISED_OPACITY = "training_params.revised_opacity";
         inline constexpr const char* SPARSIFY_STEPS = "training_params.sparsify_steps";
         inline constexpr const char* INIT_RHO = "training_params.init_rho";
         inline constexpr const char* PRUNE_RATIO = "training_params.prune_ratio";
@@ -840,6 +829,7 @@ namespace lichtfeld::Strings {
         inline constexpr const char* STOP = "python_console.stop";
         inline constexpr const char* PYTHON = "python_console.python";
         inline constexpr const char* RUNNING = "python_console.running";
+        inline constexpr const char* ALREADY_RUNNING = "python_console.already_running";
         inline constexpr const char* SYNTAX = "python_console.syntax";
         inline constexpr const char* OUTLINE = "python_console.outline";
         inline constexpr const char* SCOPE = "python_console.scope";
@@ -854,6 +844,10 @@ namespace lichtfeld::Strings {
         inline constexpr const char* VERSION = "python_console.version";
         inline constexpr const char* PATH = "python_console.path";
         inline constexpr const char* NO_PACKAGES = "python_console.no_packages";
+        inline constexpr const char* FORMAT_ERROR = "python_console.format_error";
+        inline constexpr const char* CLEANUP_ERROR = "python_console.cleanup_error";
+        inline constexpr const char* OPEN_FAILED = "python_console.open_failed";
+        inline constexpr const char* SAVE_FAILED = "python_console.save_failed";
     } // namespace PythonConsole
 
     namespace Axis {
@@ -922,7 +916,6 @@ namespace lichtfeld::Strings {
         inline constexpr const char* ERROR_MSG = "video_extractor.error";
         inline constexpr const char* DISMISS = "video_extractor.dismiss";
         inline constexpr const char* DISCARDED_FORMAT = "video_extractor.discarded_format";
-        inline constexpr const char* ALL = "all";
         inline constexpr const char* CANDIDATES_READOUT_FMT = "video_extractor.candidates_readout_fmt";
         inline constexpr const char* SHARPNESS_MODE_DESC_THRESHOLD = "video_extractor.sharpness_mode_desc_threshold";
         inline constexpr const char* SHARPNESS_MODE_DESC_WINDOW = "video_extractor.sharpness_mode_desc_window";
@@ -975,6 +968,7 @@ namespace lichtfeld::Strings {
         inline constexpr const char* KEYFRAME_TOOLTIP = "sequencer.keyframe_tooltip";
         inline constexpr const char* PLAYBACK_TIME = "sequencer.playback_time";
         inline constexpr const char* KEYFRAME_PREVIEW = "sequencer.keyframe_preview";
+        inline constexpr const char* EDIT_DELTA = "sequencer.edit_delta";
     } // namespace Sequencer
 
     namespace DiskSpaceDialog {
@@ -1038,5 +1032,60 @@ namespace lichtfeld::Strings {
         inline constexpr const char* OPEN_LOG = "error_actions.open_log";
         inline constexpr const char* STOP_RENDERER = "error_actions.stop_renderer";
     } // namespace ErrorActions
+
+    namespace Runtime {
+        inline constexpr const char* TASK_INITIALIZING = "runtime.task_initializing";
+        inline constexpr const char* TASK_STARTING = "runtime.task_starting";
+        inline constexpr const char* TASK_STARTING_ELLIPSIS = "runtime.task_starting_ellipsis";
+        inline constexpr const char* TASK_COMPLETE = "runtime.task_complete";
+        inline constexpr const char* TASK_FAILED = "runtime.task_failed";
+        inline constexpr const char* TASK_CANCELLED = "runtime.task_cancelled";
+        inline constexpr const char* TASK_CANCELLING = "runtime.task_cancelling";
+        inline constexpr const char* TASK_APPLYING = "runtime.task_applying";
+        inline constexpr const char* TASK_OPENING_ENCODER = "runtime.task_opening_encoder";
+        inline constexpr const char* TASK_RENDER_ERROR = "runtime.task_render_error";
+        inline constexpr const char* TASK_ENCODE_ERROR = "runtime.task_encode_error";
+        inline constexpr const char* TASK_FINALIZING = "runtime.task_finalizing";
+        inline constexpr const char* TASK_FAILED_DETAIL = "runtime.task_failed_detail";
+        inline constexpr const char* EXPORT_CANCELLED = "runtime.export_cancelled";
+        inline constexpr const char* NO_SPLAT_DATA = "runtime.no_splat_data";
+        inline constexpr const char* VIDEO_ENCODER_UNAVAILABLE = "runtime.video_encoder_unavailable";
+        inline constexpr const char* SCENE_MANAGER_UNAVAILABLE = "runtime.scene_manager_unavailable";
+        inline constexpr const char* NO_MODEL_SELECTED = "runtime.no_model_selected";
+        inline constexpr const char* NO_SCENE_MANAGER = "runtime.no_scene_manager";
+        inline constexpr const char* COLMAP_REQUIRES_DATASET = "runtime.colmap_requires_dataset";
+        inline constexpr const char* COLMAP_REQUIRES_SOURCE_PATH = "runtime.colmap_requires_source_path";
+        inline constexpr const char* COLMAP_REQUIRES_CAMERAS = "runtime.colmap_requires_cameras";
+        inline constexpr const char* RENDERED_GAUSSIAN_INVALID = "runtime.rendered_gaussian_invalid";
+        inline constexpr const char* RENDERED_GAUSSIAN_SHAPE_INVALID = "runtime.rendered_gaussian_shape_invalid";
+        inline constexpr const char* VIDEO_FRAME_MISSING = "runtime.video_frame_missing";
+        inline constexpr const char* COLMAP_UNKNOWN_EXCEPTION = "runtime.colmap_unknown_exception";
+        inline constexpr const char* COLMAP_WRITE_BACK_PATH = "runtime.colmap_write_back_path";
+        inline constexpr const char* EXPORT_UNKNOWN_EXCEPTION = "runtime.export_unknown_exception";
+        inline constexpr const char* SIMPLIFIED_SPLAT_ADD_FAILED = "runtime.simplified_splat_add_failed";
+        inline constexpr const char* EXPORT_WRITING_COLMAP = "runtime.export_writing_colmap";
+        inline constexpr const char* EXPORT_PREPARING_DATA = "runtime.export_preparing_data";
+        inline constexpr const char* EXPORT_DATA_PREPARED = "runtime.export_data_prepared";
+        inline constexpr const char* VIDEO_ENCODING_FRAME = "runtime.video_encoding_frame";
+        inline constexpr const char* VIDEO_MISSING_SCENE_OR_RENDERING = "runtime.video_missing_scene_or_rendering";
+        inline constexpr const char* VIDEO_GUI_MANAGER_UNAVAILABLE = "runtime.video_gui_manager_unavailable";
+        inline constexpr const char* VIDEO_NO_KEYFRAMES = "runtime.video_no_keyframes";
+        inline constexpr const char* VIDEO_RENDERING_ENGINE_UNAVAILABLE = "runtime.video_rendering_engine_unavailable";
+        inline constexpr const char* VIDEO_SPLAT_PREPARATION_FAILED = "runtime.video_splat_preparation_failed";
+        inline constexpr const char* VIDEO_NO_RENDERABLE_CONTENT = "runtime.video_no_renderable_content";
+        inline constexpr const char* RENDERED_POINT_CLOUD_INVALID = "runtime.rendered_point_cloud_invalid";
+        inline constexpr const char* SCENE_MANAGER_NOT_INITIALIZED = "runtime.scene_manager_not_initialized";
+        inline constexpr const char* IMPORT_FAILED_DETAIL = "runtime.import_failed_detail";
+        inline constexpr const char* IMPORT_UNKNOWN_EXCEPTION = "runtime.import_unknown_exception";
+        inline constexpr const char* TRAINING_UNKNOWN_ERROR = "runtime.training_unknown_error";
+        inline constexpr const char* COLMAP_OVERWRITE_MESSAGE = "runtime.colmap_overwrite_message";
+        inline constexpr const char* FOLDER_LABEL = "runtime.folder_label";
+        inline constexpr const char* FILE_LOAD_FAILED_BODY = "runtime.file_load_failed_body";
+        inline constexpr const char* CUDA_DRIVER_UNSUPPORTED = "runtime.cuda_driver_unsupported";
+        inline constexpr const char* VIEWER_SHUTTING_DOWN = "runtime.viewer_shutting_down";
+        inline constexpr const char* VIEWER_WORK_FAILED = "runtime.viewer_work_failed";
+        inline constexpr const char* COLMAP_MIN_TRACK_LENGTH = "runtime.colmap_min_track_length";
+        inline constexpr const char* NO_SPLAT_NODE_NAMED = "runtime.no_splat_node_named";
+    } // namespace Runtime
 
 } // namespace lichtfeld::Strings
