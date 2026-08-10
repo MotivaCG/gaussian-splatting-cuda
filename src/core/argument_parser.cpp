@@ -382,6 +382,7 @@ namespace {
             ::args::Flag no_error_map(training_group, "no_error_map", lfs::core::args::optimization_cli_help("--no-error-map"), {"no-error-map"});
             ::args::Flag no_edge_map(training_group, "no_edge_map", lfs::core::args::optimization_cli_help("--no-edge-map"), {"no-edge-map"});
             ::args::Flag skip_intermediate(training_group, "skip_intermediate", "Skip intermediate saves (step checkpoints, regular-phase PLY, .ppisp sidecars); keep only the final and pre-prune PLYs", {"skip-intermediate"}); // SMN
+            ::args::Flag preprune(training_group, "preprune", "Also save a pre-prune PLY copy before the attention mask mode's post-training prune (off by default)", {"preprune"}); // SMN
             ::args::ValueFlag<std::string> bg_mode(training_group, "mode", lfs::core::args::optimization_cli_help("--bg-mode"), {"bg-mode"});
             // SMN: one-shot preset for people/chroma captures. Expands to the validated recipe
             // (attention mask + pseudorandom bg + depth-normal consistency). Explicit flags override.
@@ -704,6 +705,7 @@ namespace {
             }
             // SMN begin
             params.allow_strategy_switch = static_cast<bool>(allow_strategy_switch);
+            params.save_preprune = static_cast<bool>(preprune);
             // SMN end
 
             if (init_path) {

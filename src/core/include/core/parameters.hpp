@@ -361,6 +361,11 @@ namespace lfs::core {
             bool allow_strategy_switch = false;
             // SMN end
 
+            // SMN begin — CLI-only: save the pre-prune PLY copy (attention mask mode's
+            // post-training prune only). Off by default; --preprune turns it on.
+            bool save_preprune = false;
+            // SMN end
+
             // Headless camera-path -> video render mode (see --render-camera-path)
             std::optional<RenderPathConfig> render_path = std::nullopt;
 

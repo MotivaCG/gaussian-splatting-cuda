@@ -6155,7 +6155,7 @@ namespace lfs::training {
             lfs::training::smn::SMN_ATTENTION_PRUNE_ENABLED) {
             // Optionally snapshot the pre-prune model so one attention run yields
             // both the pre-prune and pruned PLYs (no need to retrain no-prune).
-            if (lfs::training::smn::SMN_ATTENTION_SAVE_PREPRUNE_COPY) {
+            if (terminal_params.save_preprune) {
                 const std::string base_name = terminal_params.dataset.output_name.empty()
                                                   ? ("splat_" + std::to_string(terminal_iteration))
                                                   : terminal_params.dataset.output_name;

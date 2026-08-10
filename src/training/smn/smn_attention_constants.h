@@ -192,10 +192,10 @@ namespace lfs::training::smn {
     // Master switch: false skips the whole prune stage (loss/penalty untouched).
     inline constexpr bool SMN_ATTENTION_PRUNE_ENABLED = true;
 
-    // When true (and the prune runs), save an extra PLY of the model BEFORE
-    // pruning, so a single MaskMode::Attention run yields both the pre-prune and
-    // pruned results in one go.
-    inline constexpr bool SMN_ATTENTION_SAVE_PREPRUNE_COPY = true;
+    // Whether to save an extra PLY of the model BEFORE pruning (so a single
+    // MaskMode::Attention run yields both the pre-prune and pruned results in one
+    // go) is now the CLI-only --preprune flag (TrainingParameters::save_preprune),
+    // not a compile-time constant — see trainer.cpp's terminal_params.save_preprune.
 
     // Filename suffix (before ".ply") used for the pre-prune copy above.
     inline constexpr std::string_view SMN_ATTENTION_PREPRUNE_SUFFIX = "_preprune";
