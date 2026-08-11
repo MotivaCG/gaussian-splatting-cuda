@@ -37,6 +37,7 @@ namespace lfs::mcp {
             (void)lfs::training::release_gsplat_rasterizer_thread_local_caches();
             (void)gsplat_lfs::release_intersect_thread_local_cache();
             (void)lfs::core::tensor_ops::release_nan_check_thread_buffers();
+            lfs::training::release_fastgs_sort_workspace_buffers();
         }
 
         std::expected<std::pair<core::SplatData*, std::shared_ptr<core::Camera>>, std::string>
