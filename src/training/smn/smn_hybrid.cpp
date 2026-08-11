@@ -18,7 +18,7 @@ namespace lfs::training::smn {
 
         void install_mcmc_to_mrnf_safety(
             lfs::core::param::OptimizationParameters& target,
-            const int /*switch_iteration*/) {
+            const int switch_iteration) {
             const int regular_horizon = regular_training_horizon(target);
 
             target.strategy = std::string(lfs::core::param::kStrategyMRNF);
@@ -30,6 +30,15 @@ namespace lfs::training::smn {
             // opacity/scale regularization and refinement cadence. Replacing it with
             // fresh MRNF defaults made large edge splats survive as crest-like geometry.
             target.smn_hybrid_mcmc_densification = true;
+
+            // Use start_refine as Hybrid's persisted MRNF phase origin. The first
+            // refine therefore occurs after a full, steps-scaled refine_every
+            // window rather than at the next (possibly immediate) global multiple.
+            // Clamp late switches to stop_refine so validation remains sound and
+            // no topology change is re-enabled beyond the regular training phase.
+            target.start_refine = std::min(
+                target.stop_refine,
+                static_cast<size_t>(std::max(0, switch_iteration)));
         }
 
     } // namespace
@@ -65,6 +74,21 @@ namespace lfs::training::smn {
         const lfs::core::param::OptimizationParameters& params) noexcept {
         return params.smn_hybrid_mcmc_densification &&
                lfs::core::param::is_mrnf_strategy(params.strategy);
+    }
+
+    bool is_mrnf_refine_due(
+        const lfs::core::param::OptimizationParameters& params,
+        const int iteration) noexcept {
+        if (params.refine_every == 0 ||
+            iteration <= static_cast<int>(params.start_refine) ||
+            iteration >= static_cast<int>(params.stop_refine)) {
+            return false;
+        }
+
+        const auto phase_iteration = uses_mcmc_densification_signal(params)
+                                         ? static_cast<size_t>(iteration) - params.start_refine
+                                         : static_cast<size_t>(iteration);
+        return phase_iteration % params.refine_every == 0;
     }
 
     lfs::core::param::OptimizationParameters make_in_process_target_params(

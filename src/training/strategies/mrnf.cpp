@@ -13,6 +13,9 @@
 #include "kernels/mcmc_kernels.hpp"
 #include "kernels/mrnf_kernels.hpp"
 #include "smn/smn_attention_constants.h" // SMN: inside-biased replacement toggle
+// SMN begin — handoff-relative first refine window
+#include "smn/smn_hybrid.hpp"
+// SMN end
 #include "strategy_utils.hpp"
 #include "training/dataset.hpp"
 #include <algorithm>
@@ -586,9 +589,10 @@ namespace lfs::training {
     }
 
     bool MRNF::is_refining(int iter) const {
-        return (iter < static_cast<int>(_params->stop_refine) &&
-                iter > static_cast<int>(_params->start_refine) &&
-                iter % _params->refine_every == 0);
+        // SMN begin — Hybrid collects one complete MRNF window before its first
+        // topology change; regular MRNF retains the original global cadence.
+        return lfs::training::smn::is_mrnf_refine_due(*_params, iter);
+        // SMN end
     }
 
     void MRNF::refine(int iter) {

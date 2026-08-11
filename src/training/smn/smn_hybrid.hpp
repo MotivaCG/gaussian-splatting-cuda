@@ -24,6 +24,13 @@ namespace lfs::training::smn {
     [[nodiscard]] bool uses_mcmc_densification_signal(
         const lfs::core::param::OptimizationParameters& params) noexcept;
 
+    // Plain MRNF keeps its original global cadence. Hybrid instead phases the
+    // cadence from start_refine, which the handoff records as its own iteration,
+    // so its first topology change uses one complete MRNF observation window.
+    [[nodiscard]] bool is_mrnf_refine_due(
+        const lfs::core::param::OptimizationParameters& params,
+        int iteration) noexcept;
+
     // Builds the persistent (regular-iteration) parameter set for a hot-swapped
     // target strategy. The caller may extend `iterations` with a runtime-only
     // sparsification tail before initializing the concrete strategy.

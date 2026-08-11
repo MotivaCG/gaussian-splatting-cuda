@@ -40,7 +40,7 @@ TEST(SMNHybridTest, SwitchFractionMatchesOriginalEffectiveRuntimeTotal) {
     }
 }
 
-TEST(SMNHybridTest, McmcToMrnfPreservesOriginalStableHandoffProfile) {
+TEST(SMNHybridTest, McmcToMrnfPreservesProfileAndPhasesFirstRefineFromHandoff) {
     auto source = OptimizationParameters::mcmc_defaults();
     source.steps_scaler = 2.0f;
     source.apply_step_scaling();
@@ -58,7 +58,7 @@ TEST(SMNHybridTest, McmcToMrnfPreservesOriginalStableHandoffProfile) {
     EXPECT_EQ(target.strategy, "mrnf");
     EXPECT_EQ(target.iterations, 60'000u);
     EXPECT_EQ(target.refine_every, 200u);
-    EXPECT_EQ(target.start_refine, 1'000u);
+    EXPECT_EQ(target.start_refine, static_cast<size_t>(switch_iteration));
     EXPECT_EQ(target.stop_refine, 50'000u);
     EXPECT_EQ(target.grow_until_iter, 30'000u);
     EXPECT_EQ(target.max_cap, source.max_cap);
@@ -77,6 +77,20 @@ TEST(SMNHybridTest, McmcToMrnfPreservesOriginalStableHandoffProfile) {
     const auto restored = OptimizationParameters::from_json(target.to_json());
     EXPECT_TRUE(restored.smn_hybrid_mcmc_densification);
     EXPECT_TRUE(lfs::training::smn::uses_mcmc_densification_signal(restored));
+
+    const int refine_every = static_cast<int>(restored.refine_every);
+    EXPECT_FALSE(lfs::training::smn::is_mrnf_refine_due(restored, switch_iteration));
+    EXPECT_FALSE(lfs::training::smn::is_mrnf_refine_due(restored, switch_iteration + refine_every - 1));
+    EXPECT_TRUE(lfs::training::smn::is_mrnf_refine_due(restored, switch_iteration + refine_every));
+    EXPECT_FALSE(lfs::training::smn::is_mrnf_refine_due(restored, switch_iteration + refine_every + 1));
+}
+
+TEST(SMNHybridTest, PlainMrnfRetainsGlobalRefineCadence) {
+    auto params = OptimizationParameters::mrnf_defaults();
+
+    EXPECT_FALSE(lfs::training::smn::is_mrnf_refine_due(params, 199));
+    EXPECT_TRUE(lfs::training::smn::is_mrnf_refine_due(params, 200));
+    EXPECT_TRUE(lfs::training::smn::is_mrnf_refine_due(params, 400));
 }
 
 TEST(SMNStepScalingTest, ScalesWarmupsAndExplicitActivationButKeepsSentinels) {
