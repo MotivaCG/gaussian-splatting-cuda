@@ -1826,6 +1826,8 @@ class BackgroundMode(enum.Enum):
 
     RANDOM = 3
 
+    PSEUDORANDOM = 4
+
 class OptimizationParams:
     def __init__(self) -> None: ...
 
@@ -1977,6 +1979,31 @@ class OptimizationParams:
 
     @steps_scaler.setter
     def steps_scaler(self, arg: float, /) -> None: ...
+
+    @property
+    def smn_switch_strategy_to(self) -> str:
+        """Target strategy for the in-process switch; empty disables it"""
+
+    @smn_switch_strategy_to.setter
+    def smn_switch_strategy_to(self, arg: str, /) -> None: ...
+
+    @property
+    def smn_switch_at_fraction(self) -> float:
+        """
+        Fraction (0-1] of effective total iterations at which the in-process switch fires
+        """
+
+    @smn_switch_at_fraction.setter
+    def smn_switch_at_fraction(self, arg: float, /) -> None: ...
+
+    @property
+    def smn_hybrid_mcmc_densification(self) -> bool:
+        """
+        Internal Hybrid state preserving MCMC-scale densification after the MRNF handoff
+        """
+
+    @smn_hybrid_mcmc_densification.setter
+    def smn_hybrid_mcmc_densification(self, arg: bool, /) -> None: ...
 
     def apply_step_scaling(self, new_scaler: float) -> None:
         """Set steps_scaler and scale all step-related parameters by the ratio"""

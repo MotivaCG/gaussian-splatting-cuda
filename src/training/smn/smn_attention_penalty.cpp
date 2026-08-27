@@ -140,8 +140,7 @@ namespace lfs::training::smn {
         const lfs::core::param::OptimizationParameters& opt_params,
         const Tensor& raw_rendered,
         const int iteration,
-        lfs::training::kernels::MaskedFusedL1SSIMWorkspace& fused_ws,
-        lfs::training::kernels::MaskedDecoupledFusedL1SSIMWorkspace& decoupled_ws) {
+        lfs::training::kernels::LossWorkspaceArena& workspace_arena) {
 
         const bool has_mask = mask.is_valid() && mask.numel() > 0;
         const Tensor roi_weight_2d = to_2d(roi_weight);
@@ -208,6 +207,7 @@ namespace lfs::training::smn {
 
         Tensor loss, grad_corrected, grad_raw;
         if (use_decoupled) {
+            auto& decoupled_ws = workspace_arena.masked_decoupled();
             auto [loss_tensor, ctx] = lfs::training::kernels::masked_decoupled_fused_l1_ssim_forward(
                 corrected, raw_rendered, gt_image, photometric_weight, opt_params.lambda_dssim, decoupled_ws);
             auto grads = lfs::training::kernels::masked_decoupled_fused_l1_ssim_backward(ctx, decoupled_ws);
@@ -221,6 +221,7 @@ namespace lfs::training::smn {
                 grad_raw = grad_raw.squeeze(0);
             }
         } else {
+            auto& fused_ws = workspace_arena.masked_fused();
             auto [loss_tensor, ctx] = lfs::training::kernels::masked_fused_l1_ssim_forward(
                 corrected, gt_image, photometric_weight, opt_params.lambda_dssim, fused_ws);
             loss = loss_tensor;

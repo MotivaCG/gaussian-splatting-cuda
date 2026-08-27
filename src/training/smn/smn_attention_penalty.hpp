@@ -64,8 +64,8 @@ namespace lfs::training::smn {
     //   opt_params    : optimization parameters (lambda_dssim, iterations, ...)
     //   raw_rendered  : raw render for decoupled D-SSIM, or invalid to disable
     //   iteration     : current training iteration (drives the penalty schedule)
-    //   fused_ws      : reused workspace for the masked fused L1+SSIM kernel
-    //   decoupled_ws  : reused workspace for the masked decoupled variant
+    //   workspace_arena: upstream's shared arena for the mutually exclusive
+    //                    masked fused and masked decoupled loss workspaces
     //
     // The `mask` is assumed already loaded/binarized by the caller (the trainer
     // requests binarize=true for attention mode).
@@ -79,8 +79,7 @@ namespace lfs::training::smn {
         const lfs::core::param::OptimizationParameters& opt_params,
         const lfs::core::Tensor& raw_rendered,
         int iteration,
-        lfs::training::kernels::MaskedFusedL1SSIMWorkspace& fused_ws,
-        lfs::training::kernels::MaskedDecoupledFusedL1SSIMWorkspace& decoupled_ws);
+        lfs::training::kernels::LossWorkspaceArena& workspace_arena);
 
     // Schedule weight w(iter) in [0,1] for the opacity penalty. Exposed for
     // testing and logging; see smn_attention_constants.h for the ramp shape.

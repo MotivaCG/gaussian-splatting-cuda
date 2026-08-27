@@ -1410,6 +1410,10 @@ elseif(WIN32)
     endif()
     if(MSVC)
         target_compile_options(${PROJECT_NAME} PRIVATE /bigobj)
+        # SMN begin — CMake's MSBuild MultiToolTask can run several cl.exe
+        # processes for this target; serialize access to its shared program DB.
+        target_compile_options(${PROJECT_NAME} PRIVATE /FS)
+        # SMN end
     endif()
 endif()
 

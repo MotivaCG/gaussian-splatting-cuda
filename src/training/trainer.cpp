@@ -1798,7 +1798,7 @@ namespace lfs::training {
             auto attention = lfs::training::smn::compute_attention_photometric_loss(
                 corrected, gt_image, mask, roi_weight, alpha, opt_params, raw_rendered,
                 current_iteration_.load(),
-                masked_fused_workspace_, masked_decoupled_fused_workspace_);
+                photometric_loss_.arena());
             if (!attention) {
                 return std::unexpected(attention.error());
             }
@@ -6433,6 +6433,13 @@ namespace lfs::training {
                 pipelined_mask_ = example.mask.has_value() ? std::move(*example.mask) : lfs::core::Tensor();
                 pipelined_depth_ = example.depth.has_value() ? std::move(*example.depth) : lfs::core::Tensor();
                 pipelined_normal_ = example.normal.has_value() ? std::move(*example.normal) : lfs::core::Tensor();
+                // SMN begin — the loader-ready event above transfers every sidecar to
+                // the training stream. Masks need the same stream adoption as depth
+                // and normals or attention kernels can race the loader memory pool.
+                if (pipelined_mask_.is_valid()) {
+                    pipelined_mask_.set_stream(training_stream_);
+                }
+                // SMN end
                 if (pipelined_depth_.is_valid()) {
                     pipelined_depth_.set_stream(training_stream_);
                 }

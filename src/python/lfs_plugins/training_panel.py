@@ -89,7 +89,29 @@ STRATEGY_LABEL_KEYS = {
     "mnrf": "training.options.strategy.mrnf",
     "lfs": "training.options.strategy.mrnf",
     "igs+": "training.options.strategy.igs_plus",
+    # SMN begin — expose the in-process MCMC -> MRNF preset
+    "hybrid": "training.options.strategy.hybrid",
+    # SMN end
 }
+
+
+# SMN begin — hybrid (mcmc -> mrnf in-process switch) preset
+def _is_hybrid_strategy(prm):
+    return bool(
+        prm
+        and prm.has_params()
+        and prm.strategy == "mcmc"
+        and prm.smn_switch_strategy_to == "mrnf"
+    )
+
+
+def _effective_strategy_name(prm):
+    if _is_hybrid_strategy(prm):
+        return "hybrid"
+    return prm.strategy if prm and prm.has_params() else "mcmc"
+
+
+# SMN end
 
 DATASET_BOOL_PROPS = ["use_cpu_cache", "use_16bit_color"]
 
@@ -98,9 +120,15 @@ def _resolved_ppisp_activation_step(
 ):  # Must match OptimizationParameters::resolved_ppisp_controller_activation_step()
     if params is None or not params.has_params():
         return 0
-    scaler = max(float(getattr(params, "steps_scaler", 1.0)), 1.0)
+    # SMN begin — mirror the C++ effective scaler, including manual values below 1,
+    # and include the optional fixed sparsification tail in the runtime total.
+    raw_scaler = float(getattr(params, "steps_scaler", 1.0))
+    scaler = raw_scaler if raw_scaler > 0.0 else 1.0
     iterations = int(getattr(params, "iterations", 0))
+    if bool(getattr(params, "enable_sparsity", False)):
+        iterations += max(0, int(getattr(params, "sparsify_steps", 0)))
     tail_iters = int(5000.0 * scaler + 0.5)
+    # SMN end
     return max(0, iterations - tail_iters)
 
 
@@ -455,6 +483,9 @@ class TrainingPanel(Panel):
             "dep_igs": params.strategy == "igs+",
             "dep_sparsity": params.enable_sparsity,
             "dep_random": params.random,
+            # SMN begin — Hybrid-only controls follow the armed switch state
+            "dep_hybrid": _is_hybrid_strategy(params),
+            # SMN end
         }
         return bool(conditions.get(str(condition_id), True))
 
@@ -673,7 +704,9 @@ class TrainingPanel(Panel):
     def _bind_select_props(self, model, p, d):
         model.bind(
             "strategy",
-            lambda: p().strategy if p() and p().has_params() else "mcmc",
+            # SMN begin — show Hybrid when the underlying MCMC slot has its switch armed
+            lambda: _effective_strategy_name(p()),
+            # SMN end
             lambda v: self._set_strategy(v),
         )
         model.bind(
@@ -1035,8 +1068,10 @@ class TrainingPanel(Panel):
         model.bind_func(
             "opt_strategy_display",
             lambda: (
-                tr(STRATEGY_LABEL_KEYS.get(p().strategy, ""))
-                if p() and p().has_params() and p().strategy in STRATEGY_LABEL_KEYS
+                # SMN begin — report Hybrid instead of its underlying MCMC strategy
+                tr(STRATEGY_LABEL_KEYS.get(_effective_strategy_name(p()), ""))
+                if p() and p().has_params() and _effective_strategy_name(p()) in STRATEGY_LABEL_KEYS
+                # SMN end
                 else (p().strategy if p() and p().has_params() else "")
             ),
         )
@@ -1596,16 +1631,25 @@ class TrainingPanel(Panel):
         params = lf.optimization_params()
         if not params or not params.has_params():
             return
-        if val == "igs+" and params.gut:
+        # SMN begin — "hybrid" is a UI/CLI-only preset, never a real strategy_type.
+        # Translate it here before it ever reaches set_strategy() (which only accepts
+        # mcmc/mrnf/igs+ and would raise otherwise).
+        is_hybrid = val == "hybrid"
+        real_val = "mcmc" if is_hybrid else val
+        # SMN end
+        if real_val == "igs+" and params.gut:
             btn_gut = tr("training.conflict.btn_disable_gut")
             btn_cancel = tr("training.conflict.btn_cancel")
 
-            def _on_conflict(button, _gut=btn_gut, _val=val):
+            # SMN begin — pass the translated strategy through the deferred callback
+            def _on_conflict(button, _gut=btn_gut, _val=real_val):
                 p = lf.optimization_params()
                 if button == _gut:
                     p.gut = False
+                    p.smn_switch_strategy_to = ""
                     p.set_strategy(_val)
                     self._refresh_strategy_values()
+            # SMN end
 
             lf.ui.confirm_dialog(
                 tr("training.error.strategy_gut_title"),
@@ -1614,7 +1658,23 @@ class TrainingPanel(Panel):
                 _on_conflict,
             )
         else:
-            params.set_strategy(val)
+            # SMN begin — set_strategy changes the active per-strategy parameter slot,
+            # so write the hybrid fields only after selecting the underlying MCMC slot.
+            # When leaving hybrid, clear both the source slot and the destination slot
+            # so returning to MCMC later cannot silently re-arm an old preset.
+            if not is_hybrid:
+                params.smn_switch_strategy_to = ""
+            params.set_strategy(real_val)
+            params = lf.optimization_params()
+            if is_hybrid:
+                params.smn_switch_strategy_to = "mrnf"
+                params.smn_switch_at_fraction = 0.25
+            else:
+                params.smn_switch_strategy_to = ""
+            # A new preset starts clean; the trainer enables this internal marker
+            # only after a real MCMC -> MRNF handoff.
+            params.smn_hybrid_mcmc_densification = False
+            # SMN end
             self._refresh_strategy_values()
 
     def _set_int_param(self, prop, val_str):
